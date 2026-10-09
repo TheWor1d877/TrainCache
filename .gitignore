@@ -5,3 +5,9 @@ __pycache__/
 probes/data/
 probes/.cache/
 probes/results/
+
+# bench 装置运行时产物(三轨数据 / sudo 密码 / 结果)
+bench/data/
+bench/.sudo-pass
+bench/results/
+bench/.venv/
