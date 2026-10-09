@@ -1,0 +1,15 @@
+# Fluid JuiceFSRuntime:与 Dataset 同名即自动绑定;管理缓存 worker 与 FUSE
+# tieredstore 用内存缓存(数据 2GB,配额给 3Gi;换 SSD 层改 mediumtype/path)
+apiVersion: data.fluid.io/v1alpha1
+kind: JuiceFSRuntime
+metadata:
+  name: jfsdemo #metadata.name 必须和 Dataset 同名。Fluid 的 controller 就是靠"名字相同"来把 Runtime 和 Dataset 配对绑定的。
+  namespace: default
+spec:
+  replicas: 1
+  tieredstore:
+    levels:
+      - mediumtype: MEM
+        path: /dev/shm
+        quota: 3Gi
+        low: "0.1"

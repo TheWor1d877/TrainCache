@@ -1,0 +1,30 @@
+# Fluid Dataset:声明"训练要用的数据集"(挂载 JuiceFS,底层 MinIO)
+# mountPoint juicefs:/// 表示文件系统根目录;未 format 过时 access-key/secret-key 供首次初始化
+apiVersion: data.fluid.io/v1alpha1
+kind: Dataset
+metadata:
+  name: jfsdemo
+  namespace: default
+spec:
+  mounts:
+    - name: traincache-demo
+      mountPoint: juicefs:///
+      options:
+        bucket: http://minio.minio.svc.cluster.local:9000/train-data
+        storage: minio
+      encryptOptions:
+        - name: metaurl
+          valueFrom:
+            secretKeyRef:
+              name: jfs-secret
+              key: metaurl
+        - name: access-key
+          valueFrom:
+            secretKeyRef:
+              name: jfs-secret
+              key: access-key
+        - name: secret-key
+          valueFrom:
+            secretKeyRef:
+              name: jfs-secret
+              key: secret-key

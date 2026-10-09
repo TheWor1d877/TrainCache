@@ -1,0 +1,32 @@
+# 带 dataset 标签的训练 Pod:fluid.io/dataset.<name>.sched=required
+# 触发 Fluid webhook 注入(FUSE 容器)与调度亲和——现勘抓取证据的核心对象
+apiVersion: v1
+kind: Pod
+metadata:
+  name: train-demo
+  namespace: default
+  labels:
+    fluid.io/dataset.jfsdemo.sched: required
+spec:
+  containers:
+    - name: train
+      image: busybox:latest
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          echo "=== 数据集内容(经 Fluid 挂载)==="
+          ls -la /data | head -20
+          du -sh /data
+          echo "=== 读一个 tar 的前 1MB 验证可读性 ==="
+          head -c 1048576 /data/shard-00000.tar | wc -c
+          echo "train-demo done"
+          sleep 300
+      volumeMounts:
+        - name: jfsdemo
+          mountPath: /data
+  volumes:
+    - name: jfsdemo
+      persistentVolumeClaim:
+        claimName: jfsdemo
