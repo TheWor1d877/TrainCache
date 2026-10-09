@@ -1,0 +1,13 @@
+# Fluid DataLoad:手动预热(对手机制的关键观察对象——独立于调度的 CRD)
+# target.path 即 juicefs warmup 的 PATH,预热整棵数据树
+apiVersion: data.fluid.io/v1alpha1
+kind: DataLoad
+metadata:
+  name: jfs-load
+  namespace: default
+spec:
+  dataset:
+    name: jfsdemo
+    namespace: default
+  target:
+    - path: /

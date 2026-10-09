@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# 探针运行时产物(合成数据 2GB / MinIO 卷 / Agent 缓存 / 实验结果,种子固定可复现)
+probes/data/
+probes/.cache/
+probes/results/

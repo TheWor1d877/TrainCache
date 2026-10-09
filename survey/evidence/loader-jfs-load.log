@@ -1,0 +1,31 @@
++ main
++ paths=/
++ paths=(${paths// / })
++ targetPath=
++ (( j=0 ))
++ (( j<1 ))
++ targetPath=' /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/'
++ (( j++ ))
++ (( j<1 ))
++ podNames=jfsdemo-worker-0
++ podNames=(${podNames//:/ })
++ ns=default
+++ /usr/local/bin/kubectl -n default exec -it jfsdemo-worker-0 -- timeout 30s /bin/ls /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/
+++ head -3
+juicefs warmup on jfsdemo-worker-0  /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/ starts
++ checkPathResult='Unable to use a TTY - input is not a terminal or the right kind of file'
++ strUnexistence='No such file or directory'
++ [[ Unable to use a TTY - input is not a terminal or the right kind of file =~ No such file or directory ]]
++ '[' community == community ']'
++ (( i=0 ))
++ (( i<1 ))
++ local pod=jfsdemo-worker-0
++ echo -e 'juicefs warmup on jfsdemo-worker-0  /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/ starts'
++ /usr/local/bin/kubectl -n default exec -it jfsdemo-worker-0 -- timeout 30m /usr/local/bin/juicefs warmup /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/
+Unable to use a TTY - input is not a terminal or the right kind of file
+2026/10/09 02:00:12.606665 juicefs[196] <INFO>: warmup cache: 0 files (0 B bytes) [warmup@warmup.go:299]
++ echo -e 'juicefs warmup on jfsdemo-worker-0  /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/ ends'
++ (( i++ ))
++ (( i<1 ))
++ '[' community == enterprise ']'
+juicefs warmup on jfsdemo-worker-0  /runtime-mnt/juicefs/default/jfsdemo/juicefs-fuse/ ends

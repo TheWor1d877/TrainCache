@@ -1,0 +1,6 @@
+DataLoad: jfs-load
+T0: 10:00:11.019
+T1: 10:00:15.678
+Total: 4.659108666 s
+Result: warmup cache 0 files (0 B)
+Note: MinIO 中的数据为裸对象，未经 JuiceFS 写入，故 warmup 为空
