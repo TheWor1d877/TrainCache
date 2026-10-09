@@ -1,2 +1,2 @@
 NAME      UFS TOTAL SIZE   CACHED   CACHE CAPACITY   CACHED PERCENTAGE   PHASE   AGE
-jfsdemo   0.00B                     3.00GiB                              Bound   4h1m
+jfsdemo   0.00B            0.00B    3.00GiB          0.0%                Bound   6h6m
