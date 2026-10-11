@@ -1,0 +1,25 @@
+=== 数据集内容(经 Fluid 挂载)===
+total 2069995
+drwxrwxrwx    3 root     root          4096 Oct  9 08:12 .
+drwxr-xr-x    1 root     root          4096 Oct  9 08:43 ..
+-r--------    1 root     root             0 Oct  9 05:56 .accesslog
+-r--------    1 root     root          2845 Oct  9 05:56 .config
+-r--r--r--    1 root     root             0 Oct  9 05:56 .stats
+dr-xr-xr-x    2 root     root             0 Oct  9 05:56 .trash
+-rw-r--r--    1 root     root     132239360 Oct  9 08:09 shard-00000.tar
+-rw-r--r--    1 root     root     132362240 Oct  9 08:09 shard-00001.tar
+-rw-r--r--    1 root     root     132454400 Oct  9 08:09 shard-00002.tar
+-rw-r--r--    1 root     root     132474880 Oct  9 08:09 shard-00003.tar
+-rw-r--r--    1 root     root     132515840 Oct  9 08:09 shard-00004.tar
+-rw-r--r--    1 root     root     132464640 Oct  9 08:09 shard-00005.tar
+-rw-r--r--    1 root     root     132587520 Oct  9 08:09 shard-00006.tar
+-rw-r--r--    1 root     root     132546560 Oct  9 08:09 shard-00007.tar
+-rw-r--r--    1 root     root     132444160 Oct  9 08:09 shard-00008.tar
+-rw-r--r--    1 root     root     132444160 Oct  9 08:09 shard-00009.tar
+-rw-r--r--    1 root     root     132556800 Oct  9 08:09 shard-00010.tar
+-rw-r--r--    1 root     root     132485120 Oct  9 08:09 shard-00011.tar
+-rw-r--r--    1 root     root     132413440 Oct  9 08:09 shard-00012.tar
+3.9G	/data
+=== 读一个 tar 的前 1MB 验证可读性 ===
+1048576
+train-demo done

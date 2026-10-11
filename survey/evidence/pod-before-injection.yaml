@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"Pod","metadata":{"annotations":{},"labels":{"fluid.io/dataset.jfsdemo.sched":"required"},"name":"train-demo","namespace":"default"},"spec":{"containers":[{"command":["sh","-c","echo \"=== 数据集内容(经 Fluid 挂载)===\"\nls -la /data | head -20\ndu -sh /data\necho \"=== 读一个 tar 的前 1MB 验证可读性 ===\"\nhead -c 1048576 /data/shard-00000.tar | wc -c\necho \"train-demo done\"\nsleep 300\n"],"image":"busybox:latest","imagePullPolicy":"IfNotPresent","name":"train","volumeMounts":[{"mountPath":"/data","name":"jfsdemo"}]}],"volumes":[{"name":"jfsdemo","persistentVolumeClaim":{"claimName":"jfsdemo"}}]}}
+  labels:
+    fluid.io/dataset.jfsdemo.sched: required
+  name: train-demo
+  namespace: default
+spec:
+  containers:
+  - command:
+    - sh
+    - -c
+    - |
+      echo "=== 数据集内容(经 Fluid 挂载)==="
+      ls -la /data | head -20
+      du -sh /data
+      echo "=== 读一个 tar 的前 1MB 验证可读性 ==="
+      head -c 1048576 /data/shard-00000.tar | wc -c
+      echo "train-demo done"
+      sleep 300
+    image: busybox:latest
+    imagePullPolicy: IfNotPresent
+    name: train
+    volumeMounts:
+    - mountPath: /data
+      name: jfsdemo
+  volumes:
+  - name: jfsdemo
+    persistentVolumeClaim:
+      claimName: jfsdemo

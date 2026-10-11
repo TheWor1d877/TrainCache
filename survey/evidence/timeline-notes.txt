@@ -1,0 +1,8 @@
+howardhe@ASUS-HE:~/Project/TrainCache/survey/manifests$ kubectl get pod train-demo -o jsonpath='{.metadata.creationTimestamp}'; echo
+2026-10-09T08:33:39Z
+howardhe@ASUS-HE:~/Project/TrainCache/survey/manifests$ kubectl get pod train-demo -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].lastTransitionTime}'; echo
+2026-10-09T08:33:39Z
+howardhe@ASUS-HE:~/Project/TrainCache/survey/manifests$ kubectl get pod train-demo -o jsonpath='{.status.startTime}'; echo
+2026-10-09T08:33:39Z
+howardhe@ASUS-HE:~/Project/TrainCache/survey/manifests$ kubectl get pod train-demo -o jsonpath='{.spec.nodeName}'; echo
+traincache-worker

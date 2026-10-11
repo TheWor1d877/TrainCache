@@ -1,0 +1,2 @@
+NAME         READY   STATUS    RESTARTS        AGE     IP            NODE                NOMINATED NODE   READINESS GATES
+train-demo   1/1     Running   1 (3m33s ago)   8m33s   10.244.2.21   traincache-worker   <none>           <none>

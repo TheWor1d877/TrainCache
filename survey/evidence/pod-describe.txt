@@ -1,0 +1,72 @@
+Name:             train-demo
+Namespace:        default
+Priority:         0
+Service Account:  default
+Node:             traincache-worker/172.19.0.4
+Start Time:       Fri, 09 Oct 2026 16:33:39 +0800
+Labels:           fluid.io/dataset.jfsdemo.sched=required
+Annotations:      <none>
+Status:           Running
+IP:               10.244.2.21
+IPs:
+  IP:  10.244.2.21
+Containers:
+  train:
+    Container ID:  containerd://4e8992e3e783ba77890589ab8f7b5fb6bbaa735d9bc0efc83d232bb2444f5792
+    Image:         busybox:latest
+    Image ID:      docker.io/library/import-2026-10-08@sha256:3de16a7c7e0a4d02b41a9aca63f3c84b01a959c505b610dc91aa486bfc1bf5f2
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      sh
+      -c
+      echo "=== 数据集内容(经 Fluid 挂载)==="
+      ls -la /data | head -20
+      du -sh /data
+      echo "=== 读一个 tar 的前 1MB 验证可读性 ==="
+      head -c 1048576 /data/shard-00000.tar | wc -c
+      echo "train-demo done"
+      sleep 300
+      
+    State:          Running
+      Started:      Fri, 09 Oct 2026 16:38:40 +0800
+    Last State:     Terminated
+      Reason:       Completed
+      Exit Code:    0
+      Started:      Fri, 09 Oct 2026 16:33:39 +0800
+      Finished:     Fri, 09 Oct 2026 16:38:39 +0800
+    Ready:          True
+    Restart Count:  1
+    Environment:    <none>
+    Mounts:
+      /data from jfsdemo (rw)
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-24v4c (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       True 
+  ContainersReady             True 
+  PodScheduled                True 
+Volumes:
+  jfsdemo:
+    Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+    ClaimName:  jfsdemo
+    ReadOnly:   false
+  kube-api-access-24v4c:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type    Reason     Age                    From               Message
+  ----    ------     ----                   ----               -------
+  Normal  Scheduled  8m33s                  default-scheduler  Successfully assigned default/train-demo to traincache-worker
+  Normal  Pulled     3m32s (x2 over 8m33s)  kubelet            spec.containers{train}: Container image "busybox:latest" already present on machine and can be accessed by the pod
+  Normal  Created    3m32s (x2 over 8m33s)  kubelet            spec.containers{train}: Container created
+  Normal  Started    3m32s (x2 over 8m33s)  kubelet            spec.containers{train}: Container started

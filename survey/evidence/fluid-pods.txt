@@ -1,0 +1,8 @@
+NAME                                         READY   STATUS    RESTARTS        AGE   IP           NODE                       NOMINATED NODE   READINESS GATES
+csi-nodeplugin-fluid-kx6lx                   2/2     Running   4 (4h18m ago)   18h   10.244.0.5   traincache-control-plane   <none>           <none>
+csi-nodeplugin-fluid-w97l7                   2/2     Running   4 (4h18m ago)   18h   10.244.1.5   traincache-worker2         <none>           <none>
+csi-nodeplugin-fluid-zcpqr                   2/2     Running   4 (4h18m ago)   18h   10.244.2.5   traincache-worker          <none>           <none>
+dataset-controller-78f9f57bc8-r4kmh          1/1     Running   2 (4h18m ago)   18h   10.244.2.3   traincache-worker          <none>           <none>
+fluid-webhook-66969469d4-pcks4               1/1     Running   4 (4h17m ago)   18h   10.244.1.3   traincache-worker2         <none>           <none>
+fluidapp-controller-758f68c5ff-qxvn5         1/1     Running   3 (4h17m ago)   18h   10.244.2.4   traincache-worker          <none>           <none>
+juicefsruntime-controller-85df58cc5f-855hn   1/1     Running   4 (4h17m ago)   18h   10.244.1.2   traincache-worker2         <none>           <none>

@@ -1,0 +1,108 @@
+apiVersion: data.fluid.io/v1alpha1
+kind: JuiceFSRuntime
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"data.fluid.io/v1alpha1","kind":"JuiceFSRuntime","metadata":{"annotations":{},"name":"jfsdemo","namespace":"default"},"spec":{"replicas":1,"tieredstore":{"levels":[{"low":"0.1","mediumtype":"MEM","path":"/dev/shm","quota":"3Gi"}]}}}
+  creationTimestamp: "2026-10-09T01:51:01Z"
+  finalizers:
+  - juicefs-runtime-controller-finalizer
+  generation: 4
+  labels:
+    fluid.io/dataset-id: default-jfsdemo
+  name: jfsdemo
+  namespace: default
+  ownerReferences:
+  - apiVersion: data.fluid.io/v1alpha1
+    kind: Dataset
+    name: jfsdemo
+    uid: f22ee3d4-fb94-465e-8098-242fe4d92f5e
+  resourceVersion: "67432"
+  uid: aaf51a93-75dd-4d93-a6b1-ff1b9df9094f
+spec:
+  fuse:
+    podMetadata: {}
+    resources:
+      requests:
+        memory: 3Gi
+  initUsers:
+    resources: {}
+  jobWorker:
+    podMetadata: {}
+    resources: {}
+  juicefsVersion: {}
+  management:
+    cleanCachePolicy:
+      gracePeriodSeconds: 60
+      maxRetryAttempts: 3
+    metadataSyncPolicy: {}
+  master:
+    podMetadata: {}
+    resources: {}
+  podMetadata: {}
+  replicas: 1
+  tieredstore:
+    levels:
+    - low: "0.1"
+      mediumtype: MEM
+      path: /dev/shm
+      quota: 3Gi
+      volumeType: hostPath
+  worker:
+    podMetadata: {}
+    resources: {}
+status:
+  cacheAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - preference:
+        matchExpressions:
+        - key: fluid.io/f-default-jfsdemo
+          operator: In
+          values:
+          - "true"
+      weight: 100
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms: []
+  cacheStates:
+    cacheCapacity: 3.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 0.00B
+    cachedPercentage: 0.0%
+  conditions:
+  - lastProbeTime: "2026-10-09T01:51:01Z"
+    lastTransitionTime: "2026-10-09T01:51:01Z"
+    message: The workers are initialized.
+    reason: Workers are initialized
+    status: "True"
+    type: WorkersInitialized
+  - lastProbeTime: "2026-10-09T01:51:02Z"
+    lastTransitionTime: "2026-10-09T01:51:02Z"
+    message: The workers are ready.
+    reason: Workers are ready
+    status: "True"
+    type: WorkersReady
+  - lastProbeTime: "2026-10-09T01:51:02Z"
+    lastTransitionTime: "2026-10-09T01:51:02Z"
+    message: The fuses are ready.
+    reason: Fuses are ready
+    status: "True"
+    type: FusesReady
+  currentFuseNumberScheduled: 2
+  currentMasterNumberScheduled: 0
+  currentWorkerNumberScheduled: 1
+  desiredFuseNumberScheduled: 2
+  desiredMasterNumberScheduled: 0
+  desiredWorkerNumberScheduled: 1
+  fuseNumberAvailable: 2
+  fuseNumberReady: 2
+  fusePhase: Ready
+  fuseReason: Fuses are ready
+  masterNumberReady: 0
+  masterPhase: ""
+  selector: app=juicefs,release=jfsdemo,role=juicefs-worker
+  setupDuration: 1s
+  valueFile: jfsdemo-juicefs-values
+  workerNumberAvailable: 1
+  workerNumberReady: 1
+  workerPhase: Ready
