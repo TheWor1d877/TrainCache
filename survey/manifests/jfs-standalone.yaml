@@ -1,0 +1,33 @@
+# 独立 JuiceFS CE 对照组:不经 Fluid/CSI,直接用 juicefs mount 裸挂载
+# 同一文件系统(metaurl 同 redis),数据已在(阶段四导入的 16 个 tar)
+# 用途:① 记录独立挂载参数与客户端版本;② warmup 对手热读基线;③ 冷/热读计时
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jfs-standalone
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+    - name: mount
+      image: juicedata/mount:ce-v1.3.0
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: true
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          echo "=== 客户端版本 ==="
+          juicefs version
+          echo "=== 挂载(参数见上方命令)==="
+          juicefs mount redis://redis.default.svc.cluster.local:6379/0 /mnt/jfs \
+            --cache-dir /cache --cache-size 3072 -d
+          echo "MOUNTED"
+          sleep 3600
+      volumeMounts:
+        - name: cache
+          mountPath: /cache
+  volumes:
+    - name: cache
+      emptyDir: {}

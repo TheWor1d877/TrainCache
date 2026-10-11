@@ -1,0 +1,61 @@
+LAST SEEN   TYPE      REASON                 OBJECT                          MESSAGE
+40m         Normal    Scheduled              pod/jfs-import                  Successfully assigned default/jfs-import to traincache-worker
+42m         Normal    Scheduled              pod/jfs-import                  Successfully assigned default/jfs-import to traincache-worker
+15m         Normal    Scheduled              pod/jfs-load-loader-job-nsscr   Successfully assigned default/jfs-load-loader-job-nsscr to traincache-worker
+22m         Normal    Scheduled              pod/jfs-verify                  Successfully assigned default/jfs-verify to traincache-worker
+41m         Normal    Scheduled              pod/jfs-import                  Successfully assigned default/jfs-import to traincache-worker
+8m33s       Normal    Scheduled              pod/train-demo                  Successfully assigned default/train-demo to traincache-worker
+30m         Normal    Scheduled              pod/jfs-import                  Successfully assigned default/jfs-import to traincache-worker
+17m         Normal    Scheduled              pod/jfs-verify                  Successfully assigned default/jfs-verify to traincache-worker
+17m         Normal    Scheduled              pod/jfs-verify                  Successfully assigned default/jfs-verify to traincache-worker
+25m         Normal    Scheduled              pod/jfs-verify                  Successfully assigned default/jfs-verify to traincache-worker
+28m         Normal    Scheduled              pod/jfs-import                  Successfully assigned default/jfs-import to traincache-worker
+18m         Normal    Scheduled              pod/jfs-verify                  Successfully assigned default/jfs-verify to traincache-worker
+39m         Normal    Scheduled              pod/jfs-import                  Successfully assigned default/jfs-import to traincache-worker
+42m         Normal    Started                pod/jfs-import                  Container started
+42m         Normal    Pulled                 pod/jfs-import                  Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+42m         Normal    Created                pod/jfs-import                  Container created
+41m         Normal    Started                pod/jfs-import                  Container started
+41m         Normal    Created                pod/jfs-import                  Container created
+41m         Normal    Pulled                 pod/jfs-import                  Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+40m         Normal    Created                pod/jfs-import                  Container created
+40m         Normal    Pulled                 pod/jfs-import                  Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+40m         Normal    Started                pod/jfs-import                  Container started
+39m         Normal    Started                pod/jfs-import                  Container started
+39m         Normal    Pulled                 pod/jfs-import                  Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+39m         Normal    Created                pod/jfs-import                  Container created
+30m         Normal    Pulled                 pod/jfs-import                  Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+30m         Normal    Started                pod/jfs-import                  Container started
+30m         Normal    Created                pod/jfs-import                  Container created
+28m         Normal    Pulled                 pod/jfs-import                  Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+28m         Normal    Created                pod/jfs-import                  Container created
+28m         Normal    Started                pod/jfs-import                  Container started
+25m         Normal    Pulling                pod/jfs-verify                  Pulling image "busybox:latest"
+23m         Warning   Failed                 pod/jfs-verify                  Failed to pull image "busybox:latest": rpc error: code = DeadlineExceeded desc = failed to pull and unpack image "docker.io/library/busybox:latest": failed to resolve reference "docker.io/library/busybox:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/busybox/manifests/latest": dial tcp 199.59.149.237:443: i/o timeout
+23m         Warning   Failed                 pod/jfs-verify                  Error: ErrImagePull
+21m         Warning   Failed                 pod/jfs-verify                  Failed to pull image "busybox:latest": rpc error: code = DeadlineExceeded desc = failed to pull and unpack image "docker.io/library/busybox:latest": failed to resolve reference "docker.io/library/busybox:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/busybox/manifests/latest": dial tcp 199.59.149.237:443: i/o timeout
+21m         Warning   Failed                 pod/jfs-verify                  Failed to pull image "busybox:latest": rpc error: code = DeadlineExceeded desc = failed to pull and unpack image "docker.io/library/busybox:latest": failed to resolve reference "docker.io/library/busybox:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/busybox/manifests/latest": dial tcp 157.240.17.41:443: i/o timeout
+20m         Normal    Pulling                pod/jfs-verify                  Pulling image "busybox:latest"
+19m         Warning   Failed                 pod/jfs-verify                  Failed to pull image "busybox:latest": failed to pull and unpack image "docker.io/library/busybox:latest": failed to resolve reference "docker.io/library/busybox:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/busybox/manifests/latest": dial tcp 23.101.24.70:443: connect: connection refused
+19m         Warning   Failed                 pod/jfs-verify                  Error: ErrImagePull
+19m         Normal    BackOff                pod/jfs-verify                  Back-off pulling image "busybox:latest"
+19m         Warning   Failed                 pod/jfs-verify                  Error: ImagePullBackOff
+18m         Normal    Created                pod/jfs-verify                  Container created
+18m         Normal    Pulled                 pod/jfs-verify                  Container image "busybox:latest" already present on machine and can be accessed by the pod
+18m         Normal    Started                pod/jfs-verify                  Container started
+17m         Normal    Started                pod/jfs-verify                  Container started
+17m         Normal    Pulled                 pod/jfs-verify                  Container image "busybox:latest" already present on machine and can be accessed by the pod
+17m         Normal    Created                pod/jfs-verify                  Container created
+17m         Normal    Started                pod/jfs-verify                  Container started
+17m         Normal    Pulled                 pod/jfs-verify                  Container image "busybox:latest" already present on machine and can be accessed by the pod
+17m         Normal    Created                pod/jfs-verify                  Container created
+16m         Normal    Killing                pod/jfs-verify                  Stopping container v
+15m         Normal    SuccessfulCreate       job/jfs-load-loader-job         Created pod: jfs-load-loader-job-nsscr
+15m         Normal    Pulled                 pod/jfs-load-loader-job-nsscr   Container image "juicedata/mount:ce-v1.3.0" already present on machine and can be accessed by the pod
+15m         Normal    Started                pod/jfs-load-loader-job-nsscr   Container started
+15m         Normal    Created                pod/jfs-load-loader-job-nsscr   Container created
+15m         Normal    Completed              job/jfs-load-loader-job         Job completed
+15m         Normal    DataOperationSucceed   dataload/jfs-load               DataLoad jfs-load succeeded
+3m32s       Normal    Pulled                 pod/train-demo                  Container image "busybox:latest" already present on machine and can be accessed by the pod
+3m32s       Normal    Created                pod/train-demo                  Container created
+3m32s       Normal    Started                pod/train-demo                  Container started

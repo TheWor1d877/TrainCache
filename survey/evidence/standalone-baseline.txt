@@ -1,0 +1,35 @@
+=== 基线装置 ===
+客户端版本: juicefs version 1.3.0+2025-07-03.30190ca1
+挂载参数: metaurl=redis://redis.default.svc.cluster.local:6379/0, cache-dir=/cache, cache-size=3072MiB, 数据块路径见 mount 日志
+文件系统内容:
+shard-00000.tar
+shard-00001.tar
+shard-00002.tar
+shard-00003.tar
+shard-00004.tar
+shard-00005.tar
+shard-00006.tar
+shard-00007.tar
+shard-00008.tar
+shard-00009.tar
+shard-00010.tar
+shard-00011.tar
+shard-00012.tar
+shard-00013.tar
+shard-00014.tar
+shard-00015.tar
+traincache-demo
+=== 冷读(缓存为空,首次读 16 个 tar)===
+sh: 7: time: not found
+sh: 9: time: not found
+=== warmup(对手热读基线的预热动作)===
+=== 热读(重读 16 个 tar,应命中本地缓存)===
+=== 缓存目录占用 ===
+sh: 11: time: not found
+12K	/cache
+冷读耗时: 1037 ms
+2026/10/09 09:00:18.083264 juicefs[168] <INFO>: warmup cache: 548 files (3.9 GiB bytes) [warmup@warmup.go:299]
+warmup 耗时: 1193 ms
+热读耗时: 354 ms
+=== 缓存占用 ===
+2.9G	/cache

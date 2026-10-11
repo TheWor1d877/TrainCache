@@ -1,0 +1,49 @@
+=== 开始同步 ===
+2026/10/09 08:13:35.642819 juicefs[14] <INFO>: Meta address: redis://redis.default.svc.cluster.local:6379/0 [NewClient@interface.go:578]
+2026/10/09 08:13:35.644740 juicefs[14] <WARNING>: AOF is not enabled, you may lose data if Redis is not shutdown properly. [checkRedisInfo@info.go:84]
+2026/10/09 08:13:35.644800 juicefs[14] <INFO>: Ping redis latency: 36.188µs [checkServerConfig@redis.go:3692]
+2026/10/09 08:13:35.645444 juicefs[14] <INFO>: Prometheus metrics listening on 127.0.0.1:9567 [exposeMetrics@mount.go:134]
+2026/10/09 08:13:35.645730 juicefs[14] <INFO>: Syncing from minio://http://minio.minio.svc.cluster.local:9000/train-data//train-data/ to jfs://traincache-demo/ [Sync@sync.go:1742]
+2026/10/09 08:13:37.412984 juicefs[14] <INFO>: Found: 555, excluded: 0 (0 B), skipped: 31 (1.97 GiB), copied: 517 (1.97 GiB), extra: 7 (0 B), failed: 0 [Sync@sync.go:1677]
+2026/10/09 08:13:37.413151 juicefs[14] <INFO>: flush session 0: [FlushSession@base.go:721]
+2026/10/09 08:13:37.413191 juicefs[14] <INFO>: close session 0: <nil> [CloseSession@base.go:710]
+=== 校验 ===
+2026/10/09 08:13:37.719967 juicefs[42] <INFO>: Meta address: redis://redis.default.svc.cluster.local:6379/0 [NewClient@interface.go:578]
+2026/10/09 08:13:37.721567 juicefs[42] <WARNING>: AOF is not enabled, you may lose data if Redis is not shutdown properly. [checkRedisInfo@info.go:84]
+2026/10/09 08:13:37.721667 juicefs[42] <INFO>: Ping redis latency: 52.75µs [checkServerConfig@redis.go:3692]
+2026/10/09 08:13:37.722794 juicefs[42] <INFO>: Prometheus metrics listening on 127.0.0.1:9567 [exposeMetrics@mount.go:134]
+2026/10/09 08:13:37.723159 juicefs[42] <INFO>: Syncing from jfs://traincache-demo/ to file:///tmp/check/ [Sync@sync.go:1742]
+2026/10/09 08:13:40.937762 juicefs[42] <INFO>: Found: 548, excluded: 0 (0 B), skipped: 0 (0 B), copied: 548 (3.95 GiB), extra: 0 (0 B), failed: 0 [Sync@sync.go:1677]
+2026/10/09 08:13:40.937787 juicefs[42] <INFO>: flush session 0: [FlushSession@base.go:721]
+2026/10/09 08:13:40.937811 juicefs[42] <INFO>: close session 0: <nil> [CloseSession@base.go:710]
+/tmp/check/shard-00015.tar
+/tmp/check/shard-00008.tar
+/tmp/check/shard-00009.tar
+/tmp/check/shard-00007.tar
+/tmp/check/shard-00006.tar
+/tmp/check/shard-00001.tar
+/tmp/check/shard-00005.tar
+/tmp/check/shard-00013.tar
+/tmp/check/shard-00011.tar
+/tmp/check/shard-00004.tar
+/tmp/check/shard-00002.tar
+/tmp/check/shard-00003.tar
+/tmp/check/shard-00012.tar
+/tmp/check/shard-00000.tar
+/tmp/check/shard-00010.tar
+/tmp/check/traincache-demo/chunks/0/4/4099_0_579
+/tmp/check/traincache-demo/chunks/0/4/4101_0_577
+/tmp/check/traincache-demo/chunks/0/4/4097_0_579
+/tmp/check/traincache-demo/chunks/0/4/4100_0_579
+/tmp/check/traincache-demo/chunks/0/4/4102_0_36
+/tmp/check/traincache-demo/chunks/0/0/6_0_579
+/tmp/check/traincache-demo/chunks/0/0/3_0_579
+/tmp/check/traincache-demo/chunks/0/0/5_0_577
+/tmp/check/traincache-demo/chunks/0/0/4_0_579
+/tmp/check/traincache-demo/chunks/0/0/1_0_36
+/tmp/check/traincache-demo/chunks/0/8/8207_15_4194304
+/tmp/check/traincache-demo/chunks/0/8/8208_3_4194304
+/tmp/check/traincache-demo/chunks/0/8/8199_5_4194304
+/tmp/check/traincache-demo/chunks/0/8/8225_8_4194304
+/tmp/check/traincache-demo/chunks/0/8/8203_5_4194304
+4.0G	/tmp/check

@@ -1,0 +1,2 @@
+NAME 	NAMESPACE   	REVISION	UPDATED                               	STATUS  	CHART              	APP VERSION  
+fluid	fluid-system	1       	2026-10-08 22:17:07.37119515 +0800 CST	deployed	fluid-1.1.0-alpha.9	1.1.0-36f0467

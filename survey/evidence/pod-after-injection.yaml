@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"Pod","metadata":{"annotations":{},"labels":{"fluid.io/dataset.jfsdemo.sched":"required"},"name":"train-demo","namespace":"default"},"spec":{"containers":[{"command":["sh","-c","echo \"=== 数据集内容(经 Fluid 挂载)===\"\nls -la /data | head -20\ndu -sh /data\necho \"=== 读一个 tar 的前 1MB 验证可读性 ===\"\nhead -c 1048576 /data/shard-00000.tar | wc -c\necho \"train-demo done\"\nsleep 300\n"],"image":"busybox:latest","imagePullPolicy":"IfNotPresent","name":"train","volumeMounts":[{"mountPath":"/data","name":"jfsdemo"}]}],"volumes":[{"name":"jfsdemo","persistentVolumeClaim":{"claimName":"jfsdemo"}}]}}
+  creationTimestamp: "2026-10-09T08:33:39Z"
+  generation: 1
+  labels:
+    fluid.io/dataset.jfsdemo.sched: required
+  name: train-demo
+  namespace: default
+  resourceVersion: "96532"
+  uid: f1a49b4f-0f3d-4e20-8937-b563544367d8
+spec:
+  containers:
+  - command:
+    - sh
+    - -c
+    - |
+      echo "=== 数据集内容(经 Fluid 挂载)==="
+      ls -la /data | head -20
+      du -sh /data
+      echo "=== 读一个 tar 的前 1MB 验证可读性 ==="
+      head -c 1048576 /data/shard-00000.tar | wc -c
+      echo "train-demo done"
+      sleep 300
+    image: busybox:latest
+    imagePullPolicy: IfNotPresent
+    name: train
+    resources: {}
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /data
+      name: jfsdemo
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-24v4c
+      readOnly: true
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  nodeName: traincache-worker
+  preemptionPolicy: PreemptLowerPriority
+  priority: 0
+  restartPolicy: Always
+  schedulerName: default-scheduler
+  securityContext: {}
+  serviceAccount: default
+  serviceAccountName: default
+  terminationGracePeriodSeconds: 30
+  tolerations:
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
+  volumes:
+  - name: jfsdemo
+    persistentVolumeClaim:
+      claimName: jfsdemo
+  - name: kube-api-access-24v4c
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          expirationSeconds: 3607
+          path: token
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: kube-root-ca.crt
+      - downwardAPI:
+          items:
+          - fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+            path: namespace
+status:
+  conditions:
+  - lastProbeTime: null
+    lastTransitionTime: "2026-10-09T08:33:39Z"
+    observedGeneration: 1
+    status: "True"
+    type: PodReadyToStartContainers
+  - lastProbeTime: null
+    lastTransitionTime: "2026-10-09T08:33:39Z"
+    observedGeneration: 1
+    status: "True"
+    type: Initialized
+  - lastProbeTime: null
+    lastTransitionTime: "2026-10-09T08:33:39Z"
+    observedGeneration: 1
+    status: "True"
+    type: Ready
+  - lastProbeTime: null
+    lastTransitionTime: "2026-10-09T08:33:39Z"
+    observedGeneration: 1
+    status: "True"
+    type: ContainersReady
+  - lastProbeTime: null
+    lastTransitionTime: "2026-10-09T08:33:39Z"
+    observedGeneration: 1
+    status: "True"
+    type: PodScheduled
+  containerStatuses:
+  - containerID: containerd://c3e06df5be2dd9379f6f56e86c0cd12841b2ee56c7c7d2ade8f63e418baa628b
+    image: docker.io/library/busybox:latest
+    imageID: docker.io/library/import-2026-10-08@sha256:3de16a7c7e0a4d02b41a9aca63f3c84b01a959c505b610dc91aa486bfc1bf5f2
+    lastState: {}
+    name: train
+    ready: true
+    resources: {}
+    restartCount: 0
+    started: true
+    state:
+      running:
+        startedAt: "2026-10-09T08:33:39Z"
+    user:
+      linux:
+        gid: 0
+        supplementalGroups:
+        - 0
+        - 10
+        uid: 0
+    volumeMounts:
+    - mountPath: /data
+      name: jfsdemo
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-24v4c
+      readOnly: true
+      recursiveReadOnly: Disabled
+  hostIP: 172.19.0.4
+  hostIPs:
+  - ip: 172.19.0.4
+  observedGeneration: 1
+  phase: Running
+  podIP: 10.244.2.21
+  podIPs:
+  - ip: 10.244.2.21
+  qosClass: BestEffort
+  resources: {}
+  startTime: "2026-10-09T08:33:39Z"

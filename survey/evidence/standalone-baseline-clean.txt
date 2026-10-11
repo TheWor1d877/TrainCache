@@ -1,0 +1,29 @@
+日期: 2026-10-09(删除 traincache-demo 垃圾目录后,重建 jfs-standalone 空缓存重测的干净基线;对照旧文件 standalone-baseline.txt)
+
+=== 客户端版本 ===
+juicefs version 1.3.0+2025-07-03.30190ca1
+=== 文件系统根 ===
+shard-00000.tar
+shard-00001.tar
+shard-00002.tar
+shard-00003.tar
+shard-00004.tar
+shard-00005.tar
+shard-00006.tar
+shard-00007.tar
+shard-00008.tar
+shard-00009.tar
+shard-00010.tar
+shard-00011.tar
+shard-00012.tar
+shard-00013.tar
+shard-00014.tar
+shard-00015.tar
+=== 缓存初始占用 ===
+12K	/cache
+冷读耗时: 947 ms
+2026/10/09 10:12:06.630671 juicefs[182] <INFO>: warmup cache: 16 files (2.0 GiB bytes) [warmup@warmup.go:299]
+warmup 耗时: 588 ms
+热读耗时: 166 ms
+=== 缓存占用 ===
+2.0G	/cache
