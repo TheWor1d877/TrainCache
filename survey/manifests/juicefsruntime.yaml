@@ -1,5 +1,7 @@
 # Fluid JuiceFSRuntime:与 Dataset 同名即自动绑定;管理缓存 worker 与 FUSE
-# tieredstore 用内存缓存(数据 2GB,配额给 3Gi;换 SSD 层改 mediumtype/path)
+# tieredstore 用内存缓存(数据 2GB;配额 1Gi 故意欠配:16×126MB 无法全驻留,
+# 三 epoch 换序读时每次切换必产生 miss 落地 UFS,才能观测"是否主动预热";
+# 原 3Gi 会把切换点全命中、UFS 零流量,无从观测。换 SSD 层改 mediumtype/path)
 apiVersion: data.fluid.io/v1alpha1
 kind: JuiceFSRuntime
 metadata:
@@ -11,5 +13,5 @@ spec:
     levels:
       - mediumtype: MEM
         path: /dev/shm
-        quota: 3Gi
+        quota: 1Gi
         low: "0.1"

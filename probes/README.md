@@ -1,13 +1,16 @@
-# 可行性探针执行手册(阶段0 第一部分)
+# 可行性探针执行手册(阶段0 第一部分 / v4 第一步)
 
 装置设计见 [design.md](design.md)。**先读 design.md 第 4 节(stall 口径),再跑。**
+探针C / D 轨的装置细节与判定口径见 [probe_c/README.md](probe_c/README.md)。
 
 ## 0. 环境检查(本机已确认 ✓)
 
 ```bash
 docker version                      # ✓ 29.1.3,已配镜像加速
 python3 -c "import torch, webdataset, numpy, PIL; print(torch.__version__, webdataset.__version__)"
-                                    # ✓ torch 2.14.1+cpu, webdataset 1.0.2
+                                    # ✓ torch 2.14.1+cpu, webdataset 1.0.2(阶段0 第一部分用)
+/usr/bin/python3.12 -c "import torch, webdataset, numpy, PIL; print(torch.__version__, webdataset.__version__)"
+                                    # ✓ torch 2.14.1+cpu, webdataset 1.0.2(探针C/D 与 D 轨用;pillow 12.3.0 cp312 已 pip --user 补装)
 ```
 
 ## 步骤总览
@@ -22,11 +25,15 @@ python3 -c "import torch, webdataset, numpy, PIL; print(torch.__version__, webda
 | 6 | `python3 probe_a/judge.py` | 否 | 秒级 |
 | 7 | `bash probe_b/run.sh` | 否 | ~10 分钟(六组) |
 | 8 | `python3 probe_b/judge.py` | 否 | 秒级 |
-| 9 | `sudo bash probe_a/tc_teardown.sh` | **是** | 秒级 |
-| 10 | `bash setup/03_source_down.sh` | 否 | 秒级 |
-| 11 | 填 `reports/探针结果报告模板.md` | — | — |
+| 9 | `python3.12 probe_d/judge.py` | 否 | ~10 秒(verify_wds → verify_torch → reconstruct + 汇总) |
+| 10 | `bash probe_c/run_c.sh` 然后 `python3.12 probe_c/judge_c.py` | 否(优先 `sudo -n`,不可用回退特权 docker) | ~35 分钟(冷 w4/w0/w8 各 3 epoch≈9min + 热 w4≈3.5min;判定秒级) |
+| 11 | `bash probe_c/run_track_d.sh` 然后 `python3.12 probe_c/judge_track_d.py` | 否(同上回退) | ~40 分钟(10 epoch 连续跑 + 限内存/采样/恢复;判定秒级) |
+| 12 | `sudo bash probe_a/tc_teardown.sh` | **是** | 秒级 |
+| 13 | `bash setup/03_source_down.sh` | 否 | 秒级 |
+| 14 | 填 `reports/探针结果报告模板.md` | — | — |
 
-**sudo 清单(需要密码的只有三处)**:步骤 3、4、9。终端会提示输密码。
+**sudo 清单(需要密码的只有三处)**:步骤 3、4、12。终端会提示输密码。
+探针C / D 轨(步骤 10-11)在 sudo 不可用时自动回退带 NET_ADMIN / 特权的 docker 容器执行等价操作,无需密码。
 
 ## 步骤说明与关键点
 
@@ -48,7 +55,22 @@ tar 目录只读挂载,无上传步骤;kind 现勘阶段仍用真 MinIO。
 **步骤 6/8**:判定脚本输出中文报告 + `results/probe_*/verdict.json`,红灯时
 按 design.md 第 6 节排查。**探针A 红灯就不要跑探针B**;探针B 红灯同理。
 
-**步骤 9/10**:收尾。`tc_teardown.sh` 摘除限速恢复网络;源站容器随用随停,tar 数据
+**步骤 9(消费顺序探针)**:单进程(num_workers=0)纯 CPU,依赖步骤 1 的合成数据。
+`judge.py` 按序跑 `verify_wds.py → verify_torch.py → reconstruct.py`,汇总 7 点写
+`results/probe_d/verdict.json`(7/7 通过 exit 0)。
+
+**步骤 10(探针C)**:`run_c.sh` 跑四组 `cold_w4 → cold_w0 → cold_w8 → hot_w4`,
+每组 3 epoch×400 步;随后 `judge_c.py` 判定(exit 0 绿 / 1 红)。**纪律:epoch 之间
+绝不清缓存**(测量对象);每组开跑前做一次冷态并检查 kind 节点负载(与 kind 上
+其他子代理互斥)。解释器必须用 `/usr/bin/python3.12`;冷组要求 tc 已挂
+(步骤 3,脚本会断言/自动重挂)。
+
+**步骤 11(D 轨)**:`run_track_d.sh` = tc 断言 → kind 负载检查 → `docker update`
+限源站容器 1GiB(欠配 50%,memory-swap=memory)→ 后台内存采样(2s)→ 跑前一次冷态
+→ 10 epoch 连续跑 → 恢复内存限制并记档(`--memory 0` 零值语义不生效时回退 128GiB
+等效)。`judge_track_d.py` 判定:exit 0 绿 / 1 红 / 2 无效(前置门不过判无效)。
+
+**步骤 12/13**:收尾。`tc_teardown.sh` 摘除限速恢复网络;源站容器随用随停,tar 数据
 在 `data/tars/`(种子固定可复现)。
 
 ## 常见问题
