@@ -805,3 +805,137 @@ func TestList(t *testing.T) {
 		readBlock(t, s, fp)
 	}
 }
+
+// TestEvictIgnoresRefcount 覆盖 D28：refcount 不拦 Evict——Acquire 后仍可淘汰
+// 本地副本、块文件消失；Evict 不动 refs 簿记，后续 Release 不受影响。
+func TestEvictIgnoresRefcount(t *testing.T) {
+	s, blocksDir := newTestStore(t, VerifyXXH3)
+	fp := putBlock(t, s, testContent(13, 4<<10))
+	path := blockFilePath(blocksDir, fp)
+
+	if err := s.Acquire(fp); err != nil {
+		t.Fatalf("第一次 Acquire 失败: %v", err)
+	}
+	if err := s.Acquire(fp); err != nil {
+		t.Fatalf("第二次 Acquire 失败: %v", err)
+	}
+
+	if err := s.Evict(fp); err != nil {
+		t.Fatalf("refcount=2 时 Evict 失败: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Evict 后块文件应消失，Stat 错误 = %v", err)
+	}
+	if _, err := s.Open(fp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Evict 后 Open 错误 = %v，期望 ErrNotFound", err)
+	}
+	// refs 表不变：引用计数仍为 2，Evict 不触碰簿记。
+	s.mu.Lock()
+	refs := s.refs[fp]
+	s.mu.Unlock()
+	if refs != 2 {
+		t.Fatalf("Evict 后 refs[%s] = %d，期望 2（Evict 不动 refs）", fp, refs)
+	}
+	// 行为校验：引用未 Release 时 Remove 仍被 refcount 拦（ErrInUse 先于缺块判定）。
+	if err := s.Remove(fp); !errors.Is(err, ErrInUse) {
+		t.Fatalf("Evict 后（引用未 Release）Remove 错误 = %v，期望 ErrInUse", err)
+	}
+	// 后续 Release 不受影响：两次 Release 归零（空操作语义与 Evict 前一致）。
+	s.Release(fp)
+	s.Release(fp)
+	s.mu.Lock()
+	refs = s.refs[fp]
+	s.mu.Unlock()
+	if refs != 0 {
+		t.Fatalf("两次 Release 后 refs[%s] = %d，期望 0", fp, refs)
+	}
+	if err := s.Remove(fp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Release 归零后 Remove 错误 = %v，期望 ErrNotFound（引用已归零，仅缺块）", err)
+	}
+}
+
+// TestEvictPinned 覆盖 D28：pin>0 时 Evict 返回 ErrInUse 且块文件仍在；
+// Unpin 后 Evict 成功、块可被淘汰。
+func TestEvictPinned(t *testing.T) {
+	s, blocksDir := newTestStore(t, VerifyXXH3)
+	content := testContent(14, 4<<10)
+	fp := putBlock(t, s, content)
+	path := blockFilePath(blocksDir, fp)
+
+	if err := s.Pin(fp); err != nil {
+		t.Fatalf("Pin 失败: %v", err)
+	}
+	if err := s.Evict(fp); !errors.Is(err, ErrInUse) {
+		t.Fatalf("pin>0 时 Evict 错误 = %v，期望 ErrInUse", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("ErrInUse 后块文件不应被删除: %v", err)
+	}
+	if got := readBlock(t, s, fp); !bytes.Equal(got, content) {
+		t.Fatal("ErrInUse 后读回内容不一致")
+	}
+
+	s.Unpin(fp)
+	if err := s.Evict(fp); err != nil {
+		t.Fatalf("pin 归零后 Evict 失败: %v", err)
+	}
+	if _, err := s.Open(fp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Evict 后 Open 错误 = %v，期望 ErrNotFound", err)
+	}
+}
+
+// TestEvictNotFound 覆盖 D28：Evict 对 blocks/ 中不存在的块返回 ErrNotFound
+// （从未存在、已淘汰过、仅剩 quarantine/ 副本均如此）。
+func TestEvictNotFound(t *testing.T) {
+	s, _ := newTestStore(t, VerifyXXH3)
+	missing := Fingerprint(digest.XXH3_128([]byte("never put")))
+	if err := s.Evict(missing); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Evict(不存在) 错误 = %v，期望 ErrNotFound", err)
+	}
+
+	fp := putBlock(t, s, []byte("evicted soon"))
+	if err := s.Evict(fp); err != nil {
+		t.Fatalf("Evict 失败: %v", err)
+	}
+	if err := s.Evict(fp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("重复 Evict 错误 = %v，期望 ErrNotFound", err)
+	}
+
+	// 块仅存在于 quarantine/ 时同样报 ErrNotFound，且隔离副本不受影响：
+	// Evict 只删 blocks/ 下的正常块路径，不涉及 quarantine/。
+	fpQ := putBlock(t, s, []byte("quarantined only"))
+	if err := s.Quarantine(fpQ); err != nil {
+		t.Fatalf("Quarantine 失败: %v", err)
+	}
+	if err := s.Evict(fpQ); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Evict(仅隔离副本) 错误 = %v，期望 ErrNotFound", err)
+	}
+	if _, err := os.Stat(s.quarantinePath(fpQ)); err != nil {
+		t.Fatalf("Evict 不应触碰 quarantine/ 副本: %v", err)
+	}
+}
+
+// TestEvictThenReput 覆盖 D28 的淘汰后重下路径：Evict 后同内容 Put 复原（同指纹）、
+// Open 校验通过、无临时残留。
+func TestEvictThenReput(t *testing.T) {
+	s, blocksDir := newTestStore(t, VerifyXXH3)
+	content := testContent(15, 64<<10)
+	fp := putBlock(t, s, content)
+
+	if err := s.Evict(fp); err != nil {
+		t.Fatalf("Evict 失败: %v", err)
+	}
+	if _, err := s.Open(fp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Evict 后 Open 错误 = %v，期望 ErrNotFound", err)
+	}
+
+	// 模拟 fetch 重下：同内容再次 Put → 同指纹，块回到原位。
+	fp2 := putBlock(t, s, content)
+	if fp2 != fp {
+		t.Fatalf("重下指纹 = %s，期望 %s", fp2, fp)
+	}
+	if got := readBlock(t, s, fp); !bytes.Equal(got, content) {
+		t.Fatal("重下后读回内容不一致")
+	}
+	assertNoResidue(t, blocksDir, 1)
+}
