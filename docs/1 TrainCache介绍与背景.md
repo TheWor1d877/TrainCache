@@ -1,4 +1,4 @@
-## TrainCache 介绍
+`## TrainCache 介绍
 面向k8s训练Job的全程数据流加速器,工业界将数据预热做成一次启动时候的临时操作，预热完成之后就手动不管
 训练pod落到节点上面之后整个epoch中后期出现的data stall没有人兜底
 
@@ -9,7 +9,7 @@ TrainCache是负责将启动欲取拓展成贯穿训练全程的闭环，分为P
 Pod落地后由Agent按照消费顺序持续欲取后续块，epoch 切换或 shuﬄe重排时按新顺序重新预取
 
 最后，我们⽤端到端 makespan 和真实部署起来的Fluid/JuiceFS 同台跑分，分别量化启动阶段收益与全程收益。
-
+`
 #### 定位
 对标者：我们把 Fluid（Dataset/DataLoad/Runtime 加缓存亲和调度）和 JuiceFS 社区版当作⼀等对照组真实部署起来，在同样的负载下跑分，绝不打空⽓靶；
 
