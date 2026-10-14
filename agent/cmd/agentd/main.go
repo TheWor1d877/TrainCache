@@ -26,7 +26,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 装配子模块(M1 仅 metrics 骨架;M6 起被指标/GC 触发消费)。
+	// 装配子模块(metrics 骨架 + ordersource 发现循环;M6 起被指标/GC 触发消费)。
 	ag, err := svc.Assemble(*cfg)
 	if err != nil {
 		slog.Error("装配失败", "error", err)
@@ -45,12 +45,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// M2:ordersource 发现循环常驻(svc 1s 扫 TRAINCACHE_ORDERS_DIR 的 *.ring,D22);
+	// ctx 取消后随优雅停止退出,context.Canceled 是正常退出路径。
+	go func() {
+		if err := ag.Orders.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("orders discovery stopped", "err", err)
+		}
+	}()
+
 	// M1 不起 /metrics(M6);MetricsAddr 仅在启动日志中登记。
 	slog.Info("traincache-agentd 启动",
 		"node", ag.Cfg.NodeName.String(),
 		"grpc_addr", cfg.GRPCAddr,
 		"metrics_addr", cfg.MetricsAddr,
 		"cache_root", cfg.CacheRoot,
+		"orders_dir", cfg.OrdersDir,
 		"verify", cfg.Verify,
 	)
 

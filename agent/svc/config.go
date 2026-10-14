@@ -24,6 +24,9 @@ const (
 	// defaultCacheRoot 是 CAS 根目录默认值。本里程碑无对应 env:design §8 未列,
 	// 由 DaemonSet hostPath(/var/cache/traincache)固定(§8 部署要点)。
 	defaultCacheRoot = "/var/cache/traincache"
+	// defaultOrdersDir 是 ordersource ring 发现目录默认值(design §6.2 路径;
+	// 两侧 Pod 同路径挂载 hostPath /run/traincache,decisions D22)。
+	defaultOrdersDir = "/run/traincache/orders"
 )
 
 // HeatConfig 是热度与磁盘触发线参数(D14:N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%)。
@@ -46,6 +49,7 @@ type Config struct {
 	Verify           string    // TRAINCACHE_VERIFY:xxh3 | xxh3+sha256,默认 xxh3
 	DatasetWhitelist []string  // TRAINCACHE_DATASET_WHITELIST,逗号分隔(§5.8 基数控制)
 	CacheRoot        string    // CAS 根目录,默认 /var/cache/traincache(本里程碑无 env)
+	OrdersDir        string    // TRAINCACHE_ORDERS_DIR,默认 /run/traincache/orders(§6.2 ring 发现目录)
 	Heat             HeatConfig
 }
 
@@ -72,6 +76,7 @@ func Load() (*Config, error) {
 		Verify:           verify,
 		DatasetWhitelist: splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
 		CacheRoot:        defaultCacheRoot,
+		OrdersDir:        envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
 		Heat:             defaultHeatConfig(), // D14 默认值;env 覆盖延后 M5/M6
 	}, nil
 }
