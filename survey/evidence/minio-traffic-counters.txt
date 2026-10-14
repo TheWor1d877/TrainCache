@@ -1,0 +1,85 @@
+# ============================================================
+# 对手阶段感知现勘:MinIO Pod netns eth0 计数采样(只读)
+# 对象: pod=minio-f9dbc8569-54s2w ns=minio node=traincache-worker2
+#       sandbox=037d3b5a2203b(pid=445,kind 节点内 PID 命名空间)
+#       container=eb30a2ab9f4b(containerd://eb30a2ab9f4b4383a74065bbdfcdfc7a0f548d5b4e69b71b2bdacbf6c0ebe141)
+# 采样命令: docker exec traincache-worker2 nsenter -t 445 -n cat /sys/class/net/eth0/statistics/rx_bytes(tx_bytes)
+# 采样周期: 3s(比要求的 10-15s 更细,便于切换点对齐)
+# 列: <ISO8601_UTC> uptime=<host /proc/uptime 秒> rx_bytes=<n> tx_bytes=<n> restart=<minio 容器重启数>
+# 语义: rx=进入 MinIO pod 的字节(HTTP 请求), tx=MinIO 发出的字节(响应体,≈ JuiceFS 客户端从 UFS 拉取流量)
+# 事件行以 "# EVENT" 开头(EPOCH 标记、Pod 生命周期),来自 train-demo 日志实时跟随
+# ============================================================
+# ---- 观测窗口起点(实验前基线)2026-10-13T13:25:43Z uptime=42514.47 ----
+2026-10-13T13:25:43Z uptime=42514.47 rx_bytes=4323855523 tx_bytes=5874742280 restart=8
+# 注: 13:15Z 前读数为 rx=2182726567 tx=17989971;期间仅发生 jfs-import 数据恢复
+#     (裸对象→JuiceFS 同步写入约 2GB 上行 + 校验回读约 4GB),非本实验流量;窗口基线以上行为准。
+2026-10-13T13:27:05.477Z uptime=42596.41 rx_bytes=4323990661 tx_bytes=5875006575
+2026-10-13T13:27:08.639Z uptime=42599.57 rx_bytes=4323998110 tx_bytes=5875100954
+2026-10-13T13:27:11.796Z uptime=42602.72 rx_bytes=4324014361 tx_bytes=5875215692
+2026-10-13T13:27:14.953Z uptime=42605.88 rx_bytes=4324024523 tx_bytes=5875312421
+2026-10-13T13:27:18.134Z uptime=42609.06 rx_bytes=4324124204 tx_bytes=5875413352
+# EVENT 2026-10-13T13:27:19Z uptime=42610.52 POD_STARTED node=traincache-worker containerStartedAt=2026-10-13T13:27:18Z
+# EVENT 2026-10-13T13:27:20.694Z uptime=42611.62 :: 2026-10-13T13:27:18.801435420Z === EPOCH 0 START t=42609.73 order=shard-00000.tar shard-00001.tar shard-00002.tar shard-00003.tar shard-00004.tar shard-00005.tar shard-00006.tar shard-00007.tar shard-00008.tar shard-00009.tar shard-00010.tar shard-00011.tar shard-00012.tar shard-00013.tar shard-00014.tar shard-00015.tar ===
+# EVENT 2026-10-13T13:27:20.699Z uptime=42611.63 :: 2026-10-13T13:27:19.703808283Z === EPOCH 1 START t=42610.63 order=shard-00013.tar shard-00012.tar shard-00004.tar shard-00005.tar shard-00015.tar shard-00002.tar shard-00008.tar shard-00011.tar shard-00001.tar shard-00000.tar shard-00007.tar shard-00003.tar shard-00009.tar shard-00014.tar shard-00010.tar shard-00006.tar ===
+# EVENT 2026-10-13T13:27:20.703Z uptime=42611.63 :: 2026-10-13T13:27:19.893530389Z === EPOCH 2 START t=42610.82 order=shard-00003.tar shard-00000.tar shard-00011.tar shard-00004.tar shard-00015.tar shard-00013.tar shard-00002.tar shard-00001.tar shard-00008.tar shard-00012.tar shard-00010.tar shard-00014.tar shard-00006.tar shard-00005.tar shard-00009.tar shard-00007.tar ===
+# EVENT 2026-10-13T13:27:20.707Z uptime=42611.64 :: 2026-10-13T13:27:20.074397242Z train-demo done
+2026-10-13T13:27:21.279Z uptime=42612.21 rx_bytes=4325888842 tx_bytes=7999154658
+2026-10-13T13:27:24.433Z uptime=42615.36 rx_bytes=4325898805 tx_bytes=7999250440
+2026-10-13T13:27:27.593Z uptime=42618.52 rx_bytes=4325909595 tx_bytes=7999347201
+2026-10-13T13:27:30.744Z uptime=42621.67 rx_bytes=4325922201 tx_bytes=7999457529
+2026-10-13T13:27:33.931Z uptime=42624.86 rx_bytes=4325934251 tx_bytes=7999554956
+2026-10-13T13:27:37.757Z uptime=42628.00 rx_bytes=4325942297 tx_bytes=7999650359
+2026-10-13T13:27:40.204Z uptime=42631.13 rx_bytes=4325952923 tx_bytes=7999747391
+2026-10-13T13:27:43.360Z uptime=42634.29 rx_bytes=4325966422 tx_bytes=7999858283
+2026-10-13T13:27:46.516Z uptime=42637.45 rx_bytes=4325975186 tx_bytes=7999953544
+2026-10-13T13:27:49.674Z uptime=42640.60 rx_bytes=4325984182 tx_bytes=8000049389
+2026-10-13T13:27:52.827Z uptime=42643.76 rx_bytes=4325999034 tx_bytes=8000162117
+2026-10-13T13:27:55.988Z uptime=42646.92 rx_bytes=4326009269 tx_bytes=8000258283
+2026-10-13T13:27:59.137Z uptime=42650.07 rx_bytes=4326016767 tx_bytes=8000352689
+2026-10-13T13:28:02.289Z uptime=42653.22 rx_bytes=4326033243 tx_bytes=8000466047
+2026-10-13T13:28:05.441Z uptime=42656.37 rx_bytes=4326041627 tx_bytes=8000561156
+2026-10-13T13:28:08.594Z uptime=42659.52 rx_bytes=4326058824 tx_bytes=8000664865
+2026-10-13T13:28:11.754Z uptime=42662.68 rx_bytes=4326068139 tx_bytes=8000760993
+2026-10-13T13:28:14.914Z uptime=42665.84 rx_bytes=4326083557 tx_bytes=8000873771
+2026-10-13T13:28:18.656Z uptime=42668.99 rx_bytes=4326117945 tx_bytes=8000971908
+2026-10-13T13:28:21.180Z uptime=42672.11 rx_bytes=4326125228 tx_bytes=8001066799
+2026-10-13T13:28:24.340Z uptime=42675.27 rx_bytes=4326145308 tx_bytes=8001179808
+2026-10-13T13:28:27.533Z uptime=42678.46 rx_bytes=4326153901 tx_bytes=8001275437
+2026-10-13T13:28:30.693Z uptime=42681.62 rx_bytes=4326163817 tx_bytes=8001371553
+2026-10-13T13:28:33.855Z uptime=42684.78 rx_bytes=4326180706 tx_bytes=8001484066
+2026-10-13T13:28:37.348Z uptime=42687.93 rx_bytes=4326188381 tx_bytes=8001578740
+2026-10-13T13:28:40.169Z uptime=42691.10 rx_bytes=4326199114 tx_bytes=8001676303
+2026-10-13T13:28:43.321Z uptime=42694.25 rx_bytes=4326212478 tx_bytes=8001786588
+2026-10-13T13:28:46.478Z uptime=42697.41 rx_bytes=4326222496 tx_bytes=8001882651
+2026-10-13T13:28:49.660Z uptime=42700.59 rx_bytes=4326230926 tx_bytes=8001978365
+2026-10-13T13:28:52.805Z uptime=42703.73 rx_bytes=4326239924 tx_bytes=8002073613
+2026-10-13T13:28:55.962Z uptime=42706.89 rx_bytes=4326256179 tx_bytes=8002186329
+2026-10-13T13:28:59.111Z uptime=42710.04 rx_bytes=4326263216 tx_bytes=8002280227
+2026-10-13T13:29:02.263Z uptime=42713.19 rx_bytes=4326273672 tx_bytes=8002376794
+2026-10-13T13:29:05.410Z uptime=42716.34 rx_bytes=4326288375 tx_bytes=8002488230
+2026-10-13T13:29:08.567Z uptime=42719.50 rx_bytes=4326298759 tx_bytes=8002584199
+2026-10-13T13:29:11.714Z uptime=42722.64 rx_bytes=4326306061 tx_bytes=8002678860
+2026-10-13T13:29:14.852Z uptime=42725.78 rx_bytes=4326324001 tx_bytes=8002792846
+2026-10-13T13:29:18.100Z uptime=42728.94 rx_bytes=4326334271 tx_bytes=8002888902
+2026-10-13T13:29:21.165Z uptime=42732.09 rx_bytes=4326341220 tx_bytes=8002983198
+2026-10-13T13:29:24.330Z uptime=42735.26 rx_bytes=4326354437 tx_bytes=8003088543
+2026-10-13T13:29:27.465Z uptime=42738.39 rx_bytes=4326366340 tx_bytes=8003191610
+2026-10-13T13:29:30.622Z uptime=42741.55 rx_bytes=4326376434 tx_bytes=8003287928
+2026-10-13T13:29:33.770Z uptime=42744.70 rx_bytes=4326386878 tx_bytes=8003391062
+2026-10-13T13:29:36.936Z uptime=42747.86 rx_bytes=4326410926 tx_bytes=8003512280
+2026-10-13T13:29:40.879Z uptime=42751.02 rx_bytes=4326421360 tx_bytes=8003609409
+2026-10-13T13:29:43.263Z uptime=42754.19 rx_bytes=4326428270 tx_bytes=8003703372
+2026-10-13T13:29:46.423Z uptime=42757.35 rx_bytes=4326445085 tx_bytes=8003816255
+2026-10-13T13:29:49.574Z uptime=42760.50 rx_bytes=4326457577 tx_bytes=8003912528
+
+# ---- 观测窗口结束 (2026-10-13T13:29:20Z = E2 done 13:27:20 + 2min) ----
+# 以下为窗口外补充读数(对照/清理阶段), 不参与判定:
+2026-10-13T13:31:14Z       rx_bytes=(该次未采样) tx_bytes=8004361768
+2026-10-13T13:38:02Z       rx_bytes=4328146285   tx_bytes=8005635258
+2026-10-13T13:43:32.829Z   rx_bytes=4328820864   tx_bytes=8006087586   # (objcat 对照尝试前)
+2026-10-13T13:43:33Z       rx_bytes=4328825167   tx_bytes=8006092667   # (尝试后; 该子命令不存在, 无载荷)
+# 附: 13:29:49.574Z -> 13:38:02Z 约 8 分钟内 tx 累计仅 +1,722,730B, 期间发生过两轮手动预热(声明 2.0GiB+253MiB)。
+# 观测点③ 判定: E1 切换 13:27:19.704Z / E2 切换 13:27:19.894Z 前后均无 UFS 批量流量"回升";
+#   13:27:18.134Z -> 13:27:21.279Z 的唯一一次 +2,123,741,306B(tx) 与 E0 冷读的 fuse 客户端
+#   miss_bytes=2.11965952e9 一一对应, 即两个切换点的相对增量 ≈ 0(被动); 切换后至窗口结束仅 ~30KB/s 级后台抖动。
+#   证据出处: 本文件。

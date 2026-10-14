@@ -1,0 +1,204 @@
+package fetch
+
+import (
+	"context"
+	"errors"
+	"io"
+	"sync"
+	"time"
+
+	"traincache/core/cas"
+	"traincache/core/objectstore"
+)
+
+// ErrTooManyRetries 表示校验失败重下达到 MaxRetries 仍未成功。
+var ErrTooManyRetries = errors.New("fetch: verification failed after max retries")
+
+// backoffBase 是重试退避基数（decisions.md Q6：指数退避 100ms 起、无抖动）。
+const backoffBase = 100 * time.Millisecond
+
+// inflightCall 是同 key 合并下载的共享结果：owner 下载完成后写入 fp/err 并 close(done)，
+// 等待者从 done 上接收（channel close 建立 happens-before，无需额外锁）。
+type inflightCall struct {
+	done    chan struct{}
+	fp      cas.Fingerprint
+	err     error
+	waiters int // 当前等待者数量，f.mu 保护；测试观测合并行为用
+}
+
+// Fetcher 持有 objectstore.Store、*cas.Store、limiter、in-flight map（内部）。
+type Fetcher struct {
+	store objectstore.Store
+	cs    *cas.Store
+	opts  Options
+	lim   *limiter
+
+	mu       sync.Mutex
+	inflight map[string]*inflightCall
+}
+
+// New 创建 Fetcher；opts 缺省字段按 design.md §8 默认值补齐。
+func New(store objectstore.Store, cs *cas.Store, opts Options) *Fetcher {
+	opts = opts.withDefaults()
+	return &Fetcher{
+		store:    store,
+		cs:       cs,
+		opts:     opts,
+		lim:      newLimiter(opts),
+		inflight: make(map[string]*inflightCall),
+	}
+}
+
+// Fetch 下载对象：Acquire(expectSize) 字节信号量 → store.Get 流经 cas.Put 落盘 →
+// Open 读回校验 → 失败则 Remove 后重试（≤ MaxRetries）→ Release 信号量。
+// 相同 key 的并发 Fetch 合并为一次实际下载（in-flight map，等待者共享结果）；
+// 等待者的 ctx 取消只影响等待者自身，不取消实际下载。
+// 返回块指纹。命中检查是调用方职责：先经 index.Catalog.Lookup 取指纹、cas.Open
+// 验存在，未命中才调用本方法（对应 docs/7 "缓存命中就不触及数据源"）。
+func (f *Fetcher) Fetch(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
+	var zero cas.Fingerprint
+
+	// 同 key 已有实际下载：登记为等待者，共享其结果与错误（不占字节/任务额度）。
+	f.mu.Lock()
+	if c, ok := f.inflight[key]; ok {
+		c.waiters++
+		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			c.waiters--
+			f.mu.Unlock()
+		}()
+		select {
+		case <-c.done:
+			return c.fp, c.err
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
+	}
+	c := &inflightCall{done: make(chan struct{})}
+	f.inflight[key] = c
+	f.mu.Unlock()
+
+	// 本调用者是 owner：同步执行实际下载（全部尝试），完成后广播结果并摘除登记。
+	fp, err := f.download(ctx, key, expectSize)
+
+	c.fp, c.err = fp, err
+	close(c.done)
+
+	f.mu.Lock()
+	delete(f.inflight, key)
+	f.mu.Unlock()
+
+	return fp, err
+}
+
+// download 是实际下载路径（仅 in-flight 合并的 owner 执行）：
+// 任务额度 → 字节额度（Acquire(expectSize)，持至成功或最终失败）→ 逐次尝试（≤ MaxRetries 次
+// 重下，指数退避 100ms 起、受 ctx 控制）。校验失败返回 ErrTooManyRetries；
+// 其他失败（Get/Put 错误等）耗尽重试后返回最后一次的错误。
+func (f *Fetcher) download(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
+	var zero cas.Fingerprint
+
+	if err := f.lim.tasks.acquire(ctx); err != nil {
+		return zero, err
+	}
+	defer f.lim.tasks.release()
+
+	got, err := f.lim.bytes.acquire(ctx, expectSize)
+	if err != nil {
+		return zero, err
+	}
+	defer f.lim.bytes.release(got)
+
+	var lastErr error
+	for attempt := 1; attempt <= f.opts.MaxRetries+1; attempt++ {
+		if attempt > 1 {
+			if err := sleepCtx(ctx, backoffDelay(attempt-1)); err != nil {
+				return zero, err
+			}
+		}
+		fp, err := f.tryOnce(ctx, key)
+		if err == nil {
+			return fp, nil
+		}
+		lastErr = err
+		// 下载失败也算一次尝试；但 ctx 已取消时不再退避重试，立即返回。
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return zero, ctxErr
+		}
+	}
+	if errors.Is(lastErr, cas.ErrCorrupt) {
+		return zero, ErrTooManyRetries
+	}
+	return zero, lastErr
+}
+
+// tryOnce 执行一次完整下载尝试：单主机连接额度 → store.Get 经 io.Pipe 流经 cas.Put
+// 落盘（ctx 取消/流错误均不残留）→ cas.Open 读回校验；校验失败则 cas.Remove 后
+// 返回 ErrCorrupt（此时块无引用无 pin，Remove 不会 ErrInUse，design.md §7.5）。
+func (f *Fetcher) tryOnce(ctx context.Context, key string) (cas.Fingerprint, error) {
+	var zero cas.Fingerprint
+
+	host := hostOf(key)
+	if err := f.lim.hosts.acquire(ctx, host); err != nil {
+		return zero, err
+	}
+	defer f.lim.hosts.release(host)
+
+	// store.Get 是推模式（写 io.Writer），cas.Put 是拉模式（读 io.Reader），用 io.Pipe 对接。
+	// Get 在独立 goroutine 中执行；无论结果如何都先收尾该 goroutine 再返回（不泄漏）。
+	pr, pw := io.Pipe()
+	getDone := make(chan error, 1)
+	go func() {
+		err := f.store.Get(ctx, key, pw)
+		_ = pw.CloseWithError(err) // err == nil 时等价 Close()，向 Put 交付 EOF
+		getDone <- err
+	}()
+
+	fp, _, putErr := f.cs.Put(ctx, pr)
+	_ = pr.CloseWithError(putErr) // Put 提前退出时解除 Get 侧写阻塞
+	getErr := <-getDone
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return zero, ctxErr
+	}
+	if getErr != nil {
+		return zero, getErr
+	}
+	if putErr != nil {
+		return zero, putErr
+	}
+
+	br, err := f.cs.Open(fp)
+	if err != nil {
+		if errors.Is(err, cas.ErrCorrupt) {
+			_ = f.cs.Remove(fp) // 校验失败即删；失败也无妨，重下的 Put 会 rename 覆盖
+		}
+		return zero, err
+	}
+	_ = br.Close()
+	return fp, nil
+}
+
+// backoffDelay 返回第 retry 次重试前的退避时长：100ms、200ms、400ms…（无抖动，Q6）。
+func backoffDelay(retry int) time.Duration {
+	if retry < 1 {
+		retry = 1
+	}
+	if retry > 20 { // 防移位溢出；100ms<<19 ≈ 14.5h，远超实际使用
+		retry = 20
+	}
+	return backoffBase << (retry - 1)
+}
+
+// sleepCtx 等待 d，ctx 取消则立即返回 ctx.Err()（不等待剩余退避）。
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

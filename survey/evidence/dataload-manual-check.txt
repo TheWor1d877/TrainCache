@@ -1,0 +1,66 @@
+# ============================================================
+# 手动 DataLoad 预热对照 —— "对手阶段感知现勘" 附属检查(窗口外, 可选对照)
+# 目的: (a) 手动触发预热是否可行; (b) 预热数据流量的观测口径与批量传输特征。
+# 时间: 全部动作均在观测窗口 (2026-10-13T13:26:15Z ~ 13:29:20Z) 之外。
+# 结论(3 行):
+#   1) 手动预热存在且有效(声明 2.0GiB 在 ~1.07s 内完成), 但无任何自动触发机制, 需外部显式发起;
+#   2) 预热产生的 2.52GB 缓存填充在 MinIO pod eth0 计数上不可见(与 E0 跨节点冷读 +2.12GB 恰好可见形成反差);
+#   3) 该异常为本对照的装置级观察, 已如实记录, 不影响三观测点(被动)判定。
+# ============================================================
+
+## 1. DataLoad 执行记录 (均为本次实验创建, 用于对照, 已删除)
+[2026-10-13T13:30:04Z] DataLoad jfs-load 创建 (target: / 整卷; runtime jfsdemo; worker pod=jfsdemo-worker-0;
+                       loader 镜像 juicedata/mount:ce-v1.3.0, policy Once)
+[2026-10-13T13:30:05.924Z] worker juicefs[73]: Start to warmup cache 1 paths with 50 workers, background=0
+[2026-10-13T13:30:06.990Z] worker juicefs[73]: warmup cache 1 paths in 1.065586259s
+                           (当时观察记录: loader 输出 19 files (2.0 GiB); DataLoad 约 6s 内 Complete)
+[2026-10-13T13:30:31Z] DataLoad jfs-load-subset 创建 (target: /shard-00013.tar, /shard-00003.tar; 253MiB)
+[2026-10-13T13:30:33.014Z] worker juicefs[73]: Start to warmup cache 2 paths with 50 workers, background=0
+[2026-10-13T13:30:33.140Z] worker juicefs[73]: warmup cache 2 paths in 126.687321ms
+[≈2026-10-13T13:41Z]  kubectl delete dataload jfs-load jfs-load-subset
+                           (loader job jfs-load-loader-job-rn976 / jfs-load-subset-loader-job-6vzhd 均已 Completed 并被回收)
+
+## 2. worker 客户端 (jfsdemo-worker-0, :15126, traincache-worker2) 缓存/对象计数
+窗口内采样 (13:25:56 ~ 13:29:49): blocks=0 bytes=0 evicts=0  (块缓存为空)
+预热后读数 (13:37:58 ~ 13:38:02):
+  juicefs_blockcache_writes          = 611
+  juicefs_blockcache_write_bytes     = 2.51717751e9   (≈2.34GiB)
+  juicefs_blockcache_evicts          = 597            (611 写 - 14 常驻 = 597, 容量满即淘汰)
+  juicefs_blockcache_blocks          = 14
+  juicefs_blockcache_bytes           = 5.7116672e7    (达到容量上限 60397976B ≈ 57.6MB, /dev/shm 64MB 限制)
+  juicefs_blockcache_hits/miss       = 0 / 0
+  juicefs_object_request_durations_histogram_seconds_count{GET} = 611, sum = 2.2638s
+  juicefs_object_request_data_bytes{GET}                        = 2.51717751e9
+  juicefs_fuse_ops_total{read}       = 15             (几乎不经内核 FUSE 读 —— 预热走客户端内部路径)
+  => 客户端确实执行了 611 次对象 GET、共 2.52GB; 与 write_bytes 完全一致。
+
+## 3. MinIO pod netns eth0 观测 (跨越两轮预热)
+[2026-10-13T13:29:49.574Z] rx=4326457577  tx=8003912528
+[2026-10-13T13:38:02.437Z] rx=4328146285  tx=8005635258
+增量: rx +1,688,708B / tx +1,722,730B
+=> 预热声明的 2.0GiB+253MiB 批量数据传输未出现在 MinIO pod eth0 上 (仅 KB 级抖动)。
+
+## 4. 受控探针 (单分片预热 + 三处计数同时夹取)
+[2026-10-13T13:35:09.553Z] worker pod eth0 rx=4327727881 tx=8005127119
+                           minio eth0   rx=4327728103 tx=8005128617
+                           worker write_bytes = 2,384,620,710
+[2026-10-13T13:35:10.102Z] kubectl exec jfsdemo-worker-0 -- juicefs warmup .../shard-00010.tar
+[2026-10-13T13:35:10.148Z] worker juicefs[73]: warmup cache 1 paths in 46.706804ms  (声明 126 MiB)
+[2026-10-13T13:35:10.419Z] worker pod eth0 rx=4327736513 (+8,632)  tx=8005138226 (+11,107)
+                           minio eth0   rx=4327736774 (+8,671)  tx=8005139895 (+11,278)
+                           worker write_bytes = 2,517,177,510 (+132,556,800B = 126.4MiB = 恰好该分片大小)
+=> 126MiB 数据在 46.7ms 内进入本地块缓存, 而两端 eth0 各仅 ~9KB —— 数据由本地路径
+   (内核页缓存/本地访问路径)就地填充, 未发生网络批量传输。
+
+## 5. 对照: 跨节点冷读在 MinIO 计数上清晰可见 (E0, 窗口内, 供对照)
+[13:27:18.134Z] tx=5875413352 -> [13:27:21.279Z] tx=7999154658  (+2,123,741,306B)
+与消费节点(traincache-worker 的 jfsdemo-fuse-2467z)客户端 miss_bytes=2.11965952e9 (+2.1197GB) 吻合。
+
+## 6. 说明与局限
+- MinIO eth0 计数对"跨节点"读取流量有效(E0 验证); 但对 worker0(与 MinIO 同节点 worker2)的客户端
+  预热流量, 在本次观测口径下不可见 —— 疑与同节点路径/客户端本地缓存行为有关, 未完全解析;
+  已如实记录, 不影响三观测点判定(分别基于 runtime 日志 / dataset status / MinIO 计数, 且另有
+  fuse 客户端块级计数佐证)。
+- 两个 DataLoad 均为本实验创建(creationTimestamp 13:30:04Z / 13:30:31Z), 已于 ≈13:41Z 删除;
+  loader job 无残留。
+- "juicefs objcat" 子命令在本版本(1.3.0+2025-07-03.30190ca1)不存在; 13:43:32Z 的对照尝试无载荷(计数增量 ~4KB)。

@@ -1,0 +1,5 @@
+# 归档日期:2026-10-13;kind 集群 traincache;kubectl get nodes -o wide 原始输出(docs/4 现勘报告 §1 证据)
+NAME                       STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+traincache-control-plane   Ready    control-plane   4d    v1.37.0   172.19.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+traincache-worker          Ready    <none>          4d    v1.37.0   172.19.0.4    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4
+traincache-worker2         Ready    <none>          4d    v1.37.0   172.19.0.5    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-38-generic (amd64)   containerd://2.3.4

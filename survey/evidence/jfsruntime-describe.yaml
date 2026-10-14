@@ -1,0 +1,109 @@
+Name:         jfsdemo
+Namespace:    default
+Labels:       fluid.io/dataset-id=default-jfsdemo
+Annotations:  <none>
+API Version:  data.fluid.io/v1alpha1
+Kind:         JuiceFSRuntime
+Metadata:
+  Creation Timestamp:  2026-10-13T11:45:24Z
+  Finalizers:
+    juicefs-runtime-controller-finalizer
+  Generation:  3
+  Owner References:
+    API Version:     data.fluid.io/v1alpha1
+    Kind:            Dataset
+    Name:            jfsdemo
+    UID:             c4253646-c026-45e1-a1d4-ed9243968393
+  Resource Version:  244398
+  UID:               8e4c149f-4396-49ec-a8e1-5eeeffbf3bbc
+Spec:
+  Fuse:
+    Pod Metadata:
+    Resources:
+      Requests:
+        Memory:  1Gi
+  Init Users:
+    Resources:
+  Job Worker:
+    Pod Metadata:
+    Resources:
+  Juicefs Version:
+  Management:
+    Clean Cache Policy:
+      Grace Period Seconds:  60
+      Max Retry Attempts:    3
+    Metadata Sync Policy:
+  Master:
+    Pod Metadata:
+    Resources:
+  Pod Metadata:
+  Replicas:  1
+  Tieredstore:
+    Levels:
+      Low:         0.1
+      Mediumtype:  MEM
+      Path:        /dev/shm
+      Quota:       1Gi
+      Volume Source:
+      Volume Type:  hostPath
+  Worker:
+    Pod Metadata:
+    Resources:
+Status:
+  Cache Affinity:
+    Preferred During Scheduling Ignored During Execution:
+      Preference:
+        Match Expressions:
+          Key:       fluid.io/f-default-jfsdemo
+          Operator:  In
+          Values:
+            true
+      Weight:  100
+    Required During Scheduling Ignored During Execution:
+      Node Selector Terms:
+  Cache States:
+    Cache Capacity:          1.00GiB
+    Cache Hit Ratio:         
+    Cache Throughput Ratio:  
+    Cached:                  
+    Cached Percentage:       
+  Conditions:
+    Last Probe Time:                2026-10-13T11:45:25Z
+    Last Transition Time:           2026-10-13T11:45:25Z
+    Message:                        The workers are initialized.
+    Reason:                         Workers are initialized
+    Status:                         True
+    Type:                           WorkersInitialized
+    Last Probe Time:                2026-10-13T11:45:26Z
+    Last Transition Time:           2026-10-13T11:45:26Z
+    Message:                        The workers are ready.
+    Reason:                         Workers are ready
+    Status:                         True
+    Type:                           WorkersReady
+    Last Probe Time:                2026-10-13T11:45:26Z
+    Last Transition Time:           2026-10-13T11:45:26Z
+    Message:                        The fuses are ready.
+    Reason:                         Fuses are ready
+    Status:                         True
+    Type:                           FusesReady
+  Current Fuse Number Scheduled:    0
+  Current Master Number Scheduled:  0
+  Current Worker Number Scheduled:  1
+  Desired Fuse Number Scheduled:    0
+  Desired Master Number Scheduled:  0
+  Desired Worker Number Scheduled:  1
+  Fuse Number Ready:                0
+  Fuse Phase:                       Ready
+  Fuse Reason:                      Fuses are ready
+  Master Number Ready:              0
+  Master Phase:                     
+  Selector:                         app=juicefs,release=jfsdemo,role=juicefs-worker
+  Setup Duration:                   2s
+  Value File:                       jfsdemo-juicefs-values
+  Worker Number Available:          1
+  Worker Number Ready:              1
+  Worker Phase:                     Ready
+Events:
+  Type     Reason               Age    From            Message
+  ----     ------               ----   ----            -------
+  Warning  ErrorProcessRuntime  2m11s  JuiceFSRuntime  Failed to sync the ddc due to GetMetadataInfoFailed

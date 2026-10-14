@@ -1,0 +1,60 @@
+kind 集群 traincache 修复日志（2026-10-13）
+============================================
+
+【背景/现象】
+3 节点 kind 集群（k8s v1.37.0，containerd 2.3.4）。kind 节点容器约 9h 前重启后，
+kube-system（coredns x2、kindnet x3、kube-proxy x3、scheduler、controller-manager）
+与 minio 命名空间多个 Pod 报 CreateContainerError；Fluid 整体不存在（无 fluid-system
+ns、无 CRD、helm list 为空）。
+
+【诊断根因】kubelet 日志摘录（traincache-worker）：
+E1013 11:32:18 kubelet "CreateContainer ... failed" err="... failed to reserve container
+name \"kindnet-cni_kindnet-6zd2d_kube-system_a5d8c195-..._8\"; check if another
+CreateContainer request is in progress: name \"...\" is reserved for
+\"4de4b05084f2f2302ba9acf69d1c7d8337ee3611386bcfe3e48fe8e164cd281f\""
+即节点容器重启后 containerd 保留旧容器条目（name reservation 冲突）。
+
+【第一档轻修（采用）】逐节点删除 Exited 容器条目 + 重启 kubelet：
+  for n in traincache-control-plane traincache-worker traincache-worker2; do
+    docker exec $n bash -c "crictl ps -a | grep Exited | cut -d' ' -f1 | xargs -r crictl rm -f"
+    docker exec $n systemctl restart kubelet
+  done
+删除条目（crictl ps -a 中 Exited，共 12 个）：
+  control-plane(7)：274ca24956647 coredns / d66eaa762ae7a coredns /
+    f2873167e3ca6 local-path-provisioner / 33c6b6728c789 kindnet-cni /
+    7cf29d90ca792 kube-proxy / 65212d054de68 kube-scheduler /
+    41ba4a0303cc0 kube-controller-manager
+  worker(2)：1c287ef87fa44 kube-proxy / 0063745d0b71d kindnet-cni
+  worker2(3)：b225538e7d567 minio / 96b634aedf1e9 kindnet-cni /
+    da104928533ed kube-proxy
+结果：kubectl get pods -A 全部 Running（修复前约 10 个 CreateContainerError → 0）。
+未采用第二档重建。备注（备重建用）：kindest/node:v1.37.0 在宿主机仅剩 dangling 镜像
+（image ID sha256:24f646398ba8...，RepoTags 为空），如需重建须先 docker tag 恢复 tag，
+否则 kind 会尝试联网拉取（docker hub 不可达）。
+
+【同一维护窗口的恢复动作】
+1. kind load redis:7-alpine / busybox:latest 进三节点（节点内无镜像且 docker hub 不可达，
+   redis pod 曾卡 ErrImagePull）。9 个 Fluid/JuiceFS 镜像（7 fluidcloudnative:v1.1.0-36f0467
+   全套 + juicedata/juicefs-csi-driver:v0.32.0 + juicedata/mount:ce-v1.3.0）也已
+   kind load docker-image --name traincache。
+2. Fluid 重装见 fluid-install-helm.txt（chart 来源：fluid-cloudnative/charts release
+   helm-chart-fluid-1.1.0-alpha.9 直下 tgz；/tmp/fluid 已不存在，官方 helm repo index
+   未收录 alpha 版本）。
+3. 数据恢复：MinIO 内 train-data bucket 缺失（非重建引起；PVC 里只剩 bench-b 目录，
+   minio pod 自 3d20h 前持续存在）。经 kubectl port-forward -n minio svc/minio 30090:9000
+   （kind 无 extraPortMappings，宿主机不能直连 NodePort）执行：
+     PYTHONPATH=/tmp/jfs-pylib python3 survey/scripts/upload_minio.py
+   重传 probes/data/tars 16 分片，完成：16 个对象，共 1.97 GiB，耗时 5s。
+   （boto3 经 pip install --target /tmp/jfs-pylib 临时安装，未污染系统环境）
+4. apply 顺序（照 docs/4）：kubectl apply -f survey/manifests/redis.yaml →
+   jfs-secret.yaml → dataset.yaml → juicefsruntime.yaml（quota 3Gi→1Gi）。
+   结果：JuiceFSRuntime jfsdemo Worker/FUSE 均 Ready，Dataset Bound，
+   PVC jfsdemo Bound，CACHE CAPACITY 1.00GiB。
+
+【train-pod.yaml 三 epoch 读序置换生成命令】（离线生成后字面量嵌入）
+  E1(seed=17): python3 -c "import random; print(' '.join('shard-%05d.tar' % i for i in random.Random(17).sample(range(16), 16)))"
+  E2(seed=42): python3 -c "import random; print(' '.join('shard-%05d.tar' % i for i in random.Random(42).sample(range(16), 16)))"
+嵌入脚本经本机 /bin/sh(dash)sh -n 语法校验通过（busybox ash 同族 POSIX 语法）。
+
+【修复后验收】kubectl get pods -A = 23 个 Pod 全 Running（清单见
+fluid-pods-after-reinstall.txt）。
