@@ -1,0 +1,3147 @@
+# ============================================================
+# 对手阶段感知现勘:Dataset jfsdemo status 多时间点采样
+# 采样命令: kubectl get dataset jfsdemo -o yaml | sed -n '/^status:/,$p'
+# 采样周期: 10s;每段前以 "# ---- sample <ISO8601_UTC> uptime=<host秒> ----" 分隔
+# 关键字段: status.cacheStates.{cached,cachedPercentage,cacheCapacity,cacheHitRatio}
+#           status.fileNum / status.ufsTotal / status.conditions[].lastUpdateTime
+# 判读: ②缓存抬升点落在「Pod 读某分片之后」=被动;「先于 Pod 读」=主动
+# 装置备注: 基线时 cached/cachedPercentage 为空串、fileNum=0、ufsTotal=0.00B
+#           (Fluid 1.1.0-alpha.9 + JuiceFS 统计刷新滞后,观测其是否在窗口内变化)
+# ============================================================
+# ---- sample 2026-10-13T13:26:09Z uptime=42540.73 (基线,实验前) ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:25:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:27:09Z uptime=42600.86 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:26:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:27:20Z uptime=42611.19 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:27:16Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:27:30Z uptime=42621.45 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:27:16Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:27:40Z uptime=42631.80 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:27:16Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:27:51Z uptime=42642.13 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:27:16Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:28:01Z uptime=42652.48 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: ""
+    cacheThroughputRatio: ""
+    cached: ""
+    cachedPercentage: ""
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:27:16Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:28:11Z uptime=42662.81 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:28:22Z uptime=42673.13 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:28:32Z uptime=42683.47 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:28:42Z uptime=42693.80 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:28:53Z uptime=42704.15 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:29:03Z uptime=42714.50 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:29:13Z uptime=42724.83 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:29:24Z uptime=42735.09 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:29:34Z uptime=42745.40 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:28:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:29:44Z uptime=42755.76 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:29:55Z uptime=42766.09 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:30:05Z uptime=42776.42 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  operationRef:
+    DataLoad: jfs-load
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:30:15Z uptime=42786.75 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:30:26Z uptime=42797.09 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:30:36Z uptime=42807.35 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:30:46Z uptime=42817.69 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:30:57Z uptime=42828.03 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:29:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:31:07Z uptime=42838.36 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:31:17Z uptime=42848.70 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:31:28Z uptime=42859.04 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:31:38Z uptime=42869.37 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:31:48Z uptime=42879.73 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:31:59Z uptime=42890.08 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:32:09Z uptime=42900.43 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:32:19Z uptime=42910.77 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:32:30Z uptime=42921.10 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:31:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:32:40Z uptime=42931.46 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:32:50Z uptime=42941.81 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:33:01Z uptime=42952.16 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:33:11Z uptime=42962.49 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:33:21Z uptime=42972.85 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:33:32Z uptime=42983.18 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:33:42Z uptime=42993.53 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:33:52Z uptime=43003.87 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:34:03Z uptime=43014.22 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:32:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:34:13Z uptime=43024.54 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:34:23Z uptime=43034.83 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:34:34Z uptime=43045.18 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:34:44Z uptime=43055.52 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:34:54Z uptime=43065.86 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:35:05Z uptime=43076.20 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:35:15Z uptime=43086.53 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:35:25Z uptime=43096.87 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:35:36Z uptime=43107.22 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:34:06Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:35:46Z uptime=43117.55 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:35:56Z uptime=43127.90 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:36:07Z uptime=43138.24 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:36:17Z uptime=43148.59 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:36:27Z uptime=43158.92 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:36:38Z uptime=43169.21 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:36:48Z uptime=43179.55 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:36:58Z uptime=43189.89 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:35:36Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:37:09Z uptime=43200.23 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:37:19Z uptime=43210.61 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:37:29Z uptime=43220.88 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:37:40Z uptime=43231.21 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:37:50Z uptime=43241.48 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:38:00Z uptime=43251.78 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:38:11Z uptime=43262.06 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:38:21Z uptime=43272.42 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+# ---- sample 2026-10-13T13:38:31Z uptime=43282.77 ----
+status:
+  cacheStates:
+    cacheCapacity: 1.00GiB
+    cacheHitRatio: 0.0%
+    cacheThroughputRatio: 0.0%
+    cached: 54.44MiB
+    cachedPercentage: 2.7%
+  conditions:
+  - lastTransitionTime: "2026-10-13T11:45:26Z"
+    lastUpdateTime: "2026-10-13T13:37:07Z"
+    message: The ddc runtime is ready.
+    reason: DatasetReady
+    status: "True"
+    type: Ready
+  fileNum: "0"
+  mounts:
+  - encryptOptions:
+    - name: metaurl
+      valueFrom:
+        secretKeyRef:
+          key: metaurl
+          name: jfs-secret
+    - name: access-key
+      valueFrom:
+        secretKeyRef:
+          key: access-key
+          name: jfs-secret
+    - name: secret-key
+      valueFrom:
+        secretKeyRef:
+          key: secret-key
+          name: jfs-secret
+    mountPoint: juicefs:///
+    name: traincache-demo
+    options:
+      bucket: http://minio.minio.svc.cluster.local:9000/train-data
+      storage: minio
+  phase: Bound
+  runtimes:
+  - category: Accelerate
+    masterReplicas: 1
+    name: jfsdemo
+    namespace: default
+    type: juicefs
+  ufsTotal: 0.00B
+
+# ---- 观测窗口结束 (2026-10-13T13:29:20Z) ----
+# 13:29:20Z 之后的样本(至 13:38:31Z, 含第二/三轮读取与清理)不参与判定。
+# 观测点② 判定: cached 首次非空出现在 13:28:11Z 采样(值 54.44MiB / cachedPercentage 2.7% /
+#   cacheHitRatio 0.0%, lastUpdateTime=13:28:06Z), 晚于 E0 读取完成(13:27:20.074Z)与两个切换点;
+#   13:28:01Z 采样 cached 仍为空串(其 lastUpdateTime=13:27:16Z)。此后至窗口结束保持 54.44MiB 不再增长。
+#   窗口内(至 13:29:20Z)无任何超前于读取的 cached 抬升 —— 被动。证据出处: 本文件。

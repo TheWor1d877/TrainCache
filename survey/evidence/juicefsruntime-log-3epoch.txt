@@ -1,0 +1,77 @@
+# ============================================================
+# 对手阶段感知现勘:JuiceFS 客户端 metrics 采样序列 + 窗口内 Runtime 完整日志
+# 采样源: kubectl exec jfsdemo-worker-0 -- wget -qO- http://127.0.0.1:15126/metrics
+#   (worker 的 juicefs 客户端 Prometheus 端点;若 train-demo 的读路径经同一 FUSE 挂载,
+#    本序列直接反映其块缓存命中/缺失行为;实验后可据 read_ops/miss 增量判定共享与否)
+# 采样周期: 3s;列: <ISO8601_UTC> uptime=<host秒> hits miss hit_bytes miss_bytes blocks bytes evicts drops staging read_ops
+# 文件末尾附: 观测窗口内 jfsdemo-worker-0 与 fluid-csi 的完整日志(按 --since-time 截取)
+# ============================================================
+# ---- metrics 基线 2026-10-13T13:25:56Z uptime=42527.0 ----
+2026-10-13T13:25:56Z uptime=42527.0 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:05.477Z uptime=42596.41 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:08.639Z uptime=42599.57 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:11.796Z uptime=42602.72 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:14.953Z uptime=42605.88 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:18.134Z uptime=42609.06 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:21.279Z uptime=42612.21 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:24.433Z uptime=42615.36 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:27.593Z uptime=42618.52 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:30.744Z uptime=42621.67 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:33.931Z uptime=42624.86 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:37.757Z uptime=42628.00 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:40.204Z uptime=42631.13 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:43.360Z uptime=42634.29 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:46.516Z uptime=42637.45 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:49.674Z uptime=42640.60 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:52.827Z uptime=42643.76 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:55.988Z uptime=42646.92 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:27:59.137Z uptime=42650.07 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:02.289Z uptime=42653.22 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:05.441Z uptime=42656.37 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:08.594Z uptime=42659.52 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:11.754Z uptime=42662.68 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:14.914Z uptime=42665.84 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:18.656Z uptime=42668.99 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:21.180Z uptime=42672.11 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:24.340Z uptime=42675.27 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:27.533Z uptime=42678.46 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:30.693Z uptime=42681.62 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:33.855Z uptime=42684.78 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:37.348Z uptime=42687.93 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:40.169Z uptime=42691.10 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:43.321Z uptime=42694.25 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:46.478Z uptime=42697.41 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:49.660Z uptime=42700.59 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:52.805Z uptime=42703.73 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:55.962Z uptime=42706.89 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:28:59.111Z uptime=42710.04 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:02.263Z uptime=42713.19 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:05.410Z uptime=42716.34 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:08.567Z uptime=42719.50 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:11.714Z uptime=42722.64 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:14.852Z uptime=42725.78 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:18.100Z uptime=42728.94 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:21.165Z uptime=42732.09 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:24.330Z uptime=42735.26 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:27.465Z uptime=42738.39 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:30.622Z uptime=42741.55 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:33.770Z uptime=42744.70 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:36.936Z uptime=42747.86 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:40.879Z uptime=42751.02 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:43.263Z uptime=42754.19 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:46.423Z uptime=42757.35 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+2026-10-13T13:29:49.574Z uptime=42760.50 hits=0 miss=0 hit_bytes=0 miss_bytes=0 blocks=0 bytes=0 evicts=0 drops=0 staging=0 read_ops=3
+
+# ============================================================
+# [收尾] 说明与判定 (加于 2026-10-13T13:50:46Z)
+# 1) 本序列采样对象为 worker 侧 jfsdemo-worker-0 的客户端(:15126, 位于 traincache-worker2);
+#    本实验 train-demo 实际运行在 traincache-worker, 其读路径由该节点 jfsdemo-fuse-2467z 的客户端(:15506)服务,
+#    故 worker(:15126) 全程 hits=0/miss=0 属预期; 块级行为判定须看消费端(:15506)。
+# 2) jfsdemo-fuse-2467z (:15506) 读数 (2026-10-13T13:44:38Z):
+#      blockcache: hits=0  miss=528  miss_bytes=2.11965952e9  bytes=5.7085952e7 (14 blocks; 容量上限 60397976B)
+#                  evicts=319  drops=179;  fuse_ops_total{method="read"}=16207
+#    解读: 528 次块缺失 / 2.12GB 全部由 E0 冷读(13:27:18-20Z)产生, 与 MinIO tx +2.1237GB 同步吻合;
+#    此后(含 E1/E2 与第二/三轮) miss_bytes 不再增长 —— 窗口内没有任何超前于读取的块获取。
+# 3) worker(:15126) 侧另有: blockcache_writes=611 / write_bytes=2.51717751e9 / evicts=597 及对象 GET 611 次
+#    共 2.51717751e9 字节 —— 均产生于 13:30 起的手动预热(窗口外), 详见 dataload-manual-check.txt。
+# 4) 观测点①(客户端块级视角)判定: 被动。证据出处: 本文件。

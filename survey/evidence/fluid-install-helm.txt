@@ -1,0 +1,14 @@
+# helm install 输出摘要(2026-10-13)
+# 命令: helm install fluid /tmp/fluid-chart-dl/fluid-1.1.0-alpha.9.tgz -n fluid-system --create-namespace --set runtime.juicefs.enabled=true
+# chart 来源(离线 tgz): https://github.com/fluid-cloudnative/charts/releases/download/helm-chart-fluid-1.1.0-alpha.9/fluid-1.1.0-alpha.9.tgz
+# chart appVersion 1.1.0-36f0467,与本地镜像 tag 一致
+
+NAME: fluid
+LAST DEPLOYED: Tue Oct 13 19:36:58 2026
+NAMESPACE: fluid-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+--- helm list ---
+NAME 	NAMESPACE   	REVISION	UPDATED                                	STATUS  	CHART              	APP VERSION  
+fluid	fluid-system	1       	2026-10-13 19:36:58.452203335 +0800 CST	deployed	fluid-1.1.0-alpha.9	1.1.0-36f0467
