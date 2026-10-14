@@ -8,5 +8,6 @@
 `bench/`:项目正式的实验装置
 `docs/`：参考文档
 `core/`: 核心缓存库，主要实现了路径索引与cas存储层
+`agent/`: Agent服务化层（module traincache/agent），缓存节点常驻服务：预热任务接收、持续预取、重扫描修复
 
 
