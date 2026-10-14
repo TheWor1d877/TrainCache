@@ -244,6 +244,26 @@ func (s *Store) Remove(fp Fingerprint) error {
 	return nil
 }
 
+// Evict 只删除块的本地副本，供 Agent 层磁盘淘汰用（D28）：refcount 不拦
+// （引用是快照级逻辑簿记，与副本是否在本地无关），pin>0 返回 ErrInUse；
+// 已不存在返回 ErrNotFound（与 Remove/Sweep 并发安全）。索引条目不受影响，
+// 后续读取经 Catalog.Lookup 命中 + Open 得 ErrNotFound 后由 fetch 重下。
+// 簿记契约：Evict 不动 refs；只删 blocks/ 下的正常块路径，不涉及 quarantine/。
+func (s *Store) Evict(fp Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pins[fp] > 0 {
+		return ErrInUse
+	}
+	if err := os.Remove(s.blockPath(fp)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("cas: evict block %s: %w", fp, err)
+	}
+	return nil
+}
+
 // Quarantine 把 Open 校验失败的坏块物理移入 cas 根下 quarantine/ 目录（与 blocks/ 并列），
 // 不再出现在 List() 中。幂等：源块不在 blocks/（已在 quarantine 或从未存在）返回 nil；
 // 目标已存在时 rename 原子覆盖。不检查 refs/pins（坏块隔离是正确性动作，引用计数是
