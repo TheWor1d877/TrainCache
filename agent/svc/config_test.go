@@ -17,6 +17,7 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_METRICS_ADDR",
 		"TRAINCACHE_VERIFY",
 		"TRAINCACHE_DATASET_WHITELIST",
+		"TRAINCACHE_ORDERS_DIR",
 	} {
 		t.Setenv(k, "")
 	}
@@ -62,6 +63,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.CacheRoot != "/var/cache/traincache" {
 		t.Errorf("CacheRoot = %q, want /var/cache/traincache(§8)", cfg.CacheRoot)
 	}
+	if cfg.OrdersDir != "/run/traincache/orders" {
+		t.Errorf("OrdersDir = %q, want /run/traincache/orders(§6.2)", cfg.OrdersDir)
+	}
 	if want := wantDefaultHeat(); cfg.Heat != want {
 		t.Errorf("Heat 默认值 = %+v, want %+v(D14)", cfg.Heat, want)
 	}
@@ -74,6 +78,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_METRICS_ADDR", "127.0.0.1:19411")
 	t.Setenv("TRAINCACHE_VERIFY", "xxh3+sha256")
 	t.Setenv("TRAINCACHE_DATASET_WHITELIST", "b-track,a-track")
+	t.Setenv("TRAINCACHE_ORDERS_DIR", "/tmp/tc-orders")
 
 	cfg, err := Load()
 	if err != nil {
@@ -95,9 +100,27 @@ func TestLoadEnvOverride(t *testing.T) {
 	if !slices.Equal(cfg.DatasetWhitelist, []string{"b-track", "a-track"}) {
 		t.Errorf("DatasetWhitelist = %q, want [b-track a-track]", cfg.DatasetWhitelist)
 	}
+	if cfg.OrdersDir != "/tmp/tc-orders" {
+		t.Errorf("OrdersDir = %q, want /tmp/tc-orders(TRAINCACHE_ORDERS_DIR 覆盖)", cfg.OrdersDir)
+	}
 	// TRAINCACHE_HEAT_* 解析延后 M5/M6:Heat 恒为 D14 默认值。
 	if want := wantDefaultHeat(); cfg.Heat != want {
 		t.Errorf("Heat = %+v, want 默认值 %+v(env 解析延后 M5/M6)", cfg.Heat, want)
+	}
+}
+
+// TestLoadOrdersDirDefault:未设 TRAINCACHE_ORDERS_DIR → §6.2 默认发现目录。
+func TestLoadOrdersDirDefault(t *testing.T) {
+	setBaseEnv(t)
+	os.Unsetenv("TRAINCACHE_ORDERS_DIR") // t.Setenv 的 cleanup 会恢复原值
+	t.Setenv("NODE_NAME", "worker-01")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OrdersDir != "/run/traincache/orders" {
+		t.Errorf("OrdersDir = %q, want /run/traincache/orders(未设 env 取默认)", cfg.OrdersDir)
 	}
 }
 
