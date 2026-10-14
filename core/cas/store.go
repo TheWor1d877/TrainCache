@@ -39,33 +39,43 @@ var (
 const (
 	// blocksDirName 是块目录名：块文件布局 blocks/<fp[0:2]hex>/<fp hex>.blk（design.md §6.3）。
 	blocksDirName = "blocks"
+	// quarantineDirName 是隔离目录名（D25）：坏块布局 quarantine/<fp[0:2]hex>/<fp hex>.blk，
+	// 与 blocks/ 并列在 cas 根下（同一文件系统，移动用 os.Rename 原子完成）。
+	quarantineDirName = "quarantine"
 	// tempPrefix 是 Put 临时文件前缀（临时文件在完成后 rename 为块文件，不做 fsync，D11）。
 	tempPrefix = "tmp-"
 	// dirPerm 是块目录权限。
 	dirPerm = 0o755
 )
 
-// Store 是 CAS 本地块存储；内部持有 dir、verify、refcount/pin 表。
+// Store 是 CAS 本地块存储；内部持有 rootDir、blocks 目录、verify、refcount/pin 表。
 type Store struct {
-	dir    string // 块目录（<dir>/blocks）
-	verify VerifyLevel
+	rootDir string // 用户传入的根路径（blocks/ 与 quarantine/ 的父目录，D25）
+	dir     string // 块目录（<rootDir>/blocks）
+	verify  VerifyLevel
 
 	mu   sync.Mutex          // 保护 refs/pins；Remove 的"检查 → 删除"在同一把锁内完成
 	refs map[Fingerprint]int //refs是查看快照级别的引用计数
 	pins map[Fingerprint]int //pins是查看读进程级别的引用计数
 }
 
-// New 创建（必要时初始化）dir 下的块存储（创建块目录 blocks/）；verify 决定新写块的校验等级。
+// New 创建（必要时初始化）dir 下的块存储（创建块目录 blocks/ 与隔离目录 quarantine/）；
+// verify 决定新写块的校验等级。
 func New(dir string, verify VerifyLevel) (*Store, error) {
 	blocksDir := filepath.Join(dir, blocksDirName)
 	if err := os.MkdirAll(blocksDir, dirPerm); err != nil {
 		return nil, fmt.Errorf("cas: create blocks dir %q: %w", blocksDir, err)
 	}
+	quarantineDir := filepath.Join(dir, quarantineDirName)
+	if err := os.MkdirAll(quarantineDir, dirPerm); err != nil {
+		return nil, fmt.Errorf("cas: create quarantine dir %q: %w", quarantineDir, err)
+	}
 	return &Store{
-		dir:    blocksDir,
-		verify: verify,
-		refs:   make(map[Fingerprint]int),
-		pins:   make(map[Fingerprint]int),
+		rootDir: dir,
+		dir:     blocksDir,
+		verify:  verify,
+		refs:    make(map[Fingerprint]int),
+		pins:    make(map[Fingerprint]int),
 	}, nil
 }
 
@@ -73,6 +83,12 @@ func New(dir string, verify VerifyLevel) (*Store, error) {
 func (s *Store) blockPath(fp Fingerprint) string {
 	hexs := fp.String()
 	return filepath.Join(s.dir, hexs[:2], hexs+".blk")
+}
+
+// quarantinePath 返回隔离块文件的最终路径 quarantine/<fp[0:2]hex>/<fp hex>.blk（与 blocks/ 同两级分片，D25）。
+func (s *Store) quarantinePath(fp Fingerprint) string {
+	hexs := fp.String()
+	return filepath.Join(s.rootDir, quarantineDirName, hexs[:2], hexs+".blk")
 }
 
 // Put 流式写入：边读边算指纹，写临时文件，完成后 rename 到 blocks/<fp[0:2]hex>/<fp hex>.blk。
@@ -228,12 +244,68 @@ func (s *Store) Remove(fp Fingerprint) error {
 	return nil
 }
 
+// Quarantine 把 Open 校验失败的坏块物理移入 cas 根下 quarantine/ 目录（与 blocks/ 并列），
+// 不再出现在 List() 中。幂等：源块不在 blocks/（已在 quarantine 或从未存在）返回 nil；
+// 目标已存在时 rename 原子覆盖。不检查 refs/pins（坏块隔离是正确性动作，引用计数是
+// 索引层的逻辑关系，修复后同指纹块回原位、引用不变）；持 s.mu 与 Remove/其他 Quarantine
+// 串行。仅真实 I/O 错误报错。
+func (s *Store) Quarantine(fp Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dst := s.quarantinePath(fp)
+	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
+		return fmt.Errorf("cas: quarantine block %s: %w", fp, err)
+	}
+	if err := os.Rename(s.blockPath(fp), dst); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("cas: quarantine block %s: %w", fp, err)
+	}
+	return nil
+}
+
 // List 枚举 blocks/ 下全部块指纹（D20）：递归扫描块目录，解析块文件名
 // （<32 位 hex>.blk）为指纹；忽略 .tmp-* 临时文件与无法解析为 32 位 hex 的文件名。
 // 返回按指纹字典序（字节序）升序排序的切片；无块返回空切片。
 func (s *Store) List() ([]Fingerprint, error) {
+	fps, err := listBlockDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("cas: list blocks: %w", err)
+	}
+	return fps, nil
+}
+
+// ListQuarantined 枚举 quarantine/ 下全部块指纹（与 List 同规则：忽略临时文件与非法
+// 文件名，按指纹字节序升序，无块返回空切片）。供修复队列与重扫描枚举隔离块用。
+func (s *Store) ListQuarantined() ([]Fingerprint, error) {
+	fps, err := listBlockDir(filepath.Join(s.rootDir, quarantineDirName))
+	if err != nil {
+		return nil, fmt.Errorf("cas: list quarantined blocks: %w", err)
+	}
+	return fps, nil
+}
+
+// RemoveQuarantined 删除 quarantine/ 下的块（修复成功后清理）；目标不存在返回 nil
+// （同 objectstore.Delete“不存在不算错误”语义）。仅真实 I/O 错误报错。
+func (s *Store) RemoveQuarantined(fp Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.Remove(s.quarantinePath(fp)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("cas: remove quarantined block %s: %w", fp, err)
+	}
+	return nil
+}
+
+// listBlockDir 枚举 dir 下全部块指纹（List 与 ListQuarantined 共用）：递归扫描，
+// 解析块文件名（<32 位 hex>.blk）为指纹；忽略 .tmp-* 临时文件与无法解析为 32 位 hex
+// 的文件名。返回按指纹字典序（字节序）升序排序的切片；无块返回空切片。
+func listBlockDir(dir string) ([]Fingerprint, error) {
 	fps := make([]Fingerprint, 0)
-	err := filepath.WalkDir(s.dir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -252,7 +324,7 @@ func (s *Store) List() ([]Fingerprint, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cas: list blocks: %w", err)
+		return nil, err
 	}
 	slices.SortFunc(fps, func(a, b Fingerprint) int { return bytes.Compare(a[:], b[:]) })
 	return fps, nil
