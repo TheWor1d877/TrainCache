@@ -1,0 +1,156 @@
+syntax = "proto3";
+package traincache.agent.v1;
+option go_package = "traincache/agent/api/agentpb";
+import "google/protobuf/timestamp.proto";
+
+// 南向:Controller/CLI → Agent(7.0 验收 1/4/5)
+service PreheatService {
+  rpc SubmitPreheat(SubmitPreheatRequest) returns (SubmitPreheatResponse);
+  rpc GetPreheatStatus(GetPreheatStatusRequest) returns (PreheatStatus);
+}
+
+// 节点状态查询(CLI 与就绪探针)
+service NodeService {
+  rpc GetNodeStatus(GetNodeStatusRequest) returns (NodeStatus);
+  rpc ListSnapshot(ListSnapshotRequest) returns (ListSnapshotResponse);
+}
+
+// 北向:Agent → Controller,块级任务上报。
+// proto 随本设计冻结,服务端实现推迟至 Controller 里程碑(decisions Q1)。
+service ReportService {
+  rpc ReportBlocks(stream BlockReport) returns (ReportAck);
+}
+
+message SubmitPreheatRequest {
+  string task_id = 1; // 幂等键
+  string node = 2; // 须等于本节点
+  string dataset = 3;
+  string snapshot_id = 4; // 空=当前 CURRENT
+  repeated string prefixes = 5; // 路径前缀,语义同 core Catalog.LoadPrefixes:空=空映射,含空串=全量
+  repeated ChunkRef chunks = 6; // 可选,块级精确指定
+  PreheatPriority priority = 7;
+}
+
+message ChunkRef {
+  string path = 1;
+  int64 chunk = 2; // core Entry 寻址
+}
+
+// 预取优先级(默认 P0)
+enum PreheatPriority {
+  P0 = 0; // 显式启动预取
+  P1 = 1; // 阶段切换重预取
+  P2 = 2; // 邻域预取
+  P3 = 3; // 后台补全
+}
+
+message SubmitPreheatResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string message = 3;
+}
+
+message GetPreheatStatusRequest {
+  string task_id = 1;
+}
+
+message PreheatStatus {
+  // 任务状态机(D7)
+  enum State {
+    QUEUED = 0;
+    RUNNING = 1;
+    DONE = 2;
+    ERROR = 3;
+  }
+  string task_id = 1;
+  string node = 2;
+  string dataset = 3;
+  string snapshot_id = 4;
+  repeated string paths = 5;
+  State state = 6;
+  int64 total_blocks = 7;
+  int64 completed_blocks = 8;
+  int64 failed_blocks = 9;
+  google.protobuf.Timestamp started_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+message GetNodeStatusRequest {
+  string node = 1;
+  NodeStatusItem item = 2; // 全量 / agent / catalog / space / tasks / rescan
+}
+
+// 节点状态查询项(零值 = 全量)
+enum NodeStatusItem {
+  UNSPECIFIED = 0; // 全量
+  AGENT = 1; // agent
+  CATALOG = 2; // catalog
+  SPACE = 3; // space
+  TASKS = 4; // tasks
+  RESCAN = 5; // rescan
+}
+
+message NodeStatus {
+  string node = 1;
+  bool agent_ok = 2;
+  string cache_root = 3;
+  int64 cached_bytes = 4;
+  int64 free_bytes = 5;
+  int64 running_tasks = 6;
+  RescanStatus rescan = 7;
+  repeated DatasetCatalog catalog = 8;
+}
+
+message RescanStatus {
+  // 重扫描阶段(§7.1;readiness = phase != SAMPLING,§8)
+  enum Phase {
+    SAMPLING = 0;
+    FULL_SCAN = 1;
+    DONE = 2;
+  }
+  Phase phase = 1;
+  int64 sampled = 2;
+  int64 verified = 3;
+  int64 quarantined = 4;
+  int64 repair_queue = 5;
+}
+
+message DatasetCatalog {
+  string dataset = 1;
+  string snapshot_id = 2;
+  int64 shards = 3;
+  int64 entries = 4;
+}
+
+message ListSnapshotRequest {
+  string dataset = 1;
+  string snapshot_id = 2; // 空=CURRENT
+  string prefix = 3;
+}
+
+message ListSnapshotResponse {
+  repeated EntryRef entries = 1;
+}
+
+message EntryRef {
+  string path = 1;
+  int64 chunk = 2;
+  int64 size = 3;
+}
+
+message BlockReport {
+  // 块级任务上报结果
+  enum Result {
+    OK = 0;
+    CORRUPT = 1;
+    REFETCHED = 2;
+  }
+  string node = 1;
+  string task_id = 2;
+  ChunkRef ref = 3;
+  string fp = 4;
+  int64 bytes = 5;
+  Result result = 6;
+}
+
+message ReportAck {}
