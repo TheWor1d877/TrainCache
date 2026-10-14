@@ -57,6 +57,28 @@ PROBE_B_COMPUTE_ITERS = 8          # 重复次数:单线程单次 1024² ≈25ms
 PROBE_B_PREFETCH = 2               # DataLoader prefetch_factor
 PROBE_B_SHARD_URL = "http://127.0.0.1:{port}/{bucket}/shard-{{00000..{last:05d}}}.tar"
 
+# ---- 探针C:多 epoch 全程 stall(epoch0 中段/epoch1-2 切换后回升 ≥ 冷态基准 30%)----
+PROBE_C_EPOCHS = 3                  # 训练循环连续 epoch 数
+PROBE_C_SEED = 20261013             # 基种子;epoch e 有效种子 = seed + e
+PROBE_C_WARMUP = 10                 # 仅 epoch 0 的前 N 步(计入步号、标记排除)
+PROBE_C_WORKERS = [0, 4, 8]         # 三档(冷态)+ hot 组用 w4
+PROBE_C_SWITCH_WINDOW = 20          # epoch 切换后的观察窗口步数 [0,20)
+PROBE_C_MID_BEGIN = 1 / 3           # epoch 中段窗口起点(占 epoch 长的比例)
+PROBE_C_MID_END = 2 / 3             # 中段窗口终点(400 步 → [133,266))
+PROBE_C_GREEN_RATIO = 0.30          # 绿灯:窗口指标 ≥ 0.30 × 冷态基准
+PROBE_C_TAIL_WAIT_S = 0.5           # w>0 档口径:wait_s ≥ 0.5 的步数占比
+
+# ---- D 轨:全程缓存服务实验(复用 probe_c/train_multi_epoch.py 装置)----
+TRACK_D_EPOCHS = 10                 # D 轨训练循环 epoch 数
+TRACK_D_SEED = 20261014             # D 轨基种子
+TRACK_D_WORKERS = [4]               # D 轨档位
+TRACK_D_CACHE_MB = 1024             # 缓存服务容量(mb)
+TRACK_D_WINDOW = 20                 # D 轨窗口步数
+TRACK_D_MIN_R = 0.50                # D 轨判据:窗口相关/命中下限
+TRACK_D_MIN_PAIRS = 6               # D 轨判据:最少配对数
+TRACK_D_CV_MAX = 0.30               # D 轨判据:组内变异系数上限
+TRACK_D_MEM_SAMPLE_S = 2            # D 轨:内存占用采样间隔(s)
+
 
 def _sh():
     """bash 侧取值入口:python3 config.py --sh <KEY>"""

@@ -1,5 +1,12 @@
 # 带 dataset 标签的训练 Pod:fluid.io/dataset.<name>.sched=required
 # 触发 Fluid webhook 注入(FUSE 容器)与调度亲和——现勘抓取证据的核心对象
+# 三 epoch 换序读(本 Pod 只备装置,观测实验另行执行):
+#   E0 = 升序 shard-00000.tar .. shard-00015.tar
+#   E1 = random.Random(17).sample(range(16), 16) 的置换
+#   E2 = random.Random(42).sample(range(16), 16) 的置换
+# 置换离线生成后字面量嵌入(生成命令见 survey/evidence/kind-repair-log.txt),
+# 运行环境是 busybox ash,无 python/awk 依赖;逐分片用 /proc/uptime 记 t0/t1。
+# 开头只做 ls 确认挂载,不读文件内容,避免污染 E0 首分片计时。
 apiVersion: v1
 kind: Pod
 metadata:
@@ -16,11 +23,23 @@ spec:
         - sh
         - -c
         - |
-          echo "=== 数据集内容(经 Fluid 挂载)==="
-          ls -la /data | head -20
-          du -sh /data
-          echo "=== 读一个 tar 的前 1MB 验证可读性 ==="
-          head -c 1048576 /data/shard-00000.tar | wc -c
+          echo "=== 数据集挂载确认(仅目录元数据,不读内容)==="
+          ls /data | head -3
+          E0="shard-00000.tar shard-00001.tar shard-00002.tar shard-00003.tar shard-00004.tar shard-00005.tar shard-00006.tar shard-00007.tar shard-00008.tar shard-00009.tar shard-00010.tar shard-00011.tar shard-00012.tar shard-00013.tar shard-00014.tar shard-00015.tar"
+          E1="shard-00013.tar shard-00012.tar shard-00004.tar shard-00005.tar shard-00015.tar shard-00002.tar shard-00008.tar shard-00011.tar shard-00001.tar shard-00000.tar shard-00007.tar shard-00003.tar shard-00009.tar shard-00014.tar shard-00010.tar shard-00006.tar"
+          E2="shard-00003.tar shard-00000.tar shard-00011.tar shard-00004.tar shard-00015.tar shard-00013.tar shard-00002.tar shard-00001.tar shard-00008.tar shard-00012.tar shard-00010.tar shard-00014.tar shard-00006.tar shard-00005.tar shard-00009.tar shard-00007.tar"
+          for e in 0 1 2; do
+            if [ "$e" = "0" ]; then ORDER="$E0"; fi
+            if [ "$e" = "1" ]; then ORDER="$E1"; fi
+            if [ "$e" = "2" ]; then ORDER="$E2"; fi
+            echo "=== EPOCH $e START t=$(cut -d' ' -f1 /proc/uptime) order=$ORDER ==="
+            for f in $ORDER; do
+              t0=$(cut -d' ' -f1 /proc/uptime)
+              dd if=/data/$f of=/dev/null bs=4M
+              t1=$(cut -d' ' -f1 /proc/uptime)
+              echo "shard $f $t0 $t1"
+            done
+          done
           echo "train-demo done"
           sleep 300
       volumeMounts:

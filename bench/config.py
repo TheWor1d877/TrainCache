@@ -42,6 +42,31 @@ TRACK_B_TAR_BYTES = 1 << 28        # 256MB(tar 目标大小,用于校验)
 # C 轨:多 Job 倾斜(热分片比例;数据复用 B 轨,只生成清单)
 TRACK_C_HOT_RATIO = 0.10
 
+# ---- D 轨:全程收益专用(单 Job 连续 10 epoch,缓存欠配 50%,宿主机本地源)----
+# 16×800 张 512px JPEG q85(~160KB/张)≈2GiB,落宿主机本地,经独立 nginx 容器
+# traincache-source-d(端口 9100)供训练进程读取,不上传 MinIO;每 epoch 换 seed。
+TRACK_D_N_TARS = 16
+TRACK_D_IMAGES_PER_TAR = 800
+TRACK_D_IMG_SIZE = 512
+TRACK_D_JPEG_QUALITY = 85
+TRACK_D_TARGET_IMG_KB = 160
+TRACK_D_SEED = 20261015
+TRACK_D_EPOCHS = 10
+TRACK_D_WORKERS = 4
+TRACK_D_BATCH = 32
+TRACK_D_STEPS_PER_EPOCH = 400      # 16*800/32
+TRACK_D_CACHE_MB = 1024            # 欠配:2GiB 数据集的 50%
+TRACK_D_WARMUP = 10                # 仅 epoch0 前 10 步,口径与探针 C 一致
+TRACK_D_SOURCE_CONTAINER = "traincache-source-d"
+TRACK_D_SOURCE_PORT = 9100
+TRACK_D_DIR = DATA_DIR / "track_d"                 # 宿主机数据目录(shard-*.tar)
+TRACK_D_SOURCE_MOUNT = TRACK_D_DIR                 # docker -v 挂载源(需绝对路径)
+TRACK_D_SOURCE_HTML = "track-d"                    # 容器内挂到 /usr/share/nginx/html/track-d
+TRACK_D_URL = "http://127.0.0.1:9100/track-d/shard-%06d.tar"   # %06d 取 0..15
+TRACK_D_RESULTS_DIR = RESULTS_DIR / "track_d"
+TRACK_D_TC_RATE = "100mbit"
+TRACK_D_TC_DELAY = "20ms"
+
 # ---- tc 限速档位(扫点实验的自变量)----
 TC_RATE = "100mbit"
 TC_BURST = "1600k"
