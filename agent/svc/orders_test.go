@@ -6,9 +6,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,7 +202,7 @@ func TestOrderDiscoveryFindsNewRing(t *testing.T) {
 
 	m := metrics.New(metrics.Config{})
 	got := make(chan delivery, 8)
-	d := NewOrderDiscovery(dir, m, func(pod string, o ordersource.ConsumeOrder) {
+	d := NewOrderDiscovery(dir, m, func(_ context.Context, pod string, o ordersource.ConsumeOrder) {
 		got <- delivery{pod: pod, o: o}
 	})
 	_, runErr := startDiscovery(t, d)
@@ -231,7 +233,7 @@ func TestOrderDiscoveryIgnoresNonRingFiles(t *testing.T) {
 
 	m := metrics.New(metrics.Config{})
 	got := make(chan delivery, 8)
-	d := NewOrderDiscovery(dir, m, func(pod string, o ordersource.ConsumeOrder) {
+	d := NewOrderDiscovery(dir, m, func(_ context.Context, pod string, o ordersource.ConsumeOrder) {
 		got <- delivery{pod: pod, o: o}
 	})
 	startDiscovery(t, d)
@@ -263,7 +265,7 @@ func TestOrderDiscoverySyncsFormatErrors(t *testing.T) {
 
 	m := metrics.New(metrics.Config{})
 	beforeMagic, beforeVersion := gatherFormatErrors(t, m)
-	d := NewOrderDiscovery(dir, m, func(string, ordersource.ConsumeOrder) {})
+	d := NewOrderDiscovery(dir, m, func(context.Context, string, ordersource.ConsumeOrder) {})
 	startDiscovery(t, d)
 
 	waitFor(t, "ordersource 格式错误 counter(magic)增长", func() bool {
@@ -289,7 +291,7 @@ func TestOrderDiscoveryStopsOnCtxCancel(t *testing.T) {
 
 	m := metrics.New(metrics.Config{})
 	got := make(chan delivery, 8)
-	d := NewOrderDiscovery(dir, m, func(pod string, o ordersource.ConsumeOrder) {
+	d := NewOrderDiscovery(dir, m, func(_ context.Context, pod string, o ordersource.ConsumeOrder) {
 		got <- delivery{pod: pod, o: o}
 	})
 	cancel, runErr := startDiscovery(t, d)
@@ -342,7 +344,7 @@ func TestOrderDiscoveryMkdirFailureNotFatal(t *testing.T) {
 	dir := filepath.Join(blocker, "orders") // MkdirAll/ReadDir 均失败
 
 	m := metrics.New(metrics.Config{})
-	d := NewOrderDiscovery(dir, m, func(string, ordersource.ConsumeOrder) {})
+	d := NewOrderDiscovery(dir, m, func(context.Context, string, ordersource.ConsumeOrder) {})
 	_, runErr := startDiscovery(t, d)
 
 	select {
@@ -351,4 +353,60 @@ func TestOrderDiscoveryMkdirFailureNotFatal(t *testing.T) {
 	case <-time.After(3 * scanInterval):
 		// 仍在运行:目录错误不致命(用例结束时由 cleanup 取消)。
 	}
+}
+
+// TestHandleOrderWiresPrefetch:HandleOrder = M2 判据日志行 + ForOrder 接线(§7.2/§7.3):
+// 订单到达 → 只加载涉及前缀的分片(LoadPrefixes)→ 首个订单启动预取调度并安装阶段
+// (Status.Stage = stage_id)→ 预取推进游标。
+func TestHandleOrderWiresPrefetch(t *testing.T) {
+	fx := newSvcFixture(t)
+	fx.commitDataset(t, testDataset, []svcBlockSpec{
+		{path: "a-000.tar", chunk: 0, content: "ho-a0", local: true},
+		{path: "a-001.tar", chunk: 0, content: "ho-a1", local: true},
+	})
+
+	// 捕获默认 slog 输出:msg 必须保持 M2 判据"收到 ConsumeOrder"(字段不变)。
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel) // 预取调度生命周期 = 发现循环 ctx;测试结束即取消(不泄漏)
+
+	o := ordersource.ConsumeOrder{
+		Dataset:        testDataset,
+		SnapshotID:     "snap-1",
+		StageID:        "epoch-1",
+		BatchSize:      32,
+		PrefetchChunks: 1,
+		Chunks:         []ordersource.ChunkRef{{Path: "a-000.tar"}, {Path: "a-001.tar"}},
+	}
+	HandleOrder(fx.pm)(ctx, "pod-abc", o)
+
+	if !strings.Contains(buf.String(), "收到 ConsumeOrder") {
+		t.Errorf("handler 应保留 M2 判据日志行,实际日志 = %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "pod-abc") {
+		t.Errorf("日志行应含 pod_uid,实际日志 = %q", buf.String())
+	}
+
+	b := fx.pm.bundleFor(testDataset)
+	b.mu.Lock()
+	started, stageSeen := b.started, b.stageSeen
+	b.mu.Unlock()
+	if !started || !stageSeen {
+		t.Fatalf("bundle started = %v / stageSeen = %v, want 均 true(首单启动并绑定)", started, stageSeen)
+	}
+	if got := b.prefetcher.Status().Stage; got != "epoch-1" {
+		t.Errorf("Stage = %q, want epoch-1(OnStageSwitch 已安装新阶段)", got)
+	}
+	// 前缀加载生效:相关分片已加载,Lookup 命中。
+	if _, ok, err := b.catalog.Lookup(ctx, "a-000.tar", 0); err != nil || !ok {
+		t.Fatalf("Lookup(a-000.tar) ok = %v / err = %v, want 命中(LoadPrefixes 已加载相关分片)", ok, err)
+	}
+	// 预取推进:两块均本地命中,游标推进到末块。
+	waitFor(t, "预取游标推进到末块", func() bool {
+		return b.prefetcher.Status().Cursor.Path == "a-001.tar"
+	})
 }

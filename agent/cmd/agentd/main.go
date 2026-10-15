@@ -34,7 +34,7 @@ func main() {
 	}
 
 	gs := grpc.NewServer()
-	svc.NewServer(*cfg).Register(gs)
+	svc.NewServer(*cfg, ag).Register(gs)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {

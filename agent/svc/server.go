@@ -13,22 +13,24 @@ import (
 	agentpb "traincache/agent/api/agentpb"
 )
 
-// Server 实现 design §5.1 的三个 gRPC 服务。M1 骨架:health 与 GetNodeStatus
-// 静态字段可用;预热任务(M3)、ListSnapshot(M3)、北向上报(Controller 里程碑)未实现。
+// Server 实现 design §5.1 的三个 gRPC 服务。M3:预热任务、GetPreheatStatus、ListSnapshot
+// 与 GetNodeStatus.running_tasks 接入业务组件(ag);北向上报(Controller 里程碑)未实现。
 type Server struct {
 	agentpb.UnimplementedPreheatServiceServer
 	agentpb.UnimplementedNodeServiceServer
 	agentpb.UnimplementedReportServiceServer
 
 	cfg    Config
+	ag     *Agent
 	health *health.Server
 }
 
 // NewServer 构造服务并把 health 置为 SERVING(design §8:liveness = gRPC health check)。
-func NewServer(cfg Config) *Server {
+// ag 提供业务组件(预热任务表/预取管理器);nil 时业务 RPC 返回 Unavailable(仅测试骨架用)。
+func NewServer(cfg Config, ag *Agent) *Server {
 	h := health.NewServer()
 	h.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-	return &Server{cfg: cfg, health: h}
+	return &Server{cfg: cfg, ag: ag, health: h}
 }
 
 // Register 注册三个业务服务、health 与 gRPC reflection 服务。
@@ -59,9 +61,9 @@ func (s *Server) GetNodeStatus(_ context.Context, req *agentpb.GetNodeStatusRequ
 			CacheRoot:    s.cfg.CacheRoot,
 			CachedBytes:  0, // 静态 0;M4 统计 cas 目录用量
 			FreeBytes:    0, // 静态 0;M4 统计磁盘剩余
-			RunningTasks: 0, // 静态 0;M3 统计运行中预热任务
+			RunningTasks: s.runningTasks(),
 			Rescan:       rescanDONE(),
-			Catalog:      nil, // 静态空;M3 填充数据集目录
+			Catalog:      nil, // 静态空;数据集目录属后续里程碑
 		}, nil
 	case agentpb.NodeStatusItem_AGENT:
 		return &agentpb.NodeStatus{Node: node, AgentOk: true}, nil
@@ -70,7 +72,7 @@ func (s *Server) GetNodeStatus(_ context.Context, req *agentpb.GetNodeStatusRequ
 	case agentpb.NodeStatusItem_SPACE:
 		return &agentpb.NodeStatus{Node: node, CacheRoot: s.cfg.CacheRoot}, nil
 	case agentpb.NodeStatusItem_TASKS:
-		return &agentpb.NodeStatus{Node: node}, nil // running_tasks 静态 0
+		return &agentpb.NodeStatus{Node: node, RunningTasks: s.runningTasks()}, nil
 	case agentpb.NodeStatusItem_RESCAN:
 		return &agentpb.NodeStatus{Node: node, Rescan: rescanDONE()}, nil
 	default:
@@ -79,25 +81,34 @@ func (s *Server) GetNodeStatus(_ context.Context, req *agentpb.GetNodeStatusRequ
 	}
 }
 
+// runningTasks 返回运行中预热任务数(任务表未装配时 0)。
+func (s *Server) runningTasks() int64 {
+	if s.ag == nil || s.ag.Preheat == nil {
+		return 0
+	}
+	return s.ag.Preheat.RunningCount()
+}
+
 // rescanDONE 返回 M1 静态重扫描状态。必须显式 DONE:枚举零值是 SAMPLING,
 // 而 design §8 readiness = rescan.phase != SAMPLING。
 func rescanDONE() *agentpb.RescanStatus {
 	return &agentpb.RescanStatus{Phase: agentpb.RescanStatus_DONE}
 }
 
-// SubmitPreheat 未实现(里程碑 M3:四优先级预取队列 + 预热任务全链路)。
-func (s *Server) SubmitPreheat(_ context.Context, _ *agentpb.SubmitPreheatRequest) (*agentpb.SubmitPreheatResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "SubmitPreheat 未实现(里程碑 M3)")
+// SubmitPreheat 下发预热任务(§5.1/§7.2;校验顺序与状态机在 PreheatTasks)。
+func (s *Server) SubmitPreheat(ctx context.Context, req *agentpb.SubmitPreheatRequest) (*agentpb.SubmitPreheatResponse, error) {
+	if s.ag == nil || s.ag.Preheat == nil {
+		return nil, status.Error(codes.Unavailable, "预热服务未装配")
+	}
+	return s.ag.Preheat.Submit(ctx, req)
 }
 
-// GetPreheatStatus 未实现(里程碑 M3)。
-func (s *Server) GetPreheatStatus(_ context.Context, _ *agentpb.GetPreheatStatusRequest) (*agentpb.PreheatStatus, error) {
-	return nil, status.Error(codes.Unimplemented, "GetPreheatStatus 未实现(里程碑 M3)")
-}
-
-// ListSnapshot 未实现(里程碑 M3:复用 core Catalog)。
-func (s *Server) ListSnapshot(_ context.Context, _ *agentpb.ListSnapshotRequest) (*agentpb.ListSnapshotResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "ListSnapshot 未实现(里程碑 M3)")
+// GetPreheatStatus 查询预热任务进度(§5.1;不存在 → NotFound)。
+func (s *Server) GetPreheatStatus(ctx context.Context, req *agentpb.GetPreheatStatusRequest) (*agentpb.PreheatStatus, error) {
+	if s.ag == nil || s.ag.Preheat == nil {
+		return nil, status.Error(codes.Unavailable, "预热服务未装配")
+	}
+	return s.ag.Preheat.Status(ctx, req.GetTaskId())
 }
 
 // ReportBlocks 未实现(decisions Q1:北向流服务端实现推迟至 Controller 里程碑)。
