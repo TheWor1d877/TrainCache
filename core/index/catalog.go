@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -142,6 +143,50 @@ func (c *Catalog) LoadPrefixes(ctx context.Context, prefixes []string) error {
 	// snapshotState 注释。
 	c.state.Store(&snapshotState{snapID: m.SnapshotID, entries: entries})
 	return nil
+}
+
+// List 按前缀枚举条目（D29）：读 CURRENT → 下载 manifest → 复用 D22 分片相关性判定只
+// 下载、校验、加载相关分片（无关分片零下载）→ 收集 path 以 prefix 开头的条目 → 按
+// (path, chunk) 字典序排序返回；无匹配返回空切片。prefix 为空串 = 全量。无 CURRENT
+// 返回 ErrNoCurrent。只读方法：不触碰内存映射（Lookup 所见的既有映射不受影响，"失败
+// 不动旧映射"恒成立），可与 Refresh/LoadPrefixes/Start 并发调用。
+func (c *Catalog) List(ctx context.Context, prefix string) ([]Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	_, snapID, manifestFP8, err := c.readCurrent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m, err := c.loadManifest(ctx, snapID, manifestFP8)
+	if err != nil {
+		return nil, err
+	}
+
+	// 分片是加载单元、片内路径范围可跨前缀（D22）：片内不匹配 prefix 的条目在此剔除。
+	entries := make([]Entry, 0)
+	for _, ref := range m.Shards {
+		if !shardMatchesPrefix(ref, prefix) {
+			continue
+		}
+		es, err := c.loadShardEntries(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range es {
+			if strings.HasPrefix(e.Path, prefix) {
+				entries = append(entries, e)
+			}
+		}
+	}
+	// 输出恒按 (path, chunk) 字典序排序（与分片构建同一定序），不依赖 manifest 的分片顺序。
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Path != entries[j].Path {
+			return entries[i].Path < entries[j].Path
+		}
+		return entries[i].Chunk < entries[j].Chunk
+	})
+	return entries, nil
 }
 
 // readCurrent 读取并解析 CURRENT（不存在 → ErrNoCurrent），返回原始内容、快照 ID 与
