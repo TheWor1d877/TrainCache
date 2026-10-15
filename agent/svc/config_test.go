@@ -23,18 +23,34 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_OBJSTORE_SECRET_KEY",
 		"TRAINCACHE_OBJSTORE_BUCKET",
 		"TRAINCACHE_OBJSTORE_SECURE",
+		"TRAINCACHE_HEAT_DECAY_AGE",
+		"TRAINCACHE_HEAT_DUMP_INTERVAL",
+		"TRAINCACHE_HEAT_DECAY_INTERVAL",
+		"TRAINCACHE_HEAT_DECAY_FACTOR",
+		"TRAINCACHE_HEAT_OPEN_BETA",
+		"TRAINCACHE_HEAT_TOUCH_HALF_LIFE",
+		"TRAINCACHE_HEAT_CALIBRATE_WINDOW",
+		"TRAINCACHE_HEAT_CALIBRATE_THRESHOLD",
+		"TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT",
+		"TRAINCACHE_HEAT_DISK_DELTA_PERCENT",
+		"TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT",
 	} {
 		t.Setenv(k, "")
 	}
 }
 
-// wantDefaultHeat 是 D14 默认六值:N=24h、M=30min、T=24h(因子 0.5)、k=80、Δ=5、M=90。
+// wantDefaultHeat 是 D14/D30 默认十一值:N=24h、M=30min、T=24h(因子 0.5)、β=0.15、
+// T_R=6h、校准窗口 100/阈值 0.8、k=80、Δ=5、M=90。
 func wantDefaultHeat() HeatConfig {
 	return HeatConfig{
 		DecayAge:            24 * time.Hour,
 		DumpInterval:        30 * time.Minute,
 		DecayInterval:       24 * time.Hour,
 		DecayFactor:         0.5,
+		HeatOpenBeta:        0.15,
+		HeatTouchHalfLife:   6 * time.Hour,
+		CalibrateWindow:     100,
+		CalibrateThreshold:  0.8,
 		DiskTriggerPercent:  80,
 		DiskDeltaPercent:    5,
 		DiskCriticalPercent: 90,
@@ -101,6 +117,17 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_OBJSTORE_SECRET_KEY", "sk-test")
 	t.Setenv("TRAINCACHE_OBJSTORE_BUCKET", "tc-blocks")
 	t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
+	t.Setenv("TRAINCACHE_HEAT_DECAY_AGE", "48h")
+	t.Setenv("TRAINCACHE_HEAT_DUMP_INTERVAL", "1m")
+	t.Setenv("TRAINCACHE_HEAT_DECAY_INTERVAL", "12h")
+	t.Setenv("TRAINCACHE_HEAT_DECAY_FACTOR", "0.25")
+	t.Setenv("TRAINCACHE_HEAT_OPEN_BETA", "0.3")
+	t.Setenv("TRAINCACHE_HEAT_TOUCH_HALF_LIFE", "90m")
+	t.Setenv("TRAINCACHE_HEAT_CALIBRATE_WINDOW", "50")
+	t.Setenv("TRAINCACHE_HEAT_CALIBRATE_THRESHOLD", "0.65")
+	t.Setenv("TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT", "70")
+	t.Setenv("TRAINCACHE_HEAT_DISK_DELTA_PERCENT", "10")
+	t.Setenv("TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT", "95")
 
 	cfg, err := Load()
 	if err != nil {
@@ -137,9 +164,21 @@ func TestLoadEnvOverride(t *testing.T) {
 	if !cfg.ObjstoreSecure {
 		t.Error("ObjstoreSecure = false, want true(TRAINCACHE_OBJSTORE_SECURE=1)")
 	}
-	// TRAINCACHE_HEAT_* 解析延后 M5/M6:Heat 恒为 D14 默认值。
-	if want := wantDefaultHeat(); cfg.Heat != want {
-		t.Errorf("Heat = %+v, want 默认值 %+v(env 解析延后 M5/M6)", cfg.Heat, want)
+	wantHeat := HeatConfig{
+		DecayAge:            48 * time.Hour,
+		DumpInterval:        time.Minute,
+		DecayInterval:       12 * time.Hour,
+		DecayFactor:         0.25,
+		HeatOpenBeta:        0.3,
+		HeatTouchHalfLife:   90 * time.Minute,
+		CalibrateWindow:     50,
+		CalibrateThreshold:  0.65,
+		DiskTriggerPercent:  70,
+		DiskDeltaPercent:    10,
+		DiskCriticalPercent: 95,
+	}
+	if cfg.Heat != wantHeat {
+		t.Errorf("Heat = %+v, want %+v(TRAINCACHE_HEAT_* 覆盖,D30)", cfg.Heat, wantHeat)
 	}
 }
 
@@ -235,5 +274,66 @@ func TestLoadVerifyInvalid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "TRAINCACHE_VERIFY") {
 		t.Errorf("错误信息应指明 TRAINCACHE_VERIFY,实际: %v", err)
+	}
+}
+
+// TestLoadHeatEnvInvalid:TRAINCACHE_HEAT_* 非法取值启动即报错(D30:duration 走
+// time.ParseDuration,percent 0..100;比值类按 (0,1]、窗口 >0 校验),错误信息指明 env 名。
+func TestLoadHeatEnvInvalid(t *testing.T) {
+	cases := []struct{ key, val string }{
+		{"TRAINCACHE_HEAT_DECAY_AGE", "24"},       // 缺单位
+		{"TRAINCACHE_HEAT_DECAY_AGE", "0s"},       // ≤0
+		{"TRAINCACHE_HEAT_DUMP_INTERVAL", "-1m"},  // 负
+		{"TRAINCACHE_HEAT_DECAY_INTERVAL", "abc"}, // 非 duration
+		{"TRAINCACHE_HEAT_DECAY_FACTOR", "0"},     // 比值下界外
+		{"TRAINCACHE_HEAT_DECAY_FACTOR", "1.5"},   // 比值上界外
+		{"TRAINCACHE_HEAT_OPEN_BETA", "-0.1"},
+		{"TRAINCACHE_HEAT_OPEN_BETA", "NaN"},
+		{"TRAINCACHE_HEAT_TOUCH_HALF_LIFE", "6"}, // 缺单位
+		{"TRAINCACHE_HEAT_CALIBRATE_WINDOW", "0"},
+		{"TRAINCACHE_HEAT_CALIBRATE_WINDOW", "1.5"},
+		{"TRAINCACHE_HEAT_CALIBRATE_THRESHOLD", "1.01"},
+		{"TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT", "101"},
+		{"TRAINCACHE_HEAT_DISK_DELTA_PERCENT", "-1"},
+		{"TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT", "junk"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			t.Setenv(tc.key, tc.val)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("%s=%q 时 Load 应报错", tc.key, tc.val)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("错误信息应指明 %s,实际: %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestLoadHeatEnvBoundary:TRAINCACHE_HEAT_* 边界合法值受理(percent 0/100、比值 1、窗口 1)。
+func TestLoadHeatEnvBoundary(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("NODE_NAME", "worker-01")
+	t.Setenv("TRAINCACHE_HEAT_DECAY_FACTOR", "1")
+	t.Setenv("TRAINCACHE_HEAT_OPEN_BETA", "1")
+	t.Setenv("TRAINCACHE_HEAT_CALIBRATE_THRESHOLD", "1")
+	t.Setenv("TRAINCACHE_HEAT_CALIBRATE_WINDOW", "1")
+	t.Setenv("TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT", "0")
+	t.Setenv("TRAINCACHE_HEAT_DISK_DELTA_PERCENT", "100")
+	t.Setenv("TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT", "100")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("边界值 Load 应成功: %v", err)
+	}
+	if cfg.Heat.DecayFactor != 1 || cfg.Heat.HeatOpenBeta != 1 ||
+		cfg.Heat.CalibrateThreshold != 1 || cfg.Heat.CalibrateWindow != 1 {
+		t.Errorf("比值/窗口边界值解析错误: %+v", cfg.Heat)
+	}
+	if cfg.Heat.DiskTriggerPercent != 0 || cfg.Heat.DiskDeltaPercent != 100 || cfg.Heat.DiskCriticalPercent != 100 {
+		t.Errorf("百分比边界值解析错误: %+v", cfg.Heat)
 	}
 }

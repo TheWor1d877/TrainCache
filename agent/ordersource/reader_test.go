@@ -675,3 +675,145 @@ func TestCurrentOrderReturnsCopy(t *testing.T) {
 	}
 	assertOrderEqual(t, again, want)
 }
+
+// ---------------- LastAdvance(M5 降级判定,decisions D29) ----------------
+
+// TestReaderLastAdvanceMissingFile 文件不存在 → LastAdvance 零值(从未推进);多轮 poll 后保持。
+func TestReaderLastAdvanceMissingFile(t *testing.T) {
+	fastPoll(t)
+	r := newTestReader(t, filepath.Join(t.TempDir(), "absent.ring"))
+	if !r.Missing() {
+		t.Fatal("文件不存在,Missing 应为 true")
+	}
+	time.Sleep(quietWindow) // 观察窗:跨多个 poll 周期
+	if got := r.LastAdvance(); !got.IsZero() {
+		t.Fatalf("缺失文件 LastAdvance = %v, want 零值", got)
+	}
+}
+
+// TestReaderLastAdvanceInitialSnapshot 构造时的首次有效快照即视为推进(D29);
+// 头有效但 write_seq=0 的空 ring 同样计(写端可读即可观测)。
+func TestReaderLastAdvanceInitialSnapshot(t *testing.T) {
+	fastPoll(t)
+	before := time.Now()
+	path := newRingPath(t)
+	newRingWriter(t, path, 1, 128, 4)
+	r := newTestReader(t, path)
+
+	la := r.LastAdvance()
+	if la.IsZero() {
+		t.Fatal("首次有效快照应视为推进(D29)")
+	}
+	if !la.After(before) && !la.Equal(before) {
+		t.Errorf("LastAdvance = %v 早于构造前 %v", la, before)
+	}
+}
+
+// TestReaderLastAdvanceOnWriteSeqAdvance 同一代际 write_seq 前进 → LastAdvance 前移。
+func TestReaderLastAdvanceOnWriteSeqAdvance(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 3))
+	r := newTestReader(t, path)
+
+	t1 := r.LastAdvance()
+	if t1.IsZero() {
+		t.Fatal("初始快照应视为推进")
+	}
+	w.WriteOrder(testOrder("epoch-2", 5))
+	mustEventually(t, "write_seq 推进后 LastAdvance 前移", func() bool {
+		return r.LastAdvance().After(t1)
+	})
+}
+
+// TestReaderLastAdvanceStableWithoutAdvance 无新写入时 LastAdvance 保持(不随 poll 漂移)。
+func TestReaderLastAdvanceStableWithoutAdvance(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 3))
+	r := newTestReader(t, path)
+	mustEventually(t, "初始推进可见", func() bool { return !r.LastAdvance().IsZero() })
+
+	t1 := r.LastAdvance()
+	time.Sleep(quietWindow) // 多个 poll 周期内不应变化
+	if t2 := r.LastAdvance(); !t2.Equal(t1) {
+		t.Errorf("无写入时 LastAdvance 漂移:%v → %v", t1, t2)
+	}
+}
+
+// TestReaderLastAdvanceOnGenerationChange 代际变化(write_seq 不变)视为推进(D29,sidecar 重启)。
+func TestReaderLastAdvanceOnGenerationChange(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 3))
+	r := newTestReader(t, path)
+
+	t1 := r.LastAdvance()
+	if t1.IsZero() {
+		t.Fatal("初始快照应视为推进")
+	}
+	w.SetGeneration(2) // 仅代际推进,write_seq 不变
+	mustEventually(t, "代际变化后 LastAdvance 前移", func() bool {
+		return r.LastAdvance().After(t1)
+	})
+}
+
+// TestReaderLastAdvanceBadHeaderStaysZero 头非法(magic 破坏)→ 不视为推进,保持零值。
+func TestReaderLastAdvanceBadHeaderStaysZero(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	bad := buildRingHeader(1, 0, 128, 4)
+	bad[0] = 'X'
+	writeRingFile(t, path, bad[:])
+	r := newTestReader(t, path)
+
+	if r.Missing() {
+		t.Fatal("文件存在,Missing 应为 false")
+	}
+	time.Sleep(quietWindow)
+	if got := r.LastAdvance(); !got.IsZero() {
+		t.Fatalf("坏头 LastAdvance = %v, want 零值(D29)", got)
+	}
+}
+
+// TestReaderLastAdvanceKeepsValueOnFileDisappear 文件消失(删除)→ 不回退最后观测值
+// (降级判定以 Missing 为准,不依赖 LastAdvance 被清零)。
+func TestReaderLastAdvanceKeepsValueOnFileDisappear(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 3))
+	r := newTestReader(t, path)
+
+	t1 := r.LastAdvance()
+	if t1.IsZero() {
+		t.Fatal("初始快照应视为推进")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("删除 ring 文件: %v", err)
+	}
+	mustEventually(t, "Missing 标记", r.Missing)
+	if t2 := r.LastAdvance(); !t2.Equal(t1) {
+		t.Errorf("文件消失后 LastAdvance 变化:%v → %v", t1, t2)
+	}
+}
+
+// TestReaderLastAdvancePreservedAfterClose Close 后保持最后观测值不变(D29)。
+func TestReaderLastAdvancePreservedAfterClose(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 3))
+	r := NewReader(path, filepath.Dir(path)) // 手动 Close(不用 newTestReader 的清理)
+	t1 := r.LastAdvance()
+	if t1.IsZero() {
+		t.Fatal("初始快照应视为推进")
+	}
+	r.Close()
+	if t2 := r.LastAdvance(); !t2.Equal(t1) {
+		t.Errorf("Close 后 LastAdvance 变化:%v → %v", t1, t2)
+	}
+}

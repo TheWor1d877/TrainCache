@@ -1,0 +1,499 @@
+// families.go 落 M6 指标底座:design §5.8 七线指标全量注册(23 个 family 中新增 20 个;
+// prefetch_queue_depth / prefetch_cursor / stage_switch_stall_seconds 三个由 M3 注册,复用不动)
+// 与主对话冻结的专用打点 API(M4 rescan / M5 collector / M6 淘汰循环按这里冻结的方法名打点)。
+//
+// 标签纪律(§5.8 基数纪律;decisions D17):
+//   - dataset 一律先经 DatasetLabel 归并(白名单外 "other");
+//   - result / endpoint 取值编译期固定(见下方词汇表),集合外取值忽略该次打点,不新增基数
+//     (与 SetPrefetchQueueDepth 越界忽略同风格);
+//   - node 取 Config.Node(进程内单值,基数 1);
+//   - bucket 固定为 {.01,.05,.1,.5,1,5,10,30}s(design §5.8 冻结);
+//   - 构造时预置子指标(dataset="other" × 各固定 result 取值、四 endpoint × success|error、
+//     node 标签预置、agent_up=1):family 自启动即在 /metrics 可见,与 formatErrors/queueDepth
+//     既有预置风格一致。
+package metrics
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// 七线新增 20 个 family 名,逐字冻结于 design §5.8(测试侧独立字面量,防改名后测试跟着漂移)。
+const (
+	// ① 命中率线。
+	cacheHitsName     = "traincache_cache_hits_total"
+	cacheMissesName   = "traincache_cache_misses_total"
+	cacheHitRatioName = "traincache_cache_hit_ratio"
+	// ② 回源线。
+	fetchBytesName         = "traincache_fetch_bytes_total"
+	fetchRequestsName      = "traincache_fetch_requests_total"
+	fetchInflightBytesName = "traincache_fetch_inflight_bytes"
+	// ③ 索引线。
+	indexRefreshName      = "traincache_index_refresh_total"
+	indexRefreshDurName   = "traincache_index_refresh_duration_seconds"
+	indexShardsLoadedName = "traincache_index_shards_loaded"
+	// ④ GC 线。
+	gcSweepsName         = "traincache_gc_sweeps_total"
+	gcBlocksRemovedName  = "traincache_gc_blocks_removed_total"
+	gcObjectsRemovedName = "traincache_gc_objects_removed_total"
+	// ⑤ 磁盘淘汰线。
+	evictBlocksName           = "traincache_evict_blocks_total"
+	evictProtectedSkippedName = "traincache_evict_protected_skipped_total"
+	// ⑥ 延迟线(stage_switch_stall_seconds 已由 M3 注册)。
+	requestDurationName = "traincache_request_duration_seconds"
+	// ⑦ 节点状态线(prefetch_queue_depth / prefetch_cursor 已由 M3 注册)。
+	agentUpName           = "traincache_agent_up"
+	agentDegradedName     = "traincache_agent_degraded"
+	rescanProgressName    = "traincache_rescan_progress"
+	quarantinedBlocksName = "traincache_quarantined_blocks"
+	diskUsageRatioName    = "traincache_disk_usage_ratio"
+)
+
+// otherDatasetLabel 是 DatasetLabel 的白名单外归并值(§5.8;构造预置与打点归并共用)。
+const otherDatasetLabel = "other"
+
+// result 标签词汇表(编译期固定;DECISIONS 回传):
+//   - ResultSuccess / ResultError:全局二元结果,适用于回源、索引刷新、GC 清扫与 RPC 延迟
+//     (hits / fetch_bytes / index_refresh_duration / gc_*_removed 的签名无 result 参数,
+//     固定写入 ResultSuccess);
+//   - ResultRefetched:仅 cache_misses_total(§7.1:坏块修复重下成功计 result="refetched");
+//   - ResultNormal / ResultDanger:仅磁盘淘汰线,取值是触发线而非结果(§5.8 "result(normal/danger)";
+//     D24:normal=利用率超 k 触发,k danger=危险线超 M 激进淘汰)。
+const (
+	ResultSuccess   = "success"
+	ResultError     = "error"
+	ResultRefetched = "refetched"
+	ResultNormal    = "normal"
+	ResultDanger    = "danger"
+)
+
+// endpoint 标签词汇表(RPC 方法名;DECISIONS 回传):取值字面即 agent.proto 服务定义中的
+// 方法名,不带服务前缀;ReportService(北向)不参与本线。
+const (
+	EndpointSubmitPreheat    = "SubmitPreheat"
+	EndpointGetPreheatStatus = "GetPreheatStatus"
+	EndpointListSnapshot     = "ListSnapshot"
+	EndpointGetNodeStatus    = "GetNodeStatus"
+)
+
+// endpointLabels 是全部合法 endpoint 值(构造时逐一预置)。
+var endpointLabels = [...]string{
+	EndpointSubmitPreheat,
+	EndpointGetPreheatStatus,
+	EndpointListSnapshot,
+	EndpointGetNodeStatus,
+}
+
+// fixedDurationBuckets 是固定 bucket 集 {.01,.05,.1,.5,1,5,10,30}s(design §5.8 冻结,延迟线);
+// index_refresh_duration_seconds 的 bucket 文档未冻结,复用同一固定集(该 family 量级与 RPC
+// 延迟同档,30s 上界覆盖大 catalog 刷新;DECISIONS 回传)。
+var fixedDurationBuckets = []float64{0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30}
+
+// hitMiss 是 cache_hit_ratio 的内部计数(按归一化 dataset 分桶;桶数上界 = 白名单大小 + 1)。
+type hitMiss struct {
+	hits   uint64
+	misses uint64
+}
+
+// initSevenLine 构造、注册并预置七线新增的 20 个 family(New 内调用一次;MustRegister 保证
+// 每 family 只注册一次)。
+func (r *Registry) initSevenLine() {
+	r.cacheHits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: cacheHitsName,
+		Help: "缓存命中次数(design §5.8 命中率线;result 固定 success)",
+	}, []string{"dataset", "result"})
+	r.cacheMisses = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: cacheMissesName,
+		Help: "缓存未命中次数(result=success|refetched|error;§7.1 修复重下成功计 refetched)",
+	}, []string{"dataset", "result"})
+	r.cacheHitRatio = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: cacheHitRatioName,
+		Help: "缓存命中率 = 命中/(命中+未命中)(Registry 内部计数维护,每次打点即时更新)",
+	}, []string{"dataset"})
+	r.fetchBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: fetchBytesName,
+		Help: "回源成功交付字节数(§5.8 回源线;result 固定 success,失败请求经 fetch_requests 体现)",
+	}, []string{"dataset", "result"})
+	r.fetchRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: fetchRequestsName,
+		Help: "回源请求次数(result=success|error)",
+	}, []string{"dataset", "result"})
+	r.fetchInflightBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: fetchInflightBytesName,
+		Help: "回源在途字节数",
+	}, []string{"dataset"})
+	r.indexRefresh = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: indexRefreshName,
+		Help: "索引刷新次数(result=success|error)",
+	}, []string{"dataset", "result"})
+	r.indexRefreshDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    indexRefreshDurName,
+		Help:    "索引刷新耗时秒数(result 固定 success;固定 bucket {.01,.05,.1,.5,1,5,10,30}s)",
+		Buckets: fixedDurationBuckets,
+	}, []string{"dataset", "result"})
+	r.indexShardsLoaded = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: indexShardsLoadedName,
+		Help: "已加载索引分片数",
+	}, []string{"dataset"})
+	r.gcSweeps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: gcSweepsName,
+		Help: "GC 清扫次数(result=success|error)",
+	}, []string{"dataset", "result"})
+	r.gcBlocksRemoved = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: gcBlocksRemovedName,
+		Help: "GC 回收块数(result 固定 success)",
+	}, []string{"dataset", "result"})
+	r.gcObjectsRemoved = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: gcObjectsRemovedName,
+		Help: "GC 回收对象数(result 固定 success)",
+	}, []string{"dataset", "result"})
+	r.evictBlocks = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: evictBlocksName,
+		Help: "磁盘淘汰删除的本地副本块数(result=normal|danger,取触发线;decisions D24)",
+	}, []string{"dataset", "result"})
+	r.evictProtectedSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: evictProtectedSkippedName,
+		Help: "受保护(cursor+lookahead)跳过淘汰的块数(result=normal|danger,取触发线;D24)",
+	}, []string{"dataset", "result"})
+	r.requestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    requestDurationName,
+		Help:    "RPC 请求耗时秒数(endpoint=RPC 方法名;result=success|error;固定 bucket {.01,.05,.1,.5,1,5,10,30}s)",
+		Buckets: fixedDurationBuckets,
+	}, []string{"endpoint", "result"})
+	r.agentUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: agentUpName,
+		Help: "Agent 进程存活(1=up;node=节点名)",
+	}, []string{"node"})
+	r.agentDegraded = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: agentDegradedName,
+		Help: "Agent 降级(1=sidecar 退出降级;node=节点名)",
+	}, []string{"node"})
+	r.rescanProgress = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: rescanProgressName,
+		Help: "重扫描进度 0..1(design §7.1)",
+	})
+	r.quarantined = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: quarantinedBlocksName,
+		Help: "quarantine 目录坏块数(§5.7 修复成功递减)",
+	}, []string{"dataset"})
+	r.diskUsageRatio = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: diskUsageRatioName,
+		Help: "缓存盘利用率 0..1(decisions D24 淘汰触发线的输入)",
+	}, []string{"dataset"})
+
+	r.reg.MustRegister(
+		r.cacheHits, r.cacheMisses, r.cacheHitRatio,
+		r.fetchBytes, r.fetchRequests, r.fetchInflightBytes,
+		r.indexRefresh, r.indexRefreshDuration, r.indexShardsLoaded,
+		r.gcSweeps, r.gcBlocksRemoved, r.gcObjectsRemoved,
+		r.evictBlocks, r.evictProtectedSkipped,
+		r.requestDuration,
+		r.agentUp, r.agentDegraded, r.rescanProgress, r.quarantined, r.diskUsageRatio,
+	)
+
+	// 预置 dataset="other" × 固定 result 取值:family 自启动即出现,取值词汇表可见。
+	preset := func(vec *prometheus.CounterVec, results ...string) {
+		for _, res := range results {
+			vec.WithLabelValues(otherDatasetLabel, res)
+		}
+	}
+	preset(r.cacheHits, ResultSuccess)
+	preset(r.cacheMisses, ResultSuccess, ResultError, ResultRefetched)
+	preset(r.fetchBytes, ResultSuccess)
+	preset(r.fetchRequests, ResultSuccess, ResultError)
+	preset(r.indexRefresh, ResultSuccess, ResultError)
+	preset(r.gcSweeps, ResultSuccess, ResultError)
+	preset(r.gcBlocksRemoved, ResultSuccess)
+	preset(r.gcObjectsRemoved, ResultSuccess)
+	preset(r.evictBlocks, ResultNormal, ResultDanger)
+	preset(r.evictProtectedSkipped, ResultNormal, ResultDanger)
+	r.indexRefreshDuration.WithLabelValues(otherDatasetLabel, ResultSuccess)
+	// dataset 单标签 gauge 预置 "other"。
+	r.cacheHitRatio.WithLabelValues(otherDatasetLabel)
+	r.fetchInflightBytes.WithLabelValues(otherDatasetLabel)
+	r.indexShardsLoaded.WithLabelValues(otherDatasetLabel)
+	r.quarantined.WithLabelValues(otherDatasetLabel)
+	r.diskUsageRatio.WithLabelValues(otherDatasetLabel)
+	// 四 endpoint × {success,error} 全量预置。
+	for _, ep := range endpointLabels {
+		r.requestDuration.WithLabelValues(ep, ResultSuccess)
+		r.requestDuration.WithLabelValues(ep, ResultError)
+	}
+	// 节点状态线:agent_up 构造时预置 1(主对话冻结),agent_degraded 预置 0。
+	r.agentUp.WithLabelValues(r.node).Set(1)
+	r.agentDegraded.WithLabelValues(r.node).Set(0)
+}
+
+// —— ① 命中率线 ——
+
+// ObserveCacheHit 记一次缓存命中:traincache_cache_hits_total{dataset,result="success"}
+// (签名无 result 参数,固定 success),并即时更新命中率 gauge。
+func (r *Registry) ObserveCacheHit(dataset string) {
+	d := r.DatasetLabel(dataset)
+	r.cacheHits.WithLabelValues(d, ResultSuccess).Inc()
+	r.observeCacheHitRatio(d, true)
+}
+
+// ObserveCacheMiss 记一次缓存未命中:traincache_cache_misses_total{dataset,result},
+// result∈{success,refetched,error}(§7.1:坏块修复重下成功计 refetched);集合外忽略。
+// 未命中不论结果(含 error)一律计入命中率分母,并即时更新 gauge。
+func (r *Registry) ObserveCacheMiss(dataset, result string) {
+	if !validResult(result, ResultSuccess, ResultError, ResultRefetched) {
+		return
+	}
+	d := r.DatasetLabel(dataset)
+	r.cacheMisses.WithLabelValues(d, result).Inc()
+	r.observeCacheHitRatio(d, false)
+}
+
+// observeCacheHitRatio 以 命中/(命中+未命中) 维护 traincache_cache_hit_ratio(dataset)
+// (主对话冻结:ratio 由 Registry 内部计数维护;持锁内 Set,保证 gauge 与计数一致)。
+func (r *Registry) observeCacheHitRatio(dataset string, hit bool) {
+	r.muCacheRatio.Lock()
+	defer r.muCacheRatio.Unlock()
+	st := r.cacheRatio[dataset]
+	if st == nil {
+		st = &hitMiss{}
+		r.cacheRatio[dataset] = st
+	}
+	if hit {
+		st.hits++
+	} else {
+		st.misses++
+	}
+	r.cacheHitRatio.WithLabelValues(dataset).Set(float64(st.hits) / float64(st.hits+st.misses))
+}
+
+// —— ② 回源线 ——
+
+// AddFetchBytes 累加成功回源交付的字节量:traincache_fetch_bytes_total{dataset,
+// result="success"}(签名无 result;失败请求经 IncFetchRequests(…, ResultError) 体现)。
+// n<=0 忽略(counter 只增,避免负增量 panic)。
+func (r *Registry) AddFetchBytes(dataset string, n int64) {
+	if n <= 0 {
+		return
+	}
+	r.fetchBytes.WithLabelValues(r.DatasetLabel(dataset), ResultSuccess).Add(float64(n))
+}
+
+// IncFetchRequests 记一次回源请求:traincache_fetch_requests_total{dataset,result},
+// result∈{success,error};集合外忽略。
+func (r *Registry) IncFetchRequests(dataset, result string) {
+	if !validSuccessError(result) {
+		return
+	}
+	r.fetchRequests.WithLabelValues(r.DatasetLabel(dataset), result).Inc()
+}
+
+// SetFetchInflightBytes 设置回源在途字节数(traincache_fetch_inflight_bytes{dataset})。
+func (r *Registry) SetFetchInflightBytes(dataset string, n int64) {
+	r.fetchInflightBytes.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
+}
+
+// —— ③ 索引线 ——
+
+// IncIndexRefresh 记一次索引刷新:traincache_index_refresh_total{dataset,result},
+// result∈{success,error};集合外忽略。
+func (r *Registry) IncIndexRefresh(dataset, result string) {
+	if !validSuccessError(result) {
+		return
+	}
+	r.indexRefresh.WithLabelValues(r.DatasetLabel(dataset), result).Inc()
+}
+
+// ObserveIndexRefreshDuration 记录一次索引刷新耗时:traincache_index_refresh_duration_seconds
+// {dataset,result="success"}(签名无 result 固定 success),固定 bucket 集。
+func (r *Registry) ObserveIndexRefreshDuration(dataset string, seconds float64) {
+	r.indexRefreshDuration.WithLabelValues(r.DatasetLabel(dataset), ResultSuccess).Observe(seconds)
+}
+
+// SetIndexShardsLoaded 设置已加载索引分片数(traincache_index_shards_loaded{dataset})。
+func (r *Registry) SetIndexShardsLoaded(dataset string, n int64) {
+	r.indexShardsLoaded.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
+}
+
+// —— ④ GC 线 ——
+
+// IncGCSweeps 记一次 GC 清扫:traincache_gc_sweeps_total{dataset,result},
+// result∈{success,error};集合外忽略。
+func (r *Registry) IncGCSweeps(dataset, result string) {
+	if !validSuccessError(result) {
+		return
+	}
+	r.gcSweeps.WithLabelValues(r.DatasetLabel(dataset), result).Inc()
+}
+
+// AddGCBlocksRemoved 累加一次 GC 回收的块数:traincache_gc_blocks_removed_total{dataset,
+// result="success"}(签名无 result);n<=0 忽略。
+func (r *Registry) AddGCBlocksRemoved(dataset string, n int64) {
+	if n <= 0 {
+		return
+	}
+	r.gcBlocksRemoved.WithLabelValues(r.DatasetLabel(dataset), ResultSuccess).Add(float64(n))
+}
+
+// AddGCObjectsRemoved 累加一次 GC 回收的对象数:traincache_gc_objects_removed_total{dataset,
+// result="success"}(签名无 result);n<=0 忽略。
+func (r *Registry) AddGCObjectsRemoved(dataset string, n int64) {
+	if n <= 0 {
+		return
+	}
+	r.gcObjectsRemoved.WithLabelValues(r.DatasetLabel(dataset), ResultSuccess).Add(float64(n))
+}
+
+// —— ⑤ 磁盘淘汰线 ——
+
+// IncEvictBlocks 累加一次磁盘淘汰删除的本地副本块数:traincache_evict_blocks_total{dataset,
+// result},result∈{normal,danger} 取触发线(D24:normal=利用率超 k 触发,danger=危险线超 M);
+// 集合外忽略;n<=0 忽略。
+func (r *Registry) IncEvictBlocks(dataset, result string, n int64) {
+	if !validEvictTrigger(result) || n <= 0 {
+		return
+	}
+	r.evictBlocks.WithLabelValues(r.DatasetLabel(dataset), result).Add(float64(n))
+}
+
+// IncEvictProtectedSkipped 累加受保护(cursor+lookahead,任何情况不淘汰)跳过淘汰的块数:
+// traincache_evict_protected_skipped_total{dataset,result},result∈{normal,danger};
+// 集合外忽略;n<=0 忽略。
+func (r *Registry) IncEvictProtectedSkipped(dataset, result string, n int64) {
+	if !validEvictTrigger(result) || n <= 0 {
+		return
+	}
+	r.evictProtectedSkipped.WithLabelValues(r.DatasetLabel(dataset), result).Add(float64(n))
+}
+
+// —— ⑥ 延迟线 ——
+
+// ObserveRequestDuration 记录一次 RPC 请求耗时:traincache_request_duration_seconds{endpoint,
+// result},endpoint∈{SubmitPreheat,GetPreheatStatus,ListSnapshot,GetNodeStatus},result∈{success,
+// error};集合外忽略;固定 bucket {.01,.05,.1,.5,1,5,10,30}s。
+func (r *Registry) ObserveRequestDuration(endpoint, result string, seconds float64) {
+	if !validEndpoint(endpoint) || !validSuccessError(result) {
+		return
+	}
+	r.requestDuration.WithLabelValues(endpoint, result).Observe(seconds)
+}
+
+// —— ⑦ 节点状态线 ——
+
+// SetAgentUp 设置 traincache_agent_up(1=进程存活;node 标签取 Config.Node,构造时预置 1)。
+func (r *Registry) SetAgentUp(v float64) {
+	r.agentUp.WithLabelValues(r.node).Set(v)
+}
+
+// SetAgentDegraded 设置 traincache_agent_degraded(1=sidecar 退出降级,sidecar 新代际恢复自动
+// 退出降级;node 标签取 Config.Node,构造时预置 0)。
+func (r *Registry) SetAgentDegraded(v float64) {
+	r.agentDegraded.WithLabelValues(r.node).Set(v)
+}
+
+// SetRescanProgress 设置重扫描进度 0..1(traincache_rescan_progress,无标签)。
+func (r *Registry) SetRescanProgress(v float64) {
+	r.rescanProgress.Set(v)
+}
+
+// SetQuarantined 设置 quarantine 坏块数(traincache_quarantined_blocks{dataset};§5.7 修复
+// 成功后递减)。
+func (r *Registry) SetQuarantined(dataset string, n int64) {
+	r.quarantined.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
+}
+
+// SetDiskUsageRatio 设置缓存盘利用率 0..1(traincache_disk_usage_ratio{dataset};D24 触发线
+// 与危险线的输入)。
+func (r *Registry) SetDiskUsageRatio(dataset string, v float64) {
+	r.diskUsageRatio.WithLabelValues(r.DatasetLabel(dataset)).Set(v)
+}
+
+// —— 取值校验(集合外取值忽略该次打点,不新增基数)——
+
+// validResult 判断 result 是否属于给定冻结取值集。
+func validResult(result string, allowed ...string) bool {
+	for _, a := range allowed {
+		if result == a {
+			return true
+		}
+	}
+	return false
+}
+
+// validSuccessError 判断 result 是否 ∈ {success, error}(全局二元结果词汇表)。
+func validSuccessError(result string) bool {
+	return validResult(result, ResultSuccess, ResultError)
+}
+
+// validEvictTrigger 判断 result 是否 ∈ {normal, danger}(磁盘淘汰线触发线词汇表)。
+func validEvictTrigger(result string) bool {
+	return validResult(result, ResultNormal, ResultDanger)
+}
+
+// validEndpoint 判断 endpoint 是否 ∈ 冻结的四个 RPC 方法名。
+func validEndpoint(endpoint string) bool {
+	for _, e := range endpointLabels {
+		if endpoint == e {
+			return true
+		}
+	}
+	return false
+}
+
+// —— 测试访问器(与 OrdersourceFormatErrors 同风格;生产读取走 /metrics)——
+
+// CacheHits 返回命中 counter(测试访问器)。
+func (r *Registry) CacheHits() *prometheus.CounterVec { return r.cacheHits }
+
+// CacheMisses 返回未命中 counter(测试访问器)。
+func (r *Registry) CacheMisses() *prometheus.CounterVec { return r.cacheMisses }
+
+// CacheHitRatio 返回命中率 gauge(测试访问器)。
+func (r *Registry) CacheHitRatio() *prometheus.GaugeVec { return r.cacheHitRatio }
+
+// FetchBytes 返回回源字节 counter(测试访问器)。
+func (r *Registry) FetchBytes() *prometheus.CounterVec { return r.fetchBytes }
+
+// FetchRequests 返回回源请求 counter(测试访问器)。
+func (r *Registry) FetchRequests() *prometheus.CounterVec { return r.fetchRequests }
+
+// FetchInflightBytes 返回回源在途字节 gauge(测试访问器)。
+func (r *Registry) FetchInflightBytes() *prometheus.GaugeVec { return r.fetchInflightBytes }
+
+// IndexRefresh 返回索引刷新 counter(测试访问器)。
+func (r *Registry) IndexRefresh() *prometheus.CounterVec { return r.indexRefresh }
+
+// IndexRefreshDuration 返回索引刷新耗时 histogram(测试访问器)。
+func (r *Registry) IndexRefreshDuration() *prometheus.HistogramVec { return r.indexRefreshDuration }
+
+// IndexShardsLoaded 返回已加载分片数 gauge(测试访问器)。
+func (r *Registry) IndexShardsLoaded() *prometheus.GaugeVec { return r.indexShardsLoaded }
+
+// GCSweeps 返回 GC 清扫 counter(测试访问器)。
+func (r *Registry) GCSweeps() *prometheus.CounterVec { return r.gcSweeps }
+
+// GCBlocksRemoved 返回 GC 回收块 counter(测试访问器)。
+func (r *Registry) GCBlocksRemoved() *prometheus.CounterVec { return r.gcBlocksRemoved }
+
+// GCObjectsRemoved 返回 GC 回收对象 counter(测试访问器)。
+func (r *Registry) GCObjectsRemoved() *prometheus.CounterVec { return r.gcObjectsRemoved }
+
+// EvictBlocks 返回淘汰块 counter(测试访问器)。
+func (r *Registry) EvictBlocks() *prometheus.CounterVec { return r.evictBlocks }
+
+// EvictProtectedSkipped 返回受保护跳过 counter(测试访问器)。
+func (r *Registry) EvictProtectedSkipped() *prometheus.CounterVec { return r.evictProtectedSkipped }
+
+// RequestDuration 返回 RPC 耗时 histogram(测试访问器)。
+func (r *Registry) RequestDuration() *prometheus.HistogramVec { return r.requestDuration }
+
+// AgentUp 返回 agent_up gauge(测试访问器)。
+func (r *Registry) AgentUp() *prometheus.GaugeVec { return r.agentUp }
+
+// AgentDegraded 返回 agent_degraded gauge(测试访问器)。
+func (r *Registry) AgentDegraded() *prometheus.GaugeVec { return r.agentDegraded }
+
+// RescanProgress 返回重扫描进度 gauge(测试访问器)。
+func (r *Registry) RescanProgress() prometheus.Gauge { return r.rescanProgress }
+
+// QuarantinedBlocks 返回坏块数 gauge(测试访问器)。
+func (r *Registry) QuarantinedBlocks() *prometheus.GaugeVec { return r.quarantined }
+
+// DiskUsageRatio 返回磁盘利用率 gauge(测试访问器)。
+func (r *Registry) DiskUsageRatio() *prometheus.GaugeVec { return r.diskUsageRatio }

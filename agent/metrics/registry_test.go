@@ -1,6 +1,7 @@
 package metrics_test
 
 import (
+	"maps"
 	"math"
 	"slices"
 	"testing"
@@ -10,9 +11,10 @@ import (
 	"traincache/agent/metrics"
 )
 
-// family 名与实现侧一致(D23、M3;测试独立字面量,防改名后测试跟着漂移)。
+// family 名与实现侧一致(D23、M3、D33;测试独立字面量,防改名后测试跟着漂移)。
 const (
 	ordersourceFormatErrorsName = "traincache_ordersource_format_errors_total"
+	hookFormatErrorsName        = "traincache_hook_format_errors_total"
 	prefetchQueueDepthName      = "traincache_prefetch_queue_depth"
 	prefetchCursorName          = "traincache_prefetch_cursor"
 	stageSwitchStallName        = "traincache_stage_switch_stall_seconds"
@@ -59,8 +61,10 @@ func TestPrometheusRegistry(t *testing.T) {
 		t.Error("Prometheus() 应返回同一注册表")
 	}
 
-	// M3 起注册表恰含 4 个 family:ordersource 格式错误 counter(D23)、prefetch 队列深度/
-	// 游标 gauge 与阶段切换停滞 histogram(M3);六线 family 仍属 M6,不在此注册。
+	// M6 起注册表恰含 25 个 family:本节校验 M2/M3 的 4 个(ordersource 格式错误 counter[D23]、
+	// prefetch 队列深度/游标 gauge 与阶段切换停滞 histogram[M3]);七线 23 个(M6,含复用的这 3 个)
+	// 在 TestSevenLineFamiliesRegisteredAtStartup 校验;钩子帧格式错误 counter(D33,非七线)本文件
+	// 由 TestHookFormatErrors 校验。
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -71,8 +75,8 @@ func TestPrometheusRegistry(t *testing.T) {
 		prefetchCursorName:          "GAUGE",
 		stageSwitchStallName:        "HISTOGRAM",
 	}
-	if len(families) != len(want) {
-		t.Fatalf("注册表应恰有 %d 个 family(M3),实际 %d 个", len(want), len(families))
+	if len(families) != 25 {
+		t.Fatalf("注册表应恰有 25 个 family(七线 23 个[含 M3 复用的 3 个] + D23 ordersource + D33 钩子帧错误),实际 %d 个", len(families))
 	}
 	byName := make(map[string]int, len(families))
 	for i, mf := range families {
@@ -134,6 +138,54 @@ func TestOrdersourceFormatErrorsSync(t *testing.T) {
 	// 测试访问器返回同一 CounterVec。
 	if r.OrdersourceFormatErrors() == nil {
 		t.Fatal("OrdersourceFormatErrors() 返回 nil")
+	}
+}
+
+// TestHookFormatErrors：钩子帧格式错误 counter(D33,与 D23 同风格):构造预置 parse/size
+// 两个 reason 子指标为 0;IncHookFormatErrors 按 reason 计数;集合外 reason 忽略,不新增基数。
+func TestHookFormatErrors(t *testing.T) {
+	r := metrics.New(metrics.Config{})
+
+	snap := snapshotFamilies(t, r)
+	f := family(t, snap, hookFormatErrorsName)
+	if f.typ != "COUNTER" {
+		t.Errorf("family %q 类型 = %q, want COUNTER", hookFormatErrorsName, f.typ)
+	}
+	// 预置:标签集合恰为 {reason},取值集合恰为 {parse, size} 且为 0。
+	got := map[string]float64{}
+	for _, m := range f.metrics {
+		if len(m.labels) != 1 {
+			t.Errorf("子指标标签 = %v, want 仅 reason", m.labels)
+		}
+		got[m.labels["reason"]] = m.value
+	}
+	if !maps.Equal(got, map[string]float64{"parse": 0, "size": 0}) {
+		t.Fatalf("构造预置 = %v, want parse=0 size=0", got)
+	}
+
+	r.IncHookFormatErrors(metrics.ReasonParse)
+	r.IncHookFormatErrors(metrics.ReasonParse)
+	r.IncHookFormatErrors(metrics.ReasonSize)
+
+	snap = snapshotFamilies(t, r)
+	if v := metric(t, snap, hookFormatErrorsName, labels("reason", "parse")).value; v != 2 {
+		t.Errorf("parse = %v, want 2", v)
+	}
+	if v := metric(t, snap, hookFormatErrorsName, labels("reason", "size")).value; v != 1 {
+		t.Errorf("size = %v, want 1", v)
+	}
+
+	// 集合外 reason(含空串)忽略:不新增子指标、不 panic。
+	r.IncHookFormatErrors("magic")
+	r.IncHookFormatErrors("")
+	f = family(t, snapshotFamilies(t, r), hookFormatErrorsName)
+	if len(f.metrics) != 2 {
+		t.Errorf("集合外 reason 不应新增子指标,实际 %d 个(%v)", len(f.metrics), labelSetsString(f))
+	}
+
+	// 测试访问器非 nil。
+	if r.HookFormatErrors() == nil {
+		t.Error("HookFormatErrors() 返回 nil")
 	}
 }
 

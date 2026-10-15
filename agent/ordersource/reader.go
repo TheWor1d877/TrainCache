@@ -94,6 +94,8 @@ type Reader struct {
 	lastReadSeq int64  // 已追读到的 write_seq
 	badKind     string // 当前文件已计数的坏头 kind(""/magic/version:同一坏头状态只计一次)
 
+	lastAdvance time.Time // 最近一次观察到 write_seq 推进的本地时间(D29;零值 = 从未推进)
+
 	cur         ConsumeOrder
 	hasCur      bool
 	lastEmitted []byte // 上次对外推送(或启动初始快照)的载荷字节:按字节去重
@@ -161,6 +163,20 @@ func (r *Reader) Missing() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.missing
+}
+
+// LastAdvance 返回最近一次观察到 write_seq 推进的本地时间(decisions D29:锁下读取;
+// 零值 = 从未推进)。语义:
+//   - 构造时的首次有效快照视为推进(文件不存在 / 头非法 → 保持零值);
+//   - writer_generation 变化(新代际)视为推进,即使 write_seq 未变;
+//   - 同一代际内头 write_seq 前进视为推进(载荷是否可读不影响判定:写端存活即可观测);
+//   - 时间语义为读端本地时间,Close 后保持最后观测值不变。
+//
+// 供 M5 降级检测(ring 写入停滞 30s → 降级)与探活使用。
+func (r *Reader) LastAdvance() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastAdvance
 }
 
 // SubscribeStageSwitch 订阅阶段切换事件(约定 8):
@@ -253,6 +269,8 @@ func (r *Reader) resyncLocked(h ringHeader, suppress bool) {
 	r.attached = true
 	r.lastGen = h.generation
 	r.lastReadSeq = h.writeSeq // 跳过历史:阶段切换只关心最新顺序
+	// D29:首次快照 / 新代际 / 写端回退后重同步均视为"观察到推进"(写端在此刻可读)。
+	r.lastAdvance = time.Now()
 	if h.writeSeq <= 0 {
 		return
 	}
@@ -275,6 +293,8 @@ func (r *Reader) followLocked(h ringHeader) {
 	if target <= r.lastReadSeq {
 		return
 	}
+	// D29:头 write_seq 前进(含跳读最新)即视为推进;槽载荷是否可读不影响。
+	r.lastAdvance = time.Now()
 	if target > r.lastReadSeq+int64(h.slotCount) {
 		order, raw, out := r.readSlotLocked(h, target)
 		switch out {

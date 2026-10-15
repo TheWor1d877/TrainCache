@@ -41,6 +41,7 @@ type svcFixture struct {
 	cs    *cas.Store
 	pm    *PrefetchManager
 	tasks *PreheatTasks
+	reg   *metrics.Registry // 与 pm/agent() 共用的指标注册表(打点断言用)
 }
 
 // svcBlockSpec 描述一个测试块:内容(决定指纹/大小)+ 本地与源站可达性组合
@@ -72,7 +73,8 @@ func newSvcFixtureWithStore(t *testing.T, store objectstore.Store) *svcFixture {
 		MaxConnsPerHost:  2,
 		MaxRetries:       1,
 	})
-	pm := NewPrefetchManager(store, cs, f, metrics.New(metrics.Config{}))
+	reg := metrics.New(metrics.Config{})
+	pm := NewPrefetchManager(store, cs, f, reg)
 	t.Cleanup(pm.Close)
 	cfg := Config{
 		NodeName:  nodeid.ID("worker-01"),
@@ -85,6 +87,7 @@ func newSvcFixtureWithStore(t *testing.T, store objectstore.Store) *svcFixture {
 		cs:    cs,
 		pm:    pm,
 		tasks: NewPreheatTasks(cfg, pm),
+		reg:   reg,
 	}
 }
 
@@ -97,13 +100,17 @@ func (fx *svcFixture) preloadMapping(t *testing.T, dataset string) {
 	}
 }
 
-// agent 返回与装置组件同构的 Agent(供 NewServer 装配)。
+// agent 返回与装置组件同构的 Agent(供 NewServer 装配;CS/ObjectStore 供
+// GetNodeStatus 目录与用量断言读取)。Metrics 复用 fx.reg(与 pm 同一注册表,与生产
+// 装配同构;延迟线打点断言经 fx.reg 读取)。
 func (fx *svcFixture) agent() *Agent {
 	return &Agent{
-		Cfg:      fx.cfg,
-		Metrics:  metrics.New(metrics.Config{}),
-		Prefetch: fx.pm,
-		Preheat:  fx.tasks,
+		Cfg:         fx.cfg,
+		Metrics:     fx.reg,
+		Prefetch:    fx.pm,
+		Preheat:     fx.tasks,
+		CS:          fx.cs,
+		ObjectStore: fx.store,
 	}
 }
 
@@ -598,5 +605,112 @@ func TestPreheatEnqueueFailureIsError(t *testing.T) {
 	}
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		t.Fatal("前置条件:解析后 ctx 应已被取消(存储钩子未生效)")
+	}
+}
+
+// TestPreheatTaskTTLExpiry:任务记录 TTL(taskTTL = 24h;Q13 结案)惰性清理——Submit/
+// Status/RunningCount 任一入口触发:终态(完成时刻超 24h)与非终态(停滞超 24h)任务从
+// 表与 byDataset 快照消失,未过期任务保留;清理后 task_id 可复用(不再幂等/冲突)。
+func TestPreheatTaskTTLExpiry(t *testing.T) {
+	fx := newSvcFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// insert 白盒登记一个任务(按需入 byDataset 快照;updatedAt 设为 ago 之前)。
+	insert := func(id string, state agentpb.PreheatStatus_State, ago time.Duration, intoIndex bool) *preheatTask {
+		tk := newPreheatTask(id, "worker-01", preheatRequest{dataset: testDataset})
+		if intoIndex {
+			fx.tasks.register(tk, []prefetch.ChunkRef{{Path: "ttl-" + id + ".tar", Chunk: 0}})
+		}
+		tk.state.Store(int32(state))
+		tk.updatedAt.Store(now.Add(-ago).UnixNano())
+		fx.tasks.mu.Lock()
+		fx.tasks.tasks[id] = tk
+		fx.tasks.mu.Unlock()
+		return tk
+	}
+	// gone 断言:任务不在表,且指针不在 byDataset 快照(防死任务吞回调/指针累积)。
+	gone := func(name string, tk *preheatTask) {
+		t.Helper()
+		fx.tasks.mu.Lock()
+		_, inMap := fx.tasks.tasks[tk.taskID]
+		fx.tasks.mu.Unlock()
+		if inMap {
+			t.Errorf("%s:任务仍在表内,过 TTL 未被清理", name)
+		}
+		for _, list := range *fx.tasks.byDataset.Load() {
+			for _, got := range list {
+				if got == tk {
+					t.Errorf("%s:byDataset 快照仍持有过期任务指针", name)
+				}
+			}
+		}
+	}
+	// kept 断言:任务仍可查且状态未变。
+	kept := func(name string, tk *preheatTask, want agentpb.PreheatStatus_State) {
+		t.Helper()
+		st, err := fx.tasks.Status(ctx, tk.taskID)
+		if err != nil {
+			t.Errorf("%s:Status(%s) = %v, want 保留", name, tk.taskID, err)
+			return
+		}
+		if st.GetState() != want {
+			t.Errorf("%s:state = %v, want %v", name, st.GetState(), want)
+		}
+	}
+
+	expiredDone := insert("ttl-done-old", agentpb.PreheatStatus_DONE, 25*time.Hour, true)
+	expiredErr := insert("ttl-err-old", agentpb.PreheatStatus_ERROR, 25*time.Hour, false)
+	staleRunning := insert("ttl-run-old", agentpb.PreheatStatus_RUNNING, 25*time.Hour, true)
+	freshDone := insert("ttl-done-new", agentpb.PreheatStatus_DONE, time.Hour, false)
+	freshRunning := insert("ttl-run-new", agentpb.PreheatStatus_RUNNING, time.Hour, false)
+	nearMiss := insert("ttl-near", agentpb.PreheatStatus_DONE, taskTTL-time.Minute, false)
+
+	// 1) Status 入口触发清理:过期三类全消失(含停滞 RUNNING,TLL 自最近进度起算),
+	//    未过期(含临界的 23h59m)保留。
+	kept("新鲜 DONE", freshDone, agentpb.PreheatStatus_DONE)
+	kept("新鲜 RUNNING", freshRunning, agentpb.PreheatStatus_RUNNING)
+	kept("临界未过期(23h59m)", nearMiss, agentpb.PreheatStatus_DONE)
+	gone("过期 DONE(完成 25h)", expiredDone)
+	gone("过期 ERROR(完成 25h)", expiredErr)
+	gone("停滞 RUNNING(25h 无进度)", staleRunning)
+
+	// 2) RunningCount 入口触发清理:过期 RUNNING 不计入且被清。
+	insert("ttl-run-old-2", agentpb.PreheatStatus_RUNNING, 25*time.Hour, false)
+	if got := fx.tasks.RunningCount(); got != 1 {
+		t.Errorf("RunningCount = %d, want 1(仅新鲜 RUNNING;过期任务入口即清)", got)
+	}
+	fx.tasks.mu.Lock()
+	_, exists := fx.tasks.tasks["ttl-run-old-2"]
+	fx.tasks.mu.Unlock()
+	if exists {
+		t.Error("RunningCount 入口未清理过期任务")
+	}
+
+	// 3) Submit 入口触发清理(先清后校验:校验失败的请求也先完成清理)。
+	insert("ttl-submit-old", agentpb.PreheatStatus_DONE, 25*time.Hour, false)
+	bad := validSubmitReq()
+	bad.Node = "" // 必失败,但入口清理先发生
+	if _, err := fx.tasks.Submit(ctx, bad); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Submit code = %v, want InvalidArgument(err=%v)", status.Code(err), err)
+	}
+	fx.tasks.mu.Lock()
+	_, exists = fx.tasks.tasks["ttl-submit-old"]
+	fx.tasks.mu.Unlock()
+	if exists {
+		t.Error("Submit 入口未清理过期任务")
+	}
+
+	// 4) task_id 清理后可复用:同 id 重新提交不再命中旧记录(无 AlreadyExists)。
+	reuse := validSubmitReq()
+	reuse.TaskId = "ttl-done-old" // 步骤 1 已清理
+	reuse.Prefixes = nil
+	reuse.Chunks = []*agentpb.ChunkRef{{Path: "reuse-000.tar", Chunk: 0}} // 免 List,直达解析
+	resp, err := fx.tasks.Submit(ctx, reuse)
+	if err != nil {
+		t.Fatalf("过期 task_id 复用 Submit: %v", err)
+	}
+	if !resp.GetAccepted() {
+		t.Fatalf("响应 = %+v, want accepted=true(旧记录已清理)", resp)
 	}
 }
