@@ -1,8 +1,12 @@
 package svc
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,7 +19,11 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	agentpb "traincache/agent/api/agentpb"
+	"traincache/agent/metrics"
 	"traincache/agent/nodeid"
+	"traincache/agent/rescan"
+	"traincache/core/fetch"
+	"traincache/core/index"
 )
 
 // testConfig 返回静态测试配置。
@@ -39,10 +47,17 @@ func startServer(t *testing.T) *grpc.ClientConn {
 // startServerWith 同上,但注入给定 Agent(需要预置数据集/任务的用例)。
 func startServerWith(t *testing.T, ag *Agent) *grpc.ClientConn {
 	t.Helper()
+	return startServerCfg(t, testConfig(), ag)
+}
+
+// startServerCfg 以给定配置与 Agent 起服务(动态字段用例:Server 的 CacheRoot 须指向
+// 装置临时目录,而非 testConfig 的生产路径)。
+func startServerCfg(t *testing.T, cfg Config, ag *Agent) *grpc.ClientConn {
+	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
-	NewServer(testConfig(), ag).Register(gs)
+	NewServer(cfg, ag).Register(gs)
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 
@@ -58,38 +73,142 @@ func startServerWith(t *testing.T, ag *Agent) *grpc.ClientConn {
 	return conn
 }
 
-func TestGetNodeStatusStaticFields(t *testing.T) {
-	conn := startServer(t)
+// TestGetNodeStatusDynamicFields:M5 起 GetNodeStatus 的用量/目录/重扫描字段均为动态实测
+// (取代 M1 静态字段):
+//   - cached_bytes = CacheRoot 下 blocks/ 与 quarantine/ 文件字节和(精确断言);
+//   - free_bytes = statfs 实测 > 0;
+//   - catalog = 已知 dataset(已装配 bundle)的快照 ID/分片数/条目数(经对象存储实测);
+//   - rescan:未装配 Rescanner → DONE(枚举零值 SAMPLING 会卡 readiness,显式 DONE)。
+func TestGetNodeStatusDynamicFields(t *testing.T) {
+	fx := newSvcFixture(t)
+
+	// 本地副本全部保源站/Evict(local 缺省 false):blocks/ 内不留提交产生的块文件,
+	// 目录用量只剩下面预置的已知大小文件。
+	fx.commitDataset(t, testDataset, []svcBlockSpec{
+		{path: "dyn-000.tar", chunk: 0, content: "dyn-a0"},
+		{path: "dyn-001.tar", chunk: 0, content: "dyn-a1"},
+	})
+	fx.preloadMapping(t, testDataset) // 建立 bundle(已知 dataset)+ 加载索引映射
+
+	writeSized := func(rel string, n int) {
+		t.Helper()
+		p := filepath.Join(fx.cfg.CacheRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", rel, err)
+		}
+		if err := os.WriteFile(p, bytes.Repeat([]byte{'x'}, n), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", rel, err)
+		}
+	}
+	writeSized(filepath.Join("blocks", "aa", "b.blk"), 5) // blocks/ 子树
+	writeSized(filepath.Join("quarantine", "bad.blk"), 7) // quarantine/ 子树
+
+	conn := startServerCfg(t, fx.cfg, fx.agent())
 	st, err := agentpb.NewNodeServiceClient(conn).GetNodeStatus(context.Background(),
 		&agentpb.GetNodeStatusRequest{Node: "worker-01"})
 	if err != nil {
 		t.Fatalf("GetNodeStatus: %v", err)
 	}
 
-	if st.GetNode() != "worker-01" {
-		t.Errorf("node = %q, want worker-01", st.GetNode())
+	if st.GetNode() != "worker-01" || !st.GetAgentOk() {
+		t.Errorf("node/agent_ok = %q/%v, want worker-01/true", st.GetNode(), st.GetAgentOk())
 	}
-	if !st.GetAgentOk() {
-		t.Error("agent_ok = false, want true")
+	if st.GetCacheRoot() != fx.cfg.CacheRoot {
+		t.Errorf("cache_root = %q, want %q", st.GetCacheRoot(), fx.cfg.CacheRoot)
 	}
-	if st.GetCacheRoot() != "/var/cache/traincache" {
-		t.Errorf("cache_root = %q, want /var/cache/traincache", st.GetCacheRoot())
+	if got := st.GetCachedBytes(); got != 12 {
+		t.Errorf("cached_bytes = %d, want 12(blocks/ 5 字节 + quarantine/ 7 字节)", got)
 	}
-	if st.GetCachedBytes() != 0 {
-		t.Errorf("cached_bytes = %d, want 0(M1 静态)", st.GetCachedBytes())
-	}
-	if st.GetFreeBytes() != 0 {
-		t.Errorf("free_bytes = %d, want 0(M1 静态)", st.GetFreeBytes())
+	if got := st.GetFreeBytes(); got <= 0 {
+		t.Errorf("free_bytes = %d, want > 0(statfs 实测)", got)
 	}
 	if st.GetRunningTasks() != 0 {
 		t.Errorf("running_tasks = %d, want 0(空任务表)", st.GetRunningTasks())
 	}
-	// 必须显式 DONE:枚举零值是 SAMPLING,readiness = phase != SAMPLING(design §8)。
+	// 未装配 Rescanner:必须显式 DONE(枚举零值是 SAMPLING,readiness = phase != SAMPLING)。
 	if got := st.GetRescan().GetPhase(); got != agentpb.RescanStatus_DONE {
-		t.Errorf("rescan.phase = %v, want DONE(M1 静态;SAMPLING 会被 readiness 判为未就绪)", got)
+		t.Errorf("rescan.phase = %v, want DONE(无 Rescanner;SAMPLING 会被 readiness 判为未就绪)", got)
 	}
-	if len(st.GetCatalog()) != 0 {
-		t.Errorf("catalog = %v, want 空(M1 静态)", st.GetCatalog())
+
+	cat := st.GetCatalog()
+	if len(cat) != 1 || cat[0].GetDataset() != testDataset {
+		t.Fatalf("catalog = %v, want 单条 dataset=%q", cat, testDataset)
+	}
+	if cat[0].GetSnapshotId() == "" {
+		t.Error("catalog.snapshot_id 为空,应取 CURRENT 内容")
+	}
+	if cat[0].GetShards() < 1 {
+		t.Errorf("catalog.shards = %d, want ≥1(manifest 解析)", cat[0].GetShards())
+	}
+	if cat[0].GetEntries() != 2 {
+		t.Errorf("catalog.entries = %d, want 2(提交的两块)", cat[0].GetEntries())
+	}
+
+	// CATALOG 单项:同源数据,且不含其他字段组。
+	st, err = agentpb.NewNodeServiceClient(conn).GetNodeStatus(context.Background(),
+		&agentpb.GetNodeStatusRequest{Node: "worker-01", Item: agentpb.NodeStatusItem_CATALOG})
+	if err != nil {
+		t.Fatalf("GetNodeStatus(CATALOG): %v", err)
+	}
+	if len(st.GetCatalog()) != 1 || st.GetCatalog()[0].GetEntries() != 2 {
+		t.Errorf("CATALOG 项 = %v, want 与全量一致的目录", st.GetCatalog())
+	}
+	if st.GetCachedBytes() != 0 || st.GetFreeBytes() != 0 {
+		t.Errorf("CATALOG 不应含用量字段,实际 cached=%d free=%d", st.GetCachedBytes(), st.GetFreeBytes())
+	}
+}
+
+// TestGetNodeStatusRescanPhaseDynamic:rescan 状态为实时映射——未 Start 的 Rescanner 报
+// SAMPLING(readiness 未就绪),Start 后空 CAS 直接 DONE;四计数逐字段透传(置零初值)。
+func TestGetNodeStatusRescanPhaseDynamic(t *testing.T) {
+	fx := newSvcFixture(t)
+	f := fetch.New(fx.store, fx.cs, fetch.Options{
+		MaxInflightBytes: 1 << 20,
+		MaxTasks:         2,
+		MaxConnsPerHost:  1,
+		MaxRetries:       0,
+	})
+	res := rescan.New(fx.cs, f, fx.store,
+		func(context.Context, string) (*index.Catalog, error) { return nil, errors.New("测试未装配") },
+		rescanMetrics{metrics.New(metrics.Config{})})
+
+	ag := fx.agent()
+	ag.Rescan = res
+	conn := startServerCfg(t, fx.cfg, ag)
+	client := agentpb.NewNodeServiceClient(conn)
+
+	// 未 Start:初始阶段 SAMPLING。
+	st, err := client.GetNodeStatus(context.Background(),
+		&agentpb.GetNodeStatusRequest{Node: "worker-01", Item: agentpb.NodeStatusItem_RESCAN})
+	if err != nil {
+		t.Fatalf("GetNodeStatus(RESCAN): %v", err)
+	}
+	if got := st.GetRescan().GetPhase(); got != agentpb.RescanStatus_SAMPLING {
+		t.Fatalf("未 Start 的 phase = %v, want SAMPLING(初始值)", got)
+	}
+
+	// Start 后:空 CAS 直接 DONE(轮询观察过渡)。
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	res.Start(ctx)
+	deadline := time.Now().Add(testTimeout)
+	for {
+		st, err = client.GetNodeStatus(context.Background(),
+			&agentpb.GetNodeStatusRequest{Node: "worker-01", Item: agentpb.NodeStatusItem_RESCAN})
+		if err != nil {
+			t.Fatalf("GetNodeStatus(RESCAN): %v", err)
+		}
+		if st.GetRescan().GetPhase() == agentpb.RescanStatus_DONE {
+			if st.GetRescan().GetQuarantined() != 0 || st.GetRescan().GetRepairQueue() != 0 {
+				t.Errorf("空扫描 quarantined/repair_queue = %d/%d, want 0/0",
+					st.GetRescan().GetQuarantined(), st.GetRescan().GetRepairQueue())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rescan 超时未 DONE: %v", st.GetRescan())
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

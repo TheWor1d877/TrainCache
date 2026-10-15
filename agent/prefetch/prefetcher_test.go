@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"traincache/agent/metrics"
 	"traincache/core/cas"
@@ -47,11 +51,15 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 // countingStore 包装 objectstore.Mock,记录 Get 调用的对象键(断言"本地命中零下载"
-// 与 D25 键布局用)。
+// 与 D25 键布局用);holdKey 提供按精确键的源站 Get 在途闸(回源线打点断言:卡住一次
+// 真实下载,观察 inflight 打点)。
 type countingStore struct {
 	*objectstore.Mock
 	mu   sync.Mutex
 	keys []string
+
+	gateMu sync.Mutex
+	gates  map[string]chan struct{}
 }
 
 func newCountingStore() *countingStore { return &countingStore{Mock: objectstore.NewMock()} }
@@ -60,7 +68,40 @@ func (s *countingStore) Get(ctx context.Context, key string, w io.Writer) error 
 	s.mu.Lock()
 	s.keys = append(s.keys, key)
 	s.mu.Unlock()
+	if ch := s.gate(key); ch != nil {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return s.Mock.Get(ctx, key, w)
+}
+
+// holdKey 挂起指定键的 Get(键先记录后阻塞,故调用方以 blockGets 可见性判定"已进入在途");
+// releaseKey 放行(幂等)。
+func (s *countingStore) holdKey(key string) {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	if s.gates == nil {
+		s.gates = make(map[string]chan struct{})
+	}
+	s.gates[key] = make(chan struct{})
+}
+
+func (s *countingStore) releaseKey(key string) {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	if ch, ok := s.gates[key]; ok {
+		close(ch)
+		delete(s.gates, key)
+	}
+}
+
+func (s *countingStore) gate(key string) chan struct{} {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	return s.gates[key]
 }
 
 func (s *countingStore) getKeys() []string {
@@ -102,6 +143,7 @@ type blockSpec struct {
 // Catalog + metrics 注册表。
 type testEnv struct {
 	store *countingStore
+	dir   string // cas 根目录(坏块注入用)
 	cs    *cas.Store
 	fetch *fetch.Fetcher
 	cat   *index.Catalog
@@ -115,12 +157,14 @@ type testEnv struct {
 func newTestEnv(t *testing.T, specs []blockSpec) *testEnv {
 	t.Helper()
 	ctx := context.Background()
-	cs, err := cas.New(t.TempDir(), cas.VerifyXXH3)
+	dir := t.TempDir()
+	cs, err := cas.New(dir, cas.VerifyXXH3)
 	if err != nil {
 		t.Fatalf("cas.New: %v", err)
 	}
 	env := &testEnv{
 		store: newCountingStore(),
+		dir:   dir,
 		cs:    cs,
 		reg:   metrics.New(metrics.Config{}),
 		fps:   make(map[ChunkRef]cas.Fingerprint),
@@ -170,6 +214,43 @@ func newTestEnv(t *testing.T, specs []blockSpec) *testEnv {
 
 func (env *testEnv) newPrefetcher(cfg Config) *PersistentPrefetcher {
 	return New(env.cat, env.fetch, env.cs, env.reg, cfg)
+}
+
+// corruptBlock 翻转已提交块文件的数据区开头 4 字节(注入坏块;cas.Open 将报 ErrCorrupt)。
+// 必须在 Commit 之后调用(Commit 会读块验证)。
+func (env *testEnv) corruptBlock(t *testing.T, ref ChunkRef) {
+	t.Helper()
+	hexs := env.fps[ref].String()
+	p := filepath.Join(env.dir, "blocks", hexs[:2], hexs+".blk")
+	f, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("打开块文件 %s: %v", p, err)
+	}
+	defer f.Close()
+	buf := make([]byte, 4)
+	if _, err := f.ReadAt(buf, cas.HeaderSize); err != nil {
+		t.Fatalf("读块数据区 %s: %v", p, err)
+	}
+	for i := range buf {
+		buf[i] ^= 0xff
+	}
+	if _, err := f.WriteAt(buf, cas.HeaderSize); err != nil {
+		t.Fatalf("写块数据区 %s: %v", p, err)
+	}
+}
+
+// readBlock 打开块并读回全部数据(断言坏块已被覆盖为正确内容)。
+func (env *testEnv) readBlock(ref ChunkRef) (string, error) {
+	br, err := env.cs.Open(env.fps[ref])
+	if err != nil {
+		return "", err
+	}
+	defer br.Close()
+	b, err := io.ReadAll(br)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // orderOf 组装测试消费顺序(字段语义见 design §6.1)。
@@ -748,6 +829,106 @@ func TestDownloadOnLocalMissUsesD25Key(t *testing.T) {
 	}
 }
 
+// ---------------- 回源线打点(综合验收 ①) ----------------
+
+// fetchLineSnapshot 读回源线三打点(dataset 经白名单归并为 "other"):成功交付字节、
+// 在途计数、请求数{success,error}。
+func fetchLineSnapshot(t *testing.T, r *metrics.Registry) (bytes, inflight, success, failed float64) {
+	t.Helper()
+	return testutil.ToFloat64(r.FetchBytes().WithLabelValues("other", "success")),
+		testutil.ToFloat64(r.FetchInflightBytes().WithLabelValues("other")),
+		testutil.ToFloat64(r.FetchRequests().WithLabelValues("other", "success")),
+		testutil.ToFloat64(r.FetchRequests().WithLabelValues("other", "error"))
+}
+
+// TestFetchLineMetricsOnDownloadSuccess(综合验收 ①):真实下载路径三打点齐全——下载被闸
+// 卡住期间在途 == 1(且无任何 success/error 计数);放行完成后 fetch_bytes 恰为下载块字节、
+// requests{success} == 1、在途回 0。同订单的本地命中块不产生任何回源打点(字节/请求数
+// 不因它变化)。
+func TestFetchLineMetricsOnDownloadSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	const dlContent = "fetch-line-download-content"
+	env := newTestEnv(t, []blockSpec{
+		{path: "dl.tar", chunk: 0, content: dlContent, source: true}, // 本地无、源站有 → 真实下载
+		{path: "hit.tar", chunk: 0, content: "fetch-line-local-hit", local: true},
+	})
+	dlRef := ChunkRef{Path: "dl.tar"}
+	dlKey := expectedBlockKey(testDataset, dlRef)
+	env.store.holdKey(dlKey)
+
+	done := make(chan error, 2)
+	p := env.newPrefetcher(Config{Lookahead: 2, OnDone: func(_ ChunkRef, err error) { done <- err }})
+	order := orderOf("epoch-1", []ChunkRef{dlRef, {Path: "hit.tar"}}, 2)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+
+	// 下载在途:源站 Get 键已记录(阻塞在闸上),在途 gauge == 1,尚无结果计数。
+	waitFor(t, "数据块 Get 进入在途(闸上)", func() bool {
+		return len(blockGets(env.store)) == 1
+	})
+	if b, inflight, succ, fail := fetchLineSnapshot(t, env.reg); b != 0 || inflight != 1 || succ != 0 || fail != 0 {
+		t.Fatalf("在途打点 = (bytes %v, inflight %v, success %v, error %v), want (0, 1, 0, 0)", b, inflight, succ, fail)
+	}
+
+	env.store.releaseKey(dlKey)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("第 %d 块完成 err = %v, want nil", i+1, err)
+			}
+		case <-time.After(testTimeout):
+			t.Fatalf("等待第 %d 块完成回调超时", i+1)
+		}
+	}
+
+	if b, inflight, succ, fail := fetchLineSnapshot(t, env.reg); b != float64(len(dlContent)) || inflight != 0 || succ != 1 || fail != 0 {
+		t.Fatalf("完成后回源线 = (bytes %v, inflight %v, success %v, error %v), want (%d, 0, 1, 0;本地命中块不得打点)",
+			b, inflight, succ, fail, len(dlContent))
+	}
+}
+
+// TestFetchLineMetricsOnDownloadFailure(综合验收 ①):下载失败路径只记
+// fetch_requests{error} == 1(字节不增、在途回 0、无 success 计数);失败与成功同口径
+// 各计一次请求。
+func TestFetchLineMetricsOnDownloadFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := newTestEnv(t, []blockSpec{
+		{path: "dead.tar", chunk: 0, content: "fetch-line-no-source"}, // 本地无、源站无 → 下载失败
+	})
+	ref := ChunkRef{Path: "dead.tar"}
+	key := expectedBlockKey(testDataset, ref)
+	env.store.holdKey(key)
+
+	done := make(chan error, 1)
+	p := env.newPrefetcher(Config{Lookahead: 1, OnDone: func(_ ChunkRef, err error) { done <- err }})
+	if _, err := p.OnStageSwitch(ctx, orderOf("epoch-1", []ChunkRef{ref}, 1)); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+
+	waitFor(t, "失败下载的 Get 进入在途(闸上)", func() bool { return len(blockGets(env.store)) >= 1 })
+	if b, inflight, succ, fail := fetchLineSnapshot(t, env.reg); b != 0 || inflight != 1 || succ != 0 || fail != 0 {
+		t.Fatalf("在途打点 = (bytes %v, inflight %v, success %v, error %v), want (0, 1, 0, 0)", b, inflight, succ, fail)
+	}
+
+	env.store.releaseKey(key)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("无源块完成 err = nil, want 下载失败原因")
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("等待下载失败回调超时")
+	}
+
+	if b, inflight, succ, fail := fetchLineSnapshot(t, env.reg); b != 0 || inflight != 0 || succ != 0 || fail != 1 {
+		t.Fatalf("失败后回源线 = (bytes %v, inflight %v, success %v, error %v), want (0, 0, 0, 1)", b, inflight, succ, fail)
+	}
+}
+
 // ---------------- 并发与边界 ----------------
 
 // TestConcurrentAdvancesAndStageSwitch:多协程并发 advance/Status/阶段切换与完成回调
@@ -1113,5 +1294,301 @@ func TestEnqueueP0FetchesWithoutMapping(t *testing.T) {
 	_ = br.Close()
 	if keys := blockGets(env.store); !slices.Contains(keys, expectedBlockKey(testDataset, ref)) {
 		t.Errorf("源站 Get 键 = %v, want 含 %s", keys, expectedBlockKey(testDataset, ref))
+	}
+}
+
+// ---------------- M4:OnDone 通用完成回调(D28) ----------------
+
+// TestOnDoneFiresOncePerBlockWithOnP0Done:D28——OnDone 覆盖所有优先级队列,每块恰好一次
+// (本地就绪/下载成功 = nil,下载失败 = 原因);与 OnP0Done 并存:P0 块两回调都触发且先
+// OnP0Done 后 OnDone,非 P0 块只有 OnDone;两者均在调度协程内串行同步调用(最大并发 1)。
+func TestOnDoneFiresOncePerBlockWithOnP0Done(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := newTestEnv(t, []blockSpec{
+		{path: "h.tar", chunk: 0, content: "ondone-local", local: true},
+		{path: "d.tar", chunk: 0, content: "ondone-download", source: true},
+		{path: "s0.tar", chunk: 0, content: "ondone-stage-local", local: true},
+		{path: "s1.tar", chunk: 0, content: "ondone-stage-dead"}, // 本地无、源站无 → 下载失败
+	})
+
+	var (
+		mu        sync.Mutex
+		events    []string // "p0done:<path>" / "done:<path>",按发生顺序
+		doneErr   = make(map[ChunkRef]error)
+		doneCalls = make(map[ChunkRef]int)
+		p0Err     = make(map[ChunkRef]error)
+		p0Calls   = make(map[ChunkRef]int)
+		inCall    atomic.Int64
+		maxCon    atomic.Int64
+	)
+	doneCh := make(chan struct{}, 8)
+	var p *PersistentPrefetcher
+	enter := func() {
+		if cur := inCall.Add(1); cur > maxCon.Load() {
+			maxCon.Store(cur)
+		}
+	}
+	p = env.newPrefetcher(Config{
+		Lookahead: 1,
+		OnP0Done: func(ref ChunkRef, err error) {
+			enter()
+			_ = p.Status() // 回调不持预取器内部锁,可安全查询状态
+			mu.Lock()
+			p0Calls[ref]++
+			p0Err[ref] = err
+			events = append(events, "p0done:"+ref.Path)
+			mu.Unlock()
+			inCall.Add(-1)
+			doneCh <- struct{}{}
+		},
+		OnDone: func(ref ChunkRef, err error) {
+			enter()
+			_ = p.Status()
+			mu.Lock()
+			doneCalls[ref]++
+			doneErr[ref] = err
+			events = append(events, "done:"+ref.Path)
+			mu.Unlock()
+			inCall.Add(-1)
+			doneCh <- struct{}{}
+		},
+	})
+
+	stageRefs := []ChunkRef{{Path: "s0.tar"}, {Path: "s1.tar"}}
+	if _, err := p.OnStageSwitch(ctx, orderOf("epoch-1", stageRefs, 2)); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	p0Refs := []ChunkRef{{Path: "h.tar"}, {Path: "d.tar"}}
+	if err := p.EnqueueP0(ctx, p0Refs); err != nil {
+		t.Fatalf("EnqueueP0: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+
+	// 4 块完成 = 4 次 OnDone + 2 次 OnP0Done(仅 P0 块)。
+	for i := 0; i < 6; i++ {
+		select {
+		case <-doneCh:
+		case <-time.After(testTimeout):
+			t.Fatalf("等待第 %d 个完成回调超时", i+1)
+		}
+	}
+	waitFor(t, "阶段块处理完成(cursor 推进到末块)", func() bool {
+		return p.Status().Cursor == stageRefs[1]
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ref := range slices.Concat(p0Refs, stageRefs) {
+		if got := doneCalls[ref]; got != 1 {
+			t.Errorf("OnDone(%s) 次数 = %d, want 1(每块恰好一次)", ref.Path, got)
+		}
+	}
+	for _, ref := range p0Refs {
+		if got := p0Calls[ref]; got != 1 {
+			t.Errorf("OnP0Done(%s) 次数 = %d, want 1", ref.Path, got)
+		}
+	}
+	for _, ref := range stageRefs {
+		if got := p0Calls[ref]; got != 0 {
+			t.Errorf("OnP0Done(%s) 次数 = %d, want 0(仅 P0 触发)", ref.Path, got)
+		}
+	}
+	if err := doneErr[p0Refs[0]]; err != nil {
+		t.Errorf("OnDone(h.tar) err = %v, want nil(本地命中)", err)
+	}
+	if err := doneErr[p0Refs[1]]; err != nil {
+		t.Errorf("OnDone(d.tar) err = %v, want nil(下载成功)", err)
+	}
+	if err := doneErr[stageRefs[0]]; err != nil {
+		t.Errorf("OnDone(s0.tar) err = %v, want nil(本地命中)", err)
+	}
+	if err := doneErr[stageRefs[1]]; err == nil {
+		t.Error("OnDone(s1.tar) err = nil, want 下载失败原因")
+	}
+	if err := p0Err[p0Refs[0]]; err != nil {
+		t.Errorf("OnP0Done(h.tar) err = %v, want nil", err)
+	}
+	if err := p0Err[p0Refs[1]]; err != nil {
+		t.Errorf("OnP0Done(d.tar) err = %v, want nil", err)
+	}
+	// P0 块:(OnP0Done, OnDone) 两回调并存,先 OnP0Done 后 OnDone。
+	idx := make(map[string]int, len(events))
+	for i, ev := range events {
+		idx[ev] = i
+	}
+	for _, ref := range p0Refs {
+		pd, ok1 := idx["p0done:"+ref.Path]
+		dn, ok2 := idx["done:"+ref.Path]
+		if !ok1 || !ok2 || pd >= dn {
+			t.Errorf("P0 块 %s 回调顺序 = (%v,%v), want 先 OnP0Done 后 OnDone;events=%v", ref.Path, pd, dn, events)
+		}
+	}
+	if got := maxCon.Load(); got != 1 {
+		t.Errorf("回调最大并发 = %d, want 1(调度协程内串行调用)", got)
+	}
+
+	// 下载面:本地命中块零下载;下载成功块恰一次(D25 键);失败块有下载尝试(≥1)。
+	keys := blockGets(env.store)
+	if n := countKey(keys, expectedBlockKey(testDataset, p0Refs[1])); n != 1 {
+		t.Errorf("下载块 d.tar 的 Get 次数 = %d, want 1;keys=%v", n, keys)
+	}
+	if slices.Contains(keys, expectedBlockKey(testDataset, p0Refs[0])) || slices.Contains(keys, expectedBlockKey(testDataset, stageRefs[0])) {
+		t.Errorf("本地命中块不应产生下载;keys=%v", keys)
+	}
+	if countKey(keys, expectedBlockKey(testDataset, stageRefs[1])) < 1 {
+		t.Errorf("源站无块的失败下载应有尝试;keys=%v", keys)
+	}
+}
+
+// countKey 返回 keys 中等于 key 的元素个数。
+func countKey(keys []string, key string) int {
+	n := 0
+	for _, k := range keys {
+		if k == key {
+			n++
+		}
+	}
+	return n
+}
+
+// ---------------- M4:OnCorrupt 本地坏块回源(D28) ----------------
+
+// repairWrapper 构造与接线阶段一致的 OnCorrupt 注入实现:Quarantine + 按 D25 键重下
+// (fetch,内部 Put 落块并校验)+ RemoveQuarantined(同指纹;内容同源)。
+func repairWrapper(env *testEnv) func(ctx context.Context, dataset string, ref ChunkRef) error {
+	return func(ctx context.Context, dataset string, ref ChunkRef) error {
+		fp := env.fps[ref]
+		if err := env.cs.Quarantine(fp); err != nil {
+			return err
+		}
+		rfp, err := env.fetch.Fetch(ctx, expectedBlockKey(dataset, ref), 0)
+		if err != nil {
+			return err
+		}
+		return env.cs.RemoveQuarantined(rfp)
+	}
+}
+
+// TestOnCorruptRepairsThenReady(验收 ④):本地命中判定遇 ErrCorrupt → OnCorrupt 回源修复
+// 成功且重开成功 → 视为就绪跳过下载(唯一一次数据块下载 = 修复本身的 D25 键请求),
+// quarantine 归零,游标正常推进;回调收到正确的 (dataset, ref)。
+func TestOnCorruptRepairsThenReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := newTestEnv(t, []blockSpec{
+		{path: "b.tar", chunk: 2, content: "corrupt-then-repaired", local: true, source: true},
+	})
+	ref := ChunkRef{Path: "b.tar", Chunk: 2}
+	env.corruptBlock(t, ref)
+	fp := env.fps[ref]
+	if _, err := env.cs.Open(fp); !errors.Is(err, cas.ErrCorrupt) {
+		t.Fatalf("前置坏块 Open err = %v, want ErrCorrupt", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		calls  int
+		gotDS  string
+		gotRef ChunkRef
+	)
+	inner := repairWrapper(env)
+	p := env.newPrefetcher(Config{
+		Lookahead: 1,
+		OnCorrupt: func(ctx context.Context, dataset string, ref ChunkRef) error {
+			mu.Lock()
+			calls++
+			gotDS = dataset
+			gotRef = ref
+			mu.Unlock()
+			return inner(ctx, dataset, ref)
+		},
+	})
+
+	order := orderOf("epoch-1", []ChunkRef{ref}, 1)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+
+	waitFor(t, "坏块经回源修复后就绪(cursor 推进)", func() bool {
+		return p.Status().Cursor == ref
+	})
+
+	// 唯一一次数据块下载 = 修复的回源请求(D25 键);预取器自身未重复下载。
+	want := []string{expectedBlockKey(testDataset, ref)}
+	if got := blockGets(env.store); !slices.Equal(got, want) {
+		t.Fatalf("数据块下载请求 = %v, want %v(修复后视为就绪,不再下载)", got, want)
+	}
+	mu.Lock()
+	if calls != 1 || gotDS != testDataset || gotRef != ref {
+		t.Fatalf("OnCorrupt 调用 = (calls=%d, dataset=%q, ref=%+v), want (1, %q, %+v)", calls, gotDS, gotRef, testDataset, ref)
+	}
+	mu.Unlock()
+
+	q, err := env.cs.ListQuarantined()
+	if err != nil {
+		t.Fatalf("ListQuarantined: %v", err)
+	}
+	if len(q) != 0 {
+		t.Fatalf("修复后 quarantine 未归零: %v", q)
+	}
+	content, err := env.readBlock(ref)
+	if err != nil || content != "corrupt-then-repaired" {
+		t.Fatalf("修复后块内容 = (%q, %v), want 正确内容", content, err)
+	}
+}
+
+// TestOnCorruptFallbackToDownload(验收 ④ 降级面):nil 回调 / 回调返回错误 / 回调返回 nil
+// 但未实际修复(重开仍坏)三类均按未命中走下载路径——下载覆盖坏块,恰一次数据块下载,
+// 块内容恢复、游标推进、quarantine 不受影响。
+func TestOnCorruptFallbackToDownload(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cb   func(ctx context.Context, ref ChunkRef) error
+	}{
+		{"nil callback", nil},
+		{"callback error", func(context.Context, ChunkRef) error { return errors.New("修复失败") }},
+		{"callback no-op", func(context.Context, ChunkRef) error { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			env := newTestEnv(t, []blockSpec{
+				{path: "f.tar", chunk: 1, content: "fallback-content", local: true, source: true},
+			})
+			ref := ChunkRef{Path: "f.tar", Chunk: 1}
+			env.corruptBlock(t, ref)
+
+			cfg := Config{Lookahead: 1}
+			if tc.cb != nil {
+				cfg.OnCorrupt = func(_ context.Context, _ string, r ChunkRef) error {
+					return tc.cb(ctx, r)
+				}
+			}
+			p := env.newPrefetcher(cfg)
+			if _, err := p.OnStageSwitch(ctx, orderOf("epoch-1", []ChunkRef{ref}, 1)); err != nil {
+				t.Fatalf("OnStageSwitch: %v", err)
+			}
+			startPrefetcher(t, p, ctx, cancel)
+
+			waitFor(t, "坏块经下载覆盖后就绪(cursor 推进)", func() bool {
+				return p.Status().Cursor == ref
+			})
+
+			// 下载路径覆盖坏块:恰一次数据块下载(D25 键),块内容恢复正常。
+			want := []string{expectedBlockKey(testDataset, ref)}
+			if got := blockGets(env.store); !slices.Equal(got, want) {
+				t.Fatalf("数据块下载请求 = %v, want %v(按未命中下载)", got, want)
+			}
+			content, err := env.readBlock(ref)
+			if err != nil || content != "fallback-content" {
+				t.Fatalf("下载覆盖后块内容 = (%q, %v), want (fallback-content, nil)", content, err)
+			}
+			q, err := env.cs.ListQuarantined()
+			if err != nil {
+				t.Fatalf("ListQuarantined: %v", err)
+			}
+			if len(q) != 0 {
+				t.Fatalf("降级路径不产生隔离: %v", q)
+			}
+		})
 	}
 }

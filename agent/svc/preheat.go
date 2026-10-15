@@ -23,7 +23,8 @@ import (
 // prefixes, chunks);状态 QUEUED→RUNNING→DONE/ERROR)。task_id 幂等:内容摘要相同幂等
 // 返回现有任务,不同返回 AlreadyExists。块进度经 prefetch.Config.OnP0Done 逐块回调
 // (回调在预取器调度协程内同步;本表回调路径只做 atomic 计数与无锁查表,不取表锁,不阻塞)。
-// 任务记录不做 TTL 清理(留 M6/Q13)。
+// 任务记录 TTL = taskTTL(Q13 结案):Submit/Status/RunningCount 任一入口先惰性清理过期
+// 任务,不另起清理协程(见 taskTTL 与 expireTasks)。
 type PreheatTasks struct {
 	cfg Config
 	pm  *PrefetchManager
@@ -35,6 +36,13 @@ type PreheatTasks struct {
 	// 以 COW 整体替换,回调路径无锁读)。
 	byDataset atomic.Pointer[map[string][]*preheatTask]
 }
+
+// taskTTL 是任务记录存活时长(Q13 结案:24h;入口惰性清理,不另起协程)。判定口径:
+// now − updatedAt > taskTTL——终态(DONE/ERROR)任务的 updatedAt 即完成时刻(即"完成
+// 超 24h 清理");非终态(QUEUED/RUNNING)任务的 updatedAt 即最近一次进度/状态刷新时刻,
+// 停滞超 24h 视作死任务一并清理(两种状态同口径,TLL 自最近进度起算而非创建时刻;
+// DECISIONS 回传)。
+const taskTTL = 24 * time.Hour
 
 // preheatRequest 是任务内容摘要(D7 任务引用四元组;task_id 幂等/冲突判据)。
 type preheatRequest struct {
@@ -189,6 +197,8 @@ func (t *PreheatTasks) onP0Done(dataset string, ref prefetch.ChunkRef, err error
 // 空列表立即 DONE(completed = 0);入队失败置 ERROR(任务仍可查)。返回 accepted=true
 // 的受理响应(即使任务已立即失败,状态经 GetPreheatStatus 查)。
 func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatRequest) (*agentpb.SubmitPreheatResponse, error) {
+	t.expireTasks() // 入口惰性清理过期任务(Q13;先清后判,过期 task_id 可复用)
+
 	// 1) 校验。
 	if node := req.GetNode(); node == "" || node != t.cfg.NodeName.String() {
 		return nil, status.Errorf(codes.InvalidArgument,
@@ -282,10 +292,11 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}, nil
 }
 
-// Status 返回任务状态(§5.1 PreheatStatus 字段逐一映射);task_id 缺失(空或不存在)
-// → NotFound。纯读(计数走 atomic,不取表锁以外路径)。
+// Status 返回任务状态(§5.1 PreheatStatus 字段逐一映射);task_id 缺失(空、不存在或
+// 已过 taskTTL 被入口清理)→ NotFound。计数走 atomic;入口在表锁内顺带惰性清理过期任务。
 func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.PreheatStatus, error) {
 	t.mu.Lock()
+	t.expireLocked(time.Now()) // 入口惰性清理过期任务(Q13)
 	tk, ok := t.tasks[taskID]
 	t.mu.Unlock()
 	if !ok {
@@ -306,10 +317,12 @@ func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.Preh
 	}, nil
 }
 
-// RunningCount 返回运行中任务数(QUEUED/RUNNING;GetNodeStatus.running_tasks)。
+// RunningCount 返回运行中任务数(QUEUED/RUNNING;GetNodeStatus.running_tasks);入口
+// 顺带惰性清理过期任务(Q13)。
 func (t *PreheatTasks) RunningCount() int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.expireLocked(time.Now())
 	var n int64
 	for _, tk := range t.tasks {
 		switch tk.stateNow() {
@@ -318,6 +331,52 @@ func (t *PreheatTasks) RunningCount() int64 {
 		}
 	}
 	return n
+}
+
+// expireTasks 惰性清理过期任务(Submit 入口调用;取表锁一次)。
+func (t *PreheatTasks) expireTasks() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.expireLocked(time.Now())
+}
+
+// expireLocked 删除过期任务并同步剔除 byDataset 快照(t.mu 已持)。byDataset 剔除防
+// 回调路径认领已出表任务(死任务残留 pending 会吞掉后续任务的同 ref 回调)与孤儿指针
+// 无界累积;重建新切片(COW),不原地改写旧快照(调度协程可能正在读)。
+func (t *PreheatTasks) expireLocked(now time.Time) {
+	if len(t.tasks) == 0 {
+		return
+	}
+	var expired map[*preheatTask]struct{}
+	for id, tk := range t.tasks {
+		if now.Sub(time.Unix(0, tk.updatedAt.Load())) > taskTTL {
+			if expired == nil {
+				expired = make(map[*preheatTask]struct{})
+			}
+			expired[tk] = struct{}{}
+			delete(t.tasks, id)
+			slog.Info("preheat: 任务记录过 TTL 清理", "task_id", id, "dataset", tk.req.dataset,
+				"state", tk.stateNow().String(), "ttl", taskTTL)
+		}
+	}
+	if expired == nil {
+		return
+	}
+	old := t.byDataset.Load()
+	if old == nil {
+		return
+	}
+	nw := make(map[string][]*preheatTask, len(*old))
+	for ds, list := range *old {
+		kept := make([]*preheatTask, 0, len(list))
+		for _, tk := range list {
+			if _, dead := expired[tk]; !dead {
+				kept = append(kept, tk)
+			}
+		}
+		nw[ds] = kept
+	}
+	t.byDataset.Store(&nw)
 }
 
 // register 填写块列表并登记进 dataset 索引(先登记后入队):total 与回调认领表由本次

@@ -7,6 +7,11 @@
 // P0 为显式预热入队(EnqueueP0;D27):不参与阶段簿记,每块完成经 Config.OnP0Done 回调
 // (在调度协程内同步调用,仅做记账,不得阻塞)。
 //
+// 完成回调与坏块回源(M4;D28):Config.OnDone 覆盖所有优先级队列的块完成(与 OnP0Done
+// 同触发点);Config.OnCorrupt 在本地命中判定遇 cas.Open 返回 ErrCorrupt 时回源修复
+// (Quarantine+RepairOne 的包装由接线阶段注入;修复成功且重新 Open 成功 → 就绪跳过下载,
+// 否则按未命中走下载路径——下载会覆盖坏块)。
+//
 // 类型 ChunkRef/ConsumeOrder 是 ordersource(M2 冻结)的类型别名,prefetch 只取类型、
 // 不依赖读端;下载与簿记契约见主对话裁决(D25 对象键;不 Acquire/不 Pin——引用是写快照
 // 方的簿记,Agent 只拉副本)。
@@ -57,13 +62,24 @@ const (
 	resultBufSize = 64
 )
 
-// Config 是预取器配置(design §5.2 冻结;D27 增 OnP0Done)。
+// Config 是预取器配置(design §5.2 冻结;D27 增 OnP0Done,D28 增 OnDone/OnCorrupt)。
 type Config struct {
 	Lookahead int // 邻域预取提前量,默认 8(≤0 取默认;D16)
 	// OnP0Done 是 P0 块完成回调(仅 P0 触发;D27):每块完成(本地就绪或下载成功 = nil,
 	// 抓取失败 = 具体原因)调用一次,在调度协程内同步调用——实现只做轻量记账,不得阻塞;
 	// nil 表示无回调。
 	OnP0Done func(ref ChunkRef, err error)
+	// OnDone 是所有优先级队列块完成回调(D28):每块完成(本地就绪/下载成功 = nil,下载
+	// 失败 = 具体原因)触发一次,与 OnP0Done 同触发点(同一调度协程内同步调用,不得阻塞;
+	// P0 块两回调并存,先 OnP0Done 后 OnDone);nil 表示无回调。collector 的 t_touch
+	// "预取写入"来源。
+	OnDone func(ref ChunkRef, err error)
+	// OnCorrupt 是本地坏块回源回调(主对话追加冻结,并入 D28 语义):本地命中判定遇
+	// cas.Open 返回 ErrCorrupt 时调用(在工作协程内,可阻塞;内部应为 Quarantine+RepairOne
+	// 组合,接线阶段注入 rescan 包装)。返回 nil 且随后按索引指纹重新 Open 成功 → 视为就绪
+	// (跳过下载);nil 回调 / 返回错误 / 重开失败 → 按未命中走下载路径(下载覆盖坏块)。
+	// dataset 取任务归属(Catalog 绑定的数据集);nil 表示不回源修复。
+	OnCorrupt func(ctx context.Context, dataset string, ref ChunkRef) error
 }
 
 // withDefaults 返回补齐默认值的配置(≤0 回退 defaultLookahead)。
@@ -196,6 +212,13 @@ type PersistentPrefetcher struct {
 	// 吞吐 EMA(ETA 用;mu 保护):bytes/s,0 = 无历史。
 	ema   float64
 	emaAt time.Time // 上次吞吐样本时刻
+
+	// fetchInflightMu/fetchInflight 维护回源在途计数(traincache_fetch_inflight_bytes
+	// 的本次口径 = 当前在途 Fetch 调用数,±1;见 reportFetchStart/End)。独立于调度锁 mu:
+	// 下载路径不与调度/簿记锁交错;锁内"计数递增 + Set"保证并发下载下 gauge 终值恒定
+	// (不会出现后写 Set 覆盖为旧值)。
+	fetchInflightMu sync.Mutex
+	fetchInflight   int64
 }
 
 // New 构造持久预取器(design §5.2 冻结签名)。cat/f/cs/m 分别提供索引查找、下载编排、
@@ -393,6 +416,56 @@ func (p *PersistentPrefetcher) reportStageSwitchStall(eta time.Duration) {
 	p.m.ObserveStageSwitchStall(eta.Seconds())
 }
 
+// reportFetchStart / reportFetchEnd 维护并上报回源在途请求数(回源线②:traincache_fetch_
+// inflight_bytes;本次口径 = 当前在途 Fetch 调用数,±1——family 名冻结为 bytes,gauge 语义
+// 见 DECISIONS 回传)。m == nil 时整体跳过(计数与 gauge 同源,m==nil 时两者都不维护,
+// 不会漂移);锁内连计数带 Set,多个下载 goroutine 并发时终值恒为 0。
+func (p *PersistentPrefetcher) reportFetchStart(dataset string) {
+	if p.m == nil {
+		return
+	}
+	p.fetchInflightMu.Lock()
+	defer p.fetchInflightMu.Unlock()
+	p.fetchInflight++
+	p.m.SetFetchInflightBytes(dataset, p.fetchInflight)
+}
+
+func (p *PersistentPrefetcher) reportFetchEnd(dataset string) {
+	if p.m == nil {
+		return
+	}
+	p.fetchInflightMu.Lock()
+	defer p.fetchInflightMu.Unlock()
+	p.fetchInflight--
+	p.m.SetFetchInflightBytes(dataset, p.fetchInflight)
+}
+
+// reportFetchSuccess 上报一次成功回源(回源线②):fetch_bytes_total{dataset,success}
+// += 实际交付字节 + fetch_requests_total{dataset,success} +1。字节口径 = Fetch 返回指纹
+// 的 cas.Open().Size()(Fetch 已读回校验,Size 即真实块数据字节);Open 失败(理论上
+// 不应发生,防御)回退 fallbackSize(索引 Size / P0 的 expectSize,可能为 0 → 不计字节)。
+func (p *PersistentPrefetcher) reportFetchSuccess(dataset string, fp cas.Fingerprint, fallbackSize int64) {
+	if p.m == nil {
+		return
+	}
+	n := fallbackSize
+	if br, err := p.cs.Open(fp); err == nil {
+		n = br.Size()
+		_ = br.Close()
+	}
+	p.m.AddFetchBytes(dataset, n)
+	p.m.IncFetchRequests(dataset, metrics.ResultSuccess)
+}
+
+// reportFetchError 上报一次失败回源(回源线②):fetch_requests_total{dataset,error} +1
+// (失败不产生字节,不触碰 fetch_bytes)。
+func (p *PersistentPrefetcher) reportFetchError(dataset string) {
+	if p.m == nil {
+		return
+	}
+	p.m.IncFetchRequests(dataset, metrics.ResultError)
+}
+
 // estimateETA 计算新窗口(K 块)就绪 ETA(D16):剩余未就绪字节 ÷ 吞吐 EMA(ema 为切换
 // 时刻快照)。就绪判定与抓取一致:Catalog.Lookup 命中且 cas.Open 成功;Lookup 未命中
 // (或索引尚无快照)的块既无 Size 也不产生下载,不计入字节。无吞吐历史(ema<=0)或全部
@@ -525,14 +598,22 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 
 // grabBlock 是默认抓取路径(design §5.2 内部约定;D25 对象键):Catalog.Lookup 命中 →
 // cas.Open 成功 = 本地命中(不产生下载,直接视为就绪,计入吞吐);Open 返回 ErrNotFound →
-// fetch.Fetch 下载(key = blockKey,expectSize = Entry.Size);其他 Open 错误 → 不抓取
-// (重扫描/坏块修复属 M4)。下载后不调 Acquire/Pin(簿记契约:引用是写快照方的职责,
-// Agent 只拉副本)。失败原因作 P0 完成回调的 err(阶段任务路径无回调,仅按 ready 记账)。
+// fetch.Fetch 下载(key = blockKey,expectSize = Entry.Size)。下载后不调 Acquire/Pin
+// (簿记契约:引用是写快照方的职责,Agent 只拉副本)。失败原因作完成回调的 err。
+//
+// 坏块(M4;D28):Open 返回 ErrCorrupt 时,若 Config.OnCorrupt 非 nil 则调用它(内部为
+// Quarantine+RepairOne 包装,在工作协程内执行,可阻塞);返回 nil 且按索引指纹重新 Open
+// 成功 → 视为就绪(跳过下载);nil 回调 / 修复失败 / 重开失败 → 按未命中走下载路径
+// (下载会覆盖坏块)。其他 Open 错误(IO 等)维持原口径:仅返回错误、不下载。
 //
 // 索引未命中/映射未加载(ErrNoCurrent)分两类口径:P0(显式预热)仍下载——预热先于订单
 // 到达时映射未加载(且预热不切换映射),键由 (dataset, path, chunk) 直接构造,expectSize
 // 未知按 0 记账(仅少占字节额度,不影响正确性);阶段任务(P1/P2/P3)不抓取——其映射由
 // LoadPrefixes 背书,未命中即订单引用了不存在的块。
+//
+// 回源线打点(②):仅真实下载路径打点(本地命中/修复就绪跳过不打点)——下载前
+// reportFetchStart(在途 +1)、下载后 reportFetchEnd(在途 -1),成功计
+// fetch_bytes+fetch_requests{success},失败计 fetch_requests{error}(见 reportFetch* 注释)。
 func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int64, ready bool, err error) {
 	ref := t.ref
 	var entrySize int64
@@ -550,7 +631,18 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 			_ = br.Close()
 			return entry.Size, true, nil
 		}
-		if !errors.Is(oerr, cas.ErrNotFound) {
+		switch {
+		case errors.Is(oerr, cas.ErrCorrupt):
+			// 坏块回源(D28):修复成功且重开成功 → 就绪;否则落到下载路径(覆盖坏块)。
+			if p.cfg.OnCorrupt != nil {
+				if cerr := p.cfg.OnCorrupt(ctx, t.dataset, ref); cerr == nil {
+					if br2, oerr2 := p.cs.Open(entry.Fingerprint); oerr2 == nil {
+						_ = br2.Close()
+						return entry.Size, true, nil
+					}
+				}
+			}
+		case !errors.Is(oerr, cas.ErrNotFound):
 			return entry.Size, false, oerr
 		}
 	default: // 索引无此条目
@@ -563,9 +655,14 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 		// 尚无 ConsumeOrder 绑定 dataset(D25 键需要 dataset):只在本地命中时就绪。
 		return entrySize, false, errors.New("prefetch: dataset 未绑定(尚无 ConsumeOrder),无法构造下载键")
 	}
-	if _, err := p.f.Fetch(ctx, blockKey(t.dataset, ref), entrySize); err != nil {
-		return entrySize, false, err
+	p.reportFetchStart(t.dataset)
+	fp, ferr := p.f.Fetch(ctx, blockKey(t.dataset, ref), entrySize)
+	p.reportFetchEnd(t.dataset)
+	if ferr != nil {
+		p.reportFetchError(t.dataset)
+		return entrySize, false, ferr
 	}
+	p.reportFetchSuccess(t.dataset, fp, entrySize)
 	return entrySize, true, nil
 }
 
@@ -578,9 +675,10 @@ func blockKey(dataset string, ref ChunkRef) string {
 // finishTask 处理一次抓取结果并推进簿记(调度协程内串行调用):t.st 为块归属阶段(阶段
 // 切换后在途完成仍记旧阶段,不干扰新阶段游标);仅当前阶段的完成触发邻域窗口补齐与
 // /metrics 上报(SetPrefetchCursor + 四队列 SetPrefetchQueueDepth,冻结口径:每块完成推进
-// cursor 时上报)。P0 块不参与阶段簿记:每块完成经 Config.OnP0Done 回调一次(err = 抓取
-// 失败原因),并照常更新四队列深度 gauge;回调在调度协程内同步调用且不持内部锁(回调
-// 内可安全调 Status 等只读方法),实现不得阻塞。
+// cursor 时上报)。完成回调(D27/D28):P0 块经 Config.OnP0Done(仅 P0),所有块经
+// Config.OnDone(与 OnP0Done 同触发点,先 OnP0Done 后 OnDone),err = 抓取失败原因
+// (就绪为 nil);回调在调度协程内同步调用且不持内部锁(回调内可安全调 Status 等只读
+// 方法),实现不得阻塞。
 func (p *PersistentPrefetcher) finishTask(res taskResult) {
 	t := res.t
 	var (
@@ -605,6 +703,7 @@ func (p *PersistentPrefetcher) finishTask(res taskResult) {
 		if p.cfg.OnP0Done != nil {
 			p.cfg.OnP0Done(t.ref, res.err)
 		}
+		p.notifyDone(t.ref, res.err)
 		return
 	}
 	st := t.st
@@ -626,6 +725,14 @@ func (p *PersistentPrefetcher) finishTask(res taskResult) {
 
 	if report {
 		p.reportCursor(chunk, depths)
+	}
+	p.notifyDone(t.ref, res.err)
+}
+
+// notifyDone 触发通用完成回调(D28;调度协程内同步调用,不持内部锁,不得阻塞)。
+func (p *PersistentPrefetcher) notifyDone(ref ChunkRef, err error) {
+	if p.cfg.OnDone != nil {
+		p.cfg.OnDone(ref, err)
 	}
 }
 
