@@ -23,6 +23,8 @@ type snapshotState struct {
 	raw     string
 	snapID  string
 	entries map[entryKey]Entry
+	// shards 是构建该快照所用 Manifest 的分片数（Shards 长度；D30：ShardsLoaded 的数据源）。
+	shards int
 }
 
 // Catalog 是清单管理方（读侧）：内存维护 块→位置 映射，定时刷新，原子切换。
@@ -98,7 +100,7 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 	}
 
 	// 全部加载/验证通过后才一次性切换（失败路径绝不修改旧映射）。
-	c.state.Store(&snapshotState{raw: content, snapID: m.SnapshotID, entries: entries})
+	c.state.Store(&snapshotState{raw: content, snapID: m.SnapshotID, entries: entries, shards: len(m.Shards)})
 	return nil
 }
 
@@ -140,8 +142,9 @@ func (c *Catalog) LoadPrefixes(ctx context.Context, prefixes []string) error {
 	}
 
 	// 全部相关分片加载/验证通过后才一次性切换（失败路径绝不修改旧映射）；raw 置空见
-	// snapshotState 注释。
-	c.state.Store(&snapshotState{snapID: m.SnapshotID, entries: entries})
+	// snapshotState 注释；shards 记 Manifest 分片数（D30 口径为全量 Shards 长度，
+	// 非本次前缀匹配到的分片数——manifest 本身已全量读取）。
+	c.state.Store(&snapshotState{snapID: m.SnapshotID, entries: entries, shards: len(m.Shards)})
 	return nil
 }
 
@@ -281,4 +284,15 @@ func (c *Catalog) Lookup(ctx context.Context, path string, chunk int64) (Entry, 
 		return Entry{}, false, nil
 	}
 	return e, true, nil
+}
+
+// ShardsLoaded 返回当前生效索引快照的 Manifest 分片数（Manifest.Shards 长度；D30）。
+// 尚无快照（未 Start/Refresh/LoadPrefixes 成功）返回 0。纯读：与 Lookup 同口径的
+// atomic.Pointer 快照读取，不取 mu、不长持锁，与 Refresh/LoadPrefixes 并发安全。
+func (c *Catalog) ShardsLoaded() int {
+	st := c.state.Load()
+	if st == nil {
+		return 0
+	}
+	return st.shards
 }

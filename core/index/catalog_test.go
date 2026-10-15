@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sortEntries 返回按 (path, chunk) 字典序排序的副本（与 List 输出定序约定一致）。
@@ -370,4 +371,117 @@ func TestListErrorKeepsOldMapping(t *testing.T) {
 		t.Fatalf("Lookup(/data/a) = (%+v, %v, %v), want 旧值 %+v", got, ok, err, eA)
 	}
 	assertMiss(t, c, eD.Path, eD.Chunk)
+}
+
+// TestShardsLoaded：D30 契约——尚无快照（未 Start/Refresh/LoadPrefixes 成功）返回 0；
+// 加载成功后返回当前生效快照的 Manifest 分片数（Shards 长度：Refresh 全量与
+// LoadPrefixes 局部加载均为全量 manifest 长度，非本次前缀匹配到的分片数）；加载失败
+// 不动旧值（失败不动旧映射）；且纯读不长持锁（mu 被持有时仍立即返回）。
+func TestShardsLoaded(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+	cfg := Config{MaxEntriesPerShard: 2} // 5 条 → 3 片
+	const dataset = "shardsloaded"
+
+	c := NewCatalog(env.store, dataset, cfg)
+
+	// 无快照：0；LoadPrefixes 因无 CURRENT 失败后仍保持 0。
+	if got := c.ShardsLoaded(); got != 0 {
+		t.Fatalf("ShardsLoaded(无快照) = %d, want 0", got)
+	}
+	if err := c.LoadPrefixes(ctx, []string{"/data"}); !errors.Is(err, ErrNoCurrent) {
+		t.Fatalf("LoadPrefixes(无 CURRENT) = %v, want ErrNoCurrent", err)
+	}
+	if got := c.ShardsLoaded(); got != 0 {
+		t.Fatalf("ShardsLoaded(加载失败后) = %d, want 保持 0", got)
+	}
+
+	// 5 条 → 3 片（[/data/a,/data/b]、[/model/m,/model/n]、[/val/v]）；Refresh 成功后 = Shards 长度。
+	entries := []Entry{
+		{Path: "/data/a", Chunk: 0, Size: 1, Node: "n1"},
+		{Path: "/data/b", Chunk: 0, Size: 2, Node: "n1"},
+		{Path: "/model/m", Chunk: 0, Size: 3, Node: "n1"},
+		{Path: "/model/n", Chunk: 0, Size: 4, Node: "n2"},
+		{Path: "/val/v", Chunk: 0, Size: 5, Node: "n2"},
+	}
+	for i := range entries {
+		entries[i].Fingerprint = env.putBlock(t, fmt.Sprintf("shardsloaded-block-%d", i))
+	}
+	w := NewWriter(env.store, env.cs, cfg)
+	if _, err := w.Commit(ctx, dataset, entries); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	_, m := currentSnapshot(t, env.store, dataset)
+	if len(m.Shards) != 3 {
+		t.Fatalf("manifest shards = %d, want 3", len(m.Shards))
+	}
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := c.ShardsLoaded(); got != len(m.Shards) {
+		t.Fatalf("ShardsLoaded(Refresh 后) = %d, want %d", got, len(m.Shards))
+	}
+
+	// LoadPrefixes 仅 /data 相关（1 片）：D30 口径仍为 Manifest 分片数（全量 3）。
+	c2 := NewCatalog(env.store, dataset, cfg)
+	if err := c2.LoadPrefixes(ctx, []string{"/data"}); err != nil {
+		t.Fatalf("LoadPrefixes(/data): %v", err)
+	}
+	if got := c2.ShardsLoaded(); got != len(m.Shards) {
+		t.Fatalf("ShardsLoaded(LoadPrefixes 局部) = %d, want %d(Manifest 分片数,非匹配数 1)", got, len(m.Shards))
+	}
+
+	// 新快照 upsert 3 条 → 8 条 → 4 片：Refresh 前进后取新值。
+	more := []Entry{
+		{Path: "/data/c", Chunk: 0, Size: 6, Node: "n3"},
+		{Path: "/model/o", Chunk: 0, Size: 7, Node: "n3"},
+		{Path: "/val/w", Chunk: 0, Size: 8, Node: "n3"},
+	}
+	for i := range more {
+		more[i].Fingerprint = env.putBlock(t, fmt.Sprintf("shardsloaded-more-%d", i))
+	}
+	if _, err := w.Commit(ctx, dataset, more); err != nil {
+		t.Fatalf("second Commit: %v", err)
+	}
+	_, m2 := currentSnapshot(t, env.store, dataset)
+	if len(m2.Shards) != 4 {
+		t.Fatalf("第二代 manifest shards = %d, want 4", len(m2.Shards))
+	}
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatalf("second Refresh: %v", err)
+	}
+	if got := c.ShardsLoaded(); got != len(m2.Shards) {
+		t.Fatalf("ShardsLoaded(新一代) = %d, want %d", got, len(m2.Shards))
+	}
+
+	// 相关分片损坏（此后不再 Commit，避免新提交复用被篡改的分片对象）→ LoadPrefixes
+	// 失败：旧值保持（失败不动旧映射）。
+	raw, err := getObject(ctx, env.store, m2.Shards[0].Key)
+	if err != nil {
+		t.Fatalf("read shard %s: %v", m2.Shards[0].Key, err)
+	}
+	raw[0] ^= 0xFF
+	if _, err := env.store.Put(ctx, m2.Shards[0].Key, bytes.NewReader(raw), int64(len(raw))); err != nil {
+		t.Fatalf("tamper shard: %v", err)
+	}
+	if err := c2.LoadPrefixes(ctx, []string{"/data"}); !errors.Is(err, ErrInvalidShard) {
+		t.Fatalf("LoadPrefixes(损坏分片) = %v, want ErrInvalidShard", err)
+	}
+	if got := c2.ShardsLoaded(); got != len(m.Shards) {
+		t.Fatalf("ShardsLoaded(失败后) = %d, want 保持 %d", got, len(m.Shards))
+	}
+
+	// 纯读不长持锁：mu 被持有时 ShardsLoaded 仍立即返回（不阻塞、不取锁）。
+	c.mu.Lock()
+	done := make(chan int, 1)
+	go func() { done <- c.ShardsLoaded() }()
+	select {
+	case got := <-done:
+		if got != len(m2.Shards) {
+			t.Errorf("ShardsLoaded(mu 被持有时) = %d, want %d", got, len(m2.Shards))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ShardsLoaded 阻塞于 mu, want 纯读不长持锁")
+	}
+	c.mu.Unlock()
 }

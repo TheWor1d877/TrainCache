@@ -87,6 +87,7 @@ func runPrefetch(args []string) int {
 	fs := flag.NewFlagSet("traincache prefetch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	endpoint := fs.String("endpoint", defaultEndpoint, "Agent gRPC 地址(全局选项)")
+	taskID := fs.String("task-id", "", "预热任务 ID(幂等键,必填)")
 	path := fs.String("path", "", "数据路径前缀(必填)")
 	node := fs.String("node", "", "目标节点(必填;仅作请求校验字段)")
 	chunks := fs.String("chunks", "", "块名清单,逗号分隔(必填)")
@@ -99,8 +100,8 @@ func runPrefetch(args []string) int {
 	if fs.NArg() > 0 {
 		return usageError(fs, "prefetch: 不接受位置参数 %q", fs.Args())
 	}
-	if *path == "" || *node == "" {
-		return usageError(fs, "prefetch: --path 与 --node 必填")
+	if *taskID == "" || *path == "" || *node == "" {
+		return usageError(fs, "prefetch: --task-id 与 --path 与 --node 必填")
 	}
 	// --chunks 仅校验非空(逗号切分);名字解析(chunk-NNN → (path, chunk) 字典序条目,
 	// D20)经 ListSnapshot 在 M3 落地,本里程碑不解析。
@@ -123,6 +124,7 @@ func runPrefetch(args []string) int {
 	defer cancel()
 
 	resp, err := agentpb.NewPreheatServiceClient(conn).SubmitPreheat(ctx, &agentpb.SubmitPreheatRequest{
+		TaskId:     *taskID,
 		Node:       *node,
 		Dataset:    *dataset,
 		SnapshotId: *snapshotID,
@@ -131,7 +133,7 @@ func runPrefetch(args []string) int {
 		// chunks 留空:M3 经 ListSnapshot 解析 --chunks 名字后填充。
 	})
 	if err != nil {
-		return rpcError(err, "prefetch 未实现(里程碑 M3)")
+		return rpcError(err, "prefetch: 提交预热任务失败")
 	}
 	fmt.Printf("accepted=%t task_id=%s %s\n", resp.GetAccepted(), resp.GetTaskId(), resp.GetMessage())
 	return exitOK

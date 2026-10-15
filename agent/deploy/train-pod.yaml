@@ -1,0 +1,101 @@
+# train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 7.1 §8)。
+#
+# 用法(kind 本机演练;命名空间由 agentd.yaml 创建,先 apply 它):
+#   docker build -f agent/deploy/ordersrc.Dockerfile -t traincache-ordersrc:dev .
+#   kind load docker-image traincache-ordersrc:dev --name traincache
+#   kind load docker-image busybox:latest --name traincache
+#   kubectl apply -f agent/deploy/train-pod.yaml
+#
+# 布局(§8 训练 Pod 侧):
+#   - trainer:hostPath 只读挂载 /var/cache/traincache/blocks/(验收 3:直接读取本地 CAS
+#     数据块,不经 Agent gRPC 读接口);此处为占位训练进程,循环枚举可见块文件证直读通路;
+#   - ordersrc sidecar:挂 /run/traincache(rw),ring 写 /run/traincache/orders/<pod-uid>.ring
+#     (§6.2;sidecar 参数 pod-uid/dataset/chunk 清单);循环重写保持 ring 持续推进
+#     (<30s 周期,避免 Agent 按 §7.4 判停滞进入降级);POD_UID 走 Downward API。
+#   - 同 Pod 两容器与所在节点的 agentd 共享 hostPath,天然同节点。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traincache-train
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-train
+spec:
+  containers:
+    # ---- 占位训练容器:hostPath 只读直读 CAS 块 ----
+    - name: trainer
+      image: busybox:latest
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - >-
+          echo "trainer: 直读本地 CAS 块(只读 hostPath /var/cache/traincache/blocks)";
+          while true; do
+            find /var/cache/traincache/blocks -type f -name '*.blk' | head -n 5;
+            sleep 30;
+          done
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: blocks
+          mountPath: /var/cache/traincache/blocks
+          readOnly: true
+    # ---- OrderSource sidecar:ConsumeOrder 最小写端(agent/ordersrc/ordersrc.py)----
+    - name: ordersrc
+      image: traincache-ordersrc:dev
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - >-
+          while true; do
+            python3 /opt/traincache/ordersrc.py --pod-uid "$POD_UID" --dataset "$DATASET" --chunks "$CHUNKS" || exit 1;
+            sleep 10;
+          done
+      env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: DATASET
+          value: "train-data"
+        # chunk 清单:"path:chunk" 逗号分隔,列表顺序 = 消费顺序(ordersrc --chunks 口径)
+        - name: CHUNKS
+          value: "train/train.bin:0,train/train.bin:1,train/train.bin:2,train/train.bin:3"
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: run
+          mountPath: /run/traincache
+  volumes:
+    # 只读挂载:DirectoryOrCreate 由 kubelet 建目录(与 DaemonSet 侧同路径同类型);
+    # 卷本身在所有容器内经 volumeMounts.readOnly 固定只读(验收 3)。
+    - name: blocks
+      hostPath:
+        path: /var/cache/traincache/blocks
+        type: DirectoryOrCreate
+    - name: run
+      hostPath:
+        path: /run/traincache
+        type: DirectoryOrCreate
