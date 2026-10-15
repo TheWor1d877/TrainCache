@@ -3,7 +3,7 @@ package svc
 // instrument_test.go:综合验收补齐的埋点断言(埋点实现见 instrument.go 与 server.go/
 // snapshot.go 的 observeRequest):
 //   - 索引线(③):ForOrder 的 LoadPrefixes 成功/失败 → index_refresh_total{success|error}、
-//     index_refresh_duration_seconds{success} 样本、index_shards_loaded 置 0;
+//     index_refresh_duration_seconds{success} 样本、index_shards_loaded 置真实分片数;
 //   - 延迟线(⑥):四个业务 RPC 成功与错误各计一次 request_duration_seconds{endpoint,result};
 //   - 订单到达 t_touch 刷新(④;§7.6 任务 4):订单内块经索引解析指纹后被
 //     Collector.Touch 刷新(LastTouch 推进),索引未命中/空 chunks/未绑定 collector 跳过。
@@ -65,8 +65,9 @@ func histogramSamples(t *testing.T, reg *metrics.Registry, name string, kv ...st
 
 // TestIndexLineMetricsOnOrderRefresh(综合验收 ②):ForOrder 的 LoadPrefixes 打点——
 // 成功:index_refresh_total{dataset,success} +1、index_refresh_duration_seconds 样本 +1、
-// index_shards_loaded 置 0(core index 未暴露已加载分片数,裁决见回传);失败(无 CURRENT 的
-// dataset,LoadPrefixes 报错):{error} +1 且不上报耗时(避免失败以 success 混入直方图)。
+// index_shards_loaded 置真实分片数(6.3 D30:Catalog.ShardsLoaded;夹具单块数据集 manifest
+// 恰 1 片);失败(无 CURRENT 的 dataset,LoadPrefixes 报错):{error} +1 且不上报耗时(避免
+// 失败以 success 混入直方图),index_shards_loaded 保持前值(失败不更新该 gauge)。
 // dataset 标签经白名单归并为 "other"(装置无白名单)。
 func TestIndexLineMetricsOnOrderRefresh(t *testing.T) {
 	fx := newSvcFixture(t)
@@ -94,8 +95,8 @@ func TestIndexLineMetricsOnOrderRefresh(t *testing.T) {
 	if got := durSamples(); got != 1 {
 		t.Errorf("index_refresh_duration 样本数 = %v, want 1(成功上报耗时)", got)
 	}
-	if got := testutil.ToFloat64(fx.reg.IndexShardsLoaded().WithLabelValues("other")); got != 0 {
-		t.Errorf("index_shards_loaded = %v, want 0(core index 未暴露分片数)", got)
+	if got := testutil.ToFloat64(fx.reg.IndexShardsLoaded().WithLabelValues("other")); got != 1 {
+		t.Errorf("index_shards_loaded = %v, want 1(单块数据集 manifest 恰 1 片,D30)", got)
 	}
 
 	// 失败路径:无 CURRENT 的 dataset → LoadPrefixes 报错 → {error} +1;耗时样本不变。
@@ -111,6 +112,9 @@ func TestIndexLineMetricsOnOrderRefresh(t *testing.T) {
 	}
 	if got := durSamples(); got != 1 {
 		t.Errorf("index_refresh_duration 样本数 = %v, want 保持 1(失败不上报耗时)", got)
+	}
+	if got := testutil.ToFloat64(fx.reg.IndexShardsLoaded().WithLabelValues("other")); got != 1 {
+		t.Errorf("index_shards_loaded(失败后) = %v, want 保持 1(失败不更新该 gauge)", got)
 	}
 }
 

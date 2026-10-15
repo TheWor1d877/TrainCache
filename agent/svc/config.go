@@ -22,8 +22,9 @@ const (
 const (
 	defaultGRPCAddr    = ":9410"
 	defaultMetricsAddr = ":9411"
-	// defaultCacheRoot 是 CAS 根目录默认值。本里程碑无对应 env:design §8 未列,
-	// 由 DaemonSet hostPath(/var/cache/traincache)固定(§8 部署要点)。
+	// defaultCacheRoot 是 CAS 根目录默认值。DaemonSet 部署仍用默认值(design §8 部署要点:
+	// hostPath /var/cache/traincache 固定);TRAINCACHE_CACHE_ROOT env(7.3 D38)仅覆盖本机
+	// 进程级演练与非标准缓存根场景,未设置时回退此默认。
 	defaultCacheRoot = "/var/cache/traincache"
 	// defaultOrdersDir 是 ordersource ring 发现目录默认值(design §6.2 路径;
 	// 两侧 Pod 同路径挂载 hostPath /run/traincache,decisions D22)。
@@ -72,7 +73,7 @@ type Config struct {
 	MetricsAddr      string    // TRAINCACHE_METRICS_ADDR,默认 :9411(D5;M1 未起服务,M6 落地)
 	Verify           string    // TRAINCACHE_VERIFY:xxh3 | xxh3+sha256,默认 xxh3
 	DatasetWhitelist []string  // TRAINCACHE_DATASET_WHITELIST,逗号分隔(§5.8 基数控制)
-	CacheRoot        string    // CAS 根目录,默认 /var/cache/traincache(本里程碑无 env)
+	CacheRoot        string    // TRAINCACHE_CACHE_ROOT,默认 /var/cache/traincache(7.3 D38:本机演练/非标准根)
 	OrdersDir        string    // TRAINCACHE_ORDERS_DIR,默认 /run/traincache/orders(§6.2 ring 发现目录)
 	// 对象存储接入(D26;经 core objectstore.NewMinIOStore 构造)。
 	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT,默认 127.0.0.1:9000
@@ -111,7 +112,7 @@ func Load() (*Config, error) {
 		MetricsAddr:       envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
 		Verify:            verify,
 		DatasetWhitelist:  splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
-		CacheRoot:         defaultCacheRoot,
+		CacheRoot:         envOr("TRAINCACHE_CACHE_ROOT", defaultCacheRoot),
 		OrdersDir:         envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
 		ObjstoreEndpoint:  envOr("TRAINCACHE_OBJSTORE_ENDPOINT", defaultObjstoreEndpoint),
 		ObjstoreAccessKey: envOr("TRAINCACHE_OBJSTORE_ACCESS_KEY", ""),

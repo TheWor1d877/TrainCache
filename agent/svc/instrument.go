@@ -46,8 +46,10 @@ func (m *PrefetchManager) dispatchOrderTouch(dataset string, cat *index.Catalog,
 // measureLoadPrefixes 执行一次订单索引加载并打索引线指标(③):每次真实发起的
 // LoadPrefixes 记一次 traincache_index_refresh_total{dataset,success|error};成功路径
 // 追加 traincache_index_refresh_duration_seconds{dataset,success}(签名无 result,失败
-// 耗时不上报——避免以 result="success" 混入失败样本);traincache_index_shards_loaded
-// 置 0(core index 未暴露"本次加载分片数",见 DECISIONS 回传;family 调用点即在此)。
+// 耗时不上报——避免以 result="success" 混入失败样本),并以 Catalog.ShardsLoaded()
+// (6.3 D30:当前生效快照的 Manifest 分片数)上报 traincache_index_shards_loaded{dataset}
+// (family 调用点即在此;此前恒 0 为 M6 遗留)。失败路径不更新该 gauge:失败不动旧映射,
+// gauge 保持前次成功值(尚无成功加载则为注册初值 0),不被瞬时错误打成 0。
 // 打点不改变调用语义:LoadPrefixes 的错误原样返回,调用方行为不变。
 func (m *PrefetchManager) measureLoadPrefixes(ctx context.Context, dataset string, cat *index.Catalog, prefixes []string) error {
 	start := time.Now()
@@ -62,7 +64,7 @@ func (m *PrefetchManager) measureLoadPrefixes(ctx context.Context, dataset strin
 	m.m.IncIndexRefresh(dataset, result)
 	if err == nil {
 		m.m.ObserveIndexRefreshDuration(dataset, time.Since(start).Seconds())
+		m.m.SetIndexShardsLoaded(dataset, int64(cat.ShardsLoaded()))
 	}
-	m.m.SetIndexShardsLoaded(dataset, 0)
 	return err
 }

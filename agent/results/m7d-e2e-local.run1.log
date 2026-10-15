@@ -1,0 +1,36 @@
+== TrainCache Agent 本机 e2e ============================================
+repo=/home/howardhe/Project/TrainCache  grpc=:19410  metrics=:19411
+cache=/tmp/tc-e2e-cache.CBOihO  orders=/tmp/tc-e2e-orders.2bvySz
+-- [1/6] 构建 agentd 与 traincache CLI
+  [OK]   agentd / traincache 构建完成
+-- [2/6] 启动 agentd(写入可写 CACHE_ROOT)
+  [OK]   agentd pid=988496 日志=/tmp/tc-e2e-agentd.LRBp9d.log
+-- [3/6] 等待 readiness(node status --item agent 成功)
+  [OK]   agentd ready
+-- [4/6] CLI 三命令
+    NODE           e2e-local-node
+    AGENT          true
+    CACHE_ROOT     /tmp/tc-e2e-cache.CBOihO
+    CACHED_BYTES   0
+    FREE_BYTES     16060084224
+    RUNNING_TASKS  0
+    RESCAN_PHASE   DONE
+  [OK]   node status(全量)rc=0
+  [OK]   CACHE_ROOT 生效=临时目录
+  [OK]   RESCAN_PHASE=DONE(空目录→DONE,闭合 M6 遗留)
+  [OK]   FREE_BYTES=16060084224(Statfs 动态值非零)
+  命令: traincache prefetch --task-id e2e-local-task-1 --path train/ --node e2e-local-node --chunks c0 --dataset train-data
+    traincache: RPC 失败: rpc error: code = Internal desc = 预热块列表解析失败: index: get dataset/train-data/CURRENT: Get "http://127.0.0.1:9000/traincache/?location=": dial tcp 127.0.0.1:9000: connect: connection refused
+  [FAIL] prefetch rc=1 未返回 accepted=true(输出: traincache: RPC 失败: rpc error: code = Internal desc = 预热块列表解析失败: index: get dataset/train-data/CURRENT: Get "http://127.0.0.1:9000/traincache/?location=": dial tcp 127.0.0.1:9000: connect: connection refused)
+  命令: traincache status --node e2e-local-node --task-id e2e-local-task-1
+    traincache: RPC 失败: rpc error: code = NotFound desc = task_id "e2e-local-task-1" 不存在
+  [FAIL] status rc=1 未找到任务(输出: traincache: RPC 失败: rpc error: code = NotFound desc = task_id "e2e-local-task-1" 不存在)
+-- [5/6] /metrics 七线指标(25 family + dataset 标签)
+  [OK]   curl :19411/metrics OK
+  [OK]   七线 23 个代表 family 全部出现(全量 25 见 agent/results)
+  [OK]   traincache_* family 总数=25
+  [OK]   dataset 标签存在(白名单 train-data / 归并 other)
+  [OK]   agent_up=1
+-- [6/6] 结果
+RESULT: FAIL(非预期失败 2)
+原始证据: /home/howardhe/Project/TrainCache/agent/results/e2e-local.raw.log

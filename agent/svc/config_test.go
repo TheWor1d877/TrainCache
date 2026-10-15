@@ -17,6 +17,7 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_METRICS_ADDR",
 		"TRAINCACHE_VERIFY",
 		"TRAINCACHE_DATASET_WHITELIST",
+		"TRAINCACHE_CACHE_ROOT",
 		"TRAINCACHE_ORDERS_DIR",
 		"TRAINCACHE_OBJSTORE_ENDPOINT",
 		"TRAINCACHE_OBJSTORE_ACCESS_KEY",
@@ -82,7 +83,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("DatasetWhitelist = %q, want 空", cfg.DatasetWhitelist)
 	}
 	if cfg.CacheRoot != "/var/cache/traincache" {
-		t.Errorf("CacheRoot = %q, want /var/cache/traincache(§8)", cfg.CacheRoot)
+		t.Errorf("CacheRoot = %q, want /var/cache/traincache(§8;TRAINCACHE_CACHE_ROOT 未设,D38)", cfg.CacheRoot)
 	}
 	if cfg.OrdersDir != "/run/traincache/orders" {
 		t.Errorf("OrdersDir = %q, want /run/traincache/orders(§6.2)", cfg.OrdersDir)
@@ -111,6 +112,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_METRICS_ADDR", "127.0.0.1:19411")
 	t.Setenv("TRAINCACHE_VERIFY", "xxh3+sha256")
 	t.Setenv("TRAINCACHE_DATASET_WHITELIST", "b-track,a-track")
+	t.Setenv("TRAINCACHE_CACHE_ROOT", "/tmp/tc-cache-root")
 	t.Setenv("TRAINCACHE_ORDERS_DIR", "/tmp/tc-orders")
 	t.Setenv("TRAINCACHE_OBJSTORE_ENDPOINT", "minio.internal:9001")
 	t.Setenv("TRAINCACHE_OBJSTORE_ACCESS_KEY", "ak-test")
@@ -148,6 +150,9 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !slices.Equal(cfg.DatasetWhitelist, []string{"b-track", "a-track"}) {
 		t.Errorf("DatasetWhitelist = %q, want [b-track a-track]", cfg.DatasetWhitelist)
+	}
+	if cfg.CacheRoot != "/tmp/tc-cache-root" {
+		t.Errorf("CacheRoot = %q, want /tmp/tc-cache-root(TRAINCACHE_CACHE_ROOT 覆盖,D38)", cfg.CacheRoot)
 	}
 	if cfg.OrdersDir != "/tmp/tc-orders" {
 		t.Errorf("OrdersDir = %q, want /tmp/tc-orders(TRAINCACHE_ORDERS_DIR 覆盖)", cfg.OrdersDir)
@@ -229,6 +234,22 @@ func TestLoadOrdersDirDefault(t *testing.T) {
 	}
 	if cfg.OrdersDir != "/run/traincache/orders" {
 		t.Errorf("OrdersDir = %q, want /run/traincache/orders(未设 env 取默认)", cfg.OrdersDir)
+	}
+}
+
+// TestLoadCacheRootBlankFallsBack：TRAINCACHE_CACHE_ROOT 全空白 → 回退默认
+// /var/cache/traincache(与 OrdersDir 等字符串 env 同一 envOr 解析口径;D38)。
+func TestLoadCacheRootBlankFallsBack(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("NODE_NAME", "worker-01")
+	t.Setenv("TRAINCACHE_CACHE_ROOT", "   ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CacheRoot != "/var/cache/traincache" {
+		t.Errorf("CacheRoot = %q, want /var/cache/traincache(全空白回退默认,D38)", cfg.CacheRoot)
 	}
 }
 

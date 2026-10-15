@@ -20,7 +20,7 @@ PY := /usr/bin/python3.12
 VENV_SITE := $(ROOT)/.venv/lib/python3.12/site-packages
 export PYTHONPATH := $(VENV_SITE):$(PYTHONPATH)
 
-.PHONY: bench-up bench-down kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down
+.PHONY: bench-up bench-down kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down e2e-local e2e-k8s
 
 # D 轨数据已挂在 data-up 之下(track-d-data);bench-up 显式列出,使全链路依赖面直读含 D 轨(幂等,不会重复执行)
 bench-up: kind-up k8s-up data-up track-d-data upload tc-up bench-verify
@@ -98,3 +98,14 @@ track-d-verify:
 
 track-d-down:
 	@bash $(ROOT)/scripts/track_d_down.sh
+
+# ---- e2e 演练(M7c):Agent 服务化端到端 ----
+# e2e-local:本机跑真实 agentd(TRAINCACHE_CACHE_ROOT 指向可写临时目录)+ CLI 三命令
+#            + /metrics 七线指标;自清理进程与临时目录,可重复执行。
+# e2e-k8s:  复用 kind 集群(traincache,幂等 kubectl apply),演练验收 2/3/8/10。
+# 两者证据落 agent/results/*.raw.log;验收 1/5/9 需对象存储 + 测试数据,另行覆盖。
+e2e-local:
+	@bash $(ROOT)/../agent/e2e/run-local.sh
+
+e2e-k8s:
+	@bash $(ROOT)/../agent/e2e/run-k8s.sh
