@@ -18,6 +18,11 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_VERIFY",
 		"TRAINCACHE_DATASET_WHITELIST",
 		"TRAINCACHE_ORDERS_DIR",
+		"TRAINCACHE_OBJSTORE_ENDPOINT",
+		"TRAINCACHE_OBJSTORE_ACCESS_KEY",
+		"TRAINCACHE_OBJSTORE_SECRET_KEY",
+		"TRAINCACHE_OBJSTORE_BUCKET",
+		"TRAINCACHE_OBJSTORE_SECURE",
 	} {
 		t.Setenv(k, "")
 	}
@@ -66,6 +71,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.OrdersDir != "/run/traincache/orders" {
 		t.Errorf("OrdersDir = %q, want /run/traincache/orders(§6.2)", cfg.OrdersDir)
 	}
+	if cfg.ObjstoreEndpoint != "127.0.0.1:9000" {
+		t.Errorf("ObjstoreEndpoint = %q, want 127.0.0.1:9000(D26)", cfg.ObjstoreEndpoint)
+	}
+	if cfg.ObjstoreAccessKey != "" || cfg.ObjstoreSecretKey != "" {
+		t.Errorf("Objstore 凭据默认值 = (%q, %q), want 均为空(D26)", cfg.ObjstoreAccessKey, cfg.ObjstoreSecretKey)
+	}
+	if cfg.ObjstoreBucket != "traincache" {
+		t.Errorf("ObjstoreBucket = %q, want traincache(D26)", cfg.ObjstoreBucket)
+	}
+	if cfg.ObjstoreSecure {
+		t.Error("ObjstoreSecure 默认值 = true, want false(D26)")
+	}
 	if want := wantDefaultHeat(); cfg.Heat != want {
 		t.Errorf("Heat 默认值 = %+v, want %+v(D14)", cfg.Heat, want)
 	}
@@ -79,6 +96,11 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_VERIFY", "xxh3+sha256")
 	t.Setenv("TRAINCACHE_DATASET_WHITELIST", "b-track,a-track")
 	t.Setenv("TRAINCACHE_ORDERS_DIR", "/tmp/tc-orders")
+	t.Setenv("TRAINCACHE_OBJSTORE_ENDPOINT", "minio.internal:9001")
+	t.Setenv("TRAINCACHE_OBJSTORE_ACCESS_KEY", "ak-test")
+	t.Setenv("TRAINCACHE_OBJSTORE_SECRET_KEY", "sk-test")
+	t.Setenv("TRAINCACHE_OBJSTORE_BUCKET", "tc-blocks")
+	t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
 
 	cfg, err := Load()
 	if err != nil {
@@ -103,9 +125,56 @@ func TestLoadEnvOverride(t *testing.T) {
 	if cfg.OrdersDir != "/tmp/tc-orders" {
 		t.Errorf("OrdersDir = %q, want /tmp/tc-orders(TRAINCACHE_ORDERS_DIR 覆盖)", cfg.OrdersDir)
 	}
+	if cfg.ObjstoreEndpoint != "minio.internal:9001" {
+		t.Errorf("ObjstoreEndpoint = %q, want minio.internal:9001(D26)", cfg.ObjstoreEndpoint)
+	}
+	if cfg.ObjstoreAccessKey != "ak-test" || cfg.ObjstoreSecretKey != "sk-test" {
+		t.Errorf("Objstore 凭据 = (%q, %q), want (ak-test, sk-test)", cfg.ObjstoreAccessKey, cfg.ObjstoreSecretKey)
+	}
+	if cfg.ObjstoreBucket != "tc-blocks" {
+		t.Errorf("ObjstoreBucket = %q, want tc-blocks", cfg.ObjstoreBucket)
+	}
+	if !cfg.ObjstoreSecure {
+		t.Error("ObjstoreSecure = false, want true(TRAINCACHE_OBJSTORE_SECURE=1)")
+	}
 	// TRAINCACHE_HEAT_* 解析延后 M5/M6:Heat 恒为 D14 默认值。
 	if want := wantDefaultHeat(); cfg.Heat != want {
 		t.Errorf("Heat = %+v, want 默认值 %+v(env 解析延后 M5/M6)", cfg.Heat, want)
+	}
+}
+
+// TestLoadObjstoreSecureBool:TRAINCACHE_OBJSTORE_SECURE 真值口径(D26:"1"/"true"/"yes",
+// 大小写不敏感);其余取值(含未设置、垃圾值)一律 false。
+func TestLoadObjstoreSecureBool(t *testing.T) {
+	truthy := []string{"1", "true", "TRUE", "Yes", " yes "}
+	for _, v := range truthy {
+		t.Run("truthy="+v, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			t.Setenv("TRAINCACHE_OBJSTORE_SECURE", v)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !cfg.ObjstoreSecure {
+				t.Errorf("ObjstoreSecure = false, want true(env=%q)", v)
+			}
+		})
+	}
+	falsy := []string{"0", "false", "no", "on", "junk"}
+	for _, v := range falsy {
+		t.Run("falsy="+v, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			t.Setenv("TRAINCACHE_OBJSTORE_SECURE", v)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ObjstoreSecure {
+				t.Errorf("ObjstoreSecure = true, want false(env=%q)", v)
+			}
+		})
 	}
 }
 

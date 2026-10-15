@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -28,13 +29,20 @@ func testConfig() Config {
 	}
 }
 
-// startServer 在 bufconn 内存网络上起全套服务(health + 三业务服务)。
+// startServer 在 bufconn 内存网络上起全套服务(health + 三业务服务),业务组件用
+// 标准测试装置(Mock 源站 + 临时 CAS)。
 func startServer(t *testing.T) *grpc.ClientConn {
+	t.Helper()
+	return startServerWith(t, newSvcFixture(t).agent())
+}
+
+// startServerWith 同上,但注入给定 Agent(需要预置数据集/任务的用例)。
+func startServerWith(t *testing.T, ag *Agent) *grpc.ClientConn {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
-	NewServer(testConfig()).Register(gs)
+	NewServer(testConfig(), ag).Register(gs)
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 
@@ -74,7 +82,7 @@ func TestGetNodeStatusStaticFields(t *testing.T) {
 		t.Errorf("free_bytes = %d, want 0(M1 静态)", st.GetFreeBytes())
 	}
 	if st.GetRunningTasks() != 0 {
-		t.Errorf("running_tasks = %d, want 0(M1 静态)", st.GetRunningTasks())
+		t.Errorf("running_tasks = %d, want 0(空任务表)", st.GetRunningTasks())
 	}
 	// 必须显式 DONE:枚举零值是 SAMPLING,readiness = phase != SAMPLING(design §8)。
 	if got := st.GetRescan().GetPhase(); got != agentpb.RescanStatus_DONE {
@@ -229,31 +237,142 @@ func TestReflectionListServices(t *testing.T) {
 	}
 }
 
-func TestUnimplementedRPCs(t *testing.T) {
+// TestReportBlocksUnimplemented:北向流服务端推迟至 Controller 里程碑(decisions Q1)。
+func TestReportBlocksUnimplemented(t *testing.T) {
 	conn := startServer(t)
+	stream, err := agentpb.NewReportServiceClient(conn).ReportBlocks(context.Background())
+	if err != nil {
+		t.Fatalf("ReportBlocks: %v", err)
+	}
+	// 客户端流:关闭并等待响应,取服务端状态(Unimplemented)。
+	_, err = stream.CloseAndRecv()
+	assertUnimplemented(t, err)
+}
+
+// TestSubmitPreheatRPC:经 bufconn 全链路提交(本地命中块)→ GetPreheatStatus 进度到 DONE。
+func TestSubmitPreheatRPC(t *testing.T) {
+	fx := newSvcFixture(t)
+	fx.commitDataset(t, testDataset, []svcBlockSpec{
+		{path: "s-000.tar", chunk: 0, content: "rpc-s0", local: true},
+		{path: "s-001.tar", chunk: 0, content: "rpc-s1", local: true},
+	})
+	fx.preloadMapping(t, testDataset) // 本地命中块零下载(映射已加载)
+	conn := startServerWith(t, fx.agent())
 	ctx := context.Background()
 
-	t.Run("SubmitPreheat", func(t *testing.T) {
-		_, err := agentpb.NewPreheatServiceClient(conn).SubmitPreheat(ctx, &agentpb.SubmitPreheatRequest{Node: "worker-01"})
-		assertUnimplemented(t, err)
-	})
-	t.Run("GetPreheatStatus", func(t *testing.T) {
-		_, err := agentpb.NewPreheatServiceClient(conn).GetPreheatStatus(ctx, &agentpb.GetPreheatStatusRequest{TaskId: "task-1"})
-		assertUnimplemented(t, err)
-	})
-	t.Run("ListSnapshot", func(t *testing.T) {
-		_, err := agentpb.NewNodeServiceClient(conn).ListSnapshot(ctx, &agentpb.ListSnapshotRequest{Dataset: "b-track"})
-		assertUnimplemented(t, err)
-	})
-	t.Run("ReportBlocks", func(t *testing.T) {
-		stream, err := agentpb.NewReportServiceClient(conn).ReportBlocks(ctx)
+	pc := agentpb.NewPreheatServiceClient(conn)
+	resp, err := pc.SubmitPreheat(ctx, validSubmitReq())
+	if err != nil {
+		t.Fatalf("SubmitPreheat: %v", err)
+	}
+	if !resp.GetAccepted() || resp.GetTaskId() != "task-1" {
+		t.Fatalf("SubmitPreheat 响应 = %+v, want accepted=true task-1", resp)
+	}
+
+	deadline := time.Now().Add(testTimeout)
+	for {
+		st, err := pc.GetPreheatStatus(ctx, &agentpb.GetPreheatStatusRequest{TaskId: "task-1"})
 		if err != nil {
-			t.Fatalf("ReportBlocks: %v", err)
+			t.Fatalf("GetPreheatStatus: %v", err)
 		}
-		// 客户端流:关闭并等待响应,取服务端状态(Unimplemented)。
-		_, err = stream.CloseAndRecv()
-		assertUnimplemented(t, err)
+		if st.GetState() == agentpb.PreheatStatus_DONE {
+			if st.GetTotalBlocks() != 2 || st.GetCompletedBlocks() != 2 {
+				t.Errorf("进度 = %d/%d, want 2/2", st.GetCompletedBlocks(), st.GetTotalBlocks())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("任务超时未 DONE: %v", st)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestSubmitPreheatRPCInvalidNode:node 不符 → InvalidArgument(design §5.1)。
+func TestSubmitPreheatRPCInvalidNode(t *testing.T) {
+	conn := startServer(t)
+	req := validSubmitReq()
+	req.Node = "other-node"
+	_, err := agentpb.NewPreheatServiceClient(conn).SubmitPreheat(context.Background(), req)
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument(err=%v)", got, err)
+	}
+}
+
+// TestGetPreheatStatusRPCNotFound:未知 task_id → NotFound。
+func TestGetPreheatStatusRPCNotFound(t *testing.T) {
+	conn := startServer(t)
+	_, err := agentpb.NewPreheatServiceClient(conn).GetPreheatStatus(context.Background(),
+		&agentpb.GetPreheatStatusRequest{TaskId: "no-such-task"})
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound(err=%v)", got, err)
+	}
+}
+
+// TestListSnapshotRPC:条目映射 (path, chunk, size) 与 (path, chunk) 字典序。
+func TestListSnapshotRPC(t *testing.T) {
+	fx := newSvcFixture(t)
+	fx.commitDataset(t, testDataset, []svcBlockSpec{
+		{path: "b-000.tar", chunk: 0, content: "rpc-b0", local: true},
+		{path: "a-001.tar", chunk: 2, content: "rpc-a1", local: true},
+		{path: "a-000.tar", chunk: 0, content: "rpc-a0", local: true},
 	})
+	conn := startServerWith(t, fx.agent())
+
+	resp, err := agentpb.NewNodeServiceClient(conn).ListSnapshot(context.Background(),
+		&agentpb.ListSnapshotRequest{Dataset: testDataset})
+	if err != nil {
+		t.Fatalf("ListSnapshot: %v", err)
+	}
+	want := []struct {
+		path  string
+		chunk int64
+		size  int64
+	}{
+		{"a-000.tar", 0, int64(len("rpc-a0"))},
+		{"a-001.tar", 2, int64(len("rpc-a1"))},
+		{"b-000.tar", 0, int64(len("rpc-b0"))},
+	}
+	if len(resp.GetEntries()) != len(want) {
+		t.Fatalf("entries 数 = %d, want %d", len(resp.GetEntries()), len(want))
+	}
+	for i, w := range want {
+		e := resp.GetEntries()[i]
+		if e.GetPath() != w.path || e.GetChunk() != w.chunk || e.GetSize() != w.size {
+			t.Errorf("entries[%d] = (%s, %d, %d), want (%s, %d, %d)",
+				i, e.GetPath(), e.GetChunk(), e.GetSize(), w.path, w.chunk, w.size)
+		}
+	}
+}
+
+// TestGetNodeStatusRunningTasks:running_tasks 取任务表实际值(QUEUED/RUNNING 计数)。
+func TestGetNodeStatusRunningTasks(t *testing.T) {
+	fx := newSvcFixture(t)
+	tk := newPreheatTask("t-run", "worker-01", preheatRequest{dataset: testDataset})
+	tk.state.Store(int32(agentpb.PreheatStatus_QUEUED))
+	fx.tasks.mu.Lock()
+	fx.tasks.tasks[tk.taskID] = tk
+	fx.tasks.mu.Unlock()
+
+	conn := startServerWith(t, fx.agent())
+	client := agentpb.NewNodeServiceClient(conn)
+
+	st, err := client.GetNodeStatus(context.Background(),
+		&agentpb.GetNodeStatusRequest{Node: "worker-01", Item: agentpb.NodeStatusItem_TASKS})
+	if err != nil {
+		t.Fatalf("GetNodeStatus(TASKS): %v", err)
+	}
+	if st.GetRunningTasks() != 1 {
+		t.Errorf("running_tasks = %d, want 1(QUEUED 计入)", st.GetRunningTasks())
+	}
+
+	st, err = client.GetNodeStatus(context.Background(), &agentpb.GetNodeStatusRequest{Node: "worker-01"})
+	if err != nil {
+		t.Fatalf("GetNodeStatus(全量): %v", err)
+	}
+	if st.GetRunningTasks() != 1 {
+		t.Errorf("全量 running_tasks = %d, want 1", st.GetRunningTasks())
+	}
 }
 
 func assertUnimplemented(t *testing.T, err error) {

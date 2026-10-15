@@ -28,7 +28,7 @@ var scanInterval = time.Second
 type OrderDiscovery struct {
 	dir     string
 	m       *metrics.Registry
-	onOrder func(podUID string, o ordersource.ConsumeOrder)
+	onOrder func(ctx context.Context, podUID string, o ordersource.ConsumeOrder)
 
 	mu      sync.Mutex
 	readers map[string]*ordersource.Reader // pod-uid → Reader(发现即入表,不随文件消失删除)
@@ -37,8 +37,9 @@ type OrderDiscovery struct {
 }
 
 // NewOrderDiscovery 构造发现器:dir = TRAINCACHE_ORDERS_DIR;m 收集格式错误计数(D23);
-// onOrder 默认由 Assemble 接 LogOrder。
-func NewOrderDiscovery(dir string, m *metrics.Registry, onOrder func(podUID string, o ordersource.ConsumeOrder)) *OrderDiscovery {
+// onOrder 默认由 Assemble 接 HandleOrder(日志行 + 预取接线);在转发 goroutine 内串行调用,
+// ctx = 发现循环 ctx(M3:预取 LoadPrefixes/OnStageSwitch 随发现循环取消)。
+func NewOrderDiscovery(dir string, m *metrics.Registry, onOrder func(ctx context.Context, podUID string, o ordersource.ConsumeOrder)) *OrderDiscovery {
 	return &OrderDiscovery{
 		dir:     dir,
 		m:       m,
@@ -123,14 +124,14 @@ func (d *OrderDiscovery) forward(ctx context.Context, podUID string, r *ordersou
 		if err != nil {
 			// 读端解析出的订单理论上必可序列化;防御性直投,不因去重失败丢单。
 			slog.Warn("orders: ConsumeOrder 序列化失败,跳过去重直投", "pod_uid", podUID, "err", err)
-			d.onOrder(podUID, o)
+			d.onOrder(ctx, podUID, o)
 			return
 		}
 		if bytes.Equal(raw, lastDelivered) {
 			return
 		}
 		lastDelivered = append(lastDelivered[:0], raw...)
-		d.onOrder(podUID, o)
+		d.onOrder(ctx, podUID, o)
 	}
 
 	if o, ok := r.CurrentOrder(); ok {
@@ -160,8 +161,8 @@ func (d *OrderDiscovery) closeReaders() {
 	}
 }
 
-// LogOrder 是默认的订单投递 handler:行级日志(高基数维度 path 不入日志聚合,
-// 阶段级字段足够定位;Q6)。msg 固定"收到 ConsumeOrder"——手工验收判据日志行。
+// LogOrder 是订单行级日志(高基数维度 path 不入日志聚合,阶段级字段足够定位;Q6)。
+// msg 固定"收到 ConsumeOrder"——手工验收判据日志行(M2 判据,字段与措辞不得改)。
 func LogOrder(podUID string, o ordersource.ConsumeOrder) {
 	slog.Info("收到 ConsumeOrder",
 		"pod_uid", podUID,
@@ -170,4 +171,19 @@ func LogOrder(podUID string, o ordersource.ConsumeOrder) {
 		"stage_id", o.StageID,
 		"chunks", len(o.Chunks),
 	)
+}
+
+// HandleOrder 组装默认订单 handler(Assemble 装配;在发现转发 goroutine 内串行调用):
+// 先打 M2 判据日志行(原样),再交预取管理器 ForOrder(前缀分片加载 → 首个订单 Start、
+// 后续 OnStageSwitch)。预取接线失败只记日志——单条订单失败不应终止发现循环。
+func HandleOrder(pm *PrefetchManager) func(ctx context.Context, podUID string, o ordersource.ConsumeOrder) {
+	return func(ctx context.Context, podUID string, o ordersource.ConsumeOrder) {
+		LogOrder(podUID, o)
+		if pm == nil {
+			return
+		}
+		if err := pm.ForOrder(ctx, podUID, o); err != nil && ctx.Err() == nil {
+			slog.Warn("orders: 预取接线失败", "pod_uid", podUID, "dataset", o.Dataset, "stage_id", o.StageID, "err", err)
+		}
+	}
 }

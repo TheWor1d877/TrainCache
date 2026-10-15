@@ -27,6 +27,10 @@ const (
 	// defaultOrdersDir 是 ordersource ring 发现目录默认值(design §6.2 路径;
 	// 两侧 Pod 同路径挂载 hostPath /run/traincache,decisions D22)。
 	defaultOrdersDir = "/run/traincache/orders"
+	// defaultObjstoreEndpoint 是对象存储端点默认值(D26:进程内 MinIO 边车约定)。
+	defaultObjstoreEndpoint = "127.0.0.1:9000"
+	// defaultObjstoreBucket 是对象存储桶默认值(D26;v1 单桶)。
+	defaultObjstoreBucket = "traincache"
 )
 
 // HeatConfig 是热度与磁盘触发线参数(D14:N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%)。
@@ -41,7 +45,7 @@ type HeatConfig struct {
 	DiskCriticalPercent float64       // M:激进 Sweep + 告警触发线(%),默认 90
 }
 
-// Config 是 Agent 运行配置(design §8;D5/D8/D14)。
+// Config 是 Agent 运行配置(design §8;D5/D8/D14/D26)。
 type Config struct {
 	NodeName         nodeid.ID // NODE_NAME(D8:必填、权威节点标识)
 	GRPCAddr         string    // TRAINCACHE_GRPC_ADDR,默认 :9410(D5)
@@ -50,7 +54,13 @@ type Config struct {
 	DatasetWhitelist []string  // TRAINCACHE_DATASET_WHITELIST,逗号分隔(§5.8 基数控制)
 	CacheRoot        string    // CAS 根目录,默认 /var/cache/traincache(本里程碑无 env)
 	OrdersDir        string    // TRAINCACHE_ORDERS_DIR,默认 /run/traincache/orders(§6.2 ring 发现目录)
-	Heat             HeatConfig
+	// 对象存储接入(D26;经 core objectstore.NewMinIOStore 构造)。
+	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT,默认 127.0.0.1:9000
+	ObjstoreAccessKey string // TRAINCACHE_OBJSTORE_ACCESS_KEY,默认空(匿名/无鉴权)
+	ObjstoreSecretKey string // TRAINCACHE_OBJSTORE_SECRET_KEY,默认空
+	ObjstoreBucket    string // TRAINCACHE_OBJSTORE_BUCKET,默认 traincache(v1 单桶)
+	ObjstoreSecure    bool   // TRAINCACHE_OBJSTORE_SECURE,默认 false("1"/"true"/"yes" 为真)
+	Heat              HeatConfig
 }
 
 // Load 从环境变量加载配置并校验(design §8):
@@ -70,14 +80,19 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		NodeName:         node,
-		GRPCAddr:         envOr("TRAINCACHE_GRPC_ADDR", defaultGRPCAddr),
-		MetricsAddr:      envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
-		Verify:           verify,
-		DatasetWhitelist: splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
-		CacheRoot:        defaultCacheRoot,
-		OrdersDir:        envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
-		Heat:             defaultHeatConfig(), // D14 默认值;env 覆盖延后 M5/M6
+		NodeName:          node,
+		GRPCAddr:          envOr("TRAINCACHE_GRPC_ADDR", defaultGRPCAddr),
+		MetricsAddr:       envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
+		Verify:            verify,
+		DatasetWhitelist:  splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
+		CacheRoot:         defaultCacheRoot,
+		OrdersDir:         envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
+		ObjstoreEndpoint:  envOr("TRAINCACHE_OBJSTORE_ENDPOINT", defaultObjstoreEndpoint),
+		ObjstoreAccessKey: envOr("TRAINCACHE_OBJSTORE_ACCESS_KEY", ""),
+		ObjstoreSecretKey: envOr("TRAINCACHE_OBJSTORE_SECRET_KEY", ""),
+		ObjstoreBucket:    envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
+		ObjstoreSecure:    envBool("TRAINCACHE_OBJSTORE_SECURE"),
+		Heat:              defaultHeatConfig(), // D14 默认值;env 覆盖延后 M5/M6
 	}, nil
 }
 
@@ -100,6 +115,16 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool 解析布尔 env(D26 口径:TrimSpace 后 "1"/"true"/"yes",大小写不敏感,为真;
+// 未设置或其余取值一律为假,不报错——布尔 env 的错误容忍度高于端口/等级类)。
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 // splitList 逗号切分、TrimSpace、丢空项(TRAINCACHE_DATASET_WHITELIST 解析口径)。
