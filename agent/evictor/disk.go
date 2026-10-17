@@ -1,4 +1,4 @@
-// disk.go 提供默认磁盘利用率来源:Config.Usage 为 nil 且 BlockDir 非空时,
+// Package evictor： disk.go 提供默认磁盘利用率来源:Config.Usage 为 nil 且 BlockDir 非空时,
 // New 取 statfs(BlockDir) 作为实现(本包唯一触碰文件系统的地方是 core cas.Evict,
 // 利用率查询本身经此默认实现)。
 package evictor

@@ -1,4 +1,4 @@
-// families.go 落 M6 指标底座:design §5.8 七线指标全量注册(23 个 family 中新增 20 个;
+// Package metrics： families.go 落 M6 指标底座:design §5.8 七线指标全量注册(23 个 family 中新增 20 个;
 // prefetch_queue_depth / prefetch_cursor / stage_switch_stall_seconds 三个由 M3 注册,复用不动)
 // 与主对话冻结的专用打点 API(M4 rescan / M5 collector / M6 淘汰循环按这里冻结的方法名打点)。
 //

@@ -1,16 +1,33 @@
-// Package collector 是 Agent 的采集与降级层(design §5.5/§6.4/§7.4;decisions D14/D15/
-// D24/D29/D31):热度映射与淘汰得分、命中率(滚动窗口 + 按训练阶段聚合)、交叉校准、30s
-// 降级状态机,以及 heatmap.json 的周期 dump 与启动恢复。覆盖验收 10。
+// Package collector 是 Agent 的采集与降级层。
 //
-// 数据来源(§5.4/§5.5):
-//   - 打开事件:钩子 open_report(主源,svc 接线把 (path, chunk) 经索引解析为指纹后调 Open)
-//     与 inotify 旁路(兜底源,Start 起监听 blockDir/blocks 下 IN_OPEN);
-//   - 预取写入与订单刷新:由接线阶段调 Touch(fp, t) 注入(D24"t_touch 三源最大值");
-//   - 消费侧推进:钩子 advance 帧经接线层调 Advance(chunk),与校准重对齐共用回调;
-//   - ring 探活:ordersource.Reader.LastAdvance()/Missing()(D29,30s 停滞判定)。
+// collector 不产生订单数据，也不直接读写 ring 文件。它接收接线层推入的事件，
+// 主动向 ordersource.Reader 探活，在此基础上完成统计与状态判定，并把热度图持久化。
 //
-// 单 ring 语义:NewCollector 冻结形参为单个 *ordersource.Reader(decisions D31);
-// 多 Pod(多 ring)场景由接线层自行聚合。
+// 职责：
+//   - 热度映射与淘汰得分：记录数据块被打开、预取、消费的情况，算出热度与淘汰得分；
+//   - 命中率统计：滚动窗口内统计，并按训练阶段聚合；
+//   - 交叉校准：用不同来源的事件互相校准；
+//   - 30s 降级状态机：订单源超过 30s 未推进则判定停滞并降级；
+//   - heatmap.json：周期 dump，启动时恢复。
+//
+// 输入事件（由 svc 接线层调用下列方法推入 collector）：
+//   - Open(fp)：打开事件。主源是钩子 open_report，接线层把 (path, chunk) 经索引
+//     解析为指纹后调用；兜底源是 inotify，Start 后监听 blockDir/blocks 下的 IN_OPEN。
+//   - Touch(fp, t)：预取写入与订单刷新事件，t_touch 取三源最大值。
+//   - Advance(chunk)：消费侧推进事件，来自钩子 advance 帧，与校准重对齐共用回调；
+//     用于算命中率、按训练阶段聚合和校准。
+//
+// 主动探活（collector 调 ordersource.Reader，用于降级状态机）：
+//   - LastAdvance() / Missing()：检查 ring 的 write_seq 是否推进、是否有缺失或代际
+//     变化；30s 未推进即判定订单源停滞并触发降级。
+//
+// 装配与边界：
+//   - collector 跑在 Go Agent 进程内，由 svc 创建并接线；
+//   - NewCollector 只接收一个 *ordersource.Reader，即单 collector 只绑一个 ring；
+//   - 多 Pod（多 ring）场景由接线层聚合多个 Reader，collector 本身不管理多 ring。
+//
+// 覆盖验收 10。设计见 design §5.5/§6.4/§7.4，决策见 D14/D15/D24/D29/D31。
+
 package collector
 
 import (
