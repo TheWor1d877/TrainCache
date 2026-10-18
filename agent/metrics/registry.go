@@ -24,7 +24,7 @@ const (
 const (
 	prefetchQueueDepthName = "traincache_prefetch_queue_depth"
 	prefetchCursorName     = "traincache_prefetch_cursor"
-	stageSwitchStallName   = "traincache_stage_switch_stall_seconds"
+	stageSwitchETAName     = "traincache_stage_switch_eta_seconds"
 )
 
 // 钩子帧格式错误 counter 的固定维度(decisions D33:counter,labels=["reason"]∈{parse,size};
@@ -54,7 +54,8 @@ type Config struct {
 }
 
 // Registry 持有 dataset 白名单与 Prometheus 注册表(七线 23 个 family 在此挂载;
-// 新增 family 的构造/注册/预置见 families.go 的 initSevenLine)。
+// 新增 family 的构造/注册/预置见 families.go 的 initSevenLine / initHooksAndEvidence;
+// M9 后全量 34 个 family,含 D23/D33 两条格式错误线与 D44 读 miss 线)。
 type Registry struct {
 	whitelist map[string]struct{}
 	reg       *prometheus.Registry
@@ -68,18 +69,18 @@ type Registry struct {
 	hookFormatErrors *prometheus.CounterVec
 
 	// M3 预取线(New 内 MustRegister;队列深度构造时预置 4 个子指标为 0)。
-	prefetchQueueDepth *prometheus.GaugeVec // labels=["priority"]∈{P0..P3}
-	prefetchCursor     prometheus.Gauge     // 值 = 游标块的 chunk 号
-	stageSwitchStall   prometheus.Histogram // prometheus.DefBuckets
+	prefetchQueueDepth *prometheus.GaugeVec     // labels=["priority"]∈{P0..P3}
+	prefetchCursor     prometheus.Gauge         // 值 = 游标块的 chunk 号
+	stageSwitchStall   *prometheus.HistogramVec // stage_switch_eta_seconds;labels=["dataset"](M9/D46 补);prometheus.DefBuckets
 
 	// 七线新增 20 个 family(design §5.8;M6;New 内构造/注册/预置,打点 API 见 families.go)。
 	// ① 命中率线。
-	cacheHits     *prometheus.CounterVec // dataset,result 固定 success
-	cacheMisses   *prometheus.CounterVec // dataset,result∈{success,refetched,error}
-	cacheHitRatio *prometheus.GaugeVec   // dataset;值由内部计数维护(见 muCacheRatio)
+	cacheHits     *prometheus.CounterVec // dataset,result 固定 success,source,phase
+	cacheMisses   *prometheus.CounterVec // dataset,result∈{success,refetched,error},phase
+	cacheHitRatio *prometheus.GaugeVec   // dataset,phase;值由内部计数维护(见 muCacheRatio)
 	// ② 回源线。
-	fetchBytes         *prometheus.CounterVec // dataset,result 固定 success
-	fetchRequests      *prometheus.CounterVec // dataset,result∈{success,error}
+	fetchBytes         *prometheus.CounterVec // dataset,result 固定 success,reason
+	fetchRequests      *prometheus.CounterVec // dataset,result∈{success,error},reason
 	fetchInflightBytes *prometheus.GaugeVec   // dataset
 	// ③ 索引线。
 	indexRefresh         *prometheus.CounterVec   // dataset,result∈{success,error}
@@ -92,7 +93,7 @@ type Registry struct {
 	// ⑤ 磁盘淘汰线。
 	evictBlocks           *prometheus.CounterVec // dataset,result∈{normal,danger}
 	evictProtectedSkipped *prometheus.CounterVec // dataset,result∈{normal,danger}
-	// ⑥ 延迟线(stageSwitchStall 见 M3 字段)。
+	// ⑥ 延迟线(stageSwitchStall 字段见 M3,metric 名为 stage_switch_eta_seconds)。
 	requestDuration *prometheus.HistogramVec // endpoint,result∈{success,error};固定 bucket
 	// ⑦ 节点状态线(prefetchQueueDepth / prefetchCursor 见 M3 字段)。
 	agentUp        *prometheus.GaugeVec // node;构造时预置 1
@@ -101,14 +102,33 @@ type Registry struct {
 	quarantined    *prometheus.GaugeVec // dataset
 	diskUsageRatio *prometheus.GaugeVec // dataset
 
+	// M8/D44:读 miss 线(不带 dataset)。
+	hookReadMiss *prometheus.CounterVec // reason∈{absent,corrupt}
+
+	// M9/D46~D48:8 个证据/阶段 family。
+	prefetchHitRatio     *prometheus.GaugeVec     // dataset
+	readStall            *prometheus.HistogramVec // dataset,phase,cause
+	fetchSingleflight    *prometheus.CounterVec   // dataset
+	repairQueueDepth     *prometheus.GaugeVec     // dataset
+	prefetchTaskDuration *prometheus.HistogramVec // dataset,priority
+	prefetchLeadBlocks   *prometheus.GaugeVec     // dataset
+	consumptionAdvance   *prometheus.CounterVec   // dataset,source
+	fetchBandwidthLimit  *prometheus.GaugeVec     // dataset
+
 	// mu 保护 synced:Prometheus counter 只能增,Sync 以"上次同步的绝对值"为基线做增量 Add。
 	mu     sync.Mutex
 	synced [2]int64 // [magic, version] 上次同步的绝对值
 
 	// muCacheRatio 保护 cacheRatio:cache_hit_ratio gauge 由 Registry 内部计数
-	// (按归一化 dataset 记 hits/misses)维护,两 Observe 方法每次调用即时更新。
+	// (按归一化 dataset + phase 记 hits/misses)维护,两 Observe 方法每次调用即时更新。
 	muCacheRatio sync.Mutex
-	cacheRatio   map[string]*hitMiss
+	cacheRatio   map[ratioKey]*hitMiss
+}
+
+// ratioKey 是 cache_hit_ratio 内部计数的键(dataset 已归一,phase 为编译期枚举)。
+type ratioKey struct {
+	dataset string
+	phase   string
 }
 
 // New 构造注册骨架;白名单为空 → 所有 dataset 归并 "other"。
@@ -129,7 +149,7 @@ func New(cfg Config) *Registry {
 			Name: hookFormatErrorsName,
 			Help: "钩子帧格式错误累计次数(reason=parse|size;decisions D33)",
 		}, []string{"reason"}),
-		cacheRatio: make(map[string]*hitMiss),
+		cacheRatio: make(map[ratioKey]*hitMiss),
 	}
 	r.prefetchQueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: prefetchQueueDepthName,
@@ -137,13 +157,13 @@ func New(cfg Config) *Registry {
 	}, []string{"priority"})
 	r.prefetchCursor = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: prefetchCursorName,
-		Help: "预取游标块的 chunk 号(design §5.2 Status.Cursor)",
+		Help: "预取器调度游标块的 chunk 号(调度进度,非 Status.Cursor 消费位点;design §5.2/D49)",
 	})
-	r.stageSwitchStall = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    stageSwitchStallName,
-		Help:    "阶段切换停滞秒数(OnStageSwitch 返回的\"切换到新窗口就绪\"ETA;design §5.2)",
+	r.stageSwitchStall = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    stageSwitchETAName,
+		Help:    "阶段切换 ETA 秒数(OnStageSwitch 返回的\"切换到新窗口就绪\"预估时间,非实测 stall;dataset 标签;design §5.2/D46)",
 		Buckets: prometheus.DefBuckets,
-	})
+	}, []string{"dataset"})
 	r.reg.MustRegister(r.formatErrors, r.hookFormatErrors, r.prefetchQueueDepth, r.prefetchCursor, r.stageSwitchStall)
 	// 预置两个 reason 子指标为 0:family 自启动即出现在 /metrics(无坏文件时也可见)。
 	r.formatErrors.WithLabelValues(reasonMagic)
@@ -155,8 +175,12 @@ func New(cfg Config) *Registry {
 	for _, pri := range priorityLabels {
 		r.prefetchQueueDepth.WithLabelValues(pri)
 	}
+	// stage_switch_eta 预置 dataset="other"(M9 补 dataset 标签后自启动可见)。
+	r.stageSwitchStall.WithLabelValues(otherDatasetLabel)
 	// 七线新增 20 个 family:构造、注册与预置(含 agent_up=1)。
 	r.initSevenLine()
+	// M8/D44 与 M9/D46~D48 新增 9 个 family。
+	r.initHooksAndEvidence()
 	return r
 }
 
@@ -215,10 +239,17 @@ func (r *Registry) SetPrefetchCursor(cursor int64) {
 	r.prefetchCursor.Set(float64(cursor))
 }
 
-// ObserveStageSwitchStall 记录一次阶段切换停滞(histogram traincache_stage_switch_stall_seconds,
-// prometheus.DefBuckets):值 = OnStageSwitch 返回的"切换到新窗口就绪"ETA 秒数。
-func (r *Registry) ObserveStageSwitchStall(seconds float64) {
-	r.stageSwitchStall.Observe(seconds)
+// ObserveStageSwitchStall 记录一次阶段切换 ETA(histogram traincache_stage_switch_eta_seconds,
+// prometheus.DefBuckets):值 = OnStageSwitch 返回的"切换到新窗口就绪"预估秒数(非实测 stall;
+// 方法名沿用冻结签名)。
+// M9/D46 起补 dataset 标签;datasets 为可选参数(缺省 → 归并值 other),兼容冻结的
+// prefetch 调用点 p.m.ObserveStageSwitchStall(eta.Seconds())。
+func (r *Registry) ObserveStageSwitchStall(seconds float64, datasets ...string) {
+	dataset := ""
+	if len(datasets) > 0 {
+		dataset = datasets[0]
+	}
+	r.stageSwitchStall.WithLabelValues(r.DatasetLabel(dataset)).Observe(seconds)
 }
 
 // Prometheus 返回底层注册表(M6 挂载六线 family 与 /metrics HTTP handler 用)。

@@ -85,6 +85,14 @@ func (a *Agent) bindCollector(ctx context.Context, podUID string, r *ordersource
 	a.collMu.Unlock()
 
 	c.SetAdvanceCallback(a.onCalibratedAdvance)
+	// D49:inotify 兜底 OPEN → 指纹反查当前订单 → 推进纯消费位点(门控在 collector 内:
+	// 钩子活跃期不回调,避免与 source=hook 双计)。
+	c.SetOpenCallback(a.onInotifyOpen)
+	// D49 self-open guard:prefetch/fetch/rescan/backfill 等 Agent 自身读打开的指纹在
+	// TTL 内不触发 onInotifyOpen(热度/命中率仍照常 noteOpen)。
+	if a.selfOpen != nil {
+		c.SetOpenFilter(a.selfOpen.SelfOpened)
+	}
 	slog.Info("collector: 绑定首个 order ring", "pod_uid", podUID, "block_dir", a.Cfg.CacheRoot)
 	c.Start(ctx)
 }
@@ -105,8 +113,29 @@ func (a *Agent) onCalibratedAdvance(chunk int64) {
 	if !ok {
 		return
 	}
-	if err := a.Prefetch.OnConsumeSideAdvance(context.Background(), o.Dataset, ref); err != nil {
-		slog.Warn("collector: 校准重对齐推进预取游标失败", "dataset", o.Dataset, "chunk", chunk, "err", err)
+	a.Prefetch.OnConsumeSideAdvance(context.Background(), o.Dataset, ref)
+}
+
+// onInotifyOpen 是 collector inotify 兜底打开回调(D49):按指纹反查各 dataset 当前订单的
+// 候选块引用,逐个尝试推进纯消费位点;只要有一个真正推进(idx > consume)就记一次
+// consumption_advance{source=inotify} 并结束。重复 OPEN 由 consume 单调自然去重
+// (idx <= consume 返回 false,无副作用),不需要已见集合。
+func (a *Agent) onInotifyOpen(fp cas.Fingerprint) {
+	if a.Prefetch == nil {
+		return
+	}
+	ctx := context.Background()
+	for _, ds := range a.Prefetch.bundleNames() {
+		b, ok := a.Prefetch.existingBundle(ds)
+		if !ok {
+			continue
+		}
+		for _, ref := range b.lookupFingerprint(ctx, fp) {
+			if a.Prefetch.OnConsumeSideAdvance(ctx, ds, ref) {
+				a.reportConsumptionAdvance(ds, metrics.SourceInotify)
+				return
+			}
+		}
 	}
 }
 
@@ -143,9 +172,12 @@ func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fin
 
 // hookHandlers 组装钩子三型 handler(帧型见 hooksock.go;读循环单 goroutine 顺序回调):
 //   - open_report:解析指纹 → collector.Open(fp, ref)(未绑定 collector / 解析失败 → 丢弃);
-//   - advance:collector.Advance(chunk) + 对应 dataset 的预取器 OnConsumeSideAdvance;
+//   - advance:collector.Advance(chunk) + phaseTracker.OnOrder + 预取器
+//     OnConsumeSideAdvance + consumption_advance{source=hook};
 //   - stage_switch:以所绑 ring 的 CurrentOrder 为基底覆盖 stage_id/shuffle_seed 构造订单
-//     转交预取器(去重:与当前订单同 stage_id+shuffle_seed → 跳过;ring 路径先到时由此闭环)。
+//     转交预取器(去重:与当前订单同 stage_id+shuffle_seed → 跳过;ring 路径先到时由此闭环);
+//   - read_miss(D44):async demand 补块入口 handleReadMiss;
+//   - read_stall(D47):stallAttributor.Attribute + ObserveReadStall(见 stallattr.go)。
 //
 // collector 阶段上下文继续跟随 ring 的 CurrentOrder(冻结接口无重定位能力:直报阶段在
 // ring 写入后自然一致)。handler 只做内存/非阻塞操作;ctx 用后台 ctx(集帧自身无 ctx,
@@ -166,12 +198,16 @@ func (a *Agent) hookHandlers() HookHandlers {
 				c.Advance(ref.Chunk)
 			}
 			if ds, _, ok := a.resolveRef(ref); ok {
-				if err := a.Prefetch.OnConsumeSideAdvance(context.Background(), ds, prefetch.ChunkRef(ref)); err != nil {
-					slog.Warn("hooksock: advance 转投预取器失败", "dataset", ds, "path", ref.Path, "chunk", ref.Chunk, "err", err)
+				if a.phase != nil {
+					a.phase.OnOrder(ref)
 				}
+				a.reportConsumptionAdvance(ds, metrics.SourceHook)
+				a.Prefetch.OnConsumeSideAdvance(context.Background(), ds, prefetch.ChunkRef(ref))
 			}
 		},
 		StageSwitch: a.onHookStageSwitch,
+		Miss:        a.handleReadMiss,
+		Stall:       a.handleReadStall,
 	}
 }
 
@@ -226,6 +262,10 @@ func (a *Agent) onOrderTouch(dataset string, cat *index.Catalog, refs []prefetch
 func (a *Agent) onBlockDone(_ string, cat *index.Catalog, ref prefetch.ChunkRef, err error) {
 	if err != nil {
 		return
+	}
+	// D46:块就绪/本地命中 → phaseTracker 的窗口 ready 样本(M9 填写状态机)。
+	if a.phase != nil {
+		a.phase.OnBlockReady(ref)
 	}
 	c := a.collector()
 	if c == nil || cat == nil {
@@ -299,6 +339,8 @@ func (h evictHeatSource) ListForEviction() []evictor.EvictionEntry {
 // Sweep 口径"绝不删")视为空操作跳过,其余错误记日志并返回首个(evictor 按 result=error 打点)。
 // 打点 dataset 标签由 evictor.Config.Dataset 提供("" 经白名单归 other)。
 func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err error) {
+	// D48:借用淘汰周期刷新修复队列深度(数据源 = Rescan.Status)。
+	a.reportRepairQueueDepth()
 	if a.ObjectStore == nil || a.CS == nil {
 		return 0, 0, nil
 	}
@@ -411,6 +453,20 @@ func (r rescanMetrics) SetRescanProgress(v float64) {
 func (r rescanMetrics) SetQuarantined(n int64) {
 	if r.m != nil {
 		r.m.SetQuarantined(r.m.DatasetLabel(""), n)
+	}
+}
+
+// AddFetchBytes / IncFetchRequests 实现 rescan 的可选 repair 回源打点接口(D48):
+// RepairOne 的真实下载以 reason=repair 计入回源线;nil Registry 时静默跳过。
+func (r rescanMetrics) AddFetchBytes(dataset string, n int64, reasons ...string) {
+	if r.m != nil {
+		r.m.AddFetchBytes(dataset, n, reasons...)
+	}
+}
+
+func (r rescanMetrics) IncFetchRequests(dataset, result string, reasons ...string) {
+	if r.m != nil {
+		r.m.IncFetchRequests(dataset, result, reasons...)
 	}
 }
 

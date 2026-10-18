@@ -37,13 +37,27 @@ const (
 	diskUsageRatioName        = "traincache_disk_usage_ratio"
 )
 
-// sevenLineFamilies 是七线 23 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil)。
+// M8/M9 新增 family 名(测试侧独立字面量,防改名后测试跟着漂移)。
+const (
+	hookReadMissName             = "traincache_hook_read_miss_total"
+	prefetchHitRatioName         = "traincache_prefetch_hit_ratio"
+	readStallName                = "traincache_read_stall_seconds"
+	fetchSingleflightMergedName  = "traincache_fetch_singleflight_merged_total"
+	repairQueueDepthName         = "traincache_repair_queue_depth"
+	prefetchTaskDurationName     = "traincache_prefetch_task_duration_seconds"
+	prefetchLeadBlocksName       = "traincache_prefetch_lead_blocks"
+	consumptionAdvanceName       = "traincache_consumption_advance_total"
+	fetchBandwidthLimitBytesName = "traincache_fetch_bandwidth_limit_bytes"
+)
+
+// sevenLineFamilies 是 34 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil)。
+// M9/D46 变更 6 个既有 family 的标签(source/phase/reason/dataset),D44+D48 新增 9 个。
 var sevenLineFamilies = map[string][]string{
-	cacheHitsName:             {"dataset", "result"},
-	cacheMissesName:           {"dataset", "result"},
-	cacheHitRatioName:         {"dataset"},
-	fetchBytesName:            {"dataset", "result"},
-	fetchRequestsName:         {"dataset", "result"},
+	cacheHitsName:             {"dataset", "result", "source", "phase"},
+	cacheMissesName:           {"dataset", "result", "phase"},
+	cacheHitRatioName:         {"dataset", "phase"},
+	fetchBytesName:            {"dataset", "result", "reason"},
+	fetchRequestsName:         {"dataset", "result", "reason"},
 	fetchInflightBytesName:    {"dataset"},
 	indexRefreshName:          {"dataset", "result"},
 	indexRefreshDurationName:  {"dataset", "result"},
@@ -59,49 +73,69 @@ var sevenLineFamilies = map[string][]string{
 	rescanProgressName:        nil,
 	quarantinedBlocksName:     {"dataset"},
 	diskUsageRatioName:        {"dataset"},
-	// M3 复用(prefetch/阶段切换),标签形态一并冻结校验:
+	// M3 复用(prefetch/阶段切换),标签形态一并冻结校验(M9 补 dataset):
 	prefetchQueueDepthName: {"priority"},
 	prefetchCursorName:     nil,
-	stageSwitchStallName:   nil,
+	stageSwitchETAName:     {"dataset"},
+	// D44/D46/D47/D48。
+	hookReadMissName:             {"reason"},
+	prefetchHitRatioName:         {"dataset"},
+	readStallName:                {"dataset", "phase", "cause"},
+	fetchSingleflightMergedName:  {"dataset"},
+	repairQueueDepthName:         {"dataset"},
+	prefetchTaskDurationName:     {"dataset", "priority"},
+	prefetchLeadBlocksName:       {"dataset"},
+	consumptionAdvanceName:       {"dataset", "source"},
+	fetchBandwidthLimitBytesName: {"dataset"},
 }
 
 // sevenLineTypes 是七线 23 个 family 的类型冻结(Prometheus 文本枚举)。
 var sevenLineTypes = map[string]string{
-	cacheHitsName:             "COUNTER",
-	cacheMissesName:           "COUNTER",
-	cacheHitRatioName:         "GAUGE",
-	fetchBytesName:            "COUNTER",
-	fetchRequestsName:         "COUNTER",
-	fetchInflightBytesName:    "GAUGE",
-	indexRefreshName:          "COUNTER",
-	indexRefreshDurationName:  "HISTOGRAM",
-	indexShardsLoadedName:     "GAUGE",
-	gcSweepsName:              "COUNTER",
-	gcBlocksRemovedName:       "COUNTER",
-	gcObjectsRemovedName:      "COUNTER",
-	evictBlocksName:           "COUNTER",
-	evictProtectedSkippedName: "COUNTER",
-	requestDurationName:       "HISTOGRAM",
-	agentUpName:               "GAUGE",
-	agentDegradedName:         "GAUGE",
-	rescanProgressName:        "GAUGE",
-	quarantinedBlocksName:     "GAUGE",
-	diskUsageRatioName:        "GAUGE",
-	prefetchQueueDepthName:    "GAUGE",
-	prefetchCursorName:        "GAUGE",
-	stageSwitchStallName:      "HISTOGRAM",
+	cacheHitsName:                "COUNTER",
+	cacheMissesName:              "COUNTER",
+	cacheHitRatioName:            "GAUGE",
+	fetchBytesName:               "COUNTER",
+	fetchRequestsName:            "COUNTER",
+	fetchInflightBytesName:       "GAUGE",
+	indexRefreshName:             "COUNTER",
+	indexRefreshDurationName:     "HISTOGRAM",
+	indexShardsLoadedName:        "GAUGE",
+	gcSweepsName:                 "COUNTER",
+	gcBlocksRemovedName:          "COUNTER",
+	gcObjectsRemovedName:         "COUNTER",
+	evictBlocksName:              "COUNTER",
+	evictProtectedSkippedName:    "COUNTER",
+	requestDurationName:          "HISTOGRAM",
+	agentUpName:                  "GAUGE",
+	agentDegradedName:            "GAUGE",
+	rescanProgressName:           "GAUGE",
+	quarantinedBlocksName:        "GAUGE",
+	diskUsageRatioName:           "GAUGE",
+	prefetchQueueDepthName:       "GAUGE",
+	prefetchCursorName:           "GAUGE",
+	stageSwitchETAName:           "HISTOGRAM",
+	hookReadMissName:             "COUNTER",
+	prefetchHitRatioName:         "GAUGE",
+	readStallName:                "HISTOGRAM",
+	fetchSingleflightMergedName:  "COUNTER",
+	repairQueueDepthName:         "GAUGE",
+	prefetchTaskDurationName:     "HISTOGRAM",
+	prefetchLeadBlocksName:       "GAUGE",
+	consumptionAdvanceName:       "COUNTER",
+	fetchBandwidthLimitBytesName: "GAUGE",
 }
 
-// TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 25 个 family
-// (七线 23 + ordersource 格式错误 counter[D23] + 钩子帧格式错误 counter[D33]);七线每个
-// family 的类型与标签名集合与冻结清单一致,且靠构造预置自启动即有子指标(dataset 类预置值
-// 全为归并值 other;agent_up=1 / agent_degraded=0 取 Config.Node)。
+// TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 34 个 family
+// (七线 23 + ordersource 格式错误 counter[D23] + 钩子帧格式错误 counter[D33] + D44 读 miss
+// + M9 的 8 个证据 family);每个 family 的类型与标签名集合与冻结清单一致,且靠构造预置
+// 自启动即有子指标(dataset 类预置值全为归并值 other;agent_up=1 / agent_degraded=0 取
+// Config.Node)。
 func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}, Node: "node-1"})
 	snap := snapshotFamilies(t, r)
 
-	if len(snap) != 25 {
-		t.Fatalf("注册表 family 数 = %d, want 25(七线 23 + ordersource 格式错误 counter[D23] + 钩子帧错误 counter[D33]);实际 %v",
+	if len(snap) != 34 {
+		t.Fatalf("注册表 family 数 = %d, want 34(七线 23 + D23 + D33 + D44 + M9 8 个);实际 %v",
 			len(snap), slices.Sorted(maps.Keys(snap)))
 	}
 	for _, name := range []string{ordersourceFormatErrorsName, hookFormatErrorsName} {
@@ -113,7 +147,7 @@ func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 	for name, wantLabels := range sevenLineFamilies {
 		f, ok := snap[name]
 		if !ok {
-			t.Errorf("缺少七线 family %q", name)
+			t.Errorf("缺少 family %q", name)
 			continue
 		}
 		if f.typ != sevenLineTypes[name] {
@@ -158,13 +192,14 @@ func TestSevenLinePointValues(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track", "b-track"}, Node: "node-1"})
 
 	// ① 命中率线:a-track 3/4、b-track 1/2、other(c/d/e-track 归并)1/3。
-	r.ObserveCacheHit("a-track")
-	r.ObserveCacheHit("a-track")
-	r.ObserveCacheHit("a-track")
-	r.ObserveCacheMiss("a-track", metrics.ResultSuccess)
-	r.ObserveCacheHit("b-track")
-	r.ObserveCacheMiss("b-track", metrics.ResultError)
-	r.ObserveCacheHit("c-track")
+	// D46:命中显式带 source/phase,未命中带 phase。
+	r.ObserveCacheHit("a-track", metrics.SourcePrefetch, metrics.PhaseSteady)
+	r.ObserveCacheHit("a-track", metrics.SourcePrefetch, metrics.PhaseSteady)
+	r.ObserveCacheHit("a-track", metrics.SourcePrefetch, metrics.PhaseSteady)
+	r.ObserveCacheMiss("a-track", metrics.ResultSuccess, metrics.PhaseSteady)
+	r.ObserveCacheHit("b-track", metrics.SourceCache, metrics.PhaseSteady)
+	r.ObserveCacheMiss("b-track", metrics.ResultError, metrics.PhaseSteady)
+	r.ObserveCacheHit("c-track") // 缺省 source/phase → unknown/unknown
 	r.ObserveCacheMiss("d-track", metrics.ResultRefetched)
 	r.ObserveCacheMiss("e-track", metrics.ResultError)
 
@@ -218,17 +253,17 @@ func TestSevenLinePointValues(t *testing.T) {
 		labels map[string]string
 		value  float64
 	}{
-		{cacheHitsName, labels("dataset", "a-track", "result", "success"), 3},
-		{cacheHitsName, labels("dataset", "b-track", "result", "success"), 1},
-		{cacheHitsName, labels("dataset", "other", "result", "success"), 1},
-		{cacheMissesName, labels("dataset", "a-track", "result", "success"), 1},
-		{cacheMissesName, labels("dataset", "b-track", "result", "error"), 1},
-		{cacheMissesName, labels("dataset", "other", "result", "refetched"), 1},
-		{cacheMissesName, labels("dataset", "other", "result", "error"), 1},
-		{fetchBytesName, labels("dataset", "a-track", "result", "success"), 1024},
-		{fetchBytesName, labels("dataset", "other", "result", "success"), 512},
-		{fetchRequestsName, labels("dataset", "a-track", "result", "success"), 1},
-		{fetchRequestsName, labels("dataset", "other", "result", "error"), 1},
+		{cacheHitsName, labels("dataset", "a-track", "result", "success", "source", "prefetch", "phase", "steady"), 3},
+		{cacheHitsName, labels("dataset", "b-track", "result", "success", "source", "cache", "phase", "steady"), 1},
+		{cacheHitsName, labels("dataset", "other", "result", "success", "source", "unknown", "phase", "unknown"), 1},
+		{cacheMissesName, labels("dataset", "a-track", "result", "success", "phase", "steady"), 1},
+		{cacheMissesName, labels("dataset", "b-track", "result", "error", "phase", "steady"), 1},
+		{cacheMissesName, labels("dataset", "other", "result", "refetched", "phase", "unknown"), 1},
+		{cacheMissesName, labels("dataset", "other", "result", "error", "phase", "unknown"), 1},
+		{fetchBytesName, labels("dataset", "a-track", "result", "success", "reason", "other"), 1024},
+		{fetchBytesName, labels("dataset", "other", "result", "success", "reason", "other"), 512},
+		{fetchRequestsName, labels("dataset", "a-track", "result", "success", "reason", "other"), 1},
+		{fetchRequestsName, labels("dataset", "other", "result", "error", "reason", "other"), 1},
 		{indexRefreshName, labels("dataset", "a-track", "result", "success"), 1},
 		{gcSweepsName, labels("dataset", "a-track", "result", "success"), 1},
 		{gcSweepsName, labels("dataset", "a-track", "result", "error"), 1},
@@ -253,9 +288,9 @@ func TestSevenLinePointValues(t *testing.T) {
 		labels map[string]string
 		value  float64
 	}{
-		{cacheHitRatioName, labels("dataset", "a-track"), 0.75},
-		{cacheHitRatioName, labels("dataset", "b-track"), 0.5},
-		{cacheHitRatioName, labels("dataset", "other"), 1.0 / 3.0},
+		{cacheHitRatioName, labels("dataset", "a-track", "phase", "steady"), 0.75},
+		{cacheHitRatioName, labels("dataset", "b-track", "phase", "steady"), 0.5},
+		{cacheHitRatioName, labels("dataset", "other", "phase", "unknown"), 1.0 / 3.0},
 		{fetchInflightBytesName, labels("dataset", "a-track"), 2048},
 		{indexShardsLoadedName, labels("dataset", "a-track"), 12},
 		{agentUpName, labels("node", "node-1"), 1},
@@ -374,9 +409,9 @@ func TestSevenLineInvalidResultAndEndpointIgnored(t *testing.T) {
 		}
 	}
 
-	// 无效 result 不进命中率分母:other 仍为 0。
-	if m := metric(t, snap, cacheHitRatioName, labels("dataset", "other")); m.value != 0 {
-		t.Errorf("无效 result 打点后 cache_hit_ratio{other} = %v, want 0", m.value)
+	// 无效 result 不进命中率分母:other/unknown 仍为 0。
+	if m := metric(t, snap, cacheHitRatioName, labels("dataset", "other", "phase", "unknown")); m.value != 0 {
+		t.Errorf("无效 result 打点后 cache_hit_ratio{other,unknown} = %v, want 0", m.value)
 	}
 	// request_duration 仍只有构造预置的 8 个 series(4 endpoint × 2 result)。
 	if n := len(family(t, snap, requestDurationName).metrics); n != 8 {
@@ -408,7 +443,7 @@ func TestSevenLineNonPositiveAddIgnored(t *testing.T) {
 		labels map[string]string
 		value  float64
 	}{
-		{fetchBytesName, labels("dataset", "a-track", "result", "success"), 10},
+		{fetchBytesName, labels("dataset", "a-track", "result", "success", "reason", "other"), 10},
 		{gcBlocksRemovedName, labels("dataset", "a-track", "result", "success"), 3},
 		{gcObjectsRemovedName, labels("dataset", "a-track", "result", "success"), 3},
 		{evictBlocksName, labels("dataset", "a-track", "result", "normal"), 3},
@@ -525,10 +560,10 @@ func TestSevenLineConcurrentUpdates(t *testing.T) {
 
 	snap := snapshotFamilies(t, r)
 	want := float64(workers * iters)
-	if m := metric(t, snap, cacheHitsName, labels("dataset", "a-track", "result", "success")); m.value != want {
+	if m := metric(t, snap, cacheHitsName, labels("dataset", "a-track", "result", "success", "source", "unknown", "phase", "unknown")); m.value != want {
 		t.Errorf("并发后 hits = %v, want %v", m.value, want)
 	}
-	if m := metric(t, snap, fetchBytesName, labels("dataset", "a-track", "result", "success")); m.value != want {
+	if m := metric(t, snap, fetchBytesName, labels("dataset", "a-track", "result", "success", "reason", "other")); m.value != want {
 		t.Errorf("并发后 fetch_bytes = %v, want %v", m.value, want)
 	}
 	if m := metric(t, snap, evictBlocksName, labels("dataset", "a-track", "result", "danger")); m.value != want {
@@ -537,7 +572,7 @@ func TestSevenLineConcurrentUpdates(t *testing.T) {
 	if m := metric(t, snap, requestDurationName, labels("endpoint", "SubmitPreheat", "result", "success")); m.count != workers*iters {
 		t.Errorf("并发后 request_duration 样本数 = %d, want %d", m.count, workers*iters)
 	}
-	if got := metric(t, snap, cacheHitRatioName, labels("dataset", "a-track")).value; got != 0.5 {
+	if got := metric(t, snap, cacheHitRatioName, labels("dataset", "a-track", "phase", "unknown")).value; got != 0.5 {
 		t.Errorf("并发后 cache_hit_ratio = %v, want 0.5", got)
 	}
 }
@@ -576,6 +611,150 @@ func TestSevenLineAccessors(t *testing.T) {
 		if c.v == nil || reflect.ValueOf(c.v).IsNil() {
 			t.Errorf("访问器 %s() 返回 nil", c.name)
 		}
+	}
+}
+
+// TestEvidenceFamilyBuckets:M9 新增两个 histogram 的 bucket 逐字冻结
+// (read_stall 0.1/0.25/0.5/1/2/5/10/30/60;task_duration 0.1/0.5/1/2/5/10/30/60/120)。
+func TestEvidenceFamilyBuckets(t *testing.T) {
+	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
+
+	r.ObserveReadStall("a-track", metrics.PhaseSwitch, metrics.CausePrefetchLag, 0.3)
+	r.ObservePrefetchTaskDuration("a-track", "P1", 3)
+	snap := snapshotFamilies(t, r)
+
+	wantRead := []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60}
+	m := metric(t, snap, readStallName, labels("dataset", "a-track", "phase", "switch", "cause", "prefetch_lag"))
+	if !m.histogram || !slices.Equal(m.buckets, wantRead) {
+		t.Errorf("read_stall bucket = %v, want %v", m.buckets, wantRead)
+	}
+	// 0.3 秒落在 (0.25,0.5]:≤0.25 计数 0,≤0.5 计数 1。
+	if m.bucketCounts[1] != 0 || m.bucketCounts[2] != 1 {
+		t.Errorf("read_stall 0.3s 落桶 = %v, want 第 3 桶起 1", m.bucketCounts[:3])
+	}
+
+	wantTask := []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120}
+	m = metric(t, snap, prefetchTaskDurationName, labels("dataset", "a-track", "priority", "P1"))
+	if !m.histogram || !slices.Equal(m.buckets, wantTask) {
+		t.Errorf("prefetch_task_duration bucket = %v, want %v", m.buckets, wantTask)
+	}
+	// 3 秒落在 (2,5]。
+	if m.bucketCounts[3] != 0 || m.bucketCounts[4] != 1 {
+		t.Errorf("prefetch_task_duration 3s 落桶 = %v, want (2,5]", m.bucketCounts[:5])
+	}
+}
+
+// TestEvidencePointValues:D44/D48 新增 family 的打点值逐项校验。
+func TestEvidencePointValues(t *testing.T) {
+	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
+
+	r.ObserveHookReadMiss(metrics.ReasonAbsent)
+	r.ObserveHookReadMiss(metrics.ReasonAbsent)
+	r.ObserveHookReadMiss(metrics.ReasonCorrupt)
+	r.SetPrefetchHitRatio("a-track", 0.75)
+	r.IncFetchSingleflightMerged("a-track")
+	r.IncFetchSingleflightMerged("a-track")
+	r.SetRepairQueueDepth("a-track", 3)
+	r.ObservePrefetchTaskDuration("a-track", "P0", 0.4)
+	r.SetPrefetchLeadBlocks("a-track", -2)
+	r.IncConsumptionAdvance("a-track", metrics.SourceHook)
+	r.IncConsumptionAdvance("a-track", metrics.SourceInotify)
+	r.IncConsumptionAdvance("a-track", metrics.SourceInotify)
+	r.SetFetchBandwidthLimitBytes("a-track", 1<<30)
+	r.ObserveReadStall("a-track", metrics.PhaseSteady, metrics.CauseLocalSlow, 0.2)
+
+	snap := snapshotFamilies(t, r)
+
+	for _, c := range []struct {
+		family string
+		labels map[string]string
+		value  float64
+	}{
+		{hookReadMissName, labels("reason", "absent"), 2},
+		{hookReadMissName, labels("reason", "corrupt"), 1},
+		{fetchSingleflightMergedName, labels("dataset", "a-track"), 2},
+		{consumptionAdvanceName, labels("dataset", "a-track", "source", "hook"), 1},
+		{consumptionAdvanceName, labels("dataset", "a-track", "source", "inotify"), 2},
+	} {
+		if m := metric(t, snap, c.family, c.labels); m.value != c.value {
+			t.Errorf("%s%v = %v, want %v", c.family, c.labels, m.value, c.value)
+		}
+	}
+	for _, c := range []struct {
+		family string
+		labels map[string]string
+		value  float64
+	}{
+		{prefetchHitRatioName, labels("dataset", "a-track"), 0.75},
+		{repairQueueDepthName, labels("dataset", "a-track"), 3},
+		{prefetchLeadBlocksName, labels("dataset", "a-track"), -2},
+		{fetchBandwidthLimitBytesName, labels("dataset", "a-track"), 1 << 30},
+	} {
+		if m := metric(t, snap, c.family, c.labels); m.value != c.value {
+			t.Errorf("%s%v = %v, want %v", c.family, c.labels, m.value, c.value)
+		}
+	}
+	if m := metric(t, snap, readStallName, labels("dataset", "a-track", "phase", "steady", "cause", "local_slow")); m.count != 1 || m.sum != 0.2 {
+		t.Errorf("read_stall sample = (count=%d,sum=%v), want (1,0.2)", m.count, m.sum)
+	}
+}
+
+// TestEvidenceInvalidLabelsIgnored:phase/cause/priority/source/reason 集合外取值忽略,
+// 不新增 series(标签基数编译期固定);priority 只认大写 P0..P3。
+func TestEvidenceInvalidLabelsIgnored(t *testing.T) {
+	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
+	before := snapshotFamilies(t, r)
+	count := func(name string) int { return len(family(t, before, name).metrics) }
+
+	r.ObserveReadStall("a-track", "bogus", metrics.CauseLocalSlow, 1)
+	r.ObserveReadStall("a-track", metrics.PhaseSteady, "bogus", 1)
+	r.ObserveReadStall("a-track", metrics.PhaseSteady, metrics.CauseLocalSlow, -1)
+	r.ObservePrefetchTaskDuration("a-track", "p0", 1)
+	r.ObservePrefetchTaskDuration("a-track", "P9", 1)
+	r.IncConsumptionAdvance("a-track", "bogus")
+	r.IncConsumptionAdvance("a-track", "")
+	r.ObserveHookReadMiss("bogus")
+
+	after := snapshotFamilies(t, r)
+	for _, name := range []string{readStallName, prefetchTaskDurationName, consumptionAdvanceName, hookReadMissName} {
+		if got := len(family(t, after, name).metrics); got != count(name) {
+			t.Errorf("family %q 子指标数 = %d, want %d(非法标签应忽略)", name, got, count(name))
+		}
+	}
+
+	// 合法大写 priority 正常新增。
+	r.ObservePrefetchTaskDuration("a-track", "P2", 2)
+	after = snapshotFamilies(t, r)
+	metric(t, after, prefetchTaskDurationName, labels("dataset", "a-track", "priority", "P2"))
+}
+
+// TestEvidenceDatasetMerge:新增 family 的 dataset 标签同样经白名单归并(白名单外 → other)。
+func TestEvidenceDatasetMerge(t *testing.T) {
+	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
+
+	r.SetPrefetchHitRatio("x-track", 0.5)
+	r.IncFetchSingleflightMerged("x-track")
+	r.SetRepairQueueDepth("x-track", 1)
+	r.SetPrefetchLeadBlocks("x-track", 1)
+	r.SetFetchBandwidthLimitBytes("x-track", 1)
+	r.ObserveReadStall("x-track", metrics.PhaseSteady, metrics.CauseOriginSlow, 1)
+	r.ObservePrefetchTaskDuration("x-track", "P3", 1)
+	r.IncConsumptionAdvance("x-track", metrics.SourceHook)
+	snap := snapshotFamilies(t, r)
+
+	for _, name := range []string{
+		prefetchHitRatioName, fetchSingleflightMergedName, repairQueueDepthName,
+		prefetchLeadBlocksName, fetchBandwidthLimitBytesName, readStallName,
+		prefetchTaskDurationName, consumptionAdvanceName,
+	} {
+		for _, m := range family(t, snap, name).metrics {
+			if d := m.labels["dataset"]; d != "a-track" && d != "other" {
+				t.Errorf("family %q 出现白名单外 dataset=%q(应归并 other)", name, d)
+			}
+		}
+	}
+	for _, name := range []string{prefetchHitRatioName, fetchSingleflightMergedName, repairQueueDepthName, prefetchLeadBlocksName, fetchBandwidthLimitBytesName} {
+		metric(t, snap, name, labels("dataset", "other"))
 	}
 }
 
@@ -684,7 +863,7 @@ func hasMetric(snap map[string]familySnapshot, name string, labels map[string]st
 func ratioOf(t *testing.T, r *metrics.Registry, dataset string) float64 {
 	t.Helper()
 	snap := snapshotFamilies(t, r)
-	return metric(t, snap, cacheHitRatioName, labels("dataset", dataset)).value
+	return metric(t, snap, cacheHitRatioName, labels("dataset", dataset, "phase", "unknown")).value
 }
 
 // labels 由 k,v 交替参数构造标签集合。

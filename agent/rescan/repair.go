@@ -5,9 +5,18 @@ import (
 	"log"
 	"strconv"
 
+	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/core/cas"
 )
+
+// fetchReporter 是可选的 repair 回源打点能力(D48):注入的 Metrics 若同时实现该接口,
+// RepairOne 的真实下载以 reason=repair 记入 fetch_bytes/fetch_requests;未实现则静默
+// 跳过(不扩大冻结的 Metrics 窄接口 D35)。
+type fetchReporter interface {
+	AddFetchBytes(dataset string, n int64, reasons ...string)
+	IncFetchRequests(dataset, result string, reasons ...string)
+}
 
 // repairJob 是修复队列的一项:修复所需的 (dataset, 块引用) 对(D25 键直接可构造)。
 type repairJob struct {
@@ -68,6 +77,7 @@ func (r *Rescanner) RepairOne(ctx context.Context, dataset string, ref ordersour
 	}
 
 	fp, err := r.f.Fetch(ctx, key, 0)
+	r.reportRepairFetch(dataset, fp, err)
 	if err == nil {
 		err = r.cs.RemoveQuarantined(fp)
 	}
@@ -83,6 +93,28 @@ func (r *Rescanner) RepairOne(ctx context.Context, dataset string, ref ordersour
 	delete(r.flights, key)
 	r.mu.Unlock()
 	return fp, err
+}
+
+// reportRepairFetch 为 repair 路径的真实回源打点(D48):成功记交付字节 + requests{success,
+// reason=repair},失败记 requests{error,reason=repair};注入 Metrics 未实现 fetchReporter
+// 时跳过(无指标场景)。
+func (r *Rescanner) reportRepairFetch(dataset string, fp cas.Fingerprint, err error) {
+	r.markSelfOpen(fp) // D49:修复后读回打开前登记(与是否打点无关)
+	fr, ok := r.m.(fetchReporter)
+	if !ok {
+		return
+	}
+	if err != nil {
+		fr.IncFetchRequests(dataset, metrics.ResultError, metrics.FetchReasonRepair)
+		return
+	}
+	var n int64
+	if br, oerr := r.cs.Open(fp); oerr == nil {
+		n = br.Size()
+		_ = br.Close()
+	}
+	fr.AddFetchBytes(dataset, n, metrics.FetchReasonRepair)
+	fr.IncFetchRequests(dataset, metrics.ResultSuccess, metrics.FetchReasonRepair)
 }
 
 // blockKey 是数据块源站对象键(D25):<dataset>/blocks/<path>#<chunk>(path 约定不含 '#',

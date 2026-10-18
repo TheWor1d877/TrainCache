@@ -33,6 +33,11 @@ type Fetcher struct {
 	opts  Options
 	lim   *limiter
 
+	// OnMerge 是同 key 合并钩子:本调用因已有在途下载而登记为等待者时调用一次,
+	// 参数为 fetch key。由装配层在 Fetcher 构造后设置(并发使用前);nil = 不回调。
+	// 回调在调用方 goroutine 内同步执行,不得阻塞(仅用于计数,如 D48 singleflight)。
+	OnMerge func(key string)
+
 	mu       sync.Mutex
 	inflight map[string]*inflightCall
 }
@@ -49,6 +54,11 @@ func New(store objectstore.Store, cs *cas.Store, opts Options) *Fetcher {
 	}
 }
 
+// MaxInflightBytes 返回实际生效的在途下载字节上限（Options 补齐默认值后），
+// 供 Agent 侧 traincache_fetch_bandwidth_limit_bytes 指标观测（D48）。只读访问器，
+// 不改变 Fetch 语义。
+func (f *Fetcher) MaxInflightBytes() int64 { return f.opts.MaxInflightBytes }
+
 // Fetch 下载对象：Acquire(expectSize) 字节信号量 → store.Get 流经 cas.Put 落盘 →
 // Open 读回校验 → 失败则 Remove 后重试（≤ MaxRetries）→ Release 信号量。
 // 相同 key 的并发 Fetch 合并为一次实际下载（in-flight map，等待者共享结果）；
@@ -63,6 +73,9 @@ func (f *Fetcher) Fetch(ctx context.Context, key string, expectSize int64) (cas.
 	if c, ok := f.inflight[key]; ok {
 		c.waiters++
 		f.mu.Unlock()
+		if f.OnMerge != nil {
+			f.OnMerge(key)
+		}
 		defer func() {
 			f.mu.Lock()
 			c.waiters--
@@ -169,6 +182,9 @@ func (f *Fetcher) tryOnce(ctx context.Context, key string) (cas.Fingerprint, err
 		return zero, putErr
 	}
 
+	if f.opts.OnLocalOpen != nil {
+		f.opts.OnLocalOpen(fp)
+	}
 	br, err := f.cs.Open(fp)
 	if err != nil {
 		if errors.Is(err, cas.ErrCorrupt) {

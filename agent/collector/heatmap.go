@@ -399,6 +399,7 @@ func (c *Collector) openFromWatch(fp cas.Fingerprint, now time.Time) {
 		return
 	}
 	c.noteOpen(fp, ordersource.ChunkRef{}, now)
+	c.fireOpen(fp)
 }
 
 // parseBlockName 把块文件名(<32 位 hex>.blk)解析为指纹;临时文件与非法名返回 false。

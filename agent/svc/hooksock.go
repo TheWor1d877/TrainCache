@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
@@ -26,6 +27,8 @@ import (
 //	{"type":"advance","path":"...","chunk":3}                            → Advance(ChunkRef)
 //	{"type":"stage_switch","stage_id":"epoch-2","shuffle_seed":12345}    → StageSwitch(stageID, seed)
 //	{"type":"open_report","path":"...","chunk":3}                        → Open(ChunkRef)
+//	{"type":"read_miss","path":"...","chunk":3,"reason":"absent","ts":"..."} → Miss(ChunkRef, reason)
+//	{"type":"read_stall","path":"...","chunk":3,"wait_ms":250,"ts":"..."}    → Stall(ChunkRef, waitMS, ts)
 //
 // 处理语义:
 //   - 非法 JSON / 未知帧类型 / 超限帧丢弃并计数(metrics.IncHookFormatErrors,
@@ -53,15 +56,24 @@ type HookHandlers struct {
 	StageSwitch func(stageID string, seed int64)
 	// Open 接收打开上报帧(open_report):接线层经索引解析为指纹后进入 collector。
 	Open func(ref ordersource.ChunkRef)
+	// Miss 接收读 miss 帧(read_miss;D44):reason ∈ {absent,corrupt};无法区分时按
+	// absent 归一。接线层触发 Agent 侧异步补块。
+	Miss func(ref ordersource.ChunkRef, reason string)
+	// Stall 接收读等待帧(read_stall;D47):waitMS 为消费侧实测等待毫秒,ts 为 RFC3339Nano
+	// 上报时间(解析失败为零值)。阈值过滤与归因由接线层 stallattr 负责。
+	Stall func(ref ordersource.ChunkRef, waitMS int64, ts time.Time)
 }
 
-// hookFrame 是线上帧的并集结构(三型共用;未知/缺失字段留零值)。
+// hookFrame 是线上帧的并集结构(五型共用;未知/缺失字段留零值)。
 type hookFrame struct {
 	Type        string `json:"type"`
 	Path        string `json:"path"`
 	Chunk       int64  `json:"chunk"`
 	StageID     string `json:"stage_id"`
 	ShuffleSeed int64  `json:"shuffle_seed"`
+	Reason      string `json:"reason"`
+	TS          string `json:"ts"`
+	WaitMS      int64  `json:"wait_ms"`
 }
 
 // HookSock 是钩子 socket 收端(D33 冻结构造签名):New 后 Start 一次,
@@ -213,6 +225,26 @@ func (s *HookSock) dispatch(line string) {
 	case "stage_switch":
 		if s.h.StageSwitch != nil {
 			s.h.StageSwitch(f.StageID, f.ShuffleSeed)
+		}
+	case "read_miss":
+		reason := f.Reason
+		if reason != "corrupt" {
+			reason = "absent" // D44:无法区分 absent/corrupt 时按 absent 上报
+		}
+		if s.h.Miss != nil {
+			s.h.Miss(ref, reason)
+		}
+	case "read_stall":
+		ts, err := time.Parse(time.RFC3339Nano, f.TS)
+		if err != nil {
+			ts = time.Time{} // 时间戳不可解析 → 零值(归因侧按无法关联处理)
+		}
+		waitMS := f.WaitMS
+		if waitMS < 0 {
+			waitMS = 0
+		}
+		if s.h.Stall != nil {
+			s.h.Stall(ref, waitMS, ts)
 		}
 	default:
 		s.countFormatError(metrics.ReasonParse)
