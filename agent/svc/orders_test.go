@@ -405,8 +405,8 @@ func TestHandleOrderWiresPrefetch(t *testing.T) {
 	if _, ok, err := b.catalog.Lookup(ctx, "a-000.tar", 0); err != nil || !ok {
 		t.Fatalf("Lookup(a-000.tar) ok = %v / err = %v, want 命中(LoadPrefixes 已加载相关分片)", ok, err)
 	}
-	// 预取推进:两块均本地命中,游标推进到末块。
-	waitFor(t, "预取游标推进到末块", func() bool {
-		return b.prefetcher.Status().Cursor.Path == "a-001.tar"
+	// 预取推进:两块均本地命中,预取前沿推进到末块(消费游标不动)。
+	waitFor(t, "预取前沿推进到末块", func() bool {
+		return b.prefetcher.Status().PrefetchFrontier.Path == "a-001.tar"
 	})
 }

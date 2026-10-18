@@ -564,8 +564,8 @@ func TestM3Acceptance8OrderStartsPrefetcher(t *testing.T) {
 		return started && b.prefetcher.Status().Stage == "stage-1"
 	})
 	// 块就绪:预取推进游标到订单末块(首块 P1、其余邻域窗口,全部本地命中)。
-	waitFor(t, "首阶段块全部就绪(游标推进到末块)", func() bool {
-		return b.prefetcher.Status().Cursor == chunks[len(chunks)-1]
+	waitFor(t, "首阶段块全部就绪(预取前沿推进到末块)", func() bool {
+		return b.prefetcher.Status().PrefetchFrontier == chunks[len(chunks)-1]
 	})
 	// 本地命中场景:数据块级下载为零(D25 键无 Get)。
 	if got := env.store.keysWithPrefix(m3OrderDataset + "/blocks/"); len(got) != 0 {
@@ -605,8 +605,8 @@ func TestM3Acceptance9StageSwitchKWindow(t *testing.T) {
 	stage1 := []ordersource.ChunkRef{{Path: "stage1/c-000.tar"}, {Path: "stage1/c-001.tar"}}
 	w.WriteOrder(m3Order(m3OrderDataset, "stage-1", 1, stage1...))
 	b := env.fx.pm.bundleFor(m3OrderDataset)
-	waitFor(t, "首阶段块全部就绪(游标到末块)", func() bool {
-		return b.prefetcher.Status().Cursor == stage1[len(stage1)-1]
+	waitFor(t, "首阶段块全部就绪(预取前沿到末块)", func() bool {
+		return b.prefetcher.Status().PrefetchFrontier == stage1[len(stage1)-1]
 	})
 
 	// 第二份订单(新阶段):K=2 启动窗口;chunks 顺序重排为 b → a → c。
@@ -634,9 +634,9 @@ func TestM3Acceptance9StageSwitchKWindow(t *testing.T) {
 	waitFor(t, "新阶段开头 K 块即刻入队并拉起下载(P1 启动窗口)", func() bool {
 		return env.store.getCount(winKeys[0]) >= 1 && env.store.getCount(winKeys[1]) >= 1
 	})
-	// 断言 2:此刻无任何块完成(游标未建立),且 K 之外的块零触碰(P2 邻域未开放)。
-	if got := b.prefetcher.Status().Cursor; got != (ordersource.ChunkRef{}) {
-		t.Errorf("门闩期不应有块完成: Cursor = %+v, want 零值", got)
+	// 断言 2:此刻无任何块完成(预取前沿未建立),且 K 之外的块零触碰(P2 邻域未开放)。
+	if got := b.prefetcher.Status().PrefetchFrontier; got != (ordersource.ChunkRef{}) {
+		t.Errorf("门闩期不应有块完成: PrefetchFrontier = %+v, want 零值", got)
 	}
 	if got := env.store.getCount(restKey); got != 0 {
 		t.Errorf("K 之外的块在启动窗口期被触碰: Get(%s) = %d, want 0", restKey, got)
@@ -644,8 +644,8 @@ func TestM3Acceptance9StageSwitchKWindow(t *testing.T) {
 
 	// 断言 3:放行 → K 块完成 → 邻域开放 → 第 3 块下载完成,游标到新阶段末块。
 	env.store.release()
-	waitFor(t, "K 块就绪后剩余块进入邻域并完成(游标到新阶段末块)", func() bool {
-		return b.prefetcher.Status().Cursor == rest
+	waitFor(t, "K 块就绪后剩余块进入邻域并完成(预取前沿到新阶段末块)", func() bool {
+		return b.prefetcher.Status().PrefetchFrontier == rest
 	})
 	if got := env.store.getCount(restKey); got == 0 {
 		t.Errorf("K 块就绪后剩余块未被预取: Get(%s) = %d, want > 0", restKey, got)

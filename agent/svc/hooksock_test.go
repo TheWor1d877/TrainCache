@@ -324,3 +324,227 @@ func mustHookEventually(t *testing.T, what string, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// —— M8/D44:read_miss 帧(D44)——
+
+// missRec 是一次 Miss handler 调用记录(读循环单 goroutine 顺序调用)。
+type missRec struct {
+	ref    ordersource.ChunkRef
+	reason string
+}
+
+// startHookSockMiss 起一个仅带 Miss handler 的收端;清理时先取消 ctx 再 Close。
+func startHookSockMiss(t *testing.T, path string, m *metrics.Registry) chan missRec {
+	t.Helper()
+	rec := make(chan missRec, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	s := New(path, m, HookHandlers{
+		Miss: func(ref ordersource.ChunkRef, reason string) {
+			rec <- missRec{ref: ref, reason: reason}
+		},
+	})
+	if err := s.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("HookSock.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = s.Close()
+	})
+	return rec
+}
+
+// recvMiss 带超时接收一次 Miss 调用记录。
+func recvMiss(t *testing.T, ch <-chan missRec) missRec {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(hookTestTimeout):
+		t.Fatal("等待 read_miss handler 调用超时")
+		return missRec{}
+	}
+}
+
+// TestHookSockReadMissFrame:合法 read_miss 分发;reason 缺省/非法归一 absent,
+// corrupt 原样保留;不产生格式错误计数。
+func TestHookSockReadMissFrame(t *testing.T) {
+	m := newHookMetrics()
+	path := hookPath(t)
+	rec := startHookSockMiss(t, path, m)
+	c := dialHook(t, path)
+
+	cases := []struct {
+		payload string
+		ref     ordersource.ChunkRef
+		reason  string
+	}{
+		{`{"type":"read_miss","path":"shard-1.tar","chunk":2,"reason":"absent","ts":"2026-10-18T00:00:00Z"}`,
+			ordersource.ChunkRef{Path: "shard-1.tar", Chunk: 2}, "absent"},
+		{`{"type":"read_miss","path":"shard-2.tar","chunk":3,"reason":"corrupt"}`,
+			ordersource.ChunkRef{Path: "shard-2.tar", Chunk: 3}, "corrupt"},
+		{`{"type":"read_miss","path":"shard-3.tar","chunk":4}`,
+			ordersource.ChunkRef{Path: "shard-3.tar", Chunk: 4}, "absent"},
+		{`{"type":"read_miss","path":"shard-4.tar","chunk":5,"reason":"bogus"}`,
+			ordersource.ChunkRef{Path: "shard-4.tar", Chunk: 5}, "absent"},
+	}
+	for i, tc := range cases {
+		sendHook(t, c, []byte(tc.payload))
+		got := recvMiss(t, rec)
+		if got.ref != tc.ref || got.reason != tc.reason {
+			t.Errorf("第 %d 帧 → %+v/%q, want %+v/%q", i, got.ref, got.reason, tc.ref, tc.reason)
+		}
+	}
+	if got := testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonParse)); got != 0 {
+		t.Errorf("合法 read_miss 帧不应计 parse,实际 %v", got)
+	}
+	if got := testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonSize)); got != 0 {
+		t.Errorf("合法 read_miss 帧不应计 size,实际 %v", got)
+	}
+}
+
+// —— M9/D47:read_stall 帧 ——
+
+// stallRec 是一次 Stall handler 调用记录(读循环单 goroutine 顺序调用)。
+type stallRec struct {
+	ref    ordersource.ChunkRef
+	waitMS int64
+	ts     time.Time
+}
+
+// startHookSockStall 起一个仅带 Stall handler 的收端;清理时先取消 ctx 再 Close。
+func startHookSockStall(t *testing.T, path string, m *metrics.Registry) chan stallRec {
+	t.Helper()
+	rec := make(chan stallRec, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	s := New(path, m, HookHandlers{
+		Stall: func(ref ordersource.ChunkRef, waitMS int64, ts time.Time) {
+			rec <- stallRec{ref: ref, waitMS: waitMS, ts: ts}
+		},
+	})
+	if err := s.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("HookSock.Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = s.Close()
+	})
+	return rec
+}
+
+// recvStall 带超时接收一次 Stall 调用记录。
+func recvStall(t *testing.T, ch <-chan stallRec) stallRec {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(hookTestTimeout):
+		t.Fatal("等待 read_stall handler 调用超时")
+		return stallRec{}
+	}
+}
+
+// TestHookSockReadStallFrame:合法帧分发到 Stall(字段 wait_ms/ts 正确);ts 非法不 panic
+// (传递零值);wait_ms 负数归一为 0;非法 JSON 计 parse;超 4 KiB 计 size。
+func TestHookSockReadStallFrame(t *testing.T) {
+	m := newHookMetrics()
+	path := hookPath(t)
+	rec := startHookSockStall(t, path, m)
+	c := dialHook(t, path)
+
+	validTS := "2026-10-18T10:00:00.123456789Z"
+	sendHook(t, c, []byte(`{"type":"read_stall","path":"shard-1.tar","chunk":3,"wait_ms":250,"ts":"`+validTS+`"}`))
+	got := recvStall(t, rec)
+	wantTS, err := time.Parse(time.RFC3339Nano, validTS)
+	if err != nil {
+		t.Fatalf("构造时间戳解析: %v", err)
+	}
+	if got.ref != (ordersource.ChunkRef{Path: "shard-1.tar", Chunk: 3}) || got.waitMS != 250 || !got.ts.Equal(wantTS) {
+		t.Errorf("合法 read_stall → %+v, want ref{shard-1.tar,3}/250/%v", got, wantTS)
+	}
+
+	// ts 非法:零值传递,不 panic。
+	sendHook(t, c, []byte(`{"type":"read_stall","path":"p","chunk":1,"wait_ms":150,"ts":"not-a-time"}`))
+	if got := recvStall(t, rec); !got.ts.IsZero() || got.waitMS != 150 {
+		t.Errorf("非法 ts → %+v, want 零值 ts/wait=150", got)
+	}
+
+	// wait_ms 负数:归一为 0 后仍分发。
+	sendHook(t, c, []byte(`{"type":"read_stall","path":"p","chunk":2,"wait_ms":-5,"ts":"`+validTS+`"}`))
+	if got := recvStall(t, rec); got.waitMS != 0 {
+		t.Errorf("负 wait_ms → %d, want 0", got.waitMS)
+	}
+
+	if got := testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonParse)); got != 0 {
+		t.Errorf("合法 read_stall 帧不应计 parse,实际 %v", got)
+	}
+	if got := testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonSize)); got != 0 {
+		t.Errorf("合法 read_stall 帧不应计 size,实际 %v", got)
+	}
+
+	// 非法 JSON:计 parse,不分发。
+	sendHook(t, c, []byte("{not-json"))
+	mustHookEventually(t, "parse 计数", func() bool {
+		return testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonParse)) == 1
+	})
+
+	// 超 4 KiB:整报丢弃计 size,不分发。
+	base := `{"type":"read_stall","path":"p","chunk":9,"wait_ms":150}`
+	oversize := base + strings.Repeat(" ", hookMaxFrame+1-len(base))
+	sendHook(t, c, []byte(oversize))
+	mustHookEventually(t, "size 计数", func() bool {
+		return testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonSize)) == 1
+	})
+	select {
+	case r := <-rec:
+		t.Fatalf("超限帧不应分发,却收到 %+v", r)
+	case <-time.After(hookQuietWindow):
+	}
+}
+
+// TestHookSockReadMissInvalidJSONCounted:非法 JSON 计 parse,后续 read_miss 不受影响。
+func TestHookSockReadMissInvalidJSONCounted(t *testing.T) {
+	m := newHookMetrics()
+	path := hookPath(t)
+	rec := startHookSockMiss(t, path, m)
+	c := dialHook(t, path)
+
+	sendHook(t, c, []byte("{not-json"))
+	mustHookEventually(t, "parse 计数", func() bool {
+		return testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonParse)) == 1
+	})
+	sendHook(t, c, []byte(`{"type":"read_miss","path":"p","chunk":7,"reason":"corrupt"}`))
+	if got := recvMiss(t, rec); got.ref.Chunk != 7 || got.reason != "corrupt" {
+		t.Errorf("坏帧后续 read_miss 未正确分发: %+v", got)
+	}
+}
+
+// TestHookSockReadMissOversizeCounted:超 4 KiB 帧整报丢弃计 size;恰为 4 KiB 仍受理。
+func TestHookSockReadMissOversizeCounted(t *testing.T) {
+	m := newHookMetrics()
+	path := hookPath(t)
+	rec := startHookSockMiss(t, path, m)
+	c := dialHook(t, path)
+
+	base := `{"type":"read_miss","path":"p","chunk":9,"reason":"absent"}`
+	exact := base + strings.Repeat(" ", hookMaxFrame-len(base))
+	if len(exact) != hookMaxFrame {
+		t.Fatalf("构造 4 KiB 帧长度 = %d", len(exact))
+	}
+	sendHook(t, c, []byte(exact))
+	if got := recvMiss(t, rec); got.ref.Chunk != 9 {
+		t.Errorf("4 KiB 边界 read_miss 未受理: %+v", got)
+	}
+
+	oversize := base + strings.Repeat(" ", hookMaxFrame+1-len(base))
+	sendHook(t, c, []byte(oversize))
+	mustHookEventually(t, "size 计数", func() bool {
+		return testutil.ToFloat64(m.HookFormatErrors().WithLabelValues(metrics.ReasonSize)) == 1
+	})
+	select {
+	case r := <-rec:
+		t.Fatalf("超限帧不应分发,却收到 %+v", r)
+	case <-time.After(hookQuietWindow):
+	}
+}

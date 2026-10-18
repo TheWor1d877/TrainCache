@@ -221,10 +221,10 @@ func TestOpenHitMissCounts(t *testing.T) {
 	env.c.Open(absent, ordersource.ChunkRef{})
 	env.c.Open(present, ordersource.ChunkRef{})
 
-	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success")); got != 2 {
+	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success", metrics.SourceUnknown, metrics.PhaseUnknown)); got != 2 {
 		t.Errorf("cache_hits{other} = %v, want 2(白名单外归并 other)", got)
 	}
-	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success")); got != 1 {
+	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success", metrics.PhaseUnknown)); got != 1 {
 		t.Errorf("cache_misses{other} = %v, want 1", got)
 	}
 	if got := env.c.HitRate(); math.Abs(got-2.0/3.0) > 1e-9 {
@@ -246,7 +246,7 @@ func TestOpenUsesRingDatasetAndStage(t *testing.T) {
 	env.c.Open(present, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 0})
 	env.c.Open(absent, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 1})
 
-	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("b-track", "success")); got != 1 {
+	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("b-track", "success", metrics.SourceUnknown, metrics.PhaseUnknown)); got != 1 {
 		t.Errorf("cache_hits{b-track} = %v, want 1(白名单命中保留原名)", got)
 	}
 	if got := env.c.HitRateForStage("epoch-2"); got != 0.5 {
@@ -413,12 +413,62 @@ func TestInotifyFallbackGatedByHookSilence(t *testing.T) {
 	}
 	// 未命中合计 2 次:hookFP 主源打开 1 次 + watchFP 兜底 1 次(两者均无本地块);
 	// 抑制期间的 openFromWatch 未产生第 3 次。
-	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success")); got != 2 {
+	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success", metrics.PhaseUnknown)); got != 2 {
 		t.Errorf("cache_misses{other,success} = %v, want 2(主源 1 + 兜底 1,抑制期 0)", got)
 	}
-	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success")); got != 0 {
+	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success", metrics.SourceUnknown, metrics.PhaseUnknown)); got != 0 {
 		t.Errorf("cache_hits{other} = %v, want 0(无本地块)", got)
 	}
+}
+
+// TestOpenCallbackNoDedup:兜底门控通过时每个 OPEN 事件回调一次;同一指纹调用两次
+// 即回调两次(去重不在采集层,由上层消费位点的单调性负责)。
+func TestOpenCallbackNoDedup(t *testing.T) {
+	env := newTestEnv(t, nil, CollectorConfig{})
+	fp := testFP(0x73)
+
+	var got []cas.Fingerprint
+	env.c.SetOpenCallback(func(v cas.Fingerprint) { got = append(got, v) })
+
+	env.c.openFromWatch(fp, env.clock.Now())
+	env.c.openFromWatch(fp, env.clock.Now())
+
+	if len(got) != 2 || got[0] != fp || got[1] != fp {
+		t.Errorf("回调收到 %v, want 同一指纹两次", got)
+	}
+}
+
+// TestOpenCallbackGatedByHookSilence:钩子活跃(沉默窗内)时兜底被抑制,回调不触发;
+// 沉默窗过后兜底生效,回调收到指纹。
+func TestOpenCallbackGatedByHookSilence(t *testing.T) {
+	env := newTestEnv(t, nil, CollectorConfig{})
+	hookFP, watchFP := testFP(0x74), testFP(0x75)
+
+	var got []cas.Fingerprint
+	env.c.SetOpenCallback(func(v cas.Fingerprint) { got = append(got, v) })
+
+	env.c.Open(hookFP, ordersource.ChunkRef{}) // 钩子主源活跃
+	env.c.openFromWatch(watchFP, env.clock.Now())
+	if len(got) != 0 {
+		t.Errorf("钩子活跃期回调收到 %v, want 空", got)
+	}
+
+	env.clock.Advance(env.c.hookSilence + time.Millisecond)
+	env.c.openFromWatch(watchFP, env.clock.Now())
+	if len(got) != 1 || got[0] != watchFP {
+		t.Errorf("沉默窗过后回调收到 %v, want [%v]", got, watchFP)
+	}
+}
+
+// TestOpenCallbackNilSafe:未注册回调(或显式 nil)时兜底打开事件不 panic。
+func TestOpenCallbackNilSafe(t *testing.T) {
+	env := newTestEnv(t, nil, CollectorConfig{})
+	fp := testFP(0x76)
+
+	env.c.openFromWatch(fp, env.clock.Now()) // 从未注册
+	env.c.SetOpenCallback(func(cas.Fingerprint) {})
+	env.c.SetOpenCallback(nil)
+	env.c.openFromWatch(fp, env.clock.Now()) // 显式 nil
 }
 
 // TestParseBlockName:块文件名解析(cas 布局 <32 hex>.blk;临时文件与非法名不计数)。

@@ -35,8 +35,8 @@ const testTimeout = 3 * time.Second
 // testDataset 是所有用例使用的数据集名(源站键与索引共用)。
 const testDataset = "ds"
 
-// stageSwitchStallName 与实现侧 family 名一致(独立字面量,防改名后测试跟着漂移)。
-const stageSwitchStallName = "traincache_stage_switch_stall_seconds"
+// stageSwitchETAName 与实现侧 family 名一致(独立字面量,防改名后测试跟着漂移)。
+const stageSwitchETAName = "traincache_stage_switch_eta_seconds"
 
 // waitFor 带 deadline 轮询 cond(不用裸 sleep 断言;poll 间隔 2ms)。
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -398,7 +398,7 @@ func gatherStall(t *testing.T, r *metrics.Registry) (count uint64, sum float64) 
 		t.Fatalf("Gather: %v", err)
 	}
 	for _, mf := range families {
-		if mf.GetName() != stageSwitchStallName {
+		if mf.GetName() != stageSwitchETAName {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
@@ -507,8 +507,8 @@ func TestOnStageSwitchDemotesOldQueueToP3(t *testing.T) {
 
 // ---------------- Status / advance ----------------
 
-// TestStatusFieldsAndAdvance:Cursor 初始零值;advance 置为 ref 位置且单调不回退;
-// ref 不在订单内忽略返回 nil;推进后邻域窗口前进;样本计入口径一致。
+// TestStatusFieldsAndAdvance:Cursor 初始零值;advance 置为 ref 位置且单调不回退、
+// 真正推进返回 true、重复/订单外返回 false;推进后邻域窗口前进;去重事件不计样本。
 func TestStatusFieldsAndAdvance(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t, nil)
@@ -532,39 +532,140 @@ func TestStatusFieldsAndAdvance(t *testing.T) {
 		t.Errorf("无样本 HitRate = %v, want 0", s.HitRate)
 	}
 
-	// advance 置 cursor 为该 ref 位置(窗口随之补齐到 {2,3})。
-	if err := p.OnConsumeSideAdvance(ctx, order.Chunks[1]); err != nil {
-		t.Fatalf("OnConsumeSideAdvance: %v", err)
+	// advance 置 consume 位点(窗口随之补齐到 {2,3}),返回 true。
+	if !p.OnConsumeSideAdvance(ctx, order.Chunks[1]) {
+		t.Fatal("首次 advance 应返回 true")
 	}
 	if got := p.Status(); got.Cursor != order.Chunks[1] || got.QueueDepth != [4]int{0, 0, 4, 0} {
 		t.Fatalf("advance 后 Status = %+v, want Cursor=%+v 深度 [0 0 4 0]", got, order.Chunks[1])
 	}
 
-	// 单调不回退:落后的 ref 不再回置 cursor。
-	if err := p.OnConsumeSideAdvance(ctx, order.Chunks[0]); err != nil {
-		t.Fatalf("OnConsumeSideAdvance: %v", err)
+	// 单调不回退:落后的 ref 返回 false 且不回置 cursor。
+	if p.OnConsumeSideAdvance(ctx, order.Chunks[0]) {
+		t.Fatal("回退 advance 应返回 false(无副作用)")
 	}
 	if got := p.Status().Cursor; got != order.Chunks[1] {
 		t.Fatalf("回退 advance 后 Cursor = %+v, want 保持 %+v", got, order.Chunks[1])
 	}
 
-	// ref 不在订单内:忽略,返回 nil,不计样本。
-	if err := p.OnConsumeSideAdvance(ctx, ChunkRef{Path: "zzz.tar", Chunk: 9}); err != nil {
-		t.Fatalf("订单外 ref advance 应返回 nil,实际 %v", err)
+	// ref 不在订单内:返回 false,不计样本。
+	if p.OnConsumeSideAdvance(ctx, ChunkRef{Path: "zzz.tar", Chunk: 9}) {
+		t.Fatal("订单外 ref advance 应返回 false")
 	}
 	if got := p.Status().Cursor; got != order.Chunks[1] {
 		t.Fatalf("订单外 ref 不应改变 Cursor,实际 %+v", got)
 	}
 
-	// HitRate 样本:两次订单内 advance(块均未就绪),订单外不计样本。
+	// HitRate 样本:只有首次订单内 advance 计数(回退/订单外均不计)。
 	p.mu.Lock()
 	filled := p.stage.hitFilled
 	p.mu.Unlock()
-	if filled != 2 {
-		t.Fatalf("命中样本数 = %d, want 2(未就绪 2 次;订单外不计)", filled)
+	if filled != 1 {
+		t.Fatalf("命中样本数 = %d, want 1(仅首次推进计数;回退与订单外不计)", filled)
 	}
 	if got := p.Status().HitRate; got != 0 {
 		t.Fatalf("未就绪样本 HitRate = %v, want 0", got)
+	}
+}
+
+// TestStatusPrefetchFrontierWithoutConsume:块完成但消费侧尚未 advance 时,Cursor 保持
+// 零值、PrefetchFrontier 独立推进到末块。
+func TestStatusPrefetchFrontierWithoutConsume(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := newTestEnv(t, []blockSpec{
+		{path: "a-00.tar", chunk: 0, content: "block-0", local: true},
+		{path: "a-01.tar", chunk: 0, content: "block-1", local: true},
+		{path: "a-02.tar", chunk: 0, content: "block-2", local: true},
+	})
+	p := env.newPrefetcher(Config{Lookahead: 1})
+	order := orderOf("epoch-1", refsNamed("a", 3), 3)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+	waitFor(t, "全部块完成", func() bool { return p.Status().PrefetchFrontier == order.Chunks[2] })
+
+	s := p.Status()
+	if s.Cursor != (ChunkRef{}) {
+		t.Fatalf("未消费时 Cursor = %+v, want 零值", s.Cursor)
+	}
+	if s.PrefetchFrontier != order.Chunks[2] {
+		t.Fatalf("PrefetchFrontier = %+v, want %+v", s.PrefetchFrontier, order.Chunks[2])
+	}
+}
+
+// TestOnConsumeSideAdvanceDeduplicates:同一 ref 连续 advance,第一次返回 true、第二次
+// 返回 false,且命中率窗口只在第一次计数。
+func TestOnConsumeSideAdvanceDeduplicates(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := newTestEnv(t, []blockSpec{
+		{path: "b-00.tar", chunk: 0, content: "block-0", local: true},
+		{path: "b-01.tar", chunk: 0, content: "block-1", local: true},
+	})
+	p := env.newPrefetcher(Config{Lookahead: 1})
+	g := newGates()
+	p.grab = func(ctx context.Context, _ string, ref ChunkRef) (int64, bool) {
+		g.wait(ref)
+		return 100, true
+	}
+	order := orderOf("epoch-1", refsNamed("b", 2), 2)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+	defer g.releaseAll()
+	waitPending(t, g, order.Chunks[0], order.Chunks[1])
+	g.release(order.Chunks[0]) // 仅块 0 完成,前沿确定停在块 0
+	waitFor(t, "块 0 就绪", func() bool { return p.Status().PrefetchFrontier == order.Chunks[0] })
+
+	if !p.OnConsumeSideAdvance(ctx, order.Chunks[0]) {
+		t.Fatal("首次 advance 应返回 true")
+	}
+	if p.OnConsumeSideAdvance(ctx, order.Chunks[0]) {
+		t.Fatal("重复 advance 应返回 false")
+	}
+	p.mu.Lock()
+	filled := p.stage.hitFilled
+	p.mu.Unlock()
+	if filled != 1 {
+		t.Fatalf("命中样本数 = %d, want 1(重复事件不计)", filled)
+	}
+	if got := p.Status().HitRate; got != 1 {
+		t.Fatalf("HitRate = %v, want 1(仅首次就绪样本)", got)
+	}
+}
+
+// TestOnConsumeSideAdvanceMonotonicAndJump:跳跃 advance 直接推到位点,落后/重复事件
+// 返回 false 且 Cursor 单调不回退。
+func TestOnConsumeSideAdvanceMonotonicAndJump(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t, nil)
+	p := env.newPrefetcher(Config{})
+	order := orderOf("epoch-1", refsNamed("c", 5), 0)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+
+	if !p.OnConsumeSideAdvance(ctx, order.Chunks[0]) {
+		t.Fatal("advance 到块 0 应返回 true")
+	}
+	if !p.OnConsumeSideAdvance(ctx, order.Chunks[4]) {
+		t.Fatal("跳跃 advance 到块 4 应返回 true")
+	}
+	if got := p.Status().Cursor; got != order.Chunks[4] {
+		t.Fatalf("跳跃后 Cursor = %+v, want %+v", got, order.Chunks[4])
+	}
+	if p.OnConsumeSideAdvance(ctx, order.Chunks[2]) {
+		t.Fatal("落后 advance 应返回 false")
+	}
+	if got := p.Status().Cursor; got != order.Chunks[4] {
+		t.Fatalf("落后 advance 后 Cursor = %+v, want 保持 %+v", got, order.Chunks[4])
+	}
+	if p.OnConsumeSideAdvance(ctx, order.Chunks[4]) {
+		t.Fatal("重复 advance 应返回 false")
+	}
+	if got := p.Status().Cursor; got != order.Chunks[4] {
+		t.Fatalf("重复 advance 后 Cursor = %+v, want 保持 %+v", got, order.Chunks[4])
 	}
 }
 
@@ -589,13 +690,13 @@ func TestHitRateCountsReadyOnConsume(t *testing.T) {
 
 	// 块 0 完成(已就绪),再消费块 0 → 命中样本 true。
 	g.release(order.Chunks[0])
-	waitFor(t, "块 0 完成推进 cursor", func() bool { return p.Status().Cursor == order.Chunks[0] })
-	if err := p.OnConsumeSideAdvance(ctx, order.Chunks[0]); err != nil {
-		t.Fatalf("OnConsumeSideAdvance: %v", err)
+	waitFor(t, "块 0 完成推进预取前沿", func() bool { return p.Status().PrefetchFrontier == order.Chunks[0] })
+	if !p.OnConsumeSideAdvance(ctx, order.Chunks[0]) {
+		t.Fatal("首次消费块 0 应返回 true")
 	}
-	// 块 2 未就绪时被消费 → 命中样本 false;cursor 推进到块 2。
-	if err := p.OnConsumeSideAdvance(ctx, order.Chunks[2]); err != nil {
-		t.Fatalf("OnConsumeSideAdvance: %v", err)
+	// 块 2 未就绪时被消费 → 命中样本 false;消费位点推进到块 2。
+	if !p.OnConsumeSideAdvance(ctx, order.Chunks[2]) {
+		t.Fatal("消费块 2 应返回 true")
 	}
 	s := p.Status()
 	if s.Stage != "epoch-3" || s.Cursor != order.Chunks[2] || s.HitRate != 0.5 {
@@ -606,7 +707,10 @@ func TestHitRateCountsReadyOnConsume(t *testing.T) {
 	g.release(order.Chunks[1])
 	waitPending(t, g, order.Chunks[3], order.Chunks[4])
 	g.releaseAll()
-	waitFor(t, "全阶段完成推进 cursor 到末块", func() bool { return p.Status().Cursor == order.Chunks[4] })
+	waitFor(t, "全阶段完成推进预取前沿到末块", func() bool { return p.Status().PrefetchFrontier == order.Chunks[4] })
+	if got := p.Status().Cursor; got != order.Chunks[2] {
+		t.Fatalf("未再消费时 Cursor = %+v, want 保持 %+v", got, order.Chunks[2])
+	}
 	if got := p.Status().HitRate; got != 0.5 {
 		t.Fatalf("全部完成后 HitRate = %v, want 保持 0.5(无新样本)", got)
 	}
@@ -647,7 +751,7 @@ func TestStartNeighborhoodWindowWalksCursor(t *testing.T) {
 	waitPending(t, g, order.Chunks[4], order.Chunks[5])
 	g.release(order.Chunks[4])
 	g.release(order.Chunks[5])
-	waitFor(t, "全部完成且游标到末块", func() bool { return p.Status().Cursor == order.Chunks[5] })
+	waitFor(t, "全部完成且预取前沿到末块", func() bool { return p.Status().PrefetchFrontier == order.Chunks[5] })
 	if got := p.Status().QueueDepth; got != [4]int{0, 0, 0, 0} {
 		t.Fatalf("走完全程后队列深度 = %v, want 全 0", got)
 	}
@@ -689,8 +793,8 @@ func TestStageSwitchKeepsInflightRunning(t *testing.T) {
 	waitPending(t, g, append(slices.Clone(order1.Chunks), order2.Chunks[0])...)
 
 	g.releaseAll()
-	waitFor(t, "旧在途完成且新阶段游标到 K 后窗口末块", func() bool {
-		return p.Status().Cursor == order2.Chunks[1]
+	waitFor(t, "旧在途完成且新阶段预取前沿到末块", func() bool {
+		return p.Status().PrefetchFrontier == order2.Chunks[1]
 	})
 	if got := live.Load(); got != 5 {
 		t.Fatalf("未取消完成的抓取数 = %d, want 5(旧 3 + 新 2)", got)
@@ -730,10 +834,10 @@ func TestStageSwitchETA(t *testing.T) {
 	waitPending(t, g, warm.Chunks...)
 
 	g.release(warm.Chunks[0]) // t0 完成(首样本只记时刻)
-	waitFor(t, "w0 完成", func() bool { return p.Status().Cursor == warm.Chunks[0] })
+	waitFor(t, "w0 完成", func() bool { return p.Status().PrefetchFrontier == warm.Chunks[0] })
 	clk.advance(time.Second)
 	g.release(warm.Chunks[1]) // t0+1s 完成 200 字节 → EMA = 200 B/s
-	waitFor(t, "w1 完成", func() bool { return p.Status().Cursor == warm.Chunks[1] })
+	waitFor(t, "w1 完成", func() bool { return p.Status().PrefetchFrontier == warm.Chunks[1] })
 
 	next := orderOf("epoch-2", []ChunkRef{{Path: "s0.tar"}, {Path: "s1.tar"}, {Path: "s2.tar"}}, 3)
 	eta, err := p.OnStageSwitch(ctx, next)
@@ -749,7 +853,122 @@ func TestStageSwitchETA(t *testing.T) {
 
 	// 收尾:放行新阶段全部块(其 Size 为 0 的完成不产生吞吐样本)。
 	g.releaseAll()
-	waitFor(t, "新阶段全部完成", func() bool { return p.Status().Cursor == next.Chunks[2] })
+	waitFor(t, "新阶段全部完成", func() bool { return p.Status().PrefetchFrontier == next.Chunks[2] })
+}
+
+// gatherGauge 读取指定 family 中 dataset 标签匹配的 gauge 值;found=false 表示尚未出现。
+func gatherGauge(r *metrics.Registry, family, dataset string) (float64, bool) {
+	families, err := r.Prometheus().Gather()
+	if err != nil {
+		return 0, false
+	}
+	for _, mf := range families {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			match := false
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "dataset" && lp.GetValue() == dataset {
+					match = true
+				}
+			}
+			if !match {
+				continue
+			}
+			if g := m.GetGauge(); g != nil {
+				return g.GetValue(), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// TestPrefetchLeadBlocks:lead = 预取前沿 − 消费游标(D48):前沿先推进为正值,
+// 消费追平归零,消费越过前沿为负值(消费领先)。
+func TestPrefetchLeadBlocks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	env := newTestEnv(t, nil)
+	p := env.newPrefetcher(Config{Lookahead: 2})
+	g := newGates()
+	p.grab = func(_ context.Context, _ string, ref ChunkRef) (int64, bool) {
+		g.wait(ref)
+		return 10, true
+	}
+	refs := refsNamed("lead", 5)
+	order := orderOf("epoch-lead", refs, 2)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+	waitPending(t, g, refs[0], refs[1])
+
+	waitLead := func(want float64) {
+		t.Helper()
+		deadline := time.Now().Add(testTimeout)
+		for {
+			if v, ok := gatherGauge(env.reg, "traincache_prefetch_lead_blocks", "other"); ok && v == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				v, _ := gatherGauge(env.reg, "traincache_prefetch_lead_blocks", "other")
+				t.Fatalf("lead_blocks = %v, want %v", v, want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	waitLead(0) // 切换后双游标均未推进
+	g.release(refs[0])
+	waitFor(t, "块 0 就绪", func() bool { return p.Status().PrefetchFrontier == refs[0] })
+	waitLead(1) // front=0, consume=-1
+
+	if !p.OnConsumeSideAdvance(ctx, refs[0]) {
+		t.Fatal("advance refs[0] 应返回 true")
+	}
+	waitLead(0) // front=consume=0
+
+	if !p.OnConsumeSideAdvance(ctx, refs[2]) {
+		t.Fatal("advance refs[2] 应返回 true")
+	}
+	waitLead(-2) // front=0, consume=2 → 消费领先 2 块
+
+	g.releaseAll()
+}
+
+// TestStageSwitchStallTaggedWithDataset:阶段切换 ETA 以当前 ConsumeOrder.Dataset
+// 打标签(白名单命中时为原名,不再是 other)。
+func TestStageSwitchStallTaggedWithDataset(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t, nil)
+	reg := metrics.New(metrics.Config{DatasetWhitelist: []string{testDataset}})
+	p := New(env.cat, env.fetch, env.cs, reg, Config{})
+	order := orderOf("epoch-ds", nil, 0)
+	if _, err := p.OnStageSwitch(ctx, order); err != nil {
+		t.Fatalf("OnStageSwitch: %v", err)
+	}
+
+	families, err := reg.Prometheus().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != stageSwitchETAName {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			ds := ""
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "dataset" {
+					ds = lp.GetValue()
+				}
+			}
+			if ds == testDataset && m.GetHistogram().GetSampleCount() == 1 {
+				return
+			}
+		}
+	}
+	t.Fatalf("%s 未出现 dataset=%q 的样本(阶段切换 dataset 标签丢失)", stageSwitchETAName, testDataset)
 }
 
 // ---------------- 契约路径(真实 core 组合) ----------------
@@ -768,8 +987,8 @@ func TestLocalHitSkipsDownload(t *testing.T) {
 		t.Fatalf("OnStageSwitch: %v", err)
 	}
 	startPrefetcher(t, p, ctx, cancel)
-	waitFor(t, "两块处理完成(cursor 推进到末块)", func() bool {
-		return p.Status().Cursor == order.Chunks[1]
+	waitFor(t, "两块处理完成(预取前沿推进到末块)", func() bool {
+		return p.Status().PrefetchFrontier == order.Chunks[1]
 	})
 
 	if got := blockGets(env.store); len(got) != 0 {
@@ -801,7 +1020,7 @@ func TestDownloadOnLocalMissUsesD25Key(t *testing.T) {
 	startPrefetcher(t, p, ctx, cancel)
 
 	waitFor(t, "两块下载完成且落本地", func() bool {
-		if p.Status().Cursor != order.Chunks[1] {
+		if p.Status().PrefetchFrontier != order.Chunks[1] {
 			return false
 		}
 		if len(blockGets(env.store)) != 2 {
@@ -831,14 +1050,15 @@ func TestDownloadOnLocalMissUsesD25Key(t *testing.T) {
 
 // ---------------- 回源线打点(综合验收 ①) ----------------
 
-// fetchLineSnapshot 读回源线三打点(dataset 经白名单归并为 "other"):成功交付字节、
+// fetchLineSnapshot 读回源线三打点(dataset 经白名单归并为 "other";D48 起
+// fetch_bytes/fetch_requests 带 reason 标签,预取路径固定 prefetch):成功交付字节、
 // 在途计数、请求数{success,error}。
 func fetchLineSnapshot(t *testing.T, r *metrics.Registry) (bytes, inflight, success, failed float64) {
 	t.Helper()
-	return testutil.ToFloat64(r.FetchBytes().WithLabelValues("other", "success")),
+	return testutil.ToFloat64(r.FetchBytes().WithLabelValues("other", "success", metrics.FetchReasonPrefetch)),
 		testutil.ToFloat64(r.FetchInflightBytes().WithLabelValues("other")),
-		testutil.ToFloat64(r.FetchRequests().WithLabelValues("other", "success")),
-		testutil.ToFloat64(r.FetchRequests().WithLabelValues("other", "error"))
+		testutil.ToFloat64(r.FetchRequests().WithLabelValues("other", "success", metrics.FetchReasonPrefetch)),
+		testutil.ToFloat64(r.FetchRequests().WithLabelValues("other", "error", metrics.FetchReasonPrefetch))
 }
 
 // TestFetchLineMetricsOnDownloadSuccess(综合验收 ①):真实下载路径三打点齐全——下载被闸
@@ -981,16 +1201,16 @@ func TestConcurrentAdvancesAndStageSwitch(t *testing.T) {
 	wg.Wait()
 	<-statusDone
 
-	waitFor(t, "新阶段全部块就绪且队列清空", func() bool {
+	waitFor(t, "新阶段消费推进且队列清空", func() bool {
 		s := p.Status()
-		return s.Cursor == refs[n-1] && s.QueueDepth == [4]int{}
+		return s.Cursor != (ChunkRef{}) && s.QueueDepth == [4]int{}
 	})
 	if got := p.Status().Stage; got != "epoch-2" {
 		t.Fatalf("Stage = %q, want epoch-2", got)
 	}
 }
 
-// TestContextCanceled:ctx 已取消时 OnStageSwitch / OnConsumeSideAdvance 返回取消错误。
+// TestContextCanceled:ctx 已取消时 OnStageSwitch 返回取消错误、OnConsumeSideAdvance 返回 false。
 func TestContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1000,8 +1220,8 @@ func TestContextCanceled(t *testing.T) {
 	if _, err := p.OnStageSwitch(ctx, orderOf("s", refsNamed("a", 1), 0)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("OnStageSwitch err = %v, want context.Canceled", err)
 	}
-	if err := p.OnConsumeSideAdvance(ctx, ChunkRef{Path: "a-00.tar"}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("OnConsumeSideAdvance err = %v, want context.Canceled", err)
+	if p.OnConsumeSideAdvance(ctx, ChunkRef{Path: "a-00.tar"}) {
+		t.Fatal("ctx 已取消时 OnConsumeSideAdvance 应返回 false")
 	}
 }
 
@@ -1018,7 +1238,7 @@ func TestNilMetricsRegistrySafe(t *testing.T) {
 		t.Fatalf("OnStageSwitch: %v", err)
 	}
 	startPrefetcher(t, p, ctx, cancel)
-	waitFor(t, "块完成推进 cursor", func() bool { return p.Status().Cursor == order.Chunks[0] })
+	waitFor(t, "块完成推进预取前沿", func() bool { return p.Status().PrefetchFrontier == order.Chunks[0] })
 }
 
 // ---------------- D27:显式预热入队(P0) ----------------
@@ -1372,8 +1592,9 @@ func TestOnDoneFiresOncePerBlockWithOnP0Done(t *testing.T) {
 			t.Fatalf("等待第 %d 个完成回调超时", i+1)
 		}
 	}
-	waitFor(t, "阶段块处理完成(cursor 推进到末块)", func() bool {
-		return p.Status().Cursor == stageRefs[1]
+	// s1 下载失败(未就绪),前沿只到就绪的 s0;处理完成由上面 6 次回调保证。
+	waitFor(t, "阶段块处理完成(预取前沿推进到就绪末块)", func() bool {
+		return p.Status().PrefetchFrontier == stageRefs[0]
 	})
 
 	mu.Lock()
@@ -1509,8 +1730,8 @@ func TestOnCorruptRepairsThenReady(t *testing.T) {
 	}
 	startPrefetcher(t, p, ctx, cancel)
 
-	waitFor(t, "坏块经回源修复后就绪(cursor 推进)", func() bool {
-		return p.Status().Cursor == ref
+	waitFor(t, "坏块经回源修复后就绪(预取前沿推进)", func() bool {
+		return p.Status().PrefetchFrontier == ref
 	})
 
 	// 唯一一次数据块下载 = 修复的回源请求(D25 键);预取器自身未重复下载。
@@ -1569,8 +1790,8 @@ func TestOnCorruptFallbackToDownload(t *testing.T) {
 			}
 			startPrefetcher(t, p, ctx, cancel)
 
-			waitFor(t, "坏块经下载覆盖后就绪(cursor 推进)", func() bool {
-				return p.Status().Cursor == ref
+			waitFor(t, "坏块经下载覆盖后就绪(预取前沿推进)", func() bool {
+				return p.Status().PrefetchFrontier == ref
 			})
 
 			// 下载路径覆盖坏块:恰一次数据块下载(D25 键),块内容恢复正常。

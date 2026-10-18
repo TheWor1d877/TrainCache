@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"sync"
+
+	"traincache/core/cas"
 )
 
 // Options 是 Fetcher 的限流与重试参数（默认值见 design.md §8）。
@@ -13,6 +15,9 @@ type Options struct {
 	MaxConnsPerHost  int   // 单主机连接数上限，默认 64
 	MaxTasks         int   // 最大并发下载任务数，默认 8
 	MaxRetries       int   // 校验失败重下次数，默认 3
+	// OnLocalOpen 在 Put 成功、Open 读回校验之前以块指纹调用一次（可为 nil）。
+	// 通用钩子：core 不依赖 Agent 侧类型；实现不得阻塞（调用方通常仅做内存记账）。
+	OnLocalOpen func(fp cas.Fingerprint)
 }
 
 // 默认值（design.md §8）：Options 字段 <= 0 视为未设置，取默认。

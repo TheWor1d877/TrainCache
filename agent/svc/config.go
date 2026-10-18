@@ -33,6 +33,9 @@ const (
 	defaultObjstoreEndpoint = "127.0.0.1:9000"
 	// defaultObjstoreBucket 是对象存储桶默认值(D26;v1 单桶)。
 	defaultObjstoreBucket = "traincache"
+
+	// envReadStallMinWaitMS 是 read_stall 入直方图最小等待的配置项(D47/Q15;毫秒)。
+	envReadStallMinWaitMS = "TRAINCACHE_READ_STALL_MIN_WAIT_MS"
 )
 
 // HeatConfig 是热度与磁盘触发线参数(D14:N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%;
@@ -82,6 +85,9 @@ type Config struct {
 	ObjstoreBucket    string // TRAINCACHE_OBJSTORE_BUCKET,默认 traincache(v1 单桶)
 	ObjstoreSecure    bool   // TRAINCACHE_OBJSTORE_SECURE,默认 false("1"/"true"/"yes" 为真)
 	Heat              HeatConfig
+	// ReadStallMinWaitMS 是 read_stall 入直方图的最小等待毫秒(D47/Q15;默认 100,
+	// TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖,需 >0)。
+	ReadStallMinWaitMS int64
 }
 
 // Load 从环境变量加载配置并校验(design §8):
@@ -105,21 +111,26 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	readStallMinWaitMS, err := envPositiveInt64(envReadStallMinWaitMS, stallMinWaitMS)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
-		NodeName:          node,
-		GRPCAddr:          envOr("TRAINCACHE_GRPC_ADDR", defaultGRPCAddr),
-		MetricsAddr:       envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
-		Verify:            verify,
-		DatasetWhitelist:  splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
-		CacheRoot:         envOr("TRAINCACHE_CACHE_ROOT", defaultCacheRoot),
-		OrdersDir:         envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
-		ObjstoreEndpoint:  envOr("TRAINCACHE_OBJSTORE_ENDPOINT", defaultObjstoreEndpoint),
-		ObjstoreAccessKey: envOr("TRAINCACHE_OBJSTORE_ACCESS_KEY", ""),
-		ObjstoreSecretKey: envOr("TRAINCACHE_OBJSTORE_SECRET_KEY", ""),
-		ObjstoreBucket:    envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
-		ObjstoreSecure:    envBool("TRAINCACHE_OBJSTORE_SECURE"),
-		Heat:              heat,
+		NodeName:           node,
+		GRPCAddr:           envOr("TRAINCACHE_GRPC_ADDR", defaultGRPCAddr),
+		MetricsAddr:        envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
+		Verify:             verify,
+		DatasetWhitelist:   splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
+		CacheRoot:          envOr("TRAINCACHE_CACHE_ROOT", defaultCacheRoot),
+		OrdersDir:          envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
+		ObjstoreEndpoint:   envOr("TRAINCACHE_OBJSTORE_ENDPOINT", defaultObjstoreEndpoint),
+		ObjstoreAccessKey:  envOr("TRAINCACHE_OBJSTORE_ACCESS_KEY", ""),
+		ObjstoreSecretKey:  envOr("TRAINCACHE_OBJSTORE_SECRET_KEY", ""),
+		ObjstoreBucket:     envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
+		ObjstoreSecure:     envBool("TRAINCACHE_OBJSTORE_SECURE"),
+		Heat:               heat,
+		ReadStallMinWaitMS: readStallMinWaitMS,
 	}, nil
 }
 
@@ -254,6 +265,23 @@ func envPercent(key string, def float64) (float64, error) {
 		return 0, fmt.Errorf("svc: %s=%v 非法(需 0..100)", key, f)
 	}
 	return f, nil
+}
+
+// envPositiveInt64 解析正整数 env(如 read_stall 最小等待毫秒)。
+// 未设置或全空白 → 默认值;非法取值或 ≤0 → 错误。
+func envPositiveInt64(key string, def int64) (int64, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("svc: %s=%q 非法(需整数): %w", key, v, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("svc: %s=%d 非法(需 > 0)", key, n)
+	}
+	return n, nil
 }
 
 // envPositiveInt 解析正整数 env(如校准滑动窗口)。

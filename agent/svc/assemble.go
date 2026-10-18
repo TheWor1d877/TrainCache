@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"traincache/agent/collector"
 	"traincache/agent/evictor"
@@ -24,6 +25,9 @@ import (
 // 同时是淘汰硬保护窗口(§7.6:cursor 起 lookahead 块,"8 块为接线侧的约定值")。
 const prefetchLookahead = 8
 
+// selfOpenGuardTTL 是 Agent 自打开守卫的有效期(D49;覆盖 inotify 轮询与处理延迟)。
+const selfOpenGuardTTL = 3 * time.Second
+
 // Agent 是 svc 装配产物:持有配置与各子模块实例(design §3:svc 是装配层;D34 导出字段
 // 供接线测试与探针注入)。collector 例外:它绑单个 ring,在首个 ring 被发现时才构造
 // (§5.5;冻结构造签名不允许换绑),构造后经 Collector 字段发布(见 wire.go)。
@@ -40,6 +44,14 @@ type Agent struct {
 	Collector   *collector.Collector // 采集层(M5;首个 ring 发现时绑定,之前为 nil)
 	Evictor     *evictor.Evictor     // 磁盘淘汰循环(M6/§7.6)
 	HookSock    *HookSock            // 钩子收端(M5/§5.4)
+
+	// selfOpen 是 Agent 自打开守卫(D49):prefetch/fetch/rescan/backfill/stall 归因的
+	// 本地块读取先 Mark,collector 的 inotify 兜底以 SelfOpened 过滤。nil 安全。
+	selfOpen *prefetch.SelfOpenGuard
+
+	// M9 阶段/归因骨架(D46/D47;装配期构造,业务逻辑由 M9 填写)。
+	phase *phaseTracker
+	stall *stallAttributor
 
 	// collMu 保护 Collector/ring/ringPod 的懒绑定(collector 与其 ring 同时发布)。
 	collMu  sync.Mutex
@@ -71,7 +83,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	}
 	ag.CS = cs
 
-	ag.Fetcher = fetch.New(obj, cs, fetch.Options{}) // 零值回退 design §8 默认(1 GiB 在途/64 连接等)
+	// D49 self-open guard:fetch 在读回校验前登记指纹(通用钩子,core 不依赖 prefetch)。
+	ag.selfOpen = prefetch.NewSelfOpenGuard(selfOpenGuardTTL)
+	ag.Fetcher = fetch.New(obj, cs, fetch.Options{OnLocalOpen: ag.selfOpen.Mark}) // 其余零值回退 design §8 默认
 
 	// 指标层带 node 标签(traincache_agent_up / agent_degraded;§5.8 node 为第二正交维度)。
 	ag.Metrics = metrics.New(metrics.Config{
@@ -79,7 +93,19 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		Node:             cfg.NodeName.String(),
 	})
 
+	// M9/D46 阶段跟踪器(窗口 K 取 lookahead)。
+	ag.phase = newPhaseTracker(prefetchLookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
+	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
+	ag.Prefetch.phase = ag.phase
+	// 块/事件 → dataset 归属:按各 dataset Catalog 解析(与钩子 resolveRef 同口径)。
+	ag.phase.setDatasetResolver(func(ref ordersource.ChunkRef) (string, bool) {
+		ds, _, ok := ag.resolveRef(ref)
+		return ds, ok
+	})
+	// M9/D47 归因依赖:本地存在性 + 预取 pending/当前窗口(桩返回 false,逻辑由 M9 填写)。
+	ag.stall = newStallAttributorWithThreshold(ag.stallLocalExists, ag.stallInflight,
+		ag.stallCurrentWindow, cfg.ReadStallMinWaitMS)
 	ag.Preheat = NewPreheatTasks(cfg, ag.Prefetch)
 	// 读时坏块修复(D35)与块完成触达(D24/D28)接线(实现见 wire.go)。
 	ag.Prefetch.SetBlockDoneHook(ag.onBlockDone)
@@ -89,6 +115,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 
 	// 重扫描(M4/D35):catalogFor 与预取管理器共用同一 bundle(同一 dataset 一个 Catalog)。
 	ag.Rescan = rescan.New(cs, ag.Fetcher, obj, ag.catalogFor, rescanMetrics{ag.Metrics})
+	ag.Rescan.SetSelfOpenMarker(ag.selfOpen.Mark) // D49:扫描校验/修复读回
+	// M8/M9 指标接线(singleflight 合并钩子、限速上限、修复队列初始深度;见 metricswiring.go)。
+	ag.wireMetrics()
 
 	// 钩子收端(M5/§5.4;路径见 hookSockPath)+ 三型 handler(见 wire.go)。
 	ag.HookSock = New(hookSockPath(cfg), ag.Metrics, ag.hookHandlers())
@@ -110,6 +139,13 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	return ag, nil
 }
 
+// markSelfOpen 在 Agent 自身读取本地块前登记指纹(D49;nil 安全)。
+func (a *Agent) markSelfOpen(fp cas.Fingerprint) {
+	if a.selfOpen != nil {
+		a.selfOpen.Mark(fp)
+	}
+}
+
 // verifyLevel 把 svc 校验等级映射到 core cas 枚举(design §8:TRAINCACHE_VERIFY 透传)。
 func verifyLevel(verify string) cas.VerifyLevel {
 	if verify == VerifyXXH3SHA256 {
@@ -123,10 +159,11 @@ func verifyLevel(verify string) cas.VerifyLevel {
 // 10.15 口径不再按 dataset 副本),mutex 串行化 bundle 表增改。三个入口:
 // ForOrder(订单驱动)/ ForPreheat(预热 P0 入队)/ ForListSnapshot(条目枚举)。
 type PrefetchManager struct {
-	store   objectstore.Store
-	cs      *cas.Store
-	fetcher *fetch.Fetcher
-	m       *metrics.Registry
+	store    objectstore.Store
+	cs       *cas.Store
+	fetcher  *fetch.Fetcher
+	m        *metrics.Registry
+	selfOpen *prefetch.SelfOpenGuard // D49 自打开守卫(SetSelfOpenGuard 注入;m.mu 保护)
 
 	baseCtx context.Context // 预取器调度生命周期(Close 取消)
 	cancel  context.CancelFunc
@@ -150,6 +187,9 @@ type PrefetchManager struct {
 	// p0Mu/p0Pending 记录 P0 在途块(ForPreheat 入队成功登记、完成回调移出;§7.6 硬保护)。
 	p0Mu      sync.Mutex
 	p0Pending map[p0Ref]int
+
+	// phase 是 M9/D46 阶段跟踪器(装配期注入;各 dataset 的 OnStageSwitch 回调共用)。
+	phase *phaseTracker
 }
 
 // blockDoneHook 是块完成触达的 svc 侧签名(含 dataset 归属与该 dataset 的 Catalog,
@@ -187,6 +227,14 @@ func NewPrefetchManager(store objectstore.Store, cs *cas.Store, f *fetch.Fetcher
 		bundles:   make(map[string]*datasetBundle),
 		p0Pending: make(map[p0Ref]int),
 	}
+}
+
+// SetSelfOpenGuard 注入 Agent 自打开守卫(D49;装配期在首个 bundle 构造前调用一次)。
+// 传 nil 解除。m.mu 串行化,bundleFor 在同一锁下读取。
+func (m *PrefetchManager) SetSelfOpenGuard(g *prefetch.SelfOpenGuard) {
+	m.mu.Lock()
+	m.selfOpen = g
+	m.mu.Unlock()
 }
 
 // SetP0Done 注册 P0 块完成分发(装配期调用一次;传 nil 解除)。回调路径原子读。
@@ -291,6 +339,28 @@ type datasetBundle struct {
 	// lookahead 块;protectedFPs 在 bundle 锁下读)。
 	lastOrder ordersource.ConsumeOrder
 	hasOrder  bool
+
+	// fpGen/fpIndex 是按订单代际缓存的指纹反向索引(D49):键含 stageID、Chunk 数、
+	// 首尾 ref,订单切换即重建。索引一经安装不再原地修改(重建换新 map),锁外查询安全。
+	fpGen   fpIndexGen
+	fpIndex map[cas.Fingerprint][]ordersource.ChunkRef
+}
+
+// fpIndexGen 是订单代际键(订单切换或块序列变化即变化)。
+type fpIndexGen struct {
+	stageID string
+	n       int
+	first   ordersource.ChunkRef
+	last    ordersource.ChunkRef
+}
+
+// orderGeneration 返回订单的指纹索引代际键。
+func orderGeneration(o ordersource.ConsumeOrder) fpIndexGen {
+	g := fpIndexGen{stageID: o.StageID, n: len(o.Chunks)}
+	if g.n > 0 {
+		g.first, g.last = o.Chunks[0], o.Chunks[g.n-1]
+	}
+	return g
 }
 
 // bundleFor 取/建 dataset 的 bundle(惰性:首个入口触发构造)。
@@ -302,7 +372,8 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 	}
 	cat := index.NewCatalog(m.store, dataset, index.Config{})
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
-		Lookahead: prefetchLookahead,
+		Lookahead:     prefetchLookahead,
+		SelfOpenGuard: m.selfOpen, // D49:本地命中/读回/ETA 探测打开前 Mark
 		OnP0Done: func(ref prefetch.ChunkRef, err error) {
 			// 完成即移出 P0 在途保护表(在分发预热状态机之前,保持保护表新鲜)。
 			m.removeP0Ref(dataset, ref)
@@ -315,10 +386,24 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 			}
 			return m.dispatchRepair(ctx, ds, cat, ref)
 		},
+		// M9/D46:每次 OnStageSwitch 通知 svc phaseTracker 迁移到 switch。
+		OnStageSwitch: func(stageID string) {
+			if m.phase != nil {
+				m.phase.OnStageSwitchFor(dataset, stageID)
+			}
+		},
 	})
 	b := &datasetBundle{dataset: dataset, catalog: cat, prefetcher: pf}
 	m.bundles[dataset] = b
 	return b
+}
+
+// existingBundle 返回已存在的 dataset bundle(不触发构造;归因等只读路径用)。
+func (m *PrefetchManager) existingBundle(dataset string) (*datasetBundle, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.bundles[dataset]
+	return b, ok
 }
 
 // bundleNames 返回已有 bundle 的 dataset 名(升序稳定输出;状态 RPC/GC 枚举用)。
@@ -338,9 +423,46 @@ func (m *PrefetchManager) lookupRef(dataset string, ref ordersource.ChunkRef) (i
 	return m.bundleFor(dataset).catalog.Lookup(context.Background(), ref.Path, ref.Chunk)
 }
 
-// OnConsumeSideAdvance 把消费侧推进(钩子 advance 帧 / collector 校准重对齐回调)转给对应
-// dataset 的预取器(§5.2;ref 不在当前订单内或尚无订单 → 预取器自身忽略并返回 nil)。
-func (m *PrefetchManager) OnConsumeSideAdvance(ctx context.Context, dataset string, ref prefetch.ChunkRef) error {
+// lookupFingerprint 按指纹反查当前订单中的候选块引用(D49;inotify OPEN 兜底用)。
+// Catalog 无按指纹反查接口,故惰性遍历 lastOrder.Chunks 逐个 Lookup 建整张反向索引,
+// 同一订单代际内查询 O(1);无订单返回 nil。索引构建在 bundle 锁外进行(先快照订单、
+// 锁外 Catalog 查询、再校验代际安装),并发下允许重复构建但无数据竞争。
+func (b *datasetBundle) lookupFingerprint(ctx context.Context, fp cas.Fingerprint) []ordersource.ChunkRef {
+	b.mu.Lock()
+	if !b.hasOrder || len(b.lastOrder.Chunks) == 0 {
+		b.mu.Unlock()
+		return nil
+	}
+	order := b.lastOrder
+	gen := orderGeneration(order)
+	if b.fpIndex != nil && b.fpGen == gen {
+		out := b.fpIndex[fp]
+		b.mu.Unlock()
+		return out
+	}
+	b.mu.Unlock()
+
+	idx := make(map[cas.Fingerprint][]ordersource.ChunkRef, len(order.Chunks))
+	for _, ref := range order.Chunks {
+		e, ok, err := b.catalog.Lookup(ctx, ref.Path, ref.Chunk)
+		if err != nil || !ok {
+			continue
+		}
+		idx[e.Fingerprint] = append(idx[e.Fingerprint], ref)
+	}
+
+	b.mu.Lock()
+	if b.hasOrder && orderGeneration(b.lastOrder) == gen {
+		b.fpGen, b.fpIndex = gen, idx
+	}
+	b.mu.Unlock()
+	return idx[fp]
+}
+
+// OnConsumeSideAdvance 把消费侧推进(钩子 advance 帧 / collector 校准重对齐回调 /
+// inotify 兜底反查)转给对应 dataset 的预取器(§5.2),直接透传底层"是否真正推进"
+// (重复/落后事件返回 false 且无副作用;ref 不在当前订单内或尚无阶段同样 false)。
+func (m *PrefetchManager) OnConsumeSideAdvance(ctx context.Context, dataset string, ref prefetch.ChunkRef) bool {
 	return m.bundleFor(dataset).prefetcher.OnConsumeSideAdvance(ctx, ref)
 }
 
@@ -376,8 +498,39 @@ func (m *PrefetchManager) ProtectedFPs() []cas.Fingerprint {
 	return out
 }
 
-// protectedFPs 返回该 dataset 的 cursor 起 lookahead 块指纹(§7.6 硬保护;bundle 锁下读
-// 预取器状态与最近订单,索引查询为内存操作)。cursor 不在订单中(尚无游标)时从订单头起算。
+// refWindowState 判断 ref 是否属于该 dataset 最近订单的当前消费窗口(D46 命中 source
+// 判据):known=false 表示无订单可归属;inWindow=true 表示位点落在 cursor 起 lookahead
+// 范围内。bundle 锁下读;Status() 内部锁与 bundle 锁同序(b.mu → p.mu),无反向持有。
+func (b *datasetBundle) refWindowState(ref ordersource.ChunkRef) (known, inWindow bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.hasOrder || len(b.lastOrder.Chunks) == 0 {
+		return false, false
+	}
+	chunks := b.lastOrder.Chunks
+	cursor := -1
+	cur := b.prefetcher.Status().Cursor
+	for i := range chunks {
+		if chunks[i] == cur {
+			cursor = i
+			break
+		}
+	}
+	if cursor < 0 {
+		cursor = 0 // 尚无游标:从订单头起算(与 protectedFPs 同口径)
+	}
+	for i := range chunks {
+		if chunks[i] == ref {
+			return true, i >= cursor && i < cursor+prefetchLookahead
+		}
+	}
+	return true, false
+}
+
+// protectedFPs 返回该 dataset 的保护窗口指纹(§7.6 硬保护;bundle 锁下读预取器状态与
+// 最近订单,索引查询为内存操作)。窗口基准 = max(消费游标 Cursor, 预取前沿
+// PrefetchFrontier)在订单中的位置:保证已预取块不因消费尚未推进而提前解锁;任一字段
+// 找不到时回退到能找到的那个,都找不到则从订单头起算。
 func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -385,13 +538,27 @@ func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 		return nil
 	}
 	chunks := b.lastOrder.Chunks
-	cursor := b.prefetcher.Status().Cursor
-	start := 0
+	st := b.prefetcher.Status()
+	ci, fi := -1, -1
 	for i := range chunks {
-		if chunks[i] == cursor {
-			start = i
-			break
+		if ci < 0 && chunks[i] == st.Cursor {
+			ci = i
 		}
+		if fi < 0 && chunks[i] == st.PrefetchFrontier {
+			fi = i
+		}
+	}
+	start := 0
+	switch {
+	case ci >= 0 && fi >= 0:
+		start = ci
+		if fi > start {
+			start = fi
+		}
+	case ci >= 0:
+		start = ci
+	case fi >= 0:
+		start = fi
 	}
 	end := start + prefetchLookahead
 	if end > len(chunks) {
@@ -419,6 +586,20 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	b := m.bundleFor(o.Dataset)
 	if err := m.measureLoadPrefixes(ctx, o.Dataset, b.catalog, orderPaths(o.Chunks)); err != nil {
 		return err
+	}
+
+	// M9/D46:启动/切换窗口 K 取本订单的 ConsumeOrder.PrefetchChunks(与预取器同口径
+	// 截断到订单块数),按 dataset 记录;未注入 K 的 dataset 回退缺省 lookahead。
+	// 必须在 OnStageSwitch 前写入:预取器的 OnStageSwitch 回调会同步迁移 phase 状态。
+	if m.phase != nil {
+		k := o.PrefetchChunks
+		if k < 0 {
+			k = 0
+		}
+		if k > len(o.Chunks) {
+			k = len(o.Chunks)
+		}
+		m.phase.OnOrderForDataset(o.Dataset, k)
 	}
 
 	b.mu.Lock()
@@ -453,7 +634,7 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 // ForPreheat 是预热入队入口(SubmitPreheat 的 P0 入队):取/建 bundle → 未绑定 dataset 时
 // 以最小订单(dataset-only)播种——P0 抓取键(D25)的 dataset 取最近一次 ConsumeOrder 的
 // 绑定,预热先于订单到达时由播种补齐(真实首个订单随后覆盖;播种订单无 chunks,不影响
-// 阶段语义;副作用:产生一次 0 值字段的 stage_switch_stall 样本)→ 按需启动调度(生命周期 =
+// 阶段语义;副作用:产生一次 0 值字段的 stage_switch_eta 样本)→ 按需启动调度(生命周期 =
 // 管理器 ctx,先于订单到达也能推进)→ EnqueueP0(先于 Start 入队的块在 Start 后出队)。
 // refs 为空时无操作。
 func (m *PrefetchManager) ForPreheat(ctx context.Context, dataset string, refs []prefetch.ChunkRef) error {

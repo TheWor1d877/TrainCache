@@ -17,7 +17,7 @@ const (
 	hookFormatErrorsName        = "traincache_hook_format_errors_total"
 	prefetchQueueDepthName      = "traincache_prefetch_queue_depth"
 	prefetchCursorName          = "traincache_prefetch_cursor"
-	stageSwitchStallName        = "traincache_stage_switch_stall_seconds"
+	stageSwitchETAName          = "traincache_stage_switch_eta_seconds"
 )
 
 func TestDatasetLabelWhitelistHit(t *testing.T) {
@@ -61,10 +61,10 @@ func TestPrometheusRegistry(t *testing.T) {
 		t.Error("Prometheus() 应返回同一注册表")
 	}
 
-	// M6 起注册表恰含 25 个 family:本节校验 M2/M3 的 4 个(ordersource 格式错误 counter[D23]、
+	// M9 起注册表恰含 34 个 family:本节校验 M2/M3 的 4 个(ordersource 格式错误 counter[D23]、
 	// prefetch 队列深度/游标 gauge 与阶段切换停滞 histogram[M3]);七线 23 个(M6,含复用的这 3 个)
-	// 在 TestSevenLineFamiliesRegisteredAtStartup 校验;钩子帧格式错误 counter(D33,非七线)本文件
-	// 由 TestHookFormatErrors 校验。
+	// 在 TestSevenLineFamiliesRegisteredAtStartup 校验;D33 钩子帧错误、D44 读 miss 与 M9 的
+	// 8 个证据 family 也在该测试校验。
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -73,10 +73,10 @@ func TestPrometheusRegistry(t *testing.T) {
 		ordersourceFormatErrorsName: "COUNTER",
 		prefetchQueueDepthName:      "GAUGE",
 		prefetchCursorName:          "GAUGE",
-		stageSwitchStallName:        "HISTOGRAM",
+		stageSwitchETAName:          "HISTOGRAM",
 	}
-	if len(families) != 25 {
-		t.Fatalf("注册表应恰有 25 个 family(七线 23 个[含 M3 复用的 3 个] + D23 ordersource + D33 钩子帧错误),实际 %d 个", len(families))
+	if len(families) != 34 {
+		t.Fatalf("注册表应恰有 34 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个),实际 %d 个", len(families))
 	}
 	byName := make(map[string]int, len(families))
 	for i, mf := range families {
@@ -237,22 +237,32 @@ func TestPrefetchCursorGauge(t *testing.T) {
 	}
 }
 
-// TestStageSwitchStallHistogram：Observe 后 count/sum 正确;bucket 为 prometheus.DefBuckets。
+// TestStageSwitchStallHistogram：Observe 后 count/sum 正确;bucket 为 prometheus.DefBuckets;
+// M9/D46 起必须带 dataset 标签(缺省调用归并为 other)。
 func TestStageSwitchStallHistogram(t *testing.T) {
-	r := metrics.New(metrics.Config{})
+	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
 
-	r.ObserveStageSwitchStall(0.25)
-	r.ObserveStageSwitchStall(0.75)
-	count, sum, upper := gatherStallHistogram(t, r)
-	if count != 2 {
-		t.Errorf("sample count = %d, want 2", count)
+	r.ObserveStageSwitchStall(0.25, "a-track")
+	r.ObserveStageSwitchStall(0.75, "a-track")
+	r.ObserveStageSwitchStall(1.5) // 冻结调用点(无 dataset 参数)→ other
+	got := gatherStallHistograms(t, r)
+
+	a := got["a-track"]
+	if a.count != 2 {
+		t.Errorf("a-track sample count = %d, want 2", a.count)
 	}
-	if sum != 1.0 {
-		t.Errorf("sample sum = %v, want 1.0", sum)
+	if a.sum != 1.0 {
+		t.Errorf("a-track sample sum = %v, want 1.0", a.sum)
 	}
 	// 桶上界(不含 +Inf)应与 prometheus.DefBuckets 逐一一致。
-	if !slices.Equal(upper, prometheus.DefBuckets) {
-		t.Errorf("bucket 上界 = %v, want prometheus.DefBuckets = %v", upper, prometheus.DefBuckets)
+	if !slices.Equal(a.upper, prometheus.DefBuckets) {
+		t.Errorf("a-track bucket 上界 = %v, want prometheus.DefBuckets = %v", a.upper, prometheus.DefBuckets)
+	}
+	if o := got["other"]; o.count != 1 || o.sum != 1.5 {
+		t.Errorf("other(缺省 dataset)= (count=%d, sum=%v), want (1, 1.5)", o.count, o.sum)
+	}
+	if len(got) != 2 {
+		t.Errorf("dataset 子指标数 = %d, want 2(a-track/other)", len(got))
 	}
 }
 
@@ -306,31 +316,45 @@ func gatherSingleGauge(t *testing.T, r *metrics.Registry, family string) float64
 	return 0
 }
 
-// gatherStallHistogram 读出阶段切换停滞 histogram 的样本数、和与非 +Inf 桶上界列表。
-func gatherStallHistogram(t *testing.T, r *metrics.Registry) (count uint64, sum float64, upper []float64) {
+// stallHistogram 是阶段切换停滞 histogram 单 dataset 子指标的浅视图。
+type stallHistogram struct {
+	count uint64
+	sum   float64
+	upper []float64
+}
+
+// gatherStallHistograms 按 dataset 标签读出阶段切换停滞 histogram。
+func gatherStallHistograms(t *testing.T, r *metrics.Registry) map[string]stallHistogram {
 	t.Helper()
 	families, err := r.Prometheus().Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}
 	for _, mf := range families {
-		if mf.GetName() != stageSwitchStallName {
+		if mf.GetName() != stageSwitchETAName {
 			continue
 		}
+		out := make(map[string]stallHistogram, len(mf.GetMetric()))
 		for _, m := range mf.GetMetric() {
-			h := m.GetHistogram()
-			count += h.GetSampleCount()
-			sum += h.GetSampleSum()
-			for _, b := range h.GetBucket() {
-				if ub := b.GetUpperBound(); !math.IsInf(ub, +1) {
-					upper = append(upper, ub)
+			dataset := ""
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "dataset" {
+					dataset = lp.GetValue()
 				}
 			}
+			h := m.GetHistogram()
+			s := stallHistogram{count: h.GetSampleCount(), sum: h.GetSampleSum()}
+			for _, b := range h.GetBucket() {
+				if ub := b.GetUpperBound(); !math.IsInf(ub, +1) {
+					s.upper = append(s.upper, ub)
+				}
+			}
+			out[dataset] = s
 		}
-		return count, sum, upper
+		return out
 	}
-	t.Fatalf("family %q 不存在", stageSwitchStallName)
-	return 0, 0, nil
+	t.Fatalf("family %q 不存在", stageSwitchETAName)
+	return nil
 }
 
 // gatherFormatErrors 从注册表 Gather 结果中读出 ordersource 格式错误 counter 的

@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 )
 
@@ -228,11 +229,11 @@ func TestWatchBlocksCountsOpenEvent(t *testing.T) {
 	}
 	// 热度条目先于 noteOpen 的命中率/指标步骤落表,轮询等到明细齐备。
 	mustEventually(t, "命中计入命中率(本地块存在)", func() bool { return env.c.HitRate() == 1 })
-	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success")); got != 0 {
+	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success", metrics.PhaseUnknown)); got != 0 {
 		t.Errorf("cache_misses{other} = %v, want 0(块在本地)", got)
 	}
 	time.Sleep(100 * time.Millisecond) // 消窗:等内核队列里的事件被监听循环处理完
-	hits0 := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success"))
+	hits0 := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success", metrics.SourceUnknown, metrics.PhaseUnknown))
 	if hits0 < 1 {
 		t.Fatalf("cache_hits{other} = %v, want ≥ 1", hits0)
 	}
@@ -250,7 +251,7 @@ func TestWatchBlocksCountsOpenEvent(t *testing.T) {
 	if n != 1 {
 		t.Errorf("tmp 文件打开后条目数 = %d, want 1(临时文件不计入)", n)
 	}
-	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success")); got != hits0 {
+	if got := testutil.ToFloat64(env.m.CacheHits().WithLabelValues("other", "success", metrics.SourceUnknown, metrics.PhaseUnknown)); got != hits0 {
 		t.Errorf("tmp 文件打开后 cache_hits = %v, want %v(不变)", got, hits0)
 	}
 }

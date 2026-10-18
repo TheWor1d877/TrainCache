@@ -35,6 +35,7 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT",
 		"TRAINCACHE_HEAT_DISK_DELTA_PERCENT",
 		"TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT",
+		"TRAINCACHE_READ_STALL_MIN_WAIT_MS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -103,6 +104,9 @@ func TestLoadDefaults(t *testing.T) {
 	if want := wantDefaultHeat(); cfg.Heat != want {
 		t.Errorf("Heat 默认值 = %+v, want %+v(D14)", cfg.Heat, want)
 	}
+	if cfg.ReadStallMinWaitMS != stallMinWaitMS {
+		t.Errorf("ReadStallMinWaitMS = %d, want %d(D47 默认)", cfg.ReadStallMinWaitMS, stallMinWaitMS)
+	}
 }
 
 func TestLoadEnvOverride(t *testing.T) {
@@ -130,6 +134,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT", "70")
 	t.Setenv("TRAINCACHE_HEAT_DISK_DELTA_PERCENT", "10")
 	t.Setenv("TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT", "95")
+	t.Setenv("TRAINCACHE_READ_STALL_MIN_WAIT_MS", "50")
 
 	cfg, err := Load()
 	if err != nil {
@@ -184,6 +189,9 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.Heat != wantHeat {
 		t.Errorf("Heat = %+v, want %+v(TRAINCACHE_HEAT_* 覆盖,D30)", cfg.Heat, wantHeat)
+	}
+	if cfg.ReadStallMinWaitMS != 50 {
+		t.Errorf("ReadStallMinWaitMS = %d, want 50(TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖)", cfg.ReadStallMinWaitMS)
 	}
 }
 
@@ -317,6 +325,9 @@ func TestLoadHeatEnvInvalid(t *testing.T) {
 		{"TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT", "101"},
 		{"TRAINCACHE_HEAT_DISK_DELTA_PERCENT", "-1"},
 		{"TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT", "junk"},
+		{"TRAINCACHE_READ_STALL_MIN_WAIT_MS", "0"},
+		{"TRAINCACHE_READ_STALL_MIN_WAIT_MS", "-1"},
+		{"TRAINCACHE_READ_STALL_MIN_WAIT_MS", "1.5"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.val, func(t *testing.T) {

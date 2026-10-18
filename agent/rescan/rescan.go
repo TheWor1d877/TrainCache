@@ -74,6 +74,10 @@ type Rescanner struct {
 	catalogFor func(ctx context.Context, dataset string) (*index.Catalog, error)
 	m          Metrics
 
+	// selfOpen 是 Agent 自打开登记钩子(D49;装配期 SetSelfOpenMarker 注入,可为 nil):
+	// 扫描校验与修复后读回在 Open 前调用,避免被 inotify 兜底误判为训练消费。
+	selfOpen func(fp cas.Fingerprint)
+
 	// pickSample 是抽样选择钩子(非导出白盒测试用;生产为 nil → defaultPickSample)。
 	pickSample func(n, k int) []int
 
@@ -104,6 +108,24 @@ func New(cs *cas.Store, fetcher *fetch.Fetcher, obj objectstore.Store,
 		m:          m,
 		phase:      PhaseSampling,
 		flights:    make(map[string]*repairFlight),
+	}
+}
+
+// SetSelfOpenMarker 注入 Agent 自打开登记钩子(D49;装配期调用一次,传 nil 解除)。
+// 只接收指纹,不依赖 prefetch 类型(保持子模块依赖方向)。
+func (r *Rescanner) SetSelfOpenMarker(fn func(fp cas.Fingerprint)) {
+	r.mu.Lock()
+	r.selfOpen = fn
+	r.mu.Unlock()
+}
+
+// markSelfOpen 在 Agent 自身读取本地块前登记指纹(锁下取钩子,nil 安全)。
+func (r *Rescanner) markSelfOpen(fp cas.Fingerprint) {
+	r.mu.Lock()
+	fn := r.selfOpen
+	r.mu.Unlock()
+	if fn != nil {
+		fn(fp)
 	}
 }
 
@@ -216,6 +238,7 @@ func (r *Rescanner) run(ctx context.Context) {
 // Quarantine + Quarantined++ 并返回 true(调用方按映射入修复队列);ErrNotFound(已被并发
 // 隔离/淘汰)与 IO 错误只记日志(仍计 Sampled,不计 Verified)。不得持 r.mu 调用(内含 IO)。
 func (r *Rescanner) verify(fp cas.Fingerprint) (corrupt bool) {
+	r.markSelfOpen(fp) // D49:扫描校验打开前登记
 	br, err := r.cs.Open(fp)
 	if err == nil {
 		_ = br.Close()

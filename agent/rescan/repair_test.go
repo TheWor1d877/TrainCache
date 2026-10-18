@@ -12,6 +12,51 @@ import (
 	"traincache/core/cas"
 )
 
+// TestSelfOpenMarkerOnRescanReads:D49 self-open marker 覆盖扫描校验与修复读回两条
+// Agent 自读打开路径(SetSelfOpenMarker 注入后,verify/reportRepairFetch 均先登记指纹)。
+func TestSelfOpenMarkerOnRescanReads(t *testing.T) {
+	env := newEnv(t, []blockSpec{
+		{dataset: testDataset, path: "v.tar", chunk: 1, content: "verify-mark", source: true},
+	})
+	id := blockID{dataset: testDataset, path: "v.tar", chunk: 1}
+	fp := env.fpOf[id]
+
+	var (
+		mu    sync.Mutex
+		marks []cas.Fingerprint
+	)
+	r := New(env.cs, env.fetch, env.store, env.catalogFor, nil)
+	r.SetSelfOpenMarker(func(v cas.Fingerprint) {
+		mu.Lock()
+		marks = append(marks, v)
+		mu.Unlock()
+	})
+
+	if corrupt := r.verify(fp); corrupt {
+		t.Fatal("正常块 verify 返回 corrupt")
+	}
+	mu.Lock()
+	if len(marks) != 1 || marks[0] != fp {
+		mu.Unlock()
+		t.Fatalf("verify 后的自打开登记 = %v, want [%s]", marks, fp)
+	}
+	marks = nil
+	mu.Unlock()
+
+	env.corruptBlock(id)
+	if err := env.cs.Quarantine(fp); err != nil {
+		t.Fatalf("Quarantine: %v", err)
+	}
+	if _, err := r.RepairOne(context.Background(), testDataset, ordersource.ChunkRef{Path: "v.tar", Chunk: 1}); err != nil {
+		t.Fatalf("RepairOne: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(marks) == 0 || marks[0] != fp {
+		t.Fatalf("RepairOne 读回的自打开登记 = %v, want 含 %s", marks, fp)
+	}
+}
+
 // TestRepairOneClosesLoop:手动"损坏 → 隔离 → RepairOne"闭环(不依赖 Start):按 D25 键
 // 恰一次下载、指纹不变、RemoveQuarantined 使 ListQuarantined 归零、隔离 gauge 递减到 0;
 // 未 Start 时 Status 保持初值(SAMPLING/零计数),修复独立工作。

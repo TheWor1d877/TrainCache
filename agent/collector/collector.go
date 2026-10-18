@@ -121,6 +121,10 @@ type Collector struct {
 	advanceCb func(chunk int64)
 	advances  uint64 // advance 事件计数(nil 回调时仅统计)
 
+	openMu     sync.Mutex
+	openCb     func(fp cas.Fingerprint)      // inotify 兜底打开回调(仅在门控通过后触发)
+	openFilter func(fp cas.Fingerprint) bool // 回调前过滤(D49:Agent 自打开不触发回调)
+
 	hr  *hitRate
 	cal *calibrator
 
@@ -128,6 +132,42 @@ type Collector struct {
 	degraded bool
 
 	started atomic.Bool // Start 幂等守卫
+}
+
+// CacheLabeler 是命中打点的 source/phase 标签适配(D46):collector 负责事件与计数,
+// svc 装配期注入判定器(命中来源依赖预取窗口与 phaseTracker,不属于采集层)。
+type CacheLabeler struct {
+	// Source 返回 metrics.SourcePrefetch / SourceCache / SourceUnknown。
+	Source func(dataset string, fp cas.Fingerprint, ref ordersource.ChunkRef) string
+	// Phase 返回 metrics.Phase* 之一。
+	Phase func(dataset string) string
+}
+
+// cacheLabeler 是进程级注入口(atomic;装配期写入一次,读路径并发读)。
+// 未注入时 noteOpen 显式传 unknown/unknown,不引入额外标签基数。
+var cacheLabeler atomic.Pointer[CacheLabeler]
+
+// SetCacheLabeler 注入命中标签判定器(传 nil 解除)。装配期调用一次。
+func SetCacheLabeler(l *CacheLabeler) {
+	if l == nil {
+		cacheLabeler.Store(nil)
+		return
+	}
+	cacheLabeler.Store(l)
+}
+
+// cacheLabels 取本次命中/未命中的 source 与 phase(D46;缺省 unknown)。
+func (c *Collector) cacheLabels(dataset string, fp cas.Fingerprint, ref ordersource.ChunkRef) (source, phase string) {
+	source, phase = metrics.SourceUnknown, metrics.PhaseUnknown
+	if l := cacheLabeler.Load(); l != nil {
+		if l.Source != nil {
+			source = l.Source(dataset, fp, ref)
+		}
+		if l.Phase != nil {
+			phase = l.Phase(dataset)
+		}
+	}
+	return source, phase
 }
 
 // NewCollector 构造采集层(design §5.5 冻结签名):blockDir = cas 根目录
@@ -339,6 +379,38 @@ func (c *Collector) fireAdvance(chunk int64) {
 	}
 }
 
+// SetOpenCallback 注册 inotify 兜底打开回调(门控通过且计入热度后以指纹调用;传 nil 解除)。
+// 不做去重:同一指纹的重复打开逐次回调,去重由上层消费位点的单调性负责。
+func (c *Collector) SetOpenCallback(fn func(fp cas.Fingerprint)) {
+	c.openMu.Lock()
+	c.openCb = fn
+	c.openMu.Unlock()
+}
+
+// SetOpenFilter 注册兜底打开回调的前置过滤器(D49 self-open guard):返回 true 的打开
+// 事件不触发 open 回调(热度/命中率的 noteOpen 不受影响);传 nil 视为不过滤。
+// 装配期调用一次;过滤函数须并发安全且不得阻塞。
+func (c *Collector) SetOpenFilter(fn func(fp cas.Fingerprint) bool) {
+	c.openMu.Lock()
+	c.openFilter = fn
+	c.openMu.Unlock()
+}
+
+// fireOpen 锁外分发兜底打开回调(回调可安全回溯本对象的读接口)。filter 在校外调用,
+// 返回 true 时跳过回调(D49:Agent 自身读打开不推进消费)。
+func (c *Collector) fireOpen(fp cas.Fingerprint) {
+	c.openMu.Lock()
+	cb, filter := c.openCb, c.openFilter
+	c.openMu.Unlock()
+	if cb == nil {
+		return
+	}
+	if filter != nil && filter(fp) {
+		return
+	}
+	cb(fp)
+}
+
 // noteOpen 是打开事件的统一处理路径(钩子主源与 inotify 兜底共用):
 // 热度 β 增量 + t_touch → 命中率(本地块交集)与指标 → 交叉校准(仅带订单引用的钩子源)。
 func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now time.Time) {
@@ -359,13 +431,14 @@ func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now t
 	// ② 命中率:打开块与本地块求交集(命中 = 本地副本存在)。
 	hit := c.localBlock(fp)
 	if c.m != nil {
+		source, phase := c.cacheLabels(dataset, fp, ref)
 		if hit {
-			c.m.ObserveCacheHit(dataset)
+			c.m.ObserveCacheHit(dataset, source, phase)
 		} else {
 			// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按 D36 二元口径记
 			// result=success(正常未命中,消费侧将自行回源);error/refetched 由 fetch/
-			// 修复路径分别计数(接线阶段)。
-			c.m.ObserveCacheMiss(dataset, metrics.ResultSuccess)
+			// 修复路径分别计数(接线阶段)。D46:带上 phase。
+			c.m.ObserveCacheMiss(dataset, metrics.ResultSuccess, phase)
 		}
 	}
 	c.hr.observe(now, stage, hit)

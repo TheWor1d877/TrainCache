@@ -1,5 +1,5 @@
 // Package metrics： families.go 落 M6 指标底座:design §5.8 七线指标全量注册(23 个 family 中新增 20 个;
-// prefetch_queue_depth / prefetch_cursor / stage_switch_stall_seconds 三个由 M3 注册,复用不动)
+// prefetch_queue_depth / prefetch_cursor / stage_switch_eta_seconds 三个由 M3 注册,复用不动)
 // 与主对话冻结的专用打点 API(M4 rescan / M5 collector / M6 淘汰循环按这里冻结的方法名打点)。
 //
 // 标签纪律(§5.8 基数纪律;decisions D17):
@@ -38,7 +38,7 @@ const (
 	// ⑤ 磁盘淘汰线。
 	evictBlocksName           = "traincache_evict_blocks_total"
 	evictProtectedSkippedName = "traincache_evict_protected_skipped_total"
-	// ⑥ 延迟线(stage_switch_stall_seconds 已由 M3 注册)。
+	// ⑥ 延迟线(stage_switch_eta_seconds 已由 M3 注册)。
 	requestDurationName = "traincache_request_duration_seconds"
 	// ⑦ 节点状态线(prefetch_queue_depth / prefetch_cursor 已由 M3 注册)。
 	agentUpName           = "traincache_agent_up"
@@ -46,6 +46,53 @@ const (
 	rescanProgressName    = "traincache_rescan_progress"
 	quarantinedBlocksName = "traincache_quarantined_blocks"
 	diskUsageRatioName    = "traincache_disk_usage_ratio"
+)
+
+// M8/M9 新增 family 名(design §5.8;逐字冻结)。
+const (
+	hookReadMissName             = "traincache_hook_read_miss_total"
+	prefetchHitRatioName         = "traincache_prefetch_hit_ratio"
+	readStallName                = "traincache_read_stall_seconds"
+	fetchSingleflightMergedName  = "traincache_fetch_singleflight_merged_total"
+	repairQueueDepthName         = "traincache_repair_queue_depth"
+	prefetchTaskDurationName     = "traincache_prefetch_task_duration_seconds"
+	prefetchLeadBlocksName       = "traincache_prefetch_lead_blocks"
+	consumptionAdvanceName       = "traincache_consumption_advance_total"
+	fetchBandwidthLimitBytesName = "traincache_fetch_bandwidth_limit_bytes"
+)
+
+// phase / source / cause / reason / priority 标签词汇表(D44/D46/D47/D48;编译期固定)。
+const (
+	PhaseStartup = "startup"
+	PhaseSteady  = "steady"
+	PhaseSwitch  = "switch"
+	PhaseUnknown = "unknown"
+
+	SourcePrefetch = "prefetch"
+	SourceCache    = "cache"
+	SourceUnknown  = "unknown"
+
+	SourceHook    = "hook"
+	SourceInotify = "inotify"
+
+	CauseLocalSlow   = "local_slow"
+	CausePrefetchLag = "prefetch_lag"
+	CauseOriginSlow  = "origin_slow"
+	CauseUnknown     = "unknown"
+
+	ReasonAbsent  = "absent"
+	ReasonCorrupt = "corrupt"
+
+	FetchReasonPrefetch = "prefetch"
+	FetchReasonDemand   = "demand"
+	FetchReasonRepair   = "repair"
+	FetchReasonOther    = "other"
+)
+
+// M9 固定 bucket(design §5.8)。
+var (
+	readStallBuckets            = []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60}
+	prefetchTaskDurationBuckets = []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120}
 )
 
 // otherDatasetLabel 是 DatasetLabel 的白名单外归并值(§5.8;构造预置与打点归并共用)。
@@ -99,24 +146,24 @@ type hitMiss struct {
 func (r *Registry) initSevenLine() {
 	r.cacheHits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: cacheHitsName,
-		Help: "缓存命中次数(design §5.8 命中率线;result 固定 success)",
-	}, []string{"dataset", "result"})
+		Help: "缓存命中次数(design §5.8;result 固定 success;source=prefetch|cache|unknown;phase=startup|steady|switch|unknown)",
+	}, []string{"dataset", "result", "source", "phase"})
 	r.cacheMisses = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: cacheMissesName,
-		Help: "缓存未命中次数(result=success|refetched|error;§7.1 修复重下成功计 refetched)",
-	}, []string{"dataset", "result"})
+		Help: "缓存未命中次数(result=success|refetched|error;phase=startup|steady|switch|unknown)",
+	}, []string{"dataset", "result", "phase"})
 	r.cacheHitRatio = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: cacheHitRatioName,
-		Help: "缓存命中率 = 命中/(命中+未命中)(Registry 内部计数维护,每次打点即时更新)",
-	}, []string{"dataset"})
+		Help: "缓存命中率 = 命中/(命中+未命中)(按 dataset,phase;Registry 内部计数维护)",
+	}, []string{"dataset", "phase"})
 	r.fetchBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: fetchBytesName,
-		Help: "回源成功交付字节数(§5.8 回源线;result 固定 success,失败请求经 fetch_requests 体现)",
-	}, []string{"dataset", "result"})
+		Help: "回源成功交付字节数(§5.8;result 固定 success;reason=prefetch|demand|repair|other)",
+	}, []string{"dataset", "result", "reason"})
 	r.fetchRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: fetchRequestsName,
-		Help: "回源请求次数(result=success|error)",
-	}, []string{"dataset", "result"})
+		Help: "回源请求次数(result=success|error;reason=prefetch|demand|repair|other)",
+	}, []string{"dataset", "result", "reason"})
 	r.fetchInflightBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: fetchInflightBytesName,
 		Help: "回源在途字节数",
@@ -196,10 +243,14 @@ func (r *Registry) initSevenLine() {
 			vec.WithLabelValues(otherDatasetLabel, res)
 		}
 	}
-	preset(r.cacheHits, ResultSuccess)
-	preset(r.cacheMisses, ResultSuccess, ResultError, ResultRefetched)
-	preset(r.fetchBytes, ResultSuccess)
-	preset(r.fetchRequests, ResultSuccess, ResultError)
+	r.cacheHits.WithLabelValues(otherDatasetLabel, ResultSuccess, SourceUnknown, PhaseUnknown)
+	for _, res := range []string{ResultSuccess, ResultError, ResultRefetched} {
+		r.cacheMisses.WithLabelValues(otherDatasetLabel, res, PhaseUnknown)
+	}
+	r.fetchBytes.WithLabelValues(otherDatasetLabel, ResultSuccess, FetchReasonOther)
+	for _, res := range []string{ResultSuccess, ResultError} {
+		r.fetchRequests.WithLabelValues(otherDatasetLabel, res, FetchReasonOther)
+	}
 	preset(r.indexRefresh, ResultSuccess, ResultError)
 	preset(r.gcSweeps, ResultSuccess, ResultError)
 	preset(r.gcBlocksRemoved, ResultSuccess)
@@ -208,7 +259,7 @@ func (r *Registry) initSevenLine() {
 	preset(r.evictProtectedSkipped, ResultNormal, ResultDanger)
 	r.indexRefreshDuration.WithLabelValues(otherDatasetLabel, ResultSuccess)
 	// dataset 单标签 gauge 预置 "other"。
-	r.cacheHitRatio.WithLabelValues(otherDatasetLabel)
+	r.cacheHitRatio.WithLabelValues(otherDatasetLabel, PhaseUnknown)
 	r.fetchInflightBytes.WithLabelValues(otherDatasetLabel)
 	r.indexShardsLoaded.WithLabelValues(otherDatasetLabel)
 	r.quarantined.WithLabelValues(otherDatasetLabel)
@@ -225,63 +276,84 @@ func (r *Registry) initSevenLine() {
 
 // —— ① 命中率线 ——
 
-// ObserveCacheHit 记一次缓存命中:traincache_cache_hits_total{dataset,result="success"}
-// (签名无 result 参数,固定 success),并即时更新命中率 gauge。
-func (r *Registry) ObserveCacheHit(dataset string) {
+// ObserveCacheHit 记一次缓存命中:traincache_cache_hits_total{dataset,result="success",
+// source,phase}(result 固定 success;D46)。可选参数依次为 source(默认 unknown)、
+// phase(默认 unknown);集合外取值归一为 unknown,不新增基数。同时即时更新命中率 gauge。
+func (r *Registry) ObserveCacheHit(dataset string, labels ...string) {
+	source, phase := SourceUnknown, PhaseUnknown
+	if len(labels) > 0 {
+		source = normalizeSource(labels[0])
+	}
+	if len(labels) > 1 {
+		phase = normalizePhase(labels[1])
+	}
 	d := r.DatasetLabel(dataset)
-	r.cacheHits.WithLabelValues(d, ResultSuccess).Inc()
-	r.observeCacheHitRatio(d, true)
+	r.cacheHits.WithLabelValues(d, ResultSuccess, source, phase).Inc()
+	r.observeCacheHitRatio(d, phase, true)
 }
 
-// ObserveCacheMiss 记一次缓存未命中:traincache_cache_misses_total{dataset,result},
-// result∈{success,refetched,error}(§7.1:坏块修复重下成功计 refetched);集合外忽略。
-// 未命中不论结果(含 error)一律计入命中率分母,并即时更新 gauge。
-func (r *Registry) ObserveCacheMiss(dataset, result string) {
+// ObserveCacheMiss 记一次缓存未命中:traincache_cache_misses_total{dataset,result,phase},
+// result∈{success,refetched,error}(D46;§7.1:坏块修复重下成功计 refetched);集合外忽略。
+// 可选参数为 phase(默认 unknown)。未命中不论结果(含 error)一律计入命中率分母。
+func (r *Registry) ObserveCacheMiss(dataset, result string, phases ...string) {
 	if !validResult(result, ResultSuccess, ResultError, ResultRefetched) {
 		return
 	}
+	phase := PhaseUnknown
+	if len(phases) > 0 {
+		phase = normalizePhase(phases[0])
+	}
 	d := r.DatasetLabel(dataset)
-	r.cacheMisses.WithLabelValues(d, result).Inc()
-	r.observeCacheHitRatio(d, false)
+	r.cacheMisses.WithLabelValues(d, result, phase).Inc()
+	r.observeCacheHitRatio(d, phase, false)
 }
 
-// observeCacheHitRatio 以 命中/(命中+未命中) 维护 traincache_cache_hit_ratio(dataset)
-// (主对话冻结:ratio 由 Registry 内部计数维护;持锁内 Set,保证 gauge 与计数一致)。
-func (r *Registry) observeCacheHitRatio(dataset string, hit bool) {
+// observeCacheHitRatio 以 命中/(命中+未命中) 维护 traincache_cache_hit_ratio{dataset,phase}
+// (D46:ratio 由 Registry 内部计数维护;持锁内 Set,保证 gauge 与计数一致)。
+func (r *Registry) observeCacheHitRatio(dataset, phase string, hit bool) {
 	r.muCacheRatio.Lock()
 	defer r.muCacheRatio.Unlock()
-	st := r.cacheRatio[dataset]
+	k := ratioKey{dataset: dataset, phase: phase}
+	st := r.cacheRatio[k]
 	if st == nil {
 		st = &hitMiss{}
-		r.cacheRatio[dataset] = st
+		r.cacheRatio[k] = st
 	}
 	if hit {
 		st.hits++
 	} else {
 		st.misses++
 	}
-	r.cacheHitRatio.WithLabelValues(dataset).Set(float64(st.hits) / float64(st.hits+st.misses))
+	r.cacheHitRatio.WithLabelValues(dataset, phase).Set(float64(st.hits) / float64(st.hits+st.misses))
 }
 
 // —— ② 回源线 ——
 
 // AddFetchBytes 累加成功回源交付的字节量:traincache_fetch_bytes_total{dataset,
-// result="success"}(签名无 result;失败请求经 IncFetchRequests(…, ResultError) 体现)。
+// result="success",reason}(D48;reason=prefetch|demand|repair|other,默认 other)。
 // n<=0 忽略(counter 只增,避免负增量 panic)。
-func (r *Registry) AddFetchBytes(dataset string, n int64) {
+func (r *Registry) AddFetchBytes(dataset string, n int64, reasons ...string) {
 	if n <= 0 {
 		return
 	}
-	r.fetchBytes.WithLabelValues(r.DatasetLabel(dataset), ResultSuccess).Add(float64(n))
+	reason := FetchReasonOther
+	if len(reasons) > 0 {
+		reason = normalizeFetchReason(reasons[0])
+	}
+	r.fetchBytes.WithLabelValues(r.DatasetLabel(dataset), ResultSuccess, reason).Add(float64(n))
 }
 
-// IncFetchRequests 记一次回源请求:traincache_fetch_requests_total{dataset,result},
-// result∈{success,error};集合外忽略。
-func (r *Registry) IncFetchRequests(dataset, result string) {
+// IncFetchRequests 记一次回源请求:traincache_fetch_requests_total{dataset,result,reason},
+// result∈{success,error};reason 默认 other(D48);集合外 result 忽略、reason 归一 other。
+func (r *Registry) IncFetchRequests(dataset, result string, reasons ...string) {
 	if !validSuccessError(result) {
 		return
 	}
-	r.fetchRequests.WithLabelValues(r.DatasetLabel(dataset), result).Inc()
+	reason := FetchReasonOther
+	if len(reasons) > 0 {
+		reason = normalizeFetchReason(reasons[0])
+	}
+	r.fetchRequests.WithLabelValues(r.DatasetLabel(dataset), result, reason).Inc()
 }
 
 // SetFetchInflightBytes 设置回源在途字节数(traincache_fetch_inflight_bytes{dataset})。
@@ -430,6 +502,184 @@ func validEvictTrigger(result string) bool {
 func validEndpoint(endpoint string) bool {
 	for _, e := range endpointLabels {
 		if endpoint == e {
+			return true
+		}
+	}
+	return false
+}
+
+// —— M8/D44 与 M9/D46~D48 新增 family 的构造、注册与预置 ——
+
+// initHooksAndEvidence 构造并注册读 miss 线(D44)与 M9 的 8 个 family(D46~D48),
+// 并预置最小子指标使 family 自启动即在 /metrics 可见。
+func (r *Registry) initHooksAndEvidence() {
+	r.hookReadMiss = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: hookReadMissName,
+		Help: "读 miss 上报次数(reason=absent|corrupt;D44;不带 dataset)",
+	}, []string{"reason"})
+	r.prefetchHitRatio = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: prefetchHitRatioName,
+		Help: "预取命中率(最近 100 个消费样本中消费时已就绪的比例;D46)",
+	}, []string{"dataset"})
+	r.readStall = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    readStallName,
+		Help:    "实测消费读等待秒数(dataset,phase,cause;仅 ≥100ms;D47)",
+		Buckets: readStallBuckets,
+	}, []string{"dataset", "phase", "cause"})
+	r.fetchSingleflight = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: fetchSingleflightMergedName,
+		Help: "同 key 在途时被合并的 fetch 调用次数(D48)",
+	}, []string{"dataset"})
+	r.repairQueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: repairQueueDepthName,
+		Help: "坏块修复队列当前长度(D48)",
+	}, []string{"dataset"})
+	r.prefetchTaskDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    prefetchTaskDurationName,
+		Help:    "预取任务从入队到终态的耗时秒数(priority=P0..P3;D48)",
+		Buckets: prefetchTaskDurationBuckets,
+	}, []string{"dataset", "priority"})
+	r.prefetchLeadBlocks = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: prefetchLeadBlocksName,
+		Help: "预取前沿 − 消费游标块数(负值表示消费领先;D48)",
+	}, []string{"dataset"})
+	r.consumptionAdvance = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: consumptionAdvanceName,
+		Help: "消费推进事件次数(source=hook|inotify;D48)",
+	}, []string{"dataset", "source"})
+	r.fetchBandwidthLimit = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: fetchBandwidthLimitBytesName,
+		Help: "配置的回源字节信号量上限(D48)",
+	}, []string{"dataset"})
+
+	r.reg.MustRegister(
+		r.hookReadMiss, r.prefetchHitRatio, r.readStall, r.fetchSingleflight,
+		r.repairQueueDepth, r.prefetchTaskDuration, r.prefetchLeadBlocks,
+		r.consumptionAdvance, r.fetchBandwidthLimit,
+	)
+
+	// 最小预置(dataset="other",固定枚举):family 自启动即出现。
+	r.hookReadMiss.WithLabelValues(ReasonAbsent)
+	r.hookReadMiss.WithLabelValues(ReasonCorrupt)
+	r.prefetchHitRatio.WithLabelValues(otherDatasetLabel)
+	r.readStall.WithLabelValues(otherDatasetLabel, PhaseUnknown, CauseUnknown)
+	r.fetchSingleflight.WithLabelValues(otherDatasetLabel)
+	r.repairQueueDepth.WithLabelValues(otherDatasetLabel)
+	for _, pri := range priorityLabels {
+		r.prefetchTaskDuration.WithLabelValues(otherDatasetLabel, pri)
+	}
+	r.prefetchLeadBlocks.WithLabelValues(otherDatasetLabel)
+	for _, src := range []string{SourceHook, SourceInotify} {
+		r.consumptionAdvance.WithLabelValues(otherDatasetLabel, src)
+	}
+	r.fetchBandwidthLimit.WithLabelValues(otherDatasetLabel)
+}
+
+// ObserveHookReadMiss 记一次读 miss:traincache_hook_read_miss_total{reason}(D44;
+// reason∈{absent,corrupt},不带 dataset)。集合外忽略该次打点。
+func (r *Registry) ObserveHookReadMiss(reason string) {
+	if reason != ReasonAbsent && reason != ReasonCorrupt {
+		return
+	}
+	r.hookReadMiss.WithLabelValues(reason).Inc()
+}
+
+// HookReadMiss 返回读 miss counter(测试访问器;生产读取走 /metrics)。
+func (r *Registry) HookReadMiss() *prometheus.CounterVec { return r.hookReadMiss }
+
+// ObserveReadStall 记录一次实测读等待:traincache_read_stall_seconds{dataset,phase,cause}
+// (D47;仅应记录 ≥100ms 的等待,阈值过滤由接线层 stallattr 负责)。标签集合外忽略。
+func (r *Registry) ObserveReadStall(dataset, phase, cause string, seconds float64) {
+	if !validPhase(phase) || !validCause(cause) || seconds < 0 {
+		return
+	}
+	r.readStall.WithLabelValues(r.DatasetLabel(dataset), phase, cause).Observe(seconds)
+}
+
+// SetPrefetchHitRatio 设置预取命中率(traincache_prefetch_hit_ratio{dataset};D46)。
+func (r *Registry) SetPrefetchHitRatio(dataset string, v float64) {
+	r.prefetchHitRatio.WithLabelValues(r.DatasetLabel(dataset)).Set(v)
+}
+
+// IncFetchSingleflightMerged 记一次同 key 合并的 fetch 调用(D48;Agent 侧包装器统计)。
+func (r *Registry) IncFetchSingleflightMerged(dataset string) {
+	r.fetchSingleflight.WithLabelValues(r.DatasetLabel(dataset)).Inc()
+}
+
+// SetRepairQueueDepth 设置坏块修复队列长度(traincache_repair_queue_depth{dataset};D48)。
+func (r *Registry) SetRepairQueueDepth(dataset string, n int) {
+	r.repairQueueDepth.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
+}
+
+// ObservePrefetchTaskDuration 记录一次预取任务耗时(D48;priority∈{P0..P3},
+// bucket {0.1,0.5,1,2,5,10,30,60,120}s)。集合外 priority 忽略该次打点。
+func (r *Registry) ObservePrefetchTaskDuration(dataset, priority string, seconds float64) {
+	if !validPriority(priority) || seconds < 0 {
+		return
+	}
+	r.prefetchTaskDuration.WithLabelValues(r.DatasetLabel(dataset), priority).Observe(seconds)
+}
+
+// SetPrefetchLeadBlocks 设置预取前沿与消费游标的块数差(D48;负值 = 消费领先)。
+func (r *Registry) SetPrefetchLeadBlocks(dataset string, n int64) {
+	r.prefetchLeadBlocks.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
+}
+
+// IncConsumptionAdvance 记一次消费推进(D48;source∈{hook,inotify})。
+func (r *Registry) IncConsumptionAdvance(dataset, source string) {
+	if source != SourceHook && source != SourceInotify {
+		return
+	}
+	r.consumptionAdvance.WithLabelValues(r.DatasetLabel(dataset), source).Inc()
+}
+
+// SetFetchBandwidthLimitBytes 设置回源字节信号量上限(D48)。
+func (r *Registry) SetFetchBandwidthLimitBytes(dataset string, n int64) {
+	r.fetchBandwidthLimit.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
+}
+
+// —— M8/M9 标签归一与校验 ——
+
+// normalizePhase 归一 phase(D46):集合外 → unknown。
+func normalizePhase(phase string) string {
+	if validPhase(phase) {
+		return phase
+	}
+	return PhaseUnknown
+}
+
+// validPhase 判断 phase ∈ {startup,steady,switch,unknown}。
+func validPhase(phase string) bool {
+	return validResult(phase, PhaseStartup, PhaseSteady, PhaseSwitch, PhaseUnknown)
+}
+
+// normalizeSource 归一命中来源(D46):集合外 → unknown。
+func normalizeSource(source string) string {
+	if source == SourcePrefetch || source == SourceCache || source == SourceUnknown {
+		return source
+	}
+	return SourceUnknown
+}
+
+// normalizeFetchReason 归一回源 reason(D48):集合外 → other。
+func normalizeFetchReason(reason string) string {
+	switch reason {
+	case FetchReasonPrefetch, FetchReasonDemand, FetchReasonRepair, FetchReasonOther:
+		return reason
+	default:
+		return FetchReasonOther
+	}
+}
+
+// validCause 判断 stall cause ∈ {local_slow,prefetch_lag,origin_slow,unknown}。
+func validCause(cause string) bool {
+	return validResult(cause, CauseLocalSlow, CausePrefetchLag, CauseOriginSlow, CauseUnknown)
+}
+
+// validPriority 判断 priority ∈ {P0,P1,P2,P3}(指标标签统一大写)。
+func validPriority(priority string) bool {
+	for _, p := range priorityLabels {
+		if priority == p {
 			return true
 		}
 	}

@@ -153,7 +153,7 @@ if [[ $MC_RC -ne 0 ]]; then fail "curl /metrics 失败 rc=$MC_RC"; else
     traincache_index_refresh_total traincache_index_refresh_duration_seconds traincache_index_shards_loaded
     traincache_gc_sweeps_total traincache_gc_blocks_removed_total traincache_gc_objects_removed_total
     traincache_evict_blocks_total traincache_evict_protected_skipped_total
-    traincache_request_duration_seconds traincache_stage_switch_stall_seconds
+    traincache_request_duration_seconds traincache_stage_switch_eta_seconds
     traincache_agent_up traincache_agent_degraded traincache_rescan_progress
     traincache_quarantined_blocks traincache_disk_usage_ratio
     traincache_prefetch_queue_depth traincache_prefetch_cursor
