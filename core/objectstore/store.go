@@ -1,7 +1,8 @@
 // Package objectstore 提供对 S3 兼容对象存储的最小抽象（design.md §5.1）。
 //
 // 实现：
-//   - minio.go：minio-go 后端（条件写入使用 SDK 的 If-Match / If-None-Match 支持）；
+//   - s3.go：minio-go SDK 后端（条件写入使用 SDK 的 If-Match / If-None-Match 支持；
+//     通吃 COS / OSS / S3 / 本地 MinIO 等任何 S3 兼容对象存储）；
 //   - mock.go：内存 Mock（单测用，ETag = md5hex(内容)）。
 package objectstore
 

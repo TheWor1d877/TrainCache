@@ -9,6 +9,10 @@
 `core/`  : 核心缓存库，主要实现了路径索引与cas存储层
 `agent/` : Agent服务化层
 
+## 镜像拉取
+
+docker 镜像拉取统一走专属镜像域名，域名从 `/etc/docker/daemon.json` 的 `registry-mirrors` 中查找（使用时去掉 `https://`）。
+k8s/containerd 不读取该配置，manifest 里的 `image` 必须显式带域名前缀。
 
 ## 输出纪律
 

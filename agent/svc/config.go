@@ -29,7 +29,8 @@ const (
 	// defaultOrdersDir 是 ordersource ring 发现目录默认值(design §6.2 路径;
 	// 两侧 Pod 同路径挂载 hostPath /run/traincache,decisions D22)。
 	defaultOrdersDir = "/run/traincache/orders"
-	// defaultObjstoreEndpoint 是对象存储端点默认值(D26:进程内 MinIO 边车约定)。
+	// defaultObjstoreEndpoint 是对象存储端点默认值(D26:开发演练默认连本地 MinIO 边车,
+	// 真实环境通过 TRAINCACHE_OBJSTORE_ENDPOINT 环境变量覆盖为 COS/OSS/S3 endpoint)。
 	defaultObjstoreEndpoint = "127.0.0.1:9000"
 	// defaultObjstoreBucket 是对象存储桶默认值(D26;v1 单桶)。
 	defaultObjstoreBucket = "traincache"
@@ -85,7 +86,7 @@ type Config struct {
 	DatasetWhitelist []string  // TRAINCACHE_DATASET_WHITELIST,逗号分隔(§5.8 基数控制)
 	CacheRoot        string    // TRAINCACHE_CACHE_ROOT,默认 /var/cache/traincache(7.3 D38:本机演练/非标准根)
 	OrdersDir        string    // TRAINCACHE_ORDERS_DIR,默认 /run/traincache/orders(§6.2 ring 发现目录)
-	// 对象存储接入(D26;经 core objectstore.NewMinIOStore 构造)。
+	// 对象存储接入(D26;经 core objectstore.NewS3Store 构造,通吃 COS/OSS/S3/本地 MinIO)。
 	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT,默认 127.0.0.1:9000
 	ObjstoreAccessKey string // TRAINCACHE_OBJSTORE_ACCESS_KEY,默认空(匿名/无鉴权)
 	ObjstoreSecretKey string // TRAINCACHE_OBJSTORE_SECRET_KEY,默认空
