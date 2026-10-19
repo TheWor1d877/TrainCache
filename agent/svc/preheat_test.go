@@ -34,7 +34,7 @@ const testDataset = "ds"
 const testTimeout = 5 * time.Second
 
 // svcFixture 是 svc 单测装置:Mock 源站 + 临时 CAS + fetch.Fetcher + PrefetchManager +
-// PreheatTasks(与 Assemble 的装配同构,仅把 MinIO 换为 Mock、把 CacheRoot 换为临时目录)。
+// PreheatTasks(与 Assemble 的装配同构,仅把 S3 后端换为 Mock、把 CacheRoot 换为临时目录)。
 type svcFixture struct {
 	cfg   Config
 	store objectstore.Store

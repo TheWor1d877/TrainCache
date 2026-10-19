@@ -39,7 +39,7 @@ type Agent struct {
 	Preheat     *PreheatTasks        // 预热任务状态机(§7.2)
 	CS          *cas.Store           // 本地 CAS(D34)
 	Fetcher     *fetch.Fetcher       // 回源取数(D34)
-	ObjectStore objectstore.Store    // 对象存储(装配注入点:生产 MinIO / 测试 Mock)
+	ObjectStore objectstore.Store    // 对象存储(装配注入点:生产 S3 兼容后端 / 测试 Mock)
 	Rescan      *rescan.Rescanner    // 重扫描与坏块修复(M4/D35)
 	Collector   *collector.Collector // 采集层(M5;首个 ring 发现时绑定,之前为 nil)
 	Evictor     *evictor.Evictor     // 磁盘淘汰循环(M6/§7.6)
@@ -63,9 +63,9 @@ type Agent struct {
 }
 
 // Assemble 构造并持有子模块实例(依赖方向 cmd → svc → 子模块 → core 单向无环,design §4):
-// cas → objectstore(D26 MinIO 客户端)→ fetch → …(装配序见 assembleWith)。
+// cas → objectstore(D26 S3 兼容客户端)→ fetch → …(装配序见 assembleWith)。
 func Assemble(cfg Config) (*Agent, error) {
-	store, err := objectstore.NewMinIOStore(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey,
+	store, err := objectstore.NewS3Store(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey,
 		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.ObjstoreSecure)
 	if err != nil {
 		return nil, err
@@ -73,7 +73,7 @@ func Assemble(cfg Config) (*Agent, error) {
 	return assembleWith(store, cfg)
 }
 
-// assembleWith 是 Assemble 的可测内核(objectstore 注入:生产 MinIO,测试 objectstore.Mock)。
+// assembleWith 是 Assemble 的可测内核(objectstore 注入:生产 S3 兼容后端,测试 objectstore.Mock)。
 // 构造序(主对话裁决):cas → fetch → metrics(带 node 标签)→ PrefetchManager(+回调注入)
 // → PreheatTasks → Rescan(catalogFor 复用 bundle)→ HookSock → Evictor → OrderDiscovery
 // (+首 ring 回调);collector 由该回调在首个 ring 发现时构造并启动。
@@ -248,7 +248,7 @@ type p0Ref struct {
 type p0DoneFunc func(dataset string, ref prefetch.ChunkRef, err error)
 
 // NewPrefetchManager 构造管理器(导出构造函数:测试注入 objectstore.Mock + 临时 cas +
-// 自定义 fetch.Options;Assemble 以 env 配置的 MinIO 实参调用)。m 允许为 nil(无指标场景)。
+// 自定义 fetch.Options;Assemble 以 env 配置的对象存储实参调用)。m 允许为 nil(无指标场景)。
 // 调用方应经 Close 释放调度协程(测试清理;agentd 进程退出即回收)。
 func NewPrefetchManager(store objectstore.Store, cs *cas.Store, f *fetch.Fetcher, m *metrics.Registry) *PrefetchManager {
 	ctx, cancel := context.WithCancel(context.Background())
