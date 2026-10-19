@@ -36,6 +36,8 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_HEAT_DISK_DELTA_PERCENT",
 		"TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT",
 		"TRAINCACHE_READ_STALL_MIN_WAIT_MS",
+		"TRAINCACHE_INDEX_REFRESH_INTERVAL",
+		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
 	} {
 		t.Setenv(k, "")
 	}
@@ -106,6 +108,31 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ReadStallMinWaitMS != stallMinWaitMS {
 		t.Errorf("ReadStallMinWaitMS = %d, want %d(D47 默认)", cfg.ReadStallMinWaitMS, stallMinWaitMS)
+	}
+	if cfg.IndexRefreshInterval != defaultIndexRefreshInterval {
+		t.Errorf("IndexRefreshInterval = %v, want %v(7.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
+	}
+	if cfg.ObjstoreProbeConditionalWrite {
+		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(7.1 §5.12)")
+	}
+}
+
+// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(7.1 §5.9/§5.12)。
+func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("NODE_NAME", "worker-01")
+	t.Setenv("TRAINCACHE_INDEX_REFRESH_INTERVAL", "750ms")
+	t.Setenv("TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE", "yes")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IndexRefreshInterval != 750*time.Millisecond {
+		t.Errorf("IndexRefreshInterval = %v, want 750ms", cfg.IndexRefreshInterval)
+	}
+	if !cfg.ObjstoreProbeConditionalWrite {
+		t.Error("ObjstoreProbeConditionalWrite = false, want true(envBool yes)")
 	}
 }
 

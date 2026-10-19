@@ -36,6 +36,18 @@ type Config struct {
 	CommitMaxAttempts  int           // 条件提交冲突重试上限，默认 5
 	RetainSnapshots    int           // GC 保留窗口，默认 3（CURRENT + 2，decisions D14）
 	RefreshInterval    time.Duration // Catalog 后台刷新周期，默认 5 s
+	// ReaderGrace 是读者 claim 的有效期：UpdatedAt 超过该时长的 claim 整体忽略
+	// （视为读者已死）。零值/负值回退为 2*RefreshInterval（默认 10 s，7.1 §5.11）。
+	ReaderGrace time.Duration
+	// OnSnapshotChange 在每次成功原子切换后、锁外调用；参数为数据集名与新 snapID。
+	// nil 表示不回调；实现不得阻塞，回调 panic 不得向调用方传播。
+	OnSnapshotChange func(dataset, snapID string)
+	// OnSnapshotError 在 Follow 的单轮快照加载失败后、锁外调用；参数为数据集名与错误。
+	// nil 表示不回调；实现不得阻塞，回调 panic 不得向调用方传播。
+	OnSnapshotError func(dataset string, err error)
+	// OnSweepSkip 在 GC 因需要保护的快照 manifest 不可用而跳过本轮块删除时调用，
+	// 参数为数据集名与原因（如 "manifest_unavailable"）。nil 表示不回调（7.1 §5.11）。
+	OnSweepSkip func(dataset, reason string)
 }
 
 // 默认值（design.md §8）。
@@ -55,6 +67,7 @@ func DefaultConfig() Config {
 		CommitMaxAttempts:  defaultCommitMaxAttempts,
 		RetainSnapshots:    defaultRetainSnapshots,
 		RefreshInterval:    defaultRefreshInterval,
+		ReaderGrace:        2 * defaultRefreshInterval,
 	}
 }
 
@@ -76,6 +89,11 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RefreshInterval <= 0 {
 		c.RefreshInterval = d.RefreshInterval
+	}
+	// ReaderGrace 依赖回退后的 RefreshInterval（默认 2*5s = 10s）。
+	// OnSnapshotChange / OnSnapshotError / OnSweepSkip 为可选回调，nil 保持 nil，不覆盖。
+	if c.ReaderGrace <= 0 {
+		c.ReaderGrace = 2 * c.RefreshInterval
 	}
 	return c
 }

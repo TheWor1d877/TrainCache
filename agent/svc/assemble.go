@@ -44,6 +44,9 @@ type Agent struct {
 	Collector   *collector.Collector // 采集层(M5;首个 ring 发现时绑定,之前为 nil)
 	Evictor     *evictor.Evictor     // 磁盘淘汰循环(M6/§7.6)
 	HookSock    *HookSock            // 钩子收端(M5/§5.4)
+	// ReaderRegistry 是 R2 读者登记器(7.1 §5.10):声明本节点跟随的 snapID,
+	// 供 GC 按读者确认删除。装配期构造,StartBackground 起心跳。
+	ReaderRegistry *index.ReaderRegistry
 
 	// selfOpen 是 Agent 自打开守卫(D49):prefetch/fetch/rescan/backfill/stall 归因的
 	// 本地块读取先 Mark,collector 的 inotify 兜底以 SelfOpened 过滤。nil 安全。
@@ -84,7 +87,11 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	ag.CS = cs
 
 	// D49 self-open guard:fetch 在读回校验前登记指纹(通用钩子,core 不依赖 prefetch)。
+	// 最早安装在 cas.Store 实例上(Open 前置观察者):本进程任何经 Store.Open 的读打开
+	// (Commit 校验、fetch 读回、rescan/backfill 等)都登记为自打开;显式 Mark 点保留
+	// (幂等无害)。必须在 fetch/prefetcher/rescan/backfill 构造之前完成。
 	ag.selfOpen = prefetch.NewSelfOpenGuard(selfOpenGuardTTL)
+	cs.SetOpenObserver(ag.selfOpen.Mark)
 	ag.Fetcher = fetch.New(obj, cs, fetch.Options{OnLocalOpen: ag.selfOpen.Mark}) // 其余零值回退 design §8 默认
 
 	// 指标层带 node 标签(traincache_agent_up / agent_degraded;§5.8 node 为第二正交维度)。
@@ -97,6 +104,22 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	ag.phase = newPhaseTracker(prefetchLookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
 	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
+	// R1/R2(7.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
+	// 与 core ReaderGrace 默认口径一致)。Follow/心跳由 StartBackground 注入 ctx 后启动。
+	interval := cfg.indexRefreshInterval()
+	ag.ReaderRegistry = index.NewReaderRegistry(obj, cfg.NodeName.String(), 2*interval)
+	ag.Prefetch.SetIndexFollow(interval, ag.ReaderRegistry)
+	// R4(7.1 §5.12):条件写探测(默认关闭;不支持/失败只告警,不阻止启动)。
+	if cfg.ObjstoreProbeConditionalWrite {
+		probeCtx, cancel := context.WithTimeout(context.Background(), conditionalWriteProbeTimeout)
+		probeErr := objectstore.ProbeConditionalWrite(probeCtx, obj)
+		cancel()
+		ag.Metrics.SetObjectstoreConditionalWriteSupported(probeErr == nil)
+		if probeErr != nil {
+			slog.Warn("对象存储条件写探测未通过(继续启动;提交冲突重试可能不可靠)",
+				"err", probeErr)
+		}
+	}
 	ag.Prefetch.phase = ag.phase
 	// 块/事件 → dataset 归属:按各 dataset Catalog 解析(与钩子 resolveRef 同口径)。
 	ag.phase.setDatasetResolver(func(ref ordersource.ChunkRef) (string, bool) {
@@ -190,6 +213,18 @@ type PrefetchManager struct {
 
 	// phase 是 M9/D46 阶段跟踪器(装配期注入;各 dataset 的 OnStageSwitch 回调共用)。
 	phase *phaseTracker
+
+	// refreshInterval 是 Catalog.Follow 的刷新周期与心跳周期基数(7.1 §5.9;
+	// 装配期注入,零值由 Catalog 自身回退默认 5s)。
+	refreshInterval time.Duration
+	// registry 是 R2 读者登记器(原子指针:装配期注入后仅供 OnSnapshotChange 回调读)。
+	registry atomic.Pointer[index.ReaderRegistry]
+	// lifecycleCtx 是 Follow/心跳的生命周期 ctx(Agent.StartBackground 注入;
+	// m.mu 保护,未注入前不启动 Follow,避免 context.Background 泄漏)。
+	lifecycleCtx context.Context
+	// followStarts 记录每个 dataset 的 Follow 启动次数(仅测试断言"只启动一次";
+	// m.mu 保护)。
+	followStarts map[string]int
 }
 
 // blockDoneHook 是块完成触达的 svc 侧签名(含 dataset 归属与该 dataset 的 Catalog,
@@ -218,14 +253,15 @@ type p0DoneFunc func(dataset string, ref prefetch.ChunkRef, err error)
 func NewPrefetchManager(store objectstore.Store, cs *cas.Store, f *fetch.Fetcher, m *metrics.Registry) *PrefetchManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &PrefetchManager{
-		store:     store,
-		cs:        cs,
-		fetcher:   f,
-		m:         m,
-		baseCtx:   ctx,
-		cancel:    cancel,
-		bundles:   make(map[string]*datasetBundle),
-		p0Pending: make(map[p0Ref]int),
+		store:        store,
+		cs:           cs,
+		fetcher:      f,
+		m:            m,
+		baseCtx:      ctx,
+		cancel:       cancel,
+		bundles:      make(map[string]*datasetBundle),
+		p0Pending:    make(map[p0Ref]int),
+		followStarts: make(map[string]int),
 	}
 }
 
@@ -334,6 +370,9 @@ type datasetBundle struct {
 	mu        sync.Mutex
 	started   bool // 预取器调度已启动(首个 ForOrder/ForPreheat)
 	stageSeen bool // 已有 ConsumeOrder 绑定 dataset(否则 ForPreheat 以最小订单播种)
+	// followStarted 表示该 dataset 的 Catalog.Follow 后台循环已启动(m.mu 保护;
+	// 同一 dataset 只启动一次,7.1 §5.9)。
+	followStarted bool
 
 	// lastOrder 是最近一次成功安装的 ConsumeOrder(§7.6 硬保护窗口按它取 cursor 起
 	// lookahead 块;protectedFPs 在 bundle 锁下读)。
@@ -370,7 +409,18 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 	if b, ok := m.bundles[dataset]; ok {
 		return b
 	}
-	cat := index.NewCatalog(m.store, dataset, index.Config{})
+	cat := index.NewCatalog(m.store, dataset, index.Config{
+		RefreshInterval: m.refreshInterval,
+		OnSnapshotChange: func(ds, snapID string) {
+			m.onSnapshotChange(ds, snapID)
+		},
+		OnSnapshotError: func(ds string, err error) {
+			m.onSnapshotError(ds, err)
+		},
+	})
+	// R1(7.1 §5.9):Catalog 首次创建后启动一次 Follow(生命周期 ctx 未注入时由
+	// StartBackground 对既有 bundle 补启动;followStarted 保证每 dataset 一次)。
+
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
 		Lookahead:     prefetchLookahead,
 		SelfOpenGuard: m.selfOpen, // D49:本地命中/读回/ETA 探测打开前 Mark
@@ -395,6 +445,7 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 	})
 	b := &datasetBundle{dataset: dataset, catalog: cat, prefetcher: pf}
 	m.bundles[dataset] = b
+	m.startFollowLocked(b)
 	return b
 }
 

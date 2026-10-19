@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"traincache/core/cas"
 	"traincache/core/objectstore"
@@ -18,12 +19,13 @@ type Collector struct {
 	store objectstore.Store
 	cs    *cas.Store
 	cfg   Config
+	now   func() time.Time // 可注入时钟（测试用），默认 time.Now
 }
 
 // NewCollector 构造 Collector；cfg 的零值字段回退 DefaultConfig 默认值
 // （RetainSnapshots 经 withDefaults 保证 ≥1，即至少保留 CURRENT）。
 func NewCollector(store objectstore.Store, cs *cas.Store, cfg Config) *Collector {
-	return &Collector{store: store, cs: cs, cfg: cfg.withDefaults()}
+	return &Collector{store: store, cs: cs, cfg: cfg.withDefaults(), now: time.Now}
 }
 
 // Sweep ① 计算活块集合 = 保留快照（CURRENT + 按 snapID 字典序最大的最近
@@ -73,24 +75,56 @@ func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks in
 		}
 	}
 	sort.Strings(candidates)
-	live := map[string]struct{}{curSnapID: {}}
+	protected := map[string]struct{}{curSnapID: {}}
 	for i, keep := len(candidates)-1, c.cfg.RetainSnapshots-1; i >= 0 && keep > 0; i, keep = i-1, keep-1 {
-		live[candidates[i]] = struct{}{}
+		protected[candidates[i]] = struct{}{}
 	}
 
-	// 读取各活快照的 manifest 与分片（一次下载两用）：得到活对象键集合（D18 完整键，
-	// 未变更分片跨快照复用）与活块集合；分片内容必须重算指纹校验（ErrInvalidShard
-	// 时不删任何东西），否则损坏的分片会让其引用的块被误判为孤儿。
+	// 读者确认：有效 claim 的 SnapID 与未过宽限期的 PreviousSnapID 都计入
+	// protected；UpdatedAt 超过 ReaderGrace 的 claim 整体忽略（读者已死）。
+	// claims 读取失败或 JSON 损坏属于 fail-safe：本轮不做任何删除。
+	claims, err := ReadReaderClaims(ctx, c.store, dataset)
+	if err != nil {
+		return 0, 0, err
+	}
+	now := c.now()
+	for _, claim := range claims {
+		if now.Sub(claim.UpdatedAt) > c.cfg.ReaderGrace {
+			continue
+		}
+		if claim.SnapID != "" {
+			protected[claim.SnapID] = struct{}{}
+		}
+		if claim.PreviousSnapID != "" && !now.After(claim.PreviousUntil) {
+			protected[claim.PreviousSnapID] = struct{}{}
+		}
+	}
+
+	// 读取全部 protected 快照的 manifest 与分片（一次下载两用）：得到活对象键集合
+	// （D18 完整键，未变更分片跨快照复用）与活块集合；分片内容必须重算指纹校验
+	// （ErrInvalidShard 时不删任何东西），否则损坏的分片会让其引用的块被误判为孤儿。
+	// 任一 protected manifest 缺失/损坏：跳过本轮块删除（OnSweepSkip），但继续删除
+	// 其他可删快照对象，不得整体停摆。
 	liveKeys := map[string]struct{}{CurrentKey(dataset): {}}
 	liveBlocks := make(map[cas.Fingerprint]struct{})
-	for id := range live {
+	skipBlocks := false
+	for id := range protected {
 		manifestFP8 := ""
 		if id == curSnapID {
 			manifestFP8 = curManifestFP8
 		}
 		m, err := c.loadManifest(ctx, dataset, id, manifestFP8)
 		if err != nil {
-			return 0, 0, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return 0, 0, ctxErr
+			}
+			if !skipBlocks {
+				skipBlocks = true
+				if c.cfg.OnSweepSkip != nil {
+					c.cfg.OnSweepSkip(dataset, "manifest_unavailable")
+				}
+			}
+			continue
 		}
 		liveKeys[ManifestKey(dataset, id)] = struct{}{}
 		for _, ref := range m.Shards {
@@ -112,10 +146,11 @@ func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks in
 		}
 	}
 
-	// 删除窗口外快照对象：非活快照 ID 的对象中，凡不在活对象键集合（完整键比对，
-	// 保证被保留快照复用的分片保留）的一律删除；CURRENT 不在本枚举前缀内，天然不碰。
+	// 删除窗口外快照对象：非 protected 快照 ID 的对象中，凡不在活对象键集合
+	// （完整键比对，保证被保留快照复用的分片保留）的一律删除；CURRENT 不在本
+	// 枚举前缀内，天然不碰。
 	for _, key := range keys {
-		if _, ok := live[snapshotIDFromKey(prefix, key)]; ok {
+		if _, ok := protected[snapshotIDFromKey(prefix, key)]; ok {
 			continue
 		}
 		if _, ok := liveKeys[key]; ok {
@@ -125,6 +160,11 @@ func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks in
 			return removedBlocks, removedObjects, fmt.Errorf("index: sweep delete %s: %w", key, err)
 		}
 		removedObjects++
+	}
+
+	// protected manifest 不可用时无法重建完整 liveBlocks，本轮跳过块删除。
+	if skipBlocks {
+		return removedBlocks, removedObjects, nil
 	}
 
 	// 块侧：枚举磁盘全量指纹，删除不在活块集合的孤儿块；仍被引用或正在被读

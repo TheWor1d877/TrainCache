@@ -345,7 +345,10 @@ func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err e
 		return 0, 0, nil
 	}
 	var firstErr error
-	col := index.NewCollector(a.ObjectStore, a.CS, index.Config{})
+	col := index.NewCollector(a.ObjectStore, a.CS, index.Config{
+		RefreshInterval: a.Cfg.indexRefreshInterval(),
+		OnSweepSkip:     a.onSweepSkip,
+	})
 	for _, ds := range a.knownDatasets(ctx) {
 		if ctx.Err() != nil {
 			break
@@ -365,6 +368,16 @@ func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err e
 		}
 	}
 	return blocks, objects, firstErr
+}
+
+// onSweepSkip 是 Collector 的跳过回调(7.1 §5.11):protected 快照 manifest 缺失/
+// 损坏时计 index_sweep_skipped_total{dataset,reason} 并告警;core 继续删除其他可删
+// 快照对象,不整体停摆。
+func (a *Agent) onSweepSkip(dataset, reason string) {
+	if a.Metrics != nil {
+		a.Metrics.IncIndexSweepSkipped(dataset, reason)
+	}
+	slog.Warn("sweep: protected 快照不可用,跳过本轮块删除", "dataset", dataset, "reason", reason)
 }
 
 // knownDatasets 返回已知 dataset 名(升序去重):已装配 bundle 集合 ∪ 对象存储枚举

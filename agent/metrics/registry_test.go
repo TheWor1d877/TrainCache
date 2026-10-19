@@ -13,11 +13,13 @@ import (
 
 // family 名与实现侧一致(D23、M3、D33;测试独立字面量,防改名后测试跟着漂移)。
 const (
-	ordersourceFormatErrorsName = "traincache_ordersource_format_errors_total"
-	hookFormatErrorsName        = "traincache_hook_format_errors_total"
-	prefetchQueueDepthName      = "traincache_prefetch_queue_depth"
-	prefetchCursorName          = "traincache_prefetch_cursor"
-	stageSwitchETAName          = "traincache_stage_switch_eta_seconds"
+	ordersourceFormatErrorsName              = "traincache_ordersource_format_errors_total"
+	hookFormatErrorsName                     = "traincache_hook_format_errors_total"
+	prefetchQueueDepthName                   = "traincache_prefetch_queue_depth"
+	prefetchCursorName                       = "traincache_prefetch_cursor"
+	stageSwitchETAName                       = "traincache_stage_switch_eta_seconds"
+	indexSweepSkippedName                    = "traincache_index_sweep_skipped_total"
+	objectstoreConditionalWriteSupportedName = "traincache_objectstore_conditional_write_supported"
 )
 
 func TestDatasetLabelWhitelistHit(t *testing.T) {
@@ -61,7 +63,8 @@ func TestPrometheusRegistry(t *testing.T) {
 		t.Error("Prometheus() 应返回同一注册表")
 	}
 
-	// M9 起注册表恰含 34 个 family:本节校验 M2/M3 的 4 个(ordersource 格式错误 counter[D23]、
+	// R3/R4 新增 2 个 family(index_sweep_skipped_total / objectstore_conditional_write_supported),
+	// M9 起注册表恰含 36 个 family:本节校验 M2/M3 的 4 个(ordersource 格式错误 counter[D23]、
 	// prefetch 队列深度/游标 gauge 与阶段切换停滞 histogram[M3]);七线 23 个(M6,含复用的这 3 个)
 	// 在 TestSevenLineFamiliesRegisteredAtStartup 校验;D33 钩子帧错误、D44 读 miss 与 M9 的
 	// 8 个证据 family 也在该测试校验。
@@ -70,13 +73,15 @@ func TestPrometheusRegistry(t *testing.T) {
 		t.Fatalf("Gather: %v", err)
 	}
 	want := map[string]string{
-		ordersourceFormatErrorsName: "COUNTER",
-		prefetchQueueDepthName:      "GAUGE",
-		prefetchCursorName:          "GAUGE",
-		stageSwitchETAName:          "HISTOGRAM",
+		ordersourceFormatErrorsName:              "COUNTER",
+		prefetchQueueDepthName:                   "GAUGE",
+		prefetchCursorName:                       "GAUGE",
+		stageSwitchETAName:                       "HISTOGRAM",
+		indexSweepSkippedName:                    "COUNTER",
+		objectstoreConditionalWriteSupportedName: "GAUGE",
 	}
-	if len(families) != 34 {
-		t.Fatalf("注册表应恰有 34 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个),实际 %d 个", len(families))
+	if len(families) != 36 {
+		t.Fatalf("注册表应恰有 36 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个),实际 %d 个", len(families))
 	}
 	byName := make(map[string]int, len(families))
 	for i, mf := range families {

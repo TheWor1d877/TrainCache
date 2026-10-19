@@ -64,6 +64,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// R1/R2(7.1 §5.9/§5.10):前缀感知快照跟随 + 读者声明心跳;随 signal ctx 退出,
+	// 退出时对已知 dataset 撤销 claim。
+	ag.StartBackground(ctx)
+
 	// 钩子收端(M5/§5.4):绑定失败不致命(钩子为可选观测输入,不影响缓存服务本体),
 	// 记错误后继续;gRPC health 不反映该状态。
 	if err := ag.HookSock.Start(ctx); err != nil {

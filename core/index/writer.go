@@ -58,7 +58,16 @@ func (w *Writer) Commit(ctx context.Context, dataset string, entries []Entry) (s
 // commitOnce 是一次提交尝试：读 CURRENT 的最新 ETag 与内容 → 读当前 manifest 与受影响
 // 分片 → 合并本次 entries → 构建新分片（未变更分片复用旧键）→ 上传 → 验证 → PutIfMatch。
 // ErrConflict 由 Commit 的循环基于最新快照重试处理。
-func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry) (string, error) {
+func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry) (snapID string, err error) {
+	// 记录本次 attempt 新 Put 的分片键与 manifest 键；任何失败（含冲突重试前、
+	// 验证失败）都 best-effort 删除它们。复用的旧分片键不在其中，绝不删除。
+	var uploaded []string
+	defer func() {
+		if err != nil {
+			w.deleteUploaded(uploaded)
+		}
+	}()
+
 	curKey := CurrentKey(dataset)
 	expectedETag := ""
 
@@ -163,6 +172,7 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry
 
 	// 5) 上传新分片与新 manifest（独立对象键，CURRENT 未更新前对读侧不可见）。
 	for _, up := range uploads {
+		uploaded = append(uploaded, up.key)
 		if _, err := w.store.Put(ctx, up.key, bytes.NewReader(up.data), int64(len(up.data))); err != nil {
 			return "", fmt.Errorf("index: upload shard %s: %w", up.key, err)
 		}
@@ -173,6 +183,7 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry
 		return "", fmt.Errorf("index: encode manifest: %w", err)
 	}
 	manifestKey := ManifestKey(dataset, newSnapID)
+	uploaded = append(uploaded, manifestKey)
 	if _, err := w.store.Put(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return "", fmt.Errorf("index: upload manifest: %w", err)
 	}
@@ -231,6 +242,19 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry
 		return "", fmt.Errorf("index: commit CURRENT: %w", err)
 	}
 	return newSnapID, nil
+}
+
+// deleteUploaded 对本次 attempt 新上传的对象做 best-effort 清理：逆序删除、整体
+// 5s 超时、逐个忽略错误。清理失败不影响（也不覆盖）触发它的原始错误。
+func (w *Writer) deleteUploaded(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := len(keys) - 1; i >= 0; i-- {
+		_ = w.store.Delete(ctx, keys[i])
+	}
 }
 
 // loadManifest 读取快照清单并校验：内容指纹必须与 CURRENT 记录的 manifestFP8 一致，

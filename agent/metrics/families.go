@@ -59,6 +59,15 @@ const (
 	prefetchLeadBlocksName       = "traincache_prefetch_lead_blocks"
 	consumptionAdvanceName       = "traincache_consumption_advance_total"
 	fetchBandwidthLimitBytesName = "traincache_fetch_bandwidth_limit_bytes"
+	// R3/R4(7.1 §5.11/§5.12)。
+	indexSweepSkippedName                    = "traincache_index_sweep_skipped_total"
+	objectstoreConditionalWriteSupportedName = "traincache_objectstore_conditional_write_supported"
+)
+
+// GC 跳过原因词汇表(7.1 §5.11:protected 快照 manifest 缺失/损坏;集合外归一 other)。
+const (
+	ReasonManifestUnavailable = "manifest_unavailable"
+	sweepReasonOther          = "other"
 )
 
 // phase / source / cause / reason / priority 标签词汇表(D44/D46/D47/D48;编译期固定)。
@@ -383,6 +392,25 @@ func (r *Registry) SetIndexShardsLoaded(dataset string, n int64) {
 	r.indexShardsLoaded.WithLabelValues(r.DatasetLabel(dataset)).Set(float64(n))
 }
 
+// IncIndexSweepSkipped 记一次 GC 跳过块删除:traincache_index_sweep_skipped_total
+// {dataset,reason}(7.1 §5.11;reason 集合外归一 other,dataset 走白名单归并)。
+func (r *Registry) IncIndexSweepSkipped(dataset, reason string) {
+	if reason != ReasonManifestUnavailable {
+		reason = sweepReasonOther
+	}
+	r.indexSweepSkipped.WithLabelValues(r.DatasetLabel(dataset), reason).Inc()
+}
+
+// SetObjectstoreConditionalWriteSupported 设置条件写探测结果 gauge(1=支持,0=不支持/
+// 探测失败;7.1 §5.12,无标签)。
+func (r *Registry) SetObjectstoreConditionalWriteSupported(supported bool) {
+	v := 0.0
+	if supported {
+		v = 1
+	}
+	r.objectstoreConditionalWriteSupported.Set(v)
+}
+
 // —— ④ GC 线 ——
 
 // IncGCSweeps 记一次 GC 清扫:traincache_gc_sweeps_total{dataset,result},
@@ -551,11 +579,20 @@ func (r *Registry) initHooksAndEvidence() {
 		Name: fetchBandwidthLimitBytesName,
 		Help: "配置的回源字节信号量上限(D48)",
 	}, []string{"dataset"})
+	r.indexSweepSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: indexSweepSkippedName,
+		Help: "GC 因 protected 快照 manifest 不可用跳过块删除的次数(dataset,reason;7.1 §5.11)",
+	}, []string{"dataset", "reason"})
+	r.objectstoreConditionalWriteSupported = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: objectstoreConditionalWriteSupportedName,
+		Help: "对象存储条件写探测结果(1=支持,0=不支持/探测失败;7.1 §5.12)",
+	})
 
 	r.reg.MustRegister(
 		r.hookReadMiss, r.prefetchHitRatio, r.readStall, r.fetchSingleflight,
 		r.repairQueueDepth, r.prefetchTaskDuration, r.prefetchLeadBlocks,
 		r.consumptionAdvance, r.fetchBandwidthLimit,
+		r.indexSweepSkipped, r.objectstoreConditionalWriteSupported,
 	)
 
 	// 最小预置(dataset="other",固定枚举):family 自启动即出现。
@@ -573,6 +610,9 @@ func (r *Registry) initHooksAndEvidence() {
 		r.consumptionAdvance.WithLabelValues(otherDatasetLabel, src)
 	}
 	r.fetchBandwidthLimit.WithLabelValues(otherDatasetLabel)
+	r.indexSweepSkipped.WithLabelValues(otherDatasetLabel, ReasonManifestUnavailable)
+	r.indexSweepSkipped.WithLabelValues(otherDatasetLabel, sweepReasonOther)
+	r.objectstoreConditionalWriteSupported.Set(0)
 }
 
 // ObserveHookReadMiss 记一次读 miss:traincache_hook_read_miss_total{reason}(D44;
@@ -723,6 +763,14 @@ func (r *Registry) GCBlocksRemoved() *prometheus.CounterVec { return r.gcBlocksR
 
 // GCObjectsRemoved 返回 GC 回收对象 counter(测试访问器)。
 func (r *Registry) GCObjectsRemoved() *prometheus.CounterVec { return r.gcObjectsRemoved }
+
+// IndexSweepSkipped 返回 GC 跳过 counter(测试访问器)。
+func (r *Registry) IndexSweepSkipped() *prometheus.CounterVec { return r.indexSweepSkipped }
+
+// ObjectstoreConditionalWriteSupported 返回条件写支持 gauge(测试访问器)。
+func (r *Registry) ObjectstoreConditionalWriteSupported() prometheus.Gauge {
+	return r.objectstoreConditionalWriteSupported
+}
 
 // EvictBlocks 返回淘汰块 counter(测试访问器)。
 func (r *Registry) EvictBlocks() *prometheus.CounterVec { return r.evictBlocks }

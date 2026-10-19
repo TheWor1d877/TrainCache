@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"traincache/core/internal/digest"
 )
@@ -57,6 +58,10 @@ type Store struct {
 	mu   sync.Mutex          // 保护 refs/pins；Remove 的"检查 → 删除"在同一把锁内完成
 	refs map[Fingerprint]int //refs是查看快照级别的引用计数
 	pins map[Fingerprint]int //pins是查看读进程级别的引用计数
+
+	// openObserver 是 Open 前置观察者（实例级；nil = 未安装）。原子指针保证
+	// SetOpenObserver 与并发 Open 无数据竞争，回调调用时不持任何锁。
+	openObserver atomic.Pointer[openObserverFunc]
 }
 
 // New 创建（必要时初始化）dir 下的块存储（创建块目录 blocks/ 与隔离目录 quarantine/）；
@@ -170,6 +175,9 @@ func (s *Store) Put(ctx context.Context, r io.Reader) (Fingerprint, int64, error
 // 与 Store.verify 无关，D13）。不符返回 ErrCorrupt（调用方负责 Remove 后重拉）。
 // 校验通过后返回从数据区起读的句柄。
 func (s *Store) Open(fp Fingerprint) (*BlockReader, error) {
+	// 先取函数指针再调用（不持锁）：本进程即将读打开该块；无论随后成功与否都只
+	// 按"即将打开"触发。nil 安全。
+	s.notifyOpen(fp)
 	f, err := os.Open(s.blockPath(fp))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

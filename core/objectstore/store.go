@@ -14,6 +14,9 @@ import (
 var (
 	ErrNotFound = errors.New("objectstore: object not found")
 	ErrConflict = errors.New("objectstore: conditional write conflict")
+	// ErrConditionalWriteUnsupported 表示后端忽略了条件写前置条件（PutIfMatch
+	// 在 ETag 不匹配时仍然成功）。可用 ProbeConditionalWrite 探测。
+	ErrConditionalWriteUnsupported = errors.New("objectstore: conditional write unsupported")
 )
 
 // Store 是对 S3 兼容对象存储的最小抽象。
