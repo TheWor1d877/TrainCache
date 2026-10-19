@@ -3,11 +3,11 @@ package rescan
 import (
 	"context"
 	"log"
-	"strconv"
 
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/core/cas"
+	"traincache/core/objectstore"
 )
 
 // fetchReporter 是可选的 repair 回源打点能力(D48):注入的 Metrics 若同时实现该接口,
@@ -118,9 +118,9 @@ func (r *Rescanner) reportRepairFetch(dataset string, fp cas.Fingerprint, err er
 }
 
 // blockKey 是数据块源站对象键(D25):<dataset>/blocks/<path>#<chunk>(path 约定不含 '#',
-// chunk 为 int64 十进制)。与 prefetch.blockKey 同布局(子模块互不依赖,各自持有该函数)。
+// chunk 为 int64 十进制)。键构造统一由 objectstore.BlockKey 提供。
 func blockKey(dataset string, ref ordersource.ChunkRef) string {
-	return dataset + "/blocks/" + ref.Path + "#" + strconv.FormatInt(ref.Chunk, 10)
+	return objectstore.BlockKey(dataset, ref.Path, ref.Chunk)
 }
 
 // buildMapping 构建 块指纹 → (dataset, path, chunk) 映射(D35 修复队列入队用):

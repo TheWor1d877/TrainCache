@@ -11,18 +11,18 @@ package prefetch
 //     已在运行 → 忽略。
 
 import (
-	"strconv"
-
 	"traincache/agent/ordersource"
+	"traincache/core/objectstore"
 )
 
 // pendingKey 是 pending 表的键(D45;与 fetch key 同布局)。
 type pendingKey string
 
 // blockKey 是数据块源站对象键(D25/D45):<dataset>/blocks/<path>#<chunk>。
-// path 约定不含 '#';chunk 为 int64 十进制。
+// path 约定不含 '#';chunk 为 int64 十进制。键构造统一由 objectstore.BlockKey 提供,
+// 此处仅保留 pendingKey 类型适配。
 func blockKey(dataset string, ref ordersource.ChunkRef) pendingKey {
-	return pendingKey(dataset + "/blocks/" + ref.Path + "#" + strconv.FormatInt(ref.Chunk, 10))
+	return pendingKey(objectstore.BlockKey(dataset, ref.Path, ref.Chunk))
 }
 
 // enqueueDedupLocked 是 D45 入队裁决(调用方持 p.mu):
