@@ -33,14 +33,25 @@ type Catalog struct {
 	dataset string // 数据集名（CURRENT/manifest/分片对象键均以此为前缀）
 	refresh time.Duration
 
-	mu    sync.Mutex // 串行化 Refresh（后台循环与手动刷新可能并发）
+	// 可选回调在锁外调用；nil 表示不回调（7.1 §5.9）。
+	onSnapshotChange func(dataset, snapID string)
+	onSnapshotError  func(dataset string, err error)
+
+	mu    sync.Mutex // 串行化 Refresh/LoadPrefixes/RefreshManifest（后台循环与手动刷新可能并发）
 	state atomic.Pointer[snapshotState]
 }
 
 // NewCatalog 构造绑定到单个数据集 dataset 的 Catalog（D17：Refresh/Lookup 无 dataset
 // 参数，数据集在构造时绑定）；cfg 的零值字段回退 DefaultConfig 默认值。
 func NewCatalog(store objectstore.Store, dataset string, cfg Config) *Catalog {
-	return &Catalog{store: store, dataset: dataset, refresh: cfg.withDefaults().RefreshInterval}
+	cfg = cfg.withDefaults()
+	return &Catalog{
+		store:            store,
+		dataset:          dataset,
+		refresh:          cfg.RefreshInterval,
+		onSnapshotChange: cfg.OnSnapshotChange,
+		onSnapshotError:  cfg.OnSnapshotError,
+	}
 }
 
 // Start 启动后台刷新循环（每 refreshInterval 读一次 CURRENT）；ctx 取消即停止。
@@ -73,18 +84,29 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 		return err
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	content, snapID, manifestFP8, err := c.readCurrent(ctx)
+	snapID, switched, err := c.refreshLocked(ctx)
+	c.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if switched {
+		c.notifySnapshotChange(snapID)
+	}
+	return nil
+}
+
+// refreshLocked 是 Refresh 的持锁主体：switched=false 表示 CURRENT 未变而跳过（不回调）。
+func (c *Catalog) refreshLocked(ctx context.Context) (snapID string, switched bool, err error) {
+	content, currentSnapID, manifestFP8, err := c.readCurrent(ctx)
+	if err != nil {
+		return "", false, err
 	}
 	if st := c.state.Load(); st != nil && st.raw == content {
-		return nil // CURRENT 未变：跳过（不再下载 manifest）
+		return "", false, nil // CURRENT 未变：跳过（不再下载 manifest）
 	}
-	m, err := c.loadManifest(ctx, snapID, manifestFP8)
+	m, err := c.loadManifest(ctx, currentSnapID, manifestFP8)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 
 	// 逐分片下载并验证指纹，构建完整新映射（此过程不触碰旧映射）。
@@ -92,7 +114,7 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 	for _, ref := range m.Shards {
 		es, err := c.loadShardEntries(ctx, ref)
 		if err != nil {
-			return err
+			return "", false, err
 		}
 		for _, e := range es {
 			entries[entryKey{path: e.Path, chunk: e.Chunk}] = e
@@ -101,7 +123,7 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 
 	// 全部加载/验证通过后才一次性切换（失败路径绝不修改旧映射）。
 	c.state.Store(&snapshotState{raw: content, snapID: m.SnapshotID, entries: entries, shards: len(m.Shards)})
-	return nil
+	return m.SnapshotID, true, nil
 }
 
 // LoadPrefixes 按前缀加载索引分片（D23）：读 CURRENT → 下载 manifest（仅 ShardRef 列表，
@@ -115,15 +137,24 @@ func (c *Catalog) LoadPrefixes(ctx context.Context, prefixes []string) error {
 		return err
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	_, snapID, manifestFP8, err := c.readCurrent(ctx)
+	snapID, err := c.loadPrefixesLocked(ctx, prefixes)
+	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	m, err := c.loadManifest(ctx, snapID, manifestFP8)
+	c.notifySnapshotChange(snapID)
+	return nil
+}
+
+// loadPrefixesLocked 是 LoadPrefixes 的持锁主体；成功后返回新 snapID。
+func (c *Catalog) loadPrefixesLocked(ctx context.Context, prefixes []string) (string, error) {
+	_, currentSnapID, manifestFP8, err := c.readCurrent(ctx)
 	if err != nil {
-		return err
+		return "", err
+	}
+	m, err := c.loadManifest(ctx, currentSnapID, manifestFP8)
+	if err != nil {
+		return "", err
 	}
 
 	// 多前缀取并集：同一分片对多个 prefix 匹配时只下载、加载一次。
@@ -134,7 +165,7 @@ func (c *Catalog) LoadPrefixes(ctx context.Context, prefixes []string) error {
 		}
 		es, err := c.loadShardEntries(ctx, ref)
 		if err != nil {
-			return err
+			return "", err
 		}
 		for _, e := range es {
 			entries[entryKey{path: e.Path, chunk: e.Chunk}] = e
@@ -145,7 +176,7 @@ func (c *Catalog) LoadPrefixes(ctx context.Context, prefixes []string) error {
 	// snapshotState 注释；shards 记 Manifest 分片数（D30 口径为全量 Shards 长度，
 	// 非本次前缀匹配到的分片数——manifest 本身已全量读取）。
 	c.state.Store(&snapshotState{snapID: m.SnapshotID, entries: entries, shards: len(m.Shards)})
-	return nil
+	return m.SnapshotID, nil
 }
 
 // List 按前缀枚举条目（D29）：读 CURRENT → 下载 manifest → 复用 D22 分片相关性判定只
@@ -295,4 +326,125 @@ func (c *Catalog) ShardsLoaded() int {
 		return 0
 	}
 	return st.shards
+}
+
+// SnapID 原子读当前生效快照的 snapID；尚无任何快照（未成功执行 Start/Refresh/
+// LoadPrefixes/RefreshManifest）返回空串。纯读：不取 mu、不访问对象存储，
+// 与刷新路径并发安全。
+func (c *Catalog) SnapID() string {
+	st := c.state.Load()
+	if st == nil {
+		return ""
+	}
+	return st.snapID
+}
+
+// RefreshManifest 是无活跃前缀时的轻量跟随（7.1 §5.9）：读 CURRENT 并下载、校验
+// manifest（校验链同 Refresh：manifest 指纹与 snapshot_id 必须与 CURRENT 一致），
+// 不下载任何分片；成功后原子切换 snapID 与空 entries（旧映射整体作废）。
+//
+// 前置条件：与 Refresh/LoadPrefixes 互斥使用，由 Catalog 内部 mu 串行化。
+// 错误语义：ctx 已取消返回 ctx.Err()；CURRENT 不存在返回 ErrNoCurrent；manifest
+// 缺失/损坏、指纹不符或 snapshot_id 不符返回相应包装错误（指纹不符为
+// ErrInvalidShard）。任何失败都不切换、不清空，旧映射保持可用。
+// 成功后、锁外调用 Config.OnSnapshotChange(dataset, snapID)（若已配置）。
+func (c *Catalog) RefreshManifest(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	snapID, err := c.refreshManifestLocked(ctx)
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	c.notifySnapshotChange(snapID)
+	return nil
+}
+
+// refreshManifestLocked 是 RefreshManifest 的持锁主体：只下载并校验 manifest，切换为
+// snapID + 空 entries（raw 置空：后续 Refresh 会因内容不匹配而全量重建）。
+func (c *Catalog) refreshManifestLocked(ctx context.Context) (string, error) {
+	_, currentSnapID, manifestFP8, err := c.readCurrent(ctx)
+	if err != nil {
+		return "", err
+	}
+	m, err := c.loadManifest(ctx, currentSnapID, manifestFP8)
+	if err != nil {
+		return "", err
+	}
+	c.state.Store(&snapshotState{
+		snapID:  m.SnapshotID,
+		entries: make(map[entryKey]Entry),
+		shards:  len(m.Shards),
+	})
+	return m.SnapshotID, nil
+}
+
+// Follow 是阻塞式快照跟随循环（7.1 §5.9）：每 Config.RefreshInterval 检查一次
+// CURRENT；未变则跳过本轮，变更后按 prefixes() 的返回值选择加载方式——非空调用
+// LoadPrefixes，空调用 RefreshManifest。prefixes 每轮调用，nil 按空处理。
+//
+// 前置条件：与 Start/Refresh/LoadPrefixes 互斥使用，加载由 Catalog 内部 mu 串行化。
+// 后置条件：单轮加载失败不退出、不切换、不清空，记录错误后保持旧映射继续下一轮；
+// 仅当 ctx 取消时返回 ctx.Err()。成功切换后由被调方法在锁外触发
+// Config.OnSnapshotChange（若已配置）。
+func (c *Catalog) Follow(ctx context.Context, prefixes func() []string) error {
+	ticker := time.NewTicker(c.refresh)
+	defer ticker.Stop()
+	for {
+		if err := c.followOnce(ctx, prefixes); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// 失败保持旧映射并继续下一轮（7.1 §5.9）。
+			c.notifySnapshotError(err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// followOnce 执行一轮廉价检查：只读 CURRENT（不下载 manifest）；snapID 未变即跳过，
+// 变化后按 prefixes() 选择加载方式。ctx 取消时返回 ctx.Err()。
+func (c *Catalog) followOnce(ctx context.Context, prefixes func() []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, snapID, _, err := c.readCurrent(ctx)
+	if err != nil {
+		return err
+	}
+	if st := c.state.Load(); st != nil && st.snapID == snapID {
+		return nil
+	}
+	var ps []string
+	if prefixes != nil {
+		ps = prefixes()
+	}
+	if len(ps) > 0 {
+		return c.LoadPrefixes(ctx, ps)
+	}
+	return c.RefreshManifest(ctx)
+}
+
+// notifySnapshotChange 在锁外调用成功切换回调；nil 安全，panic 不向调用方传播。
+func (c *Catalog) notifySnapshotChange(snapID string) {
+	if c.onSnapshotChange == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	c.onSnapshotChange(c.dataset, snapID)
+}
+
+// notifySnapshotError 在锁外调用加载失败回调；nil 安全，panic 不向调用方传播。
+func (c *Catalog) notifySnapshotError(err error) {
+	if c.onSnapshotError == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	c.onSnapshotError(c.dataset, err)
 }

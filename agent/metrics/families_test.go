@@ -50,7 +50,8 @@ const (
 	fetchBandwidthLimitBytesName = "traincache_fetch_bandwidth_limit_bytes"
 )
 
-// sevenLineFamilies 是 34 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil)。
+// sevenLineFamilies 是 36 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil;
+// 含 R3/R4 新增的 2 个)。
 // M9/D46 变更 6 个既有 family 的标签(source/phase/reason/dataset),D44+D48 新增 9 个。
 var sevenLineFamilies = map[string][]string{
 	cacheHitsName:             {"dataset", "result", "source", "phase"},
@@ -87,55 +88,60 @@ var sevenLineFamilies = map[string][]string{
 	prefetchLeadBlocksName:       {"dataset"},
 	consumptionAdvanceName:       {"dataset", "source"},
 	fetchBandwidthLimitBytesName: {"dataset"},
+	// R3/R4(7.1 §5.11/§5.12)。
+	indexSweepSkippedName:                    {"dataset", "reason"},
+	objectstoreConditionalWriteSupportedName: nil,
 }
 
 // sevenLineTypes 是七线 23 个 family 的类型冻结(Prometheus 文本枚举)。
 var sevenLineTypes = map[string]string{
-	cacheHitsName:                "COUNTER",
-	cacheMissesName:              "COUNTER",
-	cacheHitRatioName:            "GAUGE",
-	fetchBytesName:               "COUNTER",
-	fetchRequestsName:            "COUNTER",
-	fetchInflightBytesName:       "GAUGE",
-	indexRefreshName:             "COUNTER",
-	indexRefreshDurationName:     "HISTOGRAM",
-	indexShardsLoadedName:        "GAUGE",
-	gcSweepsName:                 "COUNTER",
-	gcBlocksRemovedName:          "COUNTER",
-	gcObjectsRemovedName:         "COUNTER",
-	evictBlocksName:              "COUNTER",
-	evictProtectedSkippedName:    "COUNTER",
-	requestDurationName:          "HISTOGRAM",
-	agentUpName:                  "GAUGE",
-	agentDegradedName:            "GAUGE",
-	rescanProgressName:           "GAUGE",
-	quarantinedBlocksName:        "GAUGE",
-	diskUsageRatioName:           "GAUGE",
-	prefetchQueueDepthName:       "GAUGE",
-	prefetchCursorName:           "GAUGE",
-	stageSwitchETAName:           "HISTOGRAM",
-	hookReadMissName:             "COUNTER",
-	prefetchHitRatioName:         "GAUGE",
-	readStallName:                "HISTOGRAM",
-	fetchSingleflightMergedName:  "COUNTER",
-	repairQueueDepthName:         "GAUGE",
-	prefetchTaskDurationName:     "HISTOGRAM",
-	prefetchLeadBlocksName:       "GAUGE",
-	consumptionAdvanceName:       "COUNTER",
-	fetchBandwidthLimitBytesName: "GAUGE",
+	cacheHitsName:                            "COUNTER",
+	cacheMissesName:                          "COUNTER",
+	cacheHitRatioName:                        "GAUGE",
+	fetchBytesName:                           "COUNTER",
+	fetchRequestsName:                        "COUNTER",
+	fetchInflightBytesName:                   "GAUGE",
+	indexRefreshName:                         "COUNTER",
+	indexRefreshDurationName:                 "HISTOGRAM",
+	indexShardsLoadedName:                    "GAUGE",
+	gcSweepsName:                             "COUNTER",
+	gcBlocksRemovedName:                      "COUNTER",
+	gcObjectsRemovedName:                     "COUNTER",
+	evictBlocksName:                          "COUNTER",
+	evictProtectedSkippedName:                "COUNTER",
+	requestDurationName:                      "HISTOGRAM",
+	agentUpName:                              "GAUGE",
+	agentDegradedName:                        "GAUGE",
+	rescanProgressName:                       "GAUGE",
+	quarantinedBlocksName:                    "GAUGE",
+	diskUsageRatioName:                       "GAUGE",
+	prefetchQueueDepthName:                   "GAUGE",
+	prefetchCursorName:                       "GAUGE",
+	stageSwitchETAName:                       "HISTOGRAM",
+	hookReadMissName:                         "COUNTER",
+	prefetchHitRatioName:                     "GAUGE",
+	readStallName:                            "HISTOGRAM",
+	fetchSingleflightMergedName:              "COUNTER",
+	repairQueueDepthName:                     "GAUGE",
+	prefetchTaskDurationName:                 "HISTOGRAM",
+	prefetchLeadBlocksName:                   "GAUGE",
+	consumptionAdvanceName:                   "COUNTER",
+	fetchBandwidthLimitBytesName:             "GAUGE",
+	indexSweepSkippedName:                    "COUNTER",
+	objectstoreConditionalWriteSupportedName: "GAUGE",
 }
 
-// TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 34 个 family
+// TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 36 个 family
 // (七线 23 + ordersource 格式错误 counter[D23] + 钩子帧格式错误 counter[D33] + D44 读 miss
-// + M9 的 8 个证据 family);每个 family 的类型与标签名集合与冻结清单一致,且靠构造预置
+// + M9 的 8 个证据 family + R3/R4 的 2 个);每个 family 的类型与标签名集合与冻结清单一致,且靠构造预置
 // 自启动即有子指标(dataset 类预置值全为归并值 other;agent_up=1 / agent_degraded=0 取
 // Config.Node)。
 func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}, Node: "node-1"})
 	snap := snapshotFamilies(t, r)
 
-	if len(snap) != 34 {
-		t.Fatalf("注册表 family 数 = %d, want 34(七线 23 + D23 + D33 + D44 + M9 8 个);实际 %v",
+	if len(snap) != 36 {
+		t.Fatalf("注册表 family 数 = %d, want 36(七线 23 + D23 + D33 + D44 + M9 8 个 + R3/R4 2 个);实际 %v",
 			len(snap), slices.Sorted(maps.Keys(snap)))
 	}
 	for _, name := range []string{ordersourceFormatErrorsName, hookFormatErrorsName} {

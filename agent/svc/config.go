@@ -36,6 +36,13 @@ const (
 
 	// envReadStallMinWaitMS 是 read_stall 入直方图最小等待的配置项(D47/Q15;毫秒)。
 	envReadStallMinWaitMS = "TRAINCACHE_READ_STALL_MIN_WAIT_MS"
+
+	// defaultIndexRefreshInterval 是前缀感知快照跟随的默认刷新周期(7.1 §5.9)。
+	defaultIndexRefreshInterval = 5 * time.Second
+	// envIndexRefreshInterval 覆盖快照跟随刷新周期(time.ParseDuration)。
+	envIndexRefreshInterval = "TRAINCACHE_INDEX_REFRESH_INTERVAL"
+	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;7.1 §5.12)。
+	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
 )
 
 // HeatConfig 是热度与磁盘触发线参数(D14:N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%;
@@ -88,6 +95,21 @@ type Config struct {
 	// ReadStallMinWaitMS 是 read_stall 入直方图的最小等待毫秒(D47/Q15;默认 100,
 	// TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖,需 >0)。
 	ReadStallMinWaitMS int64
+	// IndexRefreshInterval 是快照跟随刷新周期(7.1 §5.9;默认 5s,
+	// TRAINCACHE_INDEX_REFRESH_INTERVAL 覆盖)。
+	IndexRefreshInterval time.Duration
+	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(7.1 §5.12;默认 false,
+	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
+	ObjstoreProbeConditionalWrite bool
+}
+
+// indexRefreshInterval 返回生效的快照跟随刷新周期(未配置/非正 → 默认 5s;
+// Config 直接构造的测试与零值场景同样适用)。
+func (c Config) indexRefreshInterval() time.Duration {
+	if c.IndexRefreshInterval > 0 {
+		return c.IndexRefreshInterval
+	}
+	return defaultIndexRefreshInterval
 }
 
 // Load 从环境变量加载配置并校验(design §8):
@@ -115,22 +137,28 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	indexRefreshInterval, err := envDuration(envIndexRefreshInterval, defaultIndexRefreshInterval)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
-		NodeName:           node,
-		GRPCAddr:           envOr("TRAINCACHE_GRPC_ADDR", defaultGRPCAddr),
-		MetricsAddr:        envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
-		Verify:             verify,
-		DatasetWhitelist:   splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
-		CacheRoot:          envOr("TRAINCACHE_CACHE_ROOT", defaultCacheRoot),
-		OrdersDir:          envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
-		ObjstoreEndpoint:   envOr("TRAINCACHE_OBJSTORE_ENDPOINT", defaultObjstoreEndpoint),
-		ObjstoreAccessKey:  envOr("TRAINCACHE_OBJSTORE_ACCESS_KEY", ""),
-		ObjstoreSecretKey:  envOr("TRAINCACHE_OBJSTORE_SECRET_KEY", ""),
-		ObjstoreBucket:     envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
-		ObjstoreSecure:     envBool("TRAINCACHE_OBJSTORE_SECURE"),
-		Heat:               heat,
-		ReadStallMinWaitMS: readStallMinWaitMS,
+		NodeName:                      node,
+		GRPCAddr:                      envOr("TRAINCACHE_GRPC_ADDR", defaultGRPCAddr),
+		MetricsAddr:                   envOr("TRAINCACHE_METRICS_ADDR", defaultMetricsAddr),
+		Verify:                        verify,
+		DatasetWhitelist:              splitList(os.Getenv("TRAINCACHE_DATASET_WHITELIST")),
+		CacheRoot:                     envOr("TRAINCACHE_CACHE_ROOT", defaultCacheRoot),
+		OrdersDir:                     envOr("TRAINCACHE_ORDERS_DIR", defaultOrdersDir),
+		ObjstoreEndpoint:              envOr("TRAINCACHE_OBJSTORE_ENDPOINT", defaultObjstoreEndpoint),
+		ObjstoreAccessKey:             envOr("TRAINCACHE_OBJSTORE_ACCESS_KEY", ""),
+		ObjstoreSecretKey:             envOr("TRAINCACHE_OBJSTORE_SECRET_KEY", ""),
+		ObjstoreBucket:                envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
+		ObjstoreSecure:                envBool("TRAINCACHE_OBJSTORE_SECURE"),
+		Heat:                          heat,
+		ReadStallMinWaitMS:            readStallMinWaitMS,
+		IndexRefreshInterval:          indexRefreshInterval,
+		ObjstoreProbeConditionalWrite: envBool(envObjstoreProbeConditionalWrite),
 	}, nil
 }
 
