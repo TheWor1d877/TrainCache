@@ -1,0 +1,47 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: unit + static (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [controller, core, agent]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: verify ${{ matrix.module }}
+        run: make verify-${{ matrix.module }}
+
+  # kind e2e 需要 docker、kind 与可拉取的镜像。耗时较长，仅在手动触发时运行。
+  e2e:
+    name: kind e2e
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: controller/go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: install kind
+        run: go install sigs.k8s.io/kind@v0.33.0
+      - name: run e2e
+        run: make e2e
+      - name: upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: controller/e2e/results/
+          if-no-files-found: ignore
