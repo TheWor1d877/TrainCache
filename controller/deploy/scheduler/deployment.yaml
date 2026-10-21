@@ -134,12 +134,18 @@ spec:
               value: 10m
             - name: CONTROLLER_HEALTH_ADDR
               value: ":8081"
+            # Independent scheduler registry (traincache_scheduler_score_total)
+            # is served at /metrics/traincache on this address.
+            - name: CONTROLLER_METRICS_ADDR
+              value: ":9412"
             # Debug emits one "scheduler score" line per (pod,node) decision.
             - name: CONTROLLER_LOG_LEVEL
               value: debug
           ports:
             - name: health
               containerPort: 8081
+            - name: metrics
+              containerPort: 9412
             - name: https
               containerPort: 10259
           livenessProbe:

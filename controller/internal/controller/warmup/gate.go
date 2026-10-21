@@ -80,14 +80,16 @@ func (r *Reconciler) computePlacement(
 	for _, node := range candidates {
 		nodes = append(nodes, gwaa.NodeState{
 			Name:    node,
-			Stopped: nodeStopped(task, node, submitFailed),
+			Stopped: r.nodeStopped(task, node, submitFailed),
 		})
 	}
-	return gwaa.Compute(gwaa.Input{
+	placement := gwaa.Compute(gwaa.Input{
 		Pods:  pods,
 		Nodes: nodes,
 		Rand:  r.Rand,
 	})
+	r.Metrics.ObservePlacement(datasetKey(task), placement.PreheatSet, len(placement.UnassignedPods), placement.FellBack)
+	return placement
 }
 
 // readinessAt returns table[pod][column] defensively.
@@ -103,16 +105,25 @@ func readinessAt(task *traincachev1alpha1.WarmupTask, pod int32, column int) int
 }
 
 // nodeStopped implements the "已停止节点集合" input from docs/8.1 §7.4. A node
-// is stopped when its initial Submit failed or every readiness fact collected
-// on it reports Failed (three consecutive ErrAgentUnavailable).
-func nodeStopped(task *traincachev1alpha1.WarmupTask, node string, submitFailed map[string]error) bool {
+// is stopped when its initial Submit failed, every Pod's poll on it crossed the
+// consecutive-failure threshold, or every readiness fact collected on it
+// reports Failed. The in-memory counter covers the pre-assignment fan-out (the
+// P×N facts are no longer persisted); the status scan covers assigned facts.
+func (r *Reconciler) nodeStopped(task *traincachev1alpha1.WarmupTask, node string, submitFailed map[string]error) bool {
 	if _, failed := submitFailed[node]; failed {
+		return true
+	}
+	if r != nil && r.progress.nodeFailed(string(task.UID), node, uint64(task.Generation), int(task.Spec.PodCount)) {
 		return true
 	}
 	found := false
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
-		if entry.NodeName != node {
+		entryNode := entry.NodeName
+		if entryNode == "" {
+			entryNode = entry.AssignedNode
+		}
+		if entryNode != node {
 			continue
 		}
 		found = true
@@ -146,32 +157,34 @@ func assignedNode(task *traincachev1alpha1.WarmupTask, pod int32) string {
 	return ""
 }
 
-// readinessFor returns the readiness fact for (pod,node), or nil.
+// readinessFor returns the readiness fact for (pod,node), or nil. Under the
+// M12 layout each Pod has exactly one entry, so only the assigned node (or a
+// legacy NodeName match) yields a fact.
 func readinessFor(task *traincachev1alpha1.WarmupTask, pod int32, node string) *traincachev1alpha1.PodNodeReadiness {
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
-		if entry.PodIndex == pod && entry.NodeName == node {
+		if entry.PodIndex != pod {
+			continue
+		}
+		if entry.AssignedNode == node || entry.NodeName == node {
 			return entry
 		}
 	}
 	return nil
 }
 
-// applyAssignment writes the GWAA result into status.PodNodeReadiness. Rows
-// that are not the current assignment have AssignedNode cleared so the
-// readiness fact set never claims two assignments for one Pod.
-func applyAssignment(task *traincachev1alpha1.WarmupTask, placement gwaa.Output) {
-	for i := range task.Status.PodNodeReadiness {
-		task.Status.PodNodeReadiness[i].AssignedNode = ""
-	}
-	for pod, node := range placement.Assignment {
-		if node == "" {
-			continue
-		}
-		if entry := readinessFor(task, pod, node); entry != nil {
-			entry.AssignedNode = node
-		}
-	}
+// applyAssignment writes the GWAA result into status.PodNodeReadiness as one
+// entry per PodDetail.Index. A changed assignment replaces the entry's
+// assigned-node fact with this round's observation (or clears it when none is
+// available), so stale data from the previous node is never relabeled.
+func applyAssignment(
+	task *traincachev1alpha1.WarmupTask,
+	placement gwaa.Output,
+	facts map[readinessKey]readinessFact,
+	podNames map[int32]string,
+	candidates []string,
+) {
+	buildPodDetails(task, facts, podNames, candidates, placement.Assignment)
 }
 
 // previousPreheat reconstructs the Agent tasks that should already exist.

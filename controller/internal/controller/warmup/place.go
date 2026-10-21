@@ -12,6 +12,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
 	"traincache/controller/internal/gwaa"
+	"traincache/controller/internal/metrics"
 )
 
 // PreheatPair identifies one (Pod, node) preheat task. task_id is derived from
@@ -41,6 +42,8 @@ type PlacementApplyInput struct {
 	Previous  map[PreheatPair]ExistingPreheat
 	Placement gwaa.Output
 	PodNames  map[int32]string
+	// Metrics is optional; nil keeps the RPC orchestration metric-free.
+	Metrics *metrics.Metrics
 }
 
 // PlacementActionKind is the RPC selected for one allocation difference.
@@ -237,10 +240,17 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 		default:
 			return result, fmt.Errorf("warmup: unknown placement action %q", action.Kind)
 		}
+		op, _ := preheatOp(action.Kind)
 		if callErr == nil {
+			in.Metrics.ObservePreheatRPC(op, metrics.RPCOK)
 			countAction(&result, action.Kind)
 			log.Info("agent "+strings.ToLower(string(action.Kind)), fields...)
 			continue
+		}
+		if errors.Is(callErr, agentclient.ErrPermanent) {
+			in.Metrics.ObservePreheatRPC(op, metrics.RPCPermanent)
+		} else {
+			in.Metrics.ObservePreheatRPC(op, metrics.RPCUnavailable)
 		}
 
 		fields = append(fields, "attempt", 1, "err", callErr)
@@ -258,6 +268,18 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 		return result, fmt.Errorf("%w: %d node(s) failed", agentclient.ErrAgentUnavailable, len(result.Unavailable))
 	}
 	return result, nil
+}
+
+func preheatOp(kind PlacementActionKind) (metrics.PreheatOp, bool) {
+	switch kind {
+	case ActionSubmit:
+		return metrics.PreheatSubmit, true
+	case ActionUpdate:
+		return metrics.PreheatUpdate, true
+	case ActionCancel:
+		return metrics.PreheatCancel, true
+	}
+	return "", false
 }
 
 func countAction(result *PlacementApplyResult, kind PlacementActionKind) {

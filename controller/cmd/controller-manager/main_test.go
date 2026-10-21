@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"traincache/controller/internal/config"
+	"traincache/controller/internal/metrics"
 )
 
 func TestLifecycleLogsStructuredFields(t *testing.T) {
@@ -36,9 +37,12 @@ func TestLifecycleLogsStructuredFields(t *testing.T) {
 
 func TestManagerOptionsUseConfig(t *testing.T) {
 	cfg := &config.Config{MetricsAddr: ":19412", HealthAddr: ":18081", LeaderElection: true}
-	opts := managerOptions(cfg, newScheme())
+	opts := managerOptions(cfg, newScheme(), metrics.New())
 	if opts.Metrics.BindAddress != ":19412" {
 		t.Fatalf("metrics addr = %q, want :19412", opts.Metrics.BindAddress)
+	}
+	if _, ok := opts.Metrics.ExtraHandlers[metricsPath]; !ok {
+		t.Fatalf("extra handlers = %v, want %s", opts.Metrics.ExtraHandlers, metricsPath)
 	}
 	if !opts.LeaderElection {
 		t.Fatalf("leader election = false, want true")

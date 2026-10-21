@@ -458,9 +458,14 @@ spec:
                 - Failed
                 type: string
               podNodeReadiness:
+                description: |-
+                  PodNodeReadiness has one entry per PodDetail.Index. Each entry carries the
+                  assigned node's fact; candidate-node granularity is in ReadinessTable.
                 items:
-                  description: PodNodeReadiness is one Pod's readiness fact on one
-                    candidate node.
+                  description: |-
+                    PodNodeReadiness is one Pod's readiness fact on its assigned node. Status
+                    stores exactly one entry per PodDetail.Index (M12/S15); per-candidate-node
+                    ready-block counts live in WarmupTaskStatus.ReadinessTable.
                   properties:
                     actualNode:
                       type: string
@@ -473,8 +478,8 @@ spec:
                       format: date-time
                       type: string
                     nodeName:
-                      description: NodeName is the candidate node this readiness fact
-                        was collected on.
+                      description: NodeName is unused by the M12 layout; the assigned
+                        node is AssignedNode.
                       type: string
                     podIndex:
                       format: int32
@@ -515,8 +520,9 @@ spec:
                   type: object
                 type: array
               readinessTable:
-                description: ReadinessTable is P x N window ready-block counts (not
-                  ratios).
+                description: |-
+                  ReadinessTable is P x N window ready-block counts (not ratios). Rows are
+                  indexed by PodDetail.Index and columns follow CandidateNodes order.
                 items:
                   items:
                     format: int32

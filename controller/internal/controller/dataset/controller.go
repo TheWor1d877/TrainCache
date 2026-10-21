@@ -22,6 +22,7 @@ import (
 
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/logging"
+	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/storage"
 )
 
@@ -60,6 +61,7 @@ type Reconciler struct {
 	StoreFactory storage.Factory
 	Recorder     record.EventRecorder
 	Log          *slog.Logger
+	Metrics      *metrics.Metrics
 	MaxChunks    int64
 	Now          func() time.Time
 }
@@ -75,6 +77,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Reconcile implements the DataSet state machine.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	start := r.now()
+	// Registered before the first Get so every return path, including
+	// NotFound and DeletionTimestamp, is observed exactly once.
+	defer func() {
+		r.Metrics.ObserveReconcile(metrics.ControllerDataset, retErr, result.RequeueAfter, r.now().Sub(start))
+	}()
 
 	ds := &traincachev1alpha1.DataSet{}
 	if err := r.Get(ctx, req.NamespacedName, ds); err != nil {

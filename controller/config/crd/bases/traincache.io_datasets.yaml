@@ -305,12 +305,6 @@ spec:
                 description: TotalChunks is the sum of Shards[].Count.
                 format: int32
                 type: integer
-              warmupTasks:
-                description: WarmupTasks lists WarmupTask names that reference this
-                  DataSet.
-                items:
-                  type: string
-                type: array
             type: object
         type: object
     served: true

@@ -93,8 +93,9 @@ func reconcileResult(t *testing.T, r *Reconciler) (ctrl.Result, error) {
 
 func readinessEntry(task *traincachev1alpha1.WarmupTask, pod int32, node string) *traincachev1alpha1.PodNodeReadiness {
 	for i := range task.Status.PodNodeReadiness {
-		if task.Status.PodNodeReadiness[i].PodIndex == pod && task.Status.PodNodeReadiness[i].NodeName == node {
-			return &task.Status.PodNodeReadiness[i]
+		entry := &task.Status.PodNodeReadiness[i]
+		if entry.PodIndex == pod && (entry.AssignedNode == node || entry.NodeName == node) {
+			return entry
 		}
 	}
 	return nil
@@ -297,7 +298,7 @@ func TestPollThreeUnavailableFailures(t *testing.T) {
 		if result.RequeueAfter == 0 {
 			t.Fatalf("Reconcile %d stopped requeueing before the threshold", i+1)
 		}
-		entry := readinessEntry(readyTask(t, c), 0, "n1")
+		entry := readinessByPod(readyTask(t, c), 0)
 		if entry == nil || entry.State != traincachev1alpha1.PreheatStatePreheating {
 			t.Fatalf("attempt %d state = %#v, want Preheating", i+1, entry)
 		}
@@ -307,7 +308,7 @@ func TestPollThreeUnavailableFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third Reconcile: %v", err)
 	}
-	entry := readinessEntry(readyTask(t, c), 0, "n1")
+	entry := readinessByPod(readyTask(t, c), 0)
 	if entry == nil || entry.State != traincachev1alpha1.PreheatStateFailed {
 		t.Fatalf("state = %#v, want Failed after 3 failures", entry)
 	}
@@ -341,7 +342,7 @@ func TestPollThreeUnavailableWithSubmitFailure(t *testing.T) {
 			t.Fatalf("Reconcile %d stopped the gate cycle without release", i+1)
 		}
 	}
-	entry := readinessEntry(readyTask(t, c), 0, "n1")
+	entry := readinessByPod(readyTask(t, c), 0)
 	if entry == nil || entry.State != traincachev1alpha1.PreheatStateFailed {
 		t.Fatalf("state = %#v, want Failed after 3 failures", entry)
 	}
@@ -404,17 +405,27 @@ func TestPollReadinessTableShape(t *testing.T) {
 			}
 		}
 	}
-	if len(updated.Status.PodNodeReadiness) != 4 {
-		t.Fatalf("PodNodeReadiness entries = %d, want 4", len(updated.Status.PodNodeReadiness))
+	if len(updated.Status.PodNodeReadiness) != 2 {
+		t.Fatalf("PodNodeReadiness entries = %d, want one per Pod (2)", len(updated.Status.PodNodeReadiness))
 	}
-	wantOrder := []struct {
-		pod  int32
-		node string
-	}{{0, "n1"}, {0, "n2"}, {1, "n1"}, {1, "n2"}}
-	for i, want := range wantOrder {
-		got := updated.Status.PodNodeReadiness[i]
-		if got.PodIndex != want.pod || got.NodeName != want.node {
-			t.Fatalf("entry[%d] = p%d/%s, want p%d/%s", i, got.PodIndex, got.NodeName, want.pod, want.node)
+	for pod := range updated.Status.PodNodeReadiness {
+		got := updated.Status.PodNodeReadiness[pod]
+		if got.PodIndex != int32(pod) {
+			t.Fatalf("entry[%d].podIndex = %d, want %d", pod, got.PodIndex, pod)
+		}
+		column := -1
+		for i, node := range updated.Status.CandidateNodes {
+			if node == got.AssignedNode {
+				column = i
+				break
+			}
+		}
+		if column < 0 {
+			t.Fatalf("entry[%d] assignedNode = %q, not in candidateNodes", pod, got.AssignedNode)
+		}
+		if got.ReadyInWindow != want[pod][column] {
+			t.Fatalf("entry[%d].readyInWindow = %d, want assigned-node table value %d",
+				pod, got.ReadyInWindow, want[pod][column])
 		}
 	}
 }
