@@ -1,0 +1,43 @@
+# Two training Pods, 8-chunk startup window each. threshold=0.9 requires 7 of
+# 8 ready blocks, so the Pods stay gated long enough for the webhook assertion
+# while the preheat is genuinely exercised.
+apiVersion: traincache.io/v1alpha1
+kind: WarmupTask
+metadata:
+  name: train-task
+  namespace: traincache-e2e
+spec:
+  dataSetRef:
+    name: train-data
+  targetRef:
+    apiVersion: batch/v1
+    kind: Job
+    name: train-job
+  podCount: 2
+  affinity: Any
+  trainingType: static
+  podDetails:
+    - index: 0
+      k: 8
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+    - index: 1
+      k: 8
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+  gate:
+    threshold: 0.9
+    gapMin: 0.1
+    slopeMin: 0.001
+    tMax: 5m
+    minInterval: 1s
+  score:
+    halfLife: 4
+    cutoff: 8
+  candidate:
+    requireReady: true
+    ignoreNoSchedule: false

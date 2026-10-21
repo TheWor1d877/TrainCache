@@ -1,0 +1,88 @@
+# controller-manager RBAC.
+#
+# Secrets are intentionally NOT granted cluster-wide (docs/8.3 Q9). The manager
+# only reads the object-store credential Secret referenced by a DataSet, so a
+# namespaced Role is bound per tenant namespace. The shipped Role targets the
+# e2e tenant namespace; production installs add one RoleBinding per dataset
+# namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traincache-controller-manager
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+    app.kubernetes.io/part-of: traincache
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traincache-controller-manager
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+rules:
+  - apiGroups: ["traincache.io"]
+    resources: ["datasets", "datasets/status", "warmuptasks", "warmuptasks/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # Node annotations carry the per-task score written at gate release (M8,
+  # docs/8.1 §6.2). Kubernetes RBAC cannot scope update to annotations only.
+  # Other components (webhook, scheduler) keep Nodes read-only.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-controller-manager
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traincache-controller-manager
+subjects:
+  - kind: ServiceAccount
+    name: traincache-controller-manager
+    namespace: traincache
+---
+# Namespaced Secret read for the e2e tenant. Add the same Role/RoleBinding to
+# every namespace that hosts DataSets. Only "get" is granted: the manager
+# disables client caching for Secrets (Q9), so no cluster-wide list/watch is
+# needed; the storage factory caches stores by Secret resourceVersion.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: traincache-dataset-secrets
+  namespace: traincache-e2e
+  labels:
+    app.kubernetes.io/part-of: traincache
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-controller-manager-secrets
+  namespace: traincache-e2e
+  labels:
+    app.kubernetes.io/part-of: traincache
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: traincache-dataset-secrets
+subjects:
+  - kind: ServiceAccount
+    name: traincache-controller-manager
+    namespace: traincache

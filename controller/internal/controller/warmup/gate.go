@@ -1,0 +1,584 @@
+package warmup
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentpb "traincache/agent/api/agentpb"
+	traincachev1alpha1 "traincache/controller/api/v1alpha1"
+	"traincache/controller/internal/gate"
+	"traincache/controller/internal/gwaa"
+	"traincache/controller/internal/logging"
+	"traincache/controller/internal/nodescore"
+)
+
+const (
+	// ConditionFirstReady records the first instant at which any Pod reached
+	// its integer threshold; condition ② starts from this timestamp (D15).
+	ConditionFirstReady = "FirstReady"
+	// ConditionGateReleased and ConditionGateDegraded record the terminal gate
+	// verdict.
+	ConditionGateReleased = "GateReleased"
+	ConditionGateDegraded = "GateDegraded"
+
+	// EventGateReleased and EventGateDegraded are emitted when the gate opens.
+	EventGateReleased = "GateReleased"
+	EventGateDegraded = "GateDegraded"
+
+	reasonFirstReady = "FirstPodReady"
+)
+
+// isTerminal reports whether the task already made its gate decision at the
+// current generation. A generation change reopens the loop.
+func isTerminal(task *traincachev1alpha1.WarmupTask) bool {
+	if task == nil || task.Status.ObservedGeneration != task.Generation {
+		return false
+	}
+	switch task.Status.Phase {
+	case traincachev1alpha1.WarmupPhaseReleased, traincachev1alpha1.WarmupPhaseDegraded:
+		return true
+	}
+	return false
+}
+
+// computePlacement runs GWAA over the current readiness table. Submitted
+// failures are treated as stopped nodes so a Pod is not assigned to a node
+// whose initial Submit already failed.
+func (r *Reconciler) computePlacement(
+	task *traincachev1alpha1.WarmupTask,
+	candidates []string,
+	submitFailed map[string]error,
+) gwaa.Output {
+	pods := make([]gwaa.PodState, 0, task.Spec.PodCount)
+	for index := int32(0); index < task.Spec.PodCount; index++ {
+		detail, ok := podDetail(task, index)
+		if !ok {
+			continue
+		}
+		ready := make(map[string]int32, len(candidates))
+		for column, node := range candidates {
+			ready[node] = readinessAt(task, index, column)
+		}
+		pods = append(pods, gwaa.PodState{
+			Index:            index,
+			K:                detail.K,
+			ReadyCountByNode: ready,
+		})
+	}
+
+	nodes := make([]gwaa.NodeState, 0, len(candidates))
+	for _, node := range candidates {
+		nodes = append(nodes, gwaa.NodeState{
+			Name:    node,
+			Stopped: nodeStopped(task, node, submitFailed),
+		})
+	}
+	return gwaa.Compute(gwaa.Input{
+		Pods:  pods,
+		Nodes: nodes,
+		Rand:  r.Rand,
+	})
+}
+
+// readinessAt returns table[pod][column] defensively.
+func readinessAt(task *traincachev1alpha1.WarmupTask, pod int32, column int) int32 {
+	if task == nil || int(pod) < 0 || int(pod) >= len(task.Status.ReadinessTable) {
+		return 0
+	}
+	row := task.Status.ReadinessTable[pod]
+	if column < 0 || column >= len(row) {
+		return 0
+	}
+	return row[column]
+}
+
+// nodeStopped implements the "已停止节点集合" input from docs/8.1 §7.4. A node
+// is stopped when its initial Submit failed or every readiness fact collected
+// on it reports Failed (three consecutive ErrAgentUnavailable).
+func nodeStopped(task *traincachev1alpha1.WarmupTask, node string, submitFailed map[string]error) bool {
+	if _, failed := submitFailed[node]; failed {
+		return true
+	}
+	found := false
+	for i := range task.Status.PodNodeReadiness {
+		entry := &task.Status.PodNodeReadiness[i]
+		if entry.NodeName != node {
+			continue
+		}
+		found = true
+		if entry.State != traincachev1alpha1.PreheatStateFailed {
+			return false
+		}
+	}
+	return found
+}
+
+// hasAssignment reports whether any Pod already has a GWAA assignment. Until
+// then the initial M4 fan-out keeps running, which also retries Nodes whose
+// first Submit failed.
+func hasAssignment(task *traincachev1alpha1.WarmupTask) bool {
+	for i := range task.Status.PodNodeReadiness {
+		if task.Status.PodNodeReadiness[i].AssignedNode != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// assignedNode returns the current GWAA assignment for a Pod.
+func assignedNode(task *traincachev1alpha1.WarmupTask, pod int32) string {
+	for i := range task.Status.PodNodeReadiness {
+		entry := &task.Status.PodNodeReadiness[i]
+		if entry.PodIndex == pod && entry.AssignedNode != "" {
+			return entry.AssignedNode
+		}
+	}
+	return ""
+}
+
+// readinessFor returns the readiness fact for (pod,node), or nil.
+func readinessFor(task *traincachev1alpha1.WarmupTask, pod int32, node string) *traincachev1alpha1.PodNodeReadiness {
+	for i := range task.Status.PodNodeReadiness {
+		entry := &task.Status.PodNodeReadiness[i]
+		if entry.PodIndex == pod && entry.NodeName == node {
+			return entry
+		}
+	}
+	return nil
+}
+
+// applyAssignment writes the GWAA result into status.PodNodeReadiness. Rows
+// that are not the current assignment have AssignedNode cleared so the
+// readiness fact set never claims two assignments for one Pod.
+func applyAssignment(task *traincachev1alpha1.WarmupTask, placement gwaa.Output) {
+	for i := range task.Status.PodNodeReadiness {
+		task.Status.PodNodeReadiness[i].AssignedNode = ""
+	}
+	for pod, node := range placement.Assignment {
+		if node == "" {
+			continue
+		}
+		if entry := readinessFor(task, pod, node); entry != nil {
+			entry.AssignedNode = node
+		}
+	}
+}
+
+// previousPreheat reconstructs the Agent tasks that should already exist.
+//
+// On the first reconcile M4 submitted every (pod,node) pair. After GWAA has
+// narrowed the set, only the assigned pair per Pod remains. Generation is the
+// previous reconcile's generation when it changed, so ApplyPlacement emits an
+// Update even when the window is unchanged (M7 cross-milestone fix).
+func previousPreheat(
+	task *traincachev1alpha1.WarmupTask,
+	windows [][]*agentpb.ChunkRef,
+	candidates []string,
+	initial bool,
+) map[PreheatPair]ExistingPreheat {
+	generation := uint64(task.Generation)
+	if task.Status.ObservedGeneration > 0 && task.Status.ObservedGeneration != task.Generation {
+		generation = uint64(task.Status.ObservedGeneration)
+	}
+
+	pods := int(task.Spec.PodCount)
+	previous := make(map[PreheatPair]ExistingPreheat, pods*len(candidates))
+	for pod := 0; pod < pods; pod++ {
+		var chunks []*agentpb.ChunkRef
+		if pod < len(windows) {
+			chunks = windows[pod]
+		}
+		if !initial {
+			if node := assignedNode(task, int32(pod)); node != "" {
+				previous[PreheatPair{PodIndex: int32(pod), Node: node}] = ExistingPreheat{
+					Chunks:     chunks,
+					Generation: generation,
+				}
+				continue
+			}
+		}
+		for _, node := range candidates {
+			previous[PreheatPair{PodIndex: int32(pod), Node: node}] = ExistingPreheat{
+				Chunks:     chunks,
+				Generation: generation,
+			}
+		}
+	}
+	return previous
+}
+
+// gateEvaluation bundles the pure decision with the assembled input for logs.
+type gateEvaluation struct {
+	Decision gate.Decision
+	Pods     []gate.PodGateState
+}
+
+// evaluateGate assembles PodGateState from status and invokes gate.Evaluate.
+func (r *Reconciler) evaluateGate(task *traincachev1alpha1.WarmupTask) gateEvaluation {
+	now := r.now()
+	pods := make([]gate.PodGateState, 0, task.Spec.PodCount)
+	for index := int32(0); index < task.Spec.PodCount; index++ {
+		detail, ok := podDetail(task, index)
+		if !ok {
+			continue
+		}
+		k := detail.K
+		assigned := assignedNode(task, index)
+		ready := int32(0)
+		if assigned != "" {
+			if entry := readinessFor(task, index, assigned); entry != nil {
+				ready = entry.ReadyInWindow
+			}
+		}
+		rate := 0.0
+		if k > 0 {
+			rate = float64(ready) / float64(k)
+		}
+		prevRate, prevAt, seen := rateSample(r.progress.samples(string(task.UID), index), now)
+		pods = append(pods, gate.PodGateState{
+			Index:           index,
+			AssignedNode:    assigned,
+			K:               k,
+			Ready:           ready,
+			Rate:            rate,
+			PrevRate:        prevRate,
+			PrevAt:          prevAt,
+			FirstSampleSeen: seen,
+		})
+	}
+
+	firstReady := r.ensureFirstReady(task, pods, now)
+	policy := task.Spec.Gate
+	started := time.Time{}
+	if task.Status.StartedAt != nil {
+		started = task.Status.StartedAt.Time
+	}
+	return gateEvaluation{
+		Decision: gate.Evaluate(gate.Input{
+			Now: now,
+			Policy: gate.GatePolicy{
+				Threshold:   policy.Threshold,
+				GapMin:      policy.GapMin,
+				SlopeMin:    policy.SlopeMin,
+				TMax:        policy.TMax.Duration,
+				MinInterval: policy.MinInterval.Duration,
+			},
+			Pods:         pods,
+			FirstReadyAt: firstReady,
+			StartedAt:    started,
+		}),
+		Pods: pods,
+	}
+}
+
+// ensureFirstReady freezes the first time any Pod reached its integer
+// threshold. Once the condition exists it is never updated (D15).
+func (r *Reconciler) ensureFirstReady(task *traincachev1alpha1.WarmupTask, pods []gate.PodGateState, now time.Time) time.Time {
+	if existing := meta.FindStatusCondition(task.Status.Conditions, ConditionFirstReady); existing != nil {
+		return existing.LastTransitionTime.Time
+	}
+	threshold := task.Spec.Gate.Threshold
+	for _, pod := range pods {
+		if pod.AssignedNode == "" {
+			continue
+		}
+		if pod.Ready < requiredReady(threshold, pod.K) {
+			continue
+		}
+		meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+			Type:               ConditionFirstReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             reasonFirstReady,
+			Message:            fmt.Sprintf("pod %d reached required ready blocks", pod.Index),
+			ObservedGeneration: task.Generation,
+			LastTransitionTime: metav1.NewTime(now),
+		})
+		return now
+	}
+	return time.Time{}
+}
+
+// rateSample picks the previous sample. The poll has just recorded `now` when
+// the interval allowed it; otherwise the last stored sample is the baseline.
+func rateSample(history []RateSample, now time.Time) (float64, time.Time, bool) {
+	if len(history) == 0 {
+		return 0, time.Time{}, false
+	}
+	if last := history[len(history)-1]; last.At.Before(now) {
+		return last.Rate, last.At, true
+	}
+	if len(history) >= 2 {
+		previous := history[len(history)-2]
+		return previous.Rate, previous.At, true
+	}
+	return 0, time.Time{}, false
+}
+
+// logGateDecision records the mandatory M7 fields on every evaluation.
+func logGateDecision(log *slog.Logger, taskKey string, evaluation gateEvaluation) {
+	n := len(evaluation.Decision.Rates)
+	required := make([]int32, n)
+	gaps := make([]float64, n)
+	slopes := make([]float64, n)
+	rates := make([]string, n)
+	for i, rate := range evaluation.Decision.Rates {
+		required[i] = rate.Required
+		gaps[i] = rate.Gap
+		slopes[i] = rate.Slope
+		rates[i] = fmt.Sprintf("p%d:ready=%d/%d:rate=%.4f",
+			rate.PodIndex, rate.Ready, rate.Required, rate.Rate)
+	}
+	log.Info("gate evaluated",
+		"warmup_task", taskKey,
+		"state", string(evaluation.Decision.State),
+		"reason", evaluation.Decision.Reason,
+		"required", required,
+		"gap", gaps,
+		"slope", slopes,
+		"rates", rates,
+	)
+}
+
+// releaseGate performs the frozen release order from docs/8.1 §7.5:
+// scores → gates → status. A score failure returns before any gate is removed;
+// gate removal is idempotent so a partial failure can be retried next round.
+func (r *Reconciler) releaseGate(
+	ctx context.Context,
+	log *slog.Logger,
+	task *traincachev1alpha1.WarmupTask,
+	windows [][]*agentpb.ChunkRef,
+	candidates []string,
+	podNames map[int32]string,
+	evaluation gateEvaluation,
+) (ctrl.Result, error) {
+	decision := evaluation.Decision
+	taskKey := TaskKey(task)
+
+	if err := r.writeScores(ctx, log, task, windows, candidates); err != nil {
+		log.Warn("release blocked: score annotation write failed",
+			"warmup_task", taskKey,
+			"state", string(decision.State),
+			"reason", decision.Reason,
+			"err", err,
+		)
+		return ctrl.Result{}, err
+	}
+
+	removed, skipped, err := r.removeGates(ctx, log, task, podNames)
+	if err != nil {
+		log.Warn("gate removal incomplete",
+			"warmup_task", taskKey,
+			"state", string(decision.State),
+			"reason", decision.Reason,
+			"removed", removed,
+			"skipped", skipped,
+			"err", err,
+		)
+		return ctrl.Result{}, err
+	}
+
+	now := metav1.NewTime(r.now())
+	task.Status.GateDecision = traincachev1alpha1.GateDecision{
+		State:     traincachev1alpha1.GateState(decision.State),
+		Reason:    decision.Reason,
+		DecidedAt: &now,
+		PodRates:  podRates(decision.Rates),
+	}
+	switch decision.State {
+	case gate.Released:
+		task.Status.Phase = traincachev1alpha1.WarmupPhaseReleased
+		meta.RemoveStatusCondition(&task.Status.Conditions, ConditionGateDegraded)
+		r.setCondition(task, ConditionGateReleased, metav1.ConditionTrue, EventGateReleased,
+			fmt.Sprintf("gate released: %s", decision.Reason))
+		r.event(task, corev1.EventTypeNormal, EventGateReleased,
+			fmt.Sprintf("warmup gate released: %s", decision.Reason))
+		log.Info("gate released",
+			"warmup_task", taskKey,
+			"state", string(decision.State),
+			"reason", decision.Reason,
+			"removed", removed,
+			"skipped", skipped,
+		)
+	case gate.Degraded:
+		task.Status.Phase = traincachev1alpha1.WarmupPhaseDegraded
+		meta.RemoveStatusCondition(&task.Status.Conditions, ConditionGateReleased)
+		r.setCondition(task, ConditionGateDegraded, metav1.ConditionTrue, EventGateDegraded,
+			fmt.Sprintf("gate degraded: %s", decision.Reason))
+		r.event(task, corev1.EventTypeWarning, EventGateDegraded,
+			fmt.Sprintf("warmup gate degraded: %s", decision.Reason))
+		log.Warn("gate degraded",
+			"warmup_task", taskKey,
+			"state", string(decision.State),
+			"reason", decision.Reason,
+			"removed", removed,
+			"skipped", skipped,
+		)
+	}
+	return ctrl.Result{}, nil
+}
+
+func podRates(rates []gate.PodRate) []traincachev1alpha1.PodRate {
+	out := make([]traincachev1alpha1.PodRate, len(rates))
+	for i, rate := range rates {
+		out[i] = traincachev1alpha1.PodRate{
+			PodIndex: rate.PodIndex,
+			Rate:     rate.Rate,
+			Gap:      rate.Gap,
+			Slope:    rate.Slope,
+		}
+	}
+	return out
+}
+
+// writeScores computes S(node) for every candidate and writes the task's own
+// Node annotation key. Any failure aborts the whole release (no gate removal).
+func (r *Reconciler) writeScores(
+	ctx context.Context,
+	log *slog.Logger,
+	task *traincachev1alpha1.WarmupTask,
+	windows [][]*agentpb.ChunkRef,
+	candidates []string,
+) error {
+	writer := &ScoreWriter{
+		Client: r.Client,
+		Now:    r.now,
+		Prefix: r.ScoreAnnotationPrefix,
+	}
+	ref := TaskRef{
+		Namespace:  task.Namespace,
+		Name:       task.Name,
+		Generation: task.Generation,
+	}
+	ctx = logging.Into(ctx, log)
+
+	for _, node := range candidates {
+		entries := make([]ScoreEntry, 0, task.Spec.PodCount)
+		for index := int32(0); index < task.Spec.PodCount; index++ {
+			detail, ok := podDetail(task, index)
+			if !ok {
+				continue
+			}
+			requested := int32(0)
+			if int(index) < len(windows) {
+				requested = int32(len(windows[index]))
+			}
+			bits := scoreBits(task, index, node, requested, detail.K)
+			score := nodescore.Compute(bits, nodescore.Params{
+				K: detail.K,
+				H: task.Spec.Score.HalfLife,
+				C: task.Spec.Score.Cutoff,
+			})
+			entries = append(entries, ScoreEntry{
+				PodIndex: index,
+				K:        detail.K,
+				H:        task.Spec.Score.HalfLife,
+				C:        task.Spec.Score.Cutoff,
+				Score:    score.Total,
+			})
+		}
+		if err := writer.Write(ctx, ref, node, entries); err != nil {
+			return fmt.Errorf("write scores on node %q: %w", node, err)
+		}
+	}
+	return nil
+}
+
+// scoreBits decodes the (pod,node) bitmap. Missing or malformed bitmaps score
+// as zeros; release must not be blocked by a missing observation.
+func scoreBits(task *traincachev1alpha1.WarmupTask, pod int32, node string, requested, k int32) []bool {
+	entry := readinessFor(task, pod, node)
+	if entry == nil || len(entry.ReadyBlockBitmap) == 0 {
+		return nil
+	}
+	decoded, err := nodescore.DecodeReadiness(entry.ReadyBlockBitmap, requested, k)
+	if err != nil {
+		return nil
+	}
+	return decoded.Bits
+}
+
+// removeGates patches each selected Pod to drop the warmup scheduling gate.
+// Pods whose gate is already absent are skipped; a failure on one Pod does not
+// undo the others, and the next reconcile retries only the remaining gates.
+func (r *Reconciler) removeGates(
+	ctx context.Context,
+	log *slog.Logger,
+	task *traincachev1alpha1.WarmupTask,
+	podNames map[int32]string,
+) (removed, skipped int, err error) {
+	gateName := r.GateName
+	if gateName == "" {
+		gateName = DefaultGateName
+	}
+
+	var errs []error
+	for index := int32(0); index < task.Spec.PodCount; index++ {
+		name := podNames[index]
+		if name == "" {
+			skipped++
+			continue
+		}
+		pod := &corev1.Pod{}
+		if getErr := r.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, pod); getErr != nil {
+			if apierrors.IsNotFound(getErr) {
+				skipped++
+				continue
+			}
+			errs = append(errs, fmt.Errorf("get pod %s: %w", name, getErr))
+			continue
+		}
+
+		found := false
+		for _, schedulingGate := range pod.Spec.SchedulingGates {
+			if schedulingGate.Name == gateName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			skipped++
+			continue
+		}
+
+		base := pod.DeepCopy()
+		gates := pod.Spec.SchedulingGates[:0]
+		for _, schedulingGate := range pod.Spec.SchedulingGates {
+			if schedulingGate.Name != gateName {
+				gates = append(gates, schedulingGate)
+			}
+		}
+		pod.Spec.SchedulingGates = gates
+		if patchErr := r.Patch(ctx, pod, client.MergeFrom(base)); patchErr != nil {
+			errs = append(errs, fmt.Errorf("remove gate from pod %s: %w", name, patchErr))
+			log.Warn("gate removal failed",
+				"warmup_task", TaskKey(task),
+				"pod", name,
+				"pod_index", index,
+				"node", assignedNode(task, index),
+				"err", patchErr,
+			)
+			continue
+		}
+		removed++
+		log.Info("gate removed",
+			"warmup_task", TaskKey(task),
+			"pod", name,
+			"pod_index", index,
+			"node", assignedNode(task, index),
+		)
+	}
+	if len(errs) > 0 {
+		return removed, skipped, errors.Join(errs...)
+	}
+	return removed, skipped, nil
+}

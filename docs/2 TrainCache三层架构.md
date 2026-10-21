@@ -97,7 +97,8 @@ EE 缓存组语义：JuiceFS 企业版（EE）有分布式缓存组
 ⾛内核的 page cache，Agent 完全不参与读 I/O 路径，所以读路径上没有任何额外延迟。代价是读侧的信
 号只能靠旁路采集。FUSE read-through 降级为可选的 stretch ⽬标
 
-
+## 追加补充
+当前的架构是一节点一训练Pod，多训练Pod同节点的复杂度目前暂未处理
 
 ## 对照组
 (同一负载台，非自研）：JuiceFS CE（冷/热）· Fluid + JuiceFSRuntime + DataLoad + 亲和

@@ -234,7 +234,7 @@ func (x RescanStatus_Phase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RescanStatus_Phase.Descriptor instead.
 func (RescanStatus_Phase) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{7, 0}
+	return file_agent_proto_rawDescGZIP(), []int{11, 0}
 }
 
 // 块级任务上报结果
@@ -284,7 +284,7 @@ func (x BlockReport_Result) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BlockReport_Result.Descriptor instead.
 func (BlockReport_Result) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{12, 0}
+	return file_agent_proto_rawDescGZIP(), []int{16, 0}
 }
 
 type SubmitPreheatRequest struct {
@@ -296,6 +296,7 @@ type SubmitPreheatRequest struct {
 	Prefixes      []string               `protobuf:"bytes,5,rep,name=prefixes,proto3" json:"prefixes,omitempty"`                       // 路径前缀,语义同 core Catalog.LoadPrefixes:空=空映射,含空串=全量
 	Chunks        []*ChunkRef            `protobuf:"bytes,6,rep,name=chunks,proto3" json:"chunks,omitempty"`                           // 可选,块级精确指定
 	Priority      PreheatPriority        `protobuf:"varint,7,opt,name=priority,proto3,enum=traincache.agent.v1.PreheatPriority" json:"priority,omitempty"`
+	Generation    uint64                 `protobuf:"varint,8,opt,name=generation,proto3" json:"generation,omitempty"` // 任务代际;0 表示未提供
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -377,6 +378,13 @@ func (x *SubmitPreheatRequest) GetPriority() PreheatPriority {
 		return x.Priority
 	}
 	return PreheatPriority_P0
+}
+
+func (x *SubmitPreheatRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
 }
 
 type ChunkRef struct {
@@ -548,8 +556,12 @@ type PreheatStatus struct {
 	FailedBlocks    int64                  `protobuf:"varint,9,opt,name=failed_blocks,json=failedBlocks,proto3" json:"failed_blocks,omitempty"`
 	StartedAt       *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	UpdatedAt       *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// 8.x 增量（2026-10-20）：代际与位图进度；seq 单调递增。
+	Generation    uint64 `protobuf:"varint,12,opt,name=generation,proto3" json:"generation,omitempty"`                     // 任务代际
+	Seq           uint64 `protobuf:"varint,13,opt,name=seq,proto3" json:"seq,omitempty"`                                   // 位图变更序号，单调递增
+	ReadyBitmap   []byte `protobuf:"bytes,14,opt,name=ready_bitmap,json=readyBitmap,proto3" json:"ready_bitmap,omitempty"` // 位 i 对应请求 chunks 第 i 项；1=已落盘且校验通过
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PreheatStatus) Reset() {
@@ -659,6 +671,261 @@ func (x *PreheatStatus) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *PreheatStatus) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *PreheatStatus) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *PreheatStatus) GetReadyBitmap() []byte {
+	if x != nil {
+		return x.ReadyBitmap
+	}
+	return nil
+}
+
+// 8.x 增量:窗口全量更新(chunks 全量替换并重定义位序)。
+type UpdatePreheatRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"` // 必须 >= Agent 当前代际
+	Chunks        []*ChunkRef            `protobuf:"bytes,4,rep,name=chunks,proto3" json:"chunks,omitempty"`          // 新的完整块列表，同时定义位序
+	Priority      PreheatPriority        `protobuf:"varint,5,opt,name=priority,proto3,enum=traincache.agent.v1.PreheatPriority" json:"priority,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdatePreheatRequest) Reset() {
+	*x = UpdatePreheatRequest{}
+	mi := &file_agent_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdatePreheatRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdatePreheatRequest) ProtoMessage() {}
+
+func (x *UpdatePreheatRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdatePreheatRequest.ProtoReflect.Descriptor instead.
+func (*UpdatePreheatRequest) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *UpdatePreheatRequest) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *UpdatePreheatRequest) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *UpdatePreheatRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *UpdatePreheatRequest) GetChunks() []*ChunkRef {
+	if x != nil {
+		return x.Chunks
+	}
+	return nil
+}
+
+func (x *UpdatePreheatRequest) GetPriority() PreheatPriority {
+	if x != nil {
+		return x.Priority
+	}
+	return PreheatPriority_P0
+}
+
+type UpdatePreheatResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdatePreheatResponse) Reset() {
+	*x = UpdatePreheatResponse{}
+	mi := &file_agent_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdatePreheatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdatePreheatResponse) ProtoMessage() {}
+
+func (x *UpdatePreheatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdatePreheatResponse.ProtoReflect.Descriptor instead.
+func (*UpdatePreheatResponse) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *UpdatePreheatResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *UpdatePreheatResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+// 8.x 增量:取消任务(幂等;仅停止调度新块,不取消在途 P0)。
+type CancelPreheatRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelPreheatRequest) Reset() {
+	*x = CancelPreheatRequest{}
+	mi := &file_agent_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelPreheatRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelPreheatRequest) ProtoMessage() {}
+
+func (x *CancelPreheatRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelPreheatRequest.ProtoReflect.Descriptor instead.
+func (*CancelPreheatRequest) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *CancelPreheatRequest) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *CancelPreheatRequest) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *CancelPreheatRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+type CancelPreheatResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelPreheatResponse) Reset() {
+	*x = CancelPreheatResponse{}
+	mi := &file_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelPreheatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelPreheatResponse) ProtoMessage() {}
+
+func (x *CancelPreheatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelPreheatResponse.ProtoReflect.Descriptor instead.
+func (*CancelPreheatResponse) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CancelPreheatResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
 type GetNodeStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Node          string                 `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
@@ -669,7 +936,7 @@ type GetNodeStatusRequest struct {
 
 func (x *GetNodeStatusRequest) Reset() {
 	*x = GetNodeStatusRequest{}
-	mi := &file_agent_proto_msgTypes[5]
+	mi := &file_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -681,7 +948,7 @@ func (x *GetNodeStatusRequest) String() string {
 func (*GetNodeStatusRequest) ProtoMessage() {}
 
 func (x *GetNodeStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[5]
+	mi := &file_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -694,7 +961,7 @@ func (x *GetNodeStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetNodeStatusRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{5}
+	return file_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetNodeStatusRequest) GetNode() string {
@@ -727,7 +994,7 @@ type NodeStatus struct {
 
 func (x *NodeStatus) Reset() {
 	*x = NodeStatus{}
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -739,7 +1006,7 @@ func (x *NodeStatus) String() string {
 func (*NodeStatus) ProtoMessage() {}
 
 func (x *NodeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -752,7 +1019,7 @@ func (x *NodeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
 func (*NodeStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{6}
+	return file_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *NodeStatus) GetNode() string {
@@ -824,7 +1091,7 @@ type RescanStatus struct {
 
 func (x *RescanStatus) Reset() {
 	*x = RescanStatus{}
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -836,7 +1103,7 @@ func (x *RescanStatus) String() string {
 func (*RescanStatus) ProtoMessage() {}
 
 func (x *RescanStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -849,7 +1116,7 @@ func (x *RescanStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RescanStatus.ProtoReflect.Descriptor instead.
 func (*RescanStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{7}
+	return file_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RescanStatus) GetPhase() RescanStatus_Phase {
@@ -899,7 +1166,7 @@ type DatasetCatalog struct {
 
 func (x *DatasetCatalog) Reset() {
 	*x = DatasetCatalog{}
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +1178,7 @@ func (x *DatasetCatalog) String() string {
 func (*DatasetCatalog) ProtoMessage() {}
 
 func (x *DatasetCatalog) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +1191,7 @@ func (x *DatasetCatalog) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DatasetCatalog.ProtoReflect.Descriptor instead.
 func (*DatasetCatalog) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{8}
+	return file_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DatasetCatalog) GetDataset() string {
@@ -966,7 +1233,7 @@ type ListSnapshotRequest struct {
 
 func (x *ListSnapshotRequest) Reset() {
 	*x = ListSnapshotRequest{}
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -978,7 +1245,7 @@ func (x *ListSnapshotRequest) String() string {
 func (*ListSnapshotRequest) ProtoMessage() {}
 
 func (x *ListSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -991,7 +1258,7 @@ func (x *ListSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*ListSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{9}
+	return file_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ListSnapshotRequest) GetDataset() string {
@@ -1024,7 +1291,7 @@ type ListSnapshotResponse struct {
 
 func (x *ListSnapshotResponse) Reset() {
 	*x = ListSnapshotResponse{}
-	mi := &file_agent_proto_msgTypes[10]
+	mi := &file_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1036,7 +1303,7 @@ func (x *ListSnapshotResponse) String() string {
 func (*ListSnapshotResponse) ProtoMessage() {}
 
 func (x *ListSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[10]
+	mi := &file_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1049,7 +1316,7 @@ func (x *ListSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*ListSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{10}
+	return file_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ListSnapshotResponse) GetEntries() []*EntryRef {
@@ -1070,7 +1337,7 @@ type EntryRef struct {
 
 func (x *EntryRef) Reset() {
 	*x = EntryRef{}
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1082,7 +1349,7 @@ func (x *EntryRef) String() string {
 func (*EntryRef) ProtoMessage() {}
 
 func (x *EntryRef) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1095,7 +1362,7 @@ func (x *EntryRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EntryRef.ProtoReflect.Descriptor instead.
 func (*EntryRef) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{11}
+	return file_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *EntryRef) GetPath() string {
@@ -1133,7 +1400,7 @@ type BlockReport struct {
 
 func (x *BlockReport) Reset() {
 	*x = BlockReport{}
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1145,7 +1412,7 @@ func (x *BlockReport) String() string {
 func (*BlockReport) ProtoMessage() {}
 
 func (x *BlockReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,7 +1425,7 @@ func (x *BlockReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockReport.ProtoReflect.Descriptor instead.
 func (*BlockReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{12}
+	return file_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *BlockReport) GetNode() string {
@@ -1211,7 +1478,7 @@ type ReportAck struct {
 
 func (x *ReportAck) Reset() {
 	*x = ReportAck{}
-	mi := &file_agent_proto_msgTypes[13]
+	mi := &file_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1223,7 +1490,7 @@ func (x *ReportAck) String() string {
 func (*ReportAck) ProtoMessage() {}
 
 func (x *ReportAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[13]
+	mi := &file_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1236,14 +1503,14 @@ func (x *ReportAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportAck.ProtoReflect.Descriptor instead.
 func (*ReportAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{13}
+	return file_agent_proto_rawDescGZIP(), []int{17}
 }
 
 var File_agent_proto protoreflect.FileDescriptor
 
 const file_agent_proto_rawDesc = "" +
 	"\n" +
-	"\vagent.proto\x12\x13traincache.agent.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x93\x02\n" +
+	"\vagent.proto\x12\x13traincache.agent.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb3\x02\n" +
 	"\x14SubmitPreheatRequest\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\x12\x18\n" +
@@ -1252,7 +1519,10 @@ const file_agent_proto_rawDesc = "" +
 	"snapshotId\x12\x1a\n" +
 	"\bprefixes\x18\x05 \x03(\tR\bprefixes\x125\n" +
 	"\x06chunks\x18\x06 \x03(\v2\x1d.traincache.agent.v1.ChunkRefR\x06chunks\x12@\n" +
-	"\bpriority\x18\a \x01(\x0e2$.traincache.agent.v1.PreheatPriorityR\bpriority\"4\n" +
+	"\bpriority\x18\a \x01(\x0e2$.traincache.agent.v1.PreheatPriorityR\bpriority\x12\x1e\n" +
+	"\n" +
+	"generation\x18\b \x01(\x04R\n" +
+	"generation\"4\n" +
 	"\bChunkRef\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
 	"\x05chunk\x18\x02 \x01(\x03R\x05chunk\"f\n" +
@@ -1261,7 +1531,7 @@ const file_agent_proto_rawDesc = "" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\"2\n" +
 	"\x17GetPreheatStatusRequest\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\xed\x03\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\xc2\x04\n" +
 	"\rPreheatStatus\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\x12\x18\n" +
@@ -1277,13 +1547,37 @@ const file_agent_proto_rawDesc = "" +
 	"started_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"5\n" +
+	"updated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x1e\n" +
+	"\n" +
+	"generation\x18\f \x01(\x04R\n" +
+	"generation\x12\x10\n" +
+	"\x03seq\x18\r \x01(\x04R\x03seq\x12!\n" +
+	"\fready_bitmap\x18\x0e \x01(\fR\vreadyBitmap\"5\n" +
 	"\x05State\x12\n" +
 	"\n" +
 	"\x06QUEUED\x10\x00\x12\v\n" +
 	"\aRUNNING\x10\x01\x12\b\n" +
 	"\x04DONE\x10\x02\x12\t\n" +
-	"\x05ERROR\x10\x03\"c\n" +
+	"\x05ERROR\x10\x03\"\xdc\x01\n" +
+	"\x14UpdatePreheatRequest\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\x125\n" +
+	"\x06chunks\x18\x04 \x03(\v2\x1d.traincache.agent.v1.ChunkRefR\x06chunks\x12@\n" +
+	"\bpriority\x18\x05 \x01(\x0e2$.traincache.agent.v1.PreheatPriorityR\bpriority\"M\n" +
+	"\x15UpdatePreheatResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"c\n" +
+	"\x14CancelPreheatRequest\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\"3\n" +
+	"\x15CancelPreheatResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\"c\n" +
 	"\x14GetNodeStatusRequest\x12\x12\n" +
 	"\x04node\x18\x01 \x01(\tR\x04node\x127\n" +
 	"\x04item\x18\x02 \x01(\x0e2#.traincache.agent.v1.NodeStatusItemR\x04item\"\xbb\x02\n" +
@@ -1350,10 +1644,12 @@ const file_agent_proto_rawDesc = "" +
 	"\x05SPACE\x10\x03\x12\t\n" +
 	"\x05TASKS\x10\x04\x12\n" +
 	"\n" +
-	"\x06RESCAN\x10\x052\xde\x01\n" +
+	"\x06RESCAN\x10\x052\xae\x03\n" +
 	"\x0ePreheatService\x12f\n" +
 	"\rSubmitPreheat\x12).traincache.agent.v1.SubmitPreheatRequest\x1a*.traincache.agent.v1.SubmitPreheatResponse\x12d\n" +
-	"\x10GetPreheatStatus\x12,.traincache.agent.v1.GetPreheatStatusRequest\x1a\".traincache.agent.v1.PreheatStatus2\xcf\x01\n" +
+	"\x10GetPreheatStatus\x12,.traincache.agent.v1.GetPreheatStatusRequest\x1a\".traincache.agent.v1.PreheatStatus\x12f\n" +
+	"\rUpdatePreheat\x12).traincache.agent.v1.UpdatePreheatRequest\x1a*.traincache.agent.v1.UpdatePreheatResponse\x12f\n" +
+	"\rCancelPreheat\x12).traincache.agent.v1.CancelPreheatRequest\x1a*.traincache.agent.v1.CancelPreheatResponse2\xcf\x01\n" +
 	"\vNodeService\x12[\n" +
 	"\rGetNodeStatus\x12).traincache.agent.v1.GetNodeStatusRequest\x1a\x1f.traincache.agent.v1.NodeStatus\x12c\n" +
 	"\fListSnapshot\x12(.traincache.agent.v1.ListSnapshotRequest\x1a).traincache.agent.v1.ListSnapshotResponse2c\n" +
@@ -1373,7 +1669,7 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_agent_proto_goTypes = []any{
 	(PreheatPriority)(0),            // 0: traincache.agent.v1.PreheatPriority
 	(NodeStatusItem)(0),             // 1: traincache.agent.v1.NodeStatusItem
@@ -1385,45 +1681,55 @@ var file_agent_proto_goTypes = []any{
 	(*SubmitPreheatResponse)(nil),   // 7: traincache.agent.v1.SubmitPreheatResponse
 	(*GetPreheatStatusRequest)(nil), // 8: traincache.agent.v1.GetPreheatStatusRequest
 	(*PreheatStatus)(nil),           // 9: traincache.agent.v1.PreheatStatus
-	(*GetNodeStatusRequest)(nil),    // 10: traincache.agent.v1.GetNodeStatusRequest
-	(*NodeStatus)(nil),              // 11: traincache.agent.v1.NodeStatus
-	(*RescanStatus)(nil),            // 12: traincache.agent.v1.RescanStatus
-	(*DatasetCatalog)(nil),          // 13: traincache.agent.v1.DatasetCatalog
-	(*ListSnapshotRequest)(nil),     // 14: traincache.agent.v1.ListSnapshotRequest
-	(*ListSnapshotResponse)(nil),    // 15: traincache.agent.v1.ListSnapshotResponse
-	(*EntryRef)(nil),                // 16: traincache.agent.v1.EntryRef
-	(*BlockReport)(nil),             // 17: traincache.agent.v1.BlockReport
-	(*ReportAck)(nil),               // 18: traincache.agent.v1.ReportAck
-	(*timestamppb.Timestamp)(nil),   // 19: google.protobuf.Timestamp
+	(*UpdatePreheatRequest)(nil),    // 10: traincache.agent.v1.UpdatePreheatRequest
+	(*UpdatePreheatResponse)(nil),   // 11: traincache.agent.v1.UpdatePreheatResponse
+	(*CancelPreheatRequest)(nil),    // 12: traincache.agent.v1.CancelPreheatRequest
+	(*CancelPreheatResponse)(nil),   // 13: traincache.agent.v1.CancelPreheatResponse
+	(*GetNodeStatusRequest)(nil),    // 14: traincache.agent.v1.GetNodeStatusRequest
+	(*NodeStatus)(nil),              // 15: traincache.agent.v1.NodeStatus
+	(*RescanStatus)(nil),            // 16: traincache.agent.v1.RescanStatus
+	(*DatasetCatalog)(nil),          // 17: traincache.agent.v1.DatasetCatalog
+	(*ListSnapshotRequest)(nil),     // 18: traincache.agent.v1.ListSnapshotRequest
+	(*ListSnapshotResponse)(nil),    // 19: traincache.agent.v1.ListSnapshotResponse
+	(*EntryRef)(nil),                // 20: traincache.agent.v1.EntryRef
+	(*BlockReport)(nil),             // 21: traincache.agent.v1.BlockReport
+	(*ReportAck)(nil),               // 22: traincache.agent.v1.ReportAck
+	(*timestamppb.Timestamp)(nil),   // 23: google.protobuf.Timestamp
 }
 var file_agent_proto_depIdxs = []int32{
 	6,  // 0: traincache.agent.v1.SubmitPreheatRequest.chunks:type_name -> traincache.agent.v1.ChunkRef
 	0,  // 1: traincache.agent.v1.SubmitPreheatRequest.priority:type_name -> traincache.agent.v1.PreheatPriority
 	2,  // 2: traincache.agent.v1.PreheatStatus.state:type_name -> traincache.agent.v1.PreheatStatus.State
-	19, // 3: traincache.agent.v1.PreheatStatus.started_at:type_name -> google.protobuf.Timestamp
-	19, // 4: traincache.agent.v1.PreheatStatus.updated_at:type_name -> google.protobuf.Timestamp
-	1,  // 5: traincache.agent.v1.GetNodeStatusRequest.item:type_name -> traincache.agent.v1.NodeStatusItem
-	12, // 6: traincache.agent.v1.NodeStatus.rescan:type_name -> traincache.agent.v1.RescanStatus
-	13, // 7: traincache.agent.v1.NodeStatus.catalog:type_name -> traincache.agent.v1.DatasetCatalog
-	3,  // 8: traincache.agent.v1.RescanStatus.phase:type_name -> traincache.agent.v1.RescanStatus.Phase
-	16, // 9: traincache.agent.v1.ListSnapshotResponse.entries:type_name -> traincache.agent.v1.EntryRef
-	6,  // 10: traincache.agent.v1.BlockReport.ref:type_name -> traincache.agent.v1.ChunkRef
-	4,  // 11: traincache.agent.v1.BlockReport.result:type_name -> traincache.agent.v1.BlockReport.Result
-	5,  // 12: traincache.agent.v1.PreheatService.SubmitPreheat:input_type -> traincache.agent.v1.SubmitPreheatRequest
-	8,  // 13: traincache.agent.v1.PreheatService.GetPreheatStatus:input_type -> traincache.agent.v1.GetPreheatStatusRequest
-	10, // 14: traincache.agent.v1.NodeService.GetNodeStatus:input_type -> traincache.agent.v1.GetNodeStatusRequest
-	14, // 15: traincache.agent.v1.NodeService.ListSnapshot:input_type -> traincache.agent.v1.ListSnapshotRequest
-	17, // 16: traincache.agent.v1.ReportService.ReportBlocks:input_type -> traincache.agent.v1.BlockReport
-	7,  // 17: traincache.agent.v1.PreheatService.SubmitPreheat:output_type -> traincache.agent.v1.SubmitPreheatResponse
-	9,  // 18: traincache.agent.v1.PreheatService.GetPreheatStatus:output_type -> traincache.agent.v1.PreheatStatus
-	11, // 19: traincache.agent.v1.NodeService.GetNodeStatus:output_type -> traincache.agent.v1.NodeStatus
-	15, // 20: traincache.agent.v1.NodeService.ListSnapshot:output_type -> traincache.agent.v1.ListSnapshotResponse
-	18, // 21: traincache.agent.v1.ReportService.ReportBlocks:output_type -> traincache.agent.v1.ReportAck
-	17, // [17:22] is the sub-list for method output_type
-	12, // [12:17] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	23, // 3: traincache.agent.v1.PreheatStatus.started_at:type_name -> google.protobuf.Timestamp
+	23, // 4: traincache.agent.v1.PreheatStatus.updated_at:type_name -> google.protobuf.Timestamp
+	6,  // 5: traincache.agent.v1.UpdatePreheatRequest.chunks:type_name -> traincache.agent.v1.ChunkRef
+	0,  // 6: traincache.agent.v1.UpdatePreheatRequest.priority:type_name -> traincache.agent.v1.PreheatPriority
+	1,  // 7: traincache.agent.v1.GetNodeStatusRequest.item:type_name -> traincache.agent.v1.NodeStatusItem
+	16, // 8: traincache.agent.v1.NodeStatus.rescan:type_name -> traincache.agent.v1.RescanStatus
+	17, // 9: traincache.agent.v1.NodeStatus.catalog:type_name -> traincache.agent.v1.DatasetCatalog
+	3,  // 10: traincache.agent.v1.RescanStatus.phase:type_name -> traincache.agent.v1.RescanStatus.Phase
+	20, // 11: traincache.agent.v1.ListSnapshotResponse.entries:type_name -> traincache.agent.v1.EntryRef
+	6,  // 12: traincache.agent.v1.BlockReport.ref:type_name -> traincache.agent.v1.ChunkRef
+	4,  // 13: traincache.agent.v1.BlockReport.result:type_name -> traincache.agent.v1.BlockReport.Result
+	5,  // 14: traincache.agent.v1.PreheatService.SubmitPreheat:input_type -> traincache.agent.v1.SubmitPreheatRequest
+	8,  // 15: traincache.agent.v1.PreheatService.GetPreheatStatus:input_type -> traincache.agent.v1.GetPreheatStatusRequest
+	10, // 16: traincache.agent.v1.PreheatService.UpdatePreheat:input_type -> traincache.agent.v1.UpdatePreheatRequest
+	12, // 17: traincache.agent.v1.PreheatService.CancelPreheat:input_type -> traincache.agent.v1.CancelPreheatRequest
+	14, // 18: traincache.agent.v1.NodeService.GetNodeStatus:input_type -> traincache.agent.v1.GetNodeStatusRequest
+	18, // 19: traincache.agent.v1.NodeService.ListSnapshot:input_type -> traincache.agent.v1.ListSnapshotRequest
+	21, // 20: traincache.agent.v1.ReportService.ReportBlocks:input_type -> traincache.agent.v1.BlockReport
+	7,  // 21: traincache.agent.v1.PreheatService.SubmitPreheat:output_type -> traincache.agent.v1.SubmitPreheatResponse
+	9,  // 22: traincache.agent.v1.PreheatService.GetPreheatStatus:output_type -> traincache.agent.v1.PreheatStatus
+	11, // 23: traincache.agent.v1.PreheatService.UpdatePreheat:output_type -> traincache.agent.v1.UpdatePreheatResponse
+	13, // 24: traincache.agent.v1.PreheatService.CancelPreheat:output_type -> traincache.agent.v1.CancelPreheatResponse
+	15, // 25: traincache.agent.v1.NodeService.GetNodeStatus:output_type -> traincache.agent.v1.NodeStatus
+	19, // 26: traincache.agent.v1.NodeService.ListSnapshot:output_type -> traincache.agent.v1.ListSnapshotResponse
+	22, // 27: traincache.agent.v1.ReportService.ReportBlocks:output_type -> traincache.agent.v1.ReportAck
+	21, // [21:28] is the sub-list for method output_type
+	14, // [14:21] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -1437,7 +1743,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   14,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

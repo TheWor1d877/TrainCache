@@ -1,0 +1,319 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: datasets.traincache.io
+spec:
+  group: traincache.io
+  names:
+    kind: DataSet
+    listKind: DataSetList
+    plural: datasets
+    singular: dataset
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.snapshotID
+      name: Snapshot
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DataSet is the schema for the datasets API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              DataSetSpec declares a published dataset snapshot and the chunk layout the
+              control plane must freeze in status.
+
+              Chunk numbering is frozen exactly once from this spec (D3/D4): the global
+              chunk number is the running sum of Shards[].Count in declaration order.
+            properties:
+              accessibleNodeSelector:
+                description: |-
+                  AccessibleNodeSelector optionally narrows the default
+                  traincache.io/s3-access=true node set. The label is maintained by humans
+                  and is never written by any TrainCache component (D30).
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              bucket:
+                description: Bucket is the bucket that holds the published dataset.
+                minLength: 1
+                type: string
+              chunkSize:
+                description: ChunkSize is the byte size of every non-final chunk.
+                format: int64
+                minimum: 1
+                type: integer
+              datasetName:
+                description: DatasetName is the dataset path prefix inside the bucket.
+                minLength: 1
+                type: string
+              endpoint:
+                description: Endpoint is the S3-compatible endpoint, for example s3.example.com:9000.
+                minLength: 1
+                type: string
+              metadata:
+                description: |-
+                  Metadata carries dataset registration metadata. It is informational only;
+                  neither the Controller nor the Agent reads it.
+                properties:
+                  description:
+                    description: Description is a human-readable description.
+                    type: string
+                  format:
+                    description: Format is the dataset serialization format.
+                    type: string
+                  purpose:
+                    description: Purpose is the intended training purpose.
+                    type: string
+                  sampleCount:
+                    description: SampleCount is the number of training samples.
+                    format: int64
+                    type: integer
+                  source:
+                    description: Source is the provenance of the dataset.
+                    type: string
+                  version:
+                    description: Version is the dataset version label.
+                    type: string
+                type: object
+              secretRef:
+                description: SecretRef points at a same-namespace Secret holding accessKey/secretKey.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              shards:
+                description: Shards is the ordered shard list; global chunk numbers
+                  accumulate across it.
+                items:
+                  description: ShardSpec describes one publish shard.
+                  properties:
+                    count:
+                      description: Count is the number of chunks in this shard.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    lastChunkSize:
+                      description: LastChunkSize is the byte size of the final chunk
+                        in this shard.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    name:
+                      description: Name is the shard name used by core/publish.
+                      minLength: 1
+                      type: string
+                  required:
+                  - count
+                  - lastChunkSize
+                  - name
+                  type: object
+                minItems: 1
+                type: array
+              shuffle:
+                description: Shuffle records the dataset's default shuffle capability.
+                type: boolean
+              snapshotID:
+                description: SnapshotID selects a specific snapshot; empty means CURRENT.
+                type: string
+            required:
+            - bucket
+            - chunkSize
+            - datasetName
+            - endpoint
+            - secretRef
+            - shards
+            type: object
+          status:
+            description: DataSetStatus is written by the DataSet controller only.
+            properties:
+              accessibleNodes:
+                description: AccessibleNodes is the resolved, ascending node list.
+                items:
+                  type: string
+                type: array
+              blockLayout:
+                description: BlockLayout is the frozen global chunk layout, in spec
+                  shard order.
+                items:
+                  description: BlockLayout freezes the global chunk range of one shard.
+                  properties:
+                    count:
+                      description: Count is the shard's chunk count.
+                      format: int32
+                      type: integer
+                    lastChunkSize:
+                      description: LastChunkSize is the shard's final chunk size in
+                        bytes.
+                      format: int64
+                      type: integer
+                    shard:
+                      description: Shard is the shard name.
+                      type: string
+                    startChunk:
+                      description: StartChunk is the global chunk number of this shard's
+                        first chunk.
+                      format: int32
+                      type: integer
+                  required:
+                  - count
+                  - lastChunkSize
+                  - shard
+                  - startChunk
+                  type: object
+                type: array
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+              snapshotID:
+                description: SnapshotID is the resolved concrete snapshot (never CURRENT).
+                type: string
+              totalChunks:
+                description: TotalChunks is the sum of Shards[].Count.
+                format: int32
+                type: integer
+              warmupTasks:
+                description: WarmupTasks lists WarmupTask names that reference this
+                  DataSet.
+                items:
+                  type: string
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

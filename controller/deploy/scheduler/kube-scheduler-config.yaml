@@ -1,0 +1,35 @@
+# KubeSchedulerConfiguration (v1) enabling TrainCacheScore on the score
+# extension point (docs/8.0 Scheduler, docs/8.1 §5.8, Q2(a)).
+#
+# The profile name is traincache-scheduler so this scheduler can run beside the
+# stock kube-scheduler: training Pods opt in with spec.schedulerName. The
+# plugin reads each Node's per-task annotation and never writes anything.
+# NormalizeScore is not a v1 config field: kube-scheduler calls it
+# automatically for every score plugin whose ScoreExtensions implements it, so
+# the single `score` entry below covers both extension points. Adding a
+# `normalizeScore:` key is rejected by strict decoding.
+#
+# leaderElection.resourceName must differ from kube-scheduler's default lease,
+# otherwise the two schedulers fight over the same lock.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-scheduler-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+data:
+  scheduler.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: traincache-scheduler
+      resourceNamespace: kube-system
+    profiles:
+      - schedulerName: traincache-scheduler
+        plugins:
+          score:
+            enabled:
+              - name: TrainCacheScore
+                weight: 10

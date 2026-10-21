@@ -1,0 +1,22 @@
+# Published test snapshot: two 8 MiB shards, 1 MiB chunks (16 chunks total).
+# The same constants are used by run.sh when calling core/cmd/trainpublish.
+apiVersion: traincache.io/v1alpha1
+kind: DataSet
+metadata:
+  name: train-data
+  namespace: traincache-e2e
+spec:
+  endpoint: minio.minio.svc.cluster.local:9000
+  bucket: traincache
+  datasetName: train-data
+  secretRef:
+    name: traincache-objstore
+  chunkSize: 1048576
+  shards:
+    - name: shard-000.tar
+      count: 8
+      lastChunkSize: 1048576
+    - name: shard-001.tar
+      count: 8
+      lastChunkSize: 1048576
+  shuffle: false

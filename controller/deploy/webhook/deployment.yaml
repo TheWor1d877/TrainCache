@@ -1,0 +1,85 @@
+# Pod mutating webhook. controller-runtime serves TLS on :9443 and reads the
+# serving certificate from /tmp/k8s-webhook-server/serving-certs (the Secret
+# traincache-webhook-tls created by e2e/run.sh or by the cluster operator).
+#
+# failurePolicy=Ignore (see mutatingwebhook.yaml): a webhook outage never
+# blocks Pod creation; the manager records GateInjectionDegraded instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-webhook
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+    app.kubernetes.io/part-of: traincache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traincache-webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traincache-webhook
+    spec:
+      serviceAccountName: traincache-webhook
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: webhook
+          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/webhook:0.8.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CONTROLLER_WEBHOOK_ADDR
+              value: ":9443"
+            - name: CONTROLLER_HEALTH_ADDR
+              value: ":8081"
+            - name: CONTROLLER_METRICS_ADDR
+              value: ":9412"
+            - name: CONTROLLER_NAMESPACE
+              value: ""
+            - name: CONTROLLER_GATE_NAME
+              value: traincache.io/warmup
+            - name: CONTROLLER_LOG_LEVEL
+              value: info
+          ports:
+            - name: https
+              containerPort: 9443
+            - name: health
+              containerPort: 8081
+            - name: metrics
+              containerPort: 9412
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+              scheme: HTTP
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+      volumes:
+        - name: tls
+          secret:
+            secretName: traincache-webhook-tls

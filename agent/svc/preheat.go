@@ -59,14 +59,26 @@ func (a preheatRequest) matches(b preheatRequest) bool {
 }
 
 // preheatTask 是一个预热任务(§7.2 状态机;字段与 §5.1 PreheatStatus 一一对应)。
+// 8.x 增量:generation/seq/ready_bitmap 及取消标记;位序 = chunks 切片顺序。
+// 并发约定:chunks/bitmap/pending/priority 由 mu 保护(Update 会全量替换,须与调度
+// 协程的 claim 互斥);generation/canceled/seq 用 atomic,供 Submit 在表锁内只读。
 type preheatTask struct {
 	taskID string
 	req    preheatRequest
 	node   string
 
-	// pending 是期望的 P0 完成回调数(按 ref;重复 ref 计多次)。登记(register)后仅
-	// 预取器调度协程读写:同一 bundle 的 P0 完成回调在该协程内串行,无并发。
+	// pending 是期望的 P0 完成回调数(按 ref;重复 ref 计多次)。register 后由调度
+	// 协程的 claim 与本表 Update 路径在 mu 下读写。
 	pending map[prefetch.ChunkRef]int
+
+	mu       sync.Mutex
+	chunks   []prefetch.ChunkRef // 当前窗口有序块(位序 = 本切片顺序)
+	bitmap   []byte              // 就绪位图,长度 ceil(len(chunks)/8)
+	priority agentpb.PreheatPriority
+
+	generation atomic.Uint64 // 已接受的任务代际(单调不减)
+	seq        atomic.Uint64 // 位图变更序号(置位/重置时递增)
+	canceled   atomic.Bool   // Cancel 标记(不取消在途 P0)
 
 	total     atomic.Int64 // 块总数(登记时定盘;Status 读取无锁)
 	completed atomic.Int64
@@ -85,6 +97,7 @@ func newPreheatTask(taskID, node string, req preheatRequest) *preheatTask {
 		req:       req,
 		startedAt: time.Now(),
 	}
+	t.seq.Store(1) // 新任务 = 一次位图重置(空 → 请求 chunks)
 	t.touch()
 	return t
 }
@@ -100,17 +113,31 @@ func (t *preheatTask) touch() { t.updatedAt.Store(time.Now().UnixNano()) }
 // claim 记一个 P0 块的完成(调度协程内串行调用):该 ref 尚有剩余回调数才记账
 // (err != nil 计 failed,否则计 completed),全部到齐(total == completed + failed)
 // 转终态 DONE(failed == 0)/ERROR。返回是否由本任务认领(get 即扣减)。
+// 8.x:成功完成时把该 ref 在 chunks 中的全部位置置位(重复 ref 一次回调覆盖多位),
+// 有新位置置位则 seq 递增;失败位保持 0。
 func (t *preheatTask) claim(ref prefetch.ChunkRef, err error) bool {
-	if n := t.pending[ref]; n > 0 {
-		t.pending[ref] = n - 1
-	} else {
+	t.mu.Lock()
+	n := t.pending[ref]
+	if n <= 0 {
+		t.mu.Unlock()
 		return false
 	}
+	t.pending[ref] = n - 1
 	if err != nil {
 		t.failed.Add(1)
 	} else {
 		t.completed.Add(1)
+		var changed uint64
+		for i, c := range t.chunks {
+			if c == ref && setBitmapBit(t.bitmap, i) {
+				changed++
+			}
+		}
+		if changed > 0 {
+			t.seq.Add(changed) // 任一位置位都使 seq 递增(A.2)
+		}
 	}
+	t.mu.Unlock()
 	t.touch()
 	if t.completed.Load()+t.failed.Load() >= t.total.Load() {
 		t.finish()
@@ -118,9 +145,45 @@ func (t *preheatTask) claim(ref prefetch.ChunkRef, err error) bool {
 	return true
 }
 
+// bitmapLen 返回 chunks 数 n 对应的位图字节数(ceil(n/8);D56)。
+func bitmapLen(n int) int { return (n + 7) / 8 }
+
+// setBitmapBit 把位图第 i 位置 1(位 i = 字节 i/8 的第 i%8 位,LittleEndian 位序);
+// 越界或已置位返回 false。
+func setBitmapBit(bitmap []byte, i int) bool {
+	if i < 0 || i/8 >= len(bitmap) {
+		return false
+	}
+	mask := byte(1 << uint(i%8))
+	if bitmap[i/8]&mask != 0 {
+		return false
+	}
+	bitmap[i/8] |= mask
+	return true
+}
+
+// advanceGeneration 单调推进已接受代际(低于当前值不动作;CAS 防并发回退)。
+func (t *preheatTask) advanceGeneration(gen uint64) {
+	for {
+		cur := t.generation.Load()
+		if gen <= cur {
+			return
+		}
+		if t.generation.CompareAndSwap(cur, gen) {
+			t.touch()
+			return
+		}
+	}
+}
+
 // finish 终态迁移:DONE(failed == 0)/ERROR;CAS 防与 markRunning/markError 竞争,
-// 已终态则幂等不动。
+// 已终态则幂等不动。持任务锁复核计数:Update 重置窗口后旧回调不得把新窗口误置终态。
 func (t *preheatTask) finish() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.completed.Load()+t.failed.Load() < t.total.Load() {
+		return
+	}
 	target := agentpb.PreheatStatus_DONE
 	if t.failed.Load() > 0 {
 		target = agentpb.PreheatStatus_ERROR
@@ -200,9 +263,8 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	t.expireTasks() // 入口惰性清理过期任务(Q13;先清后判,过期 task_id 可复用)
 
 	// 1) 校验。
-	if node := req.GetNode(); node == "" || node != t.cfg.NodeName.String() {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"node %q 必填且须等于本节点 %q(design §5.1)", node, t.cfg.NodeName.String())
+	if err := t.checkNode(req.GetNode()); err != nil {
+		return nil, err
 	}
 	taskID := req.GetTaskId()
 	if taskID == "" {
@@ -221,6 +283,7 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	if len(prefixes) == 0 && len(chunks) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "prefixes 与 chunks 不能同时为空")
 	}
+	gen := req.GetGeneration()
 
 	summary := preheatRequest{
 		dataset:    dataset,
@@ -229,21 +292,39 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 		chunks:     chunkRefsFromProto(chunks),
 	}
 
-	// 2) task_id 幂等/冲突(建表与查重同锁)。
+	// 2) task_id 幂等/冲突/代际(建表与查重同锁;generation/canceled 走 atomic,
+	//    表锁内不取任务锁,避免与 register 反向加锁)。
 	t.mu.Lock()
 	if ex, ok := t.tasks[taskID]; ok {
-		t.mu.Unlock()
-		if ex.req.matches(summary) {
-			return &agentpb.SubmitPreheatResponse{
-				Accepted: true,
-				TaskId:   taskID,
-				Message:  fmt.Sprintf("任务已存在(幂等),状态 %s", ex.stateNow()),
-			}, nil
+		curGen := ex.generation.Load()
+		if gen < curGen {
+			t.mu.Unlock()
+			slog.Warn("preheat: 拒绝陈旧 generation",
+				"rpc", "SubmitPreheat", "task_id", taskID, "generation", gen, "current_generation", curGen)
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"generation %d 低于 Agent 当前代际 %d", gen, curGen)
 		}
-		return nil, status.Errorf(codes.AlreadyExists,
-			"task_id %q 已存在且内容不同(D7 任务引用)", taskID)
+		if !ex.canceled.Load() {
+			t.mu.Unlock()
+			if ex.req.matches(summary) {
+				ex.advanceGeneration(gen) // 同内容幂等重放:仅推进代际,不重置进度
+				return &agentpb.SubmitPreheatResponse{
+					Accepted: true,
+					TaskId:   taskID,
+					Message:  fmt.Sprintf("任务已存在(幂等),状态 %s", ex.stateNow()),
+				}, nil
+			}
+			return nil, status.Errorf(codes.AlreadyExists,
+				"task_id %q 已存在且内容不同(D7 任务引用)", taskID)
+		}
+		// 已取消任务:同名同代际(或更高)再 Submit 视为新任务(A.2)。
+		delete(t.tasks, taskID)
+		t.removeDatasetLocked(ex)
+		slog.Info("preheat: 已取消任务重新提交视为新任务",
+			"task_id", taskID, "generation", gen)
 	}
 	tk := newPreheatTask(taskID, t.cfg.NodeName.String(), summary)
+	tk.generation.Store(gen)
 	t.tasks[taskID] = tk
 	t.mu.Unlock()
 
@@ -259,7 +340,8 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}
 
 	// 4) 解析块列表(只读查询,不切换 catalog 内存映射;ErrNoCurrent 视作空列表)。
-	refs, err := t.resolveRefs(ctx, dataset, prefixes, chunks)
+	//    ordered 保留请求 chunks 顺序(含重复项,定义位序);enq 去重保序(下载侧)。
+	ordered, enq, err := t.resolveRefs(ctx, dataset, prefixes, chunks)
 	if err != nil {
 		t.drop(taskID, tk) // 解析失败:撤销登记,客户端可原样重试
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -269,8 +351,8 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}
 
 	// 5) 先登记进度表(含回调认领表)后入队:回调可能先于 EnqueueP0 返回。
-	t.register(tk, refs)
-	if len(refs) == 0 {
+	t.registerSubmit(tk, ordered, enq)
+	if len(enq) == 0 {
 		tk.finish() // 空列表/交集为空:立即 DONE(completed = 0;裁决口径)
 		return &agentpb.SubmitPreheatResponse{
 			Accepted: true,
@@ -280,7 +362,7 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}
 
 	// 6) P0 入队;失败置 ERROR(任务不撤销:状态查询可见失败原因)。
-	if err := t.pm.ForPreheat(ctx, dataset, refs); err != nil {
+	if err := t.pm.ForPreheat(ctx, dataset, enq); err != nil {
 		tk.markError(fmt.Sprintf("P0 入队失败: %v", err))
 	} else {
 		tk.markRunning()
@@ -292,6 +374,142 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}, nil
 }
 
+// Update 处理 UpdatePreheat(8.x D55/D56):校验 → 代际 → 全量替换 chunks(位序=本次
+// 请求顺序,旧位图重置、seq++)→ 唯一 ref 入 P0;已落盘块不清理,在途请求不取消。
+// 空 chunks 视为清空窗口(总数为 0,立即 DONE)。返回 accepted 表示窗口已替换;
+// 入队失败置 ERROR,状态经 GetPreheatStatus 可见。
+func (t *PreheatTasks) Update(ctx context.Context, req *agentpb.UpdatePreheatRequest) (*agentpb.UpdatePreheatResponse, error) {
+	t.expireTasks()
+	if err := t.checkNode(req.GetNode()); err != nil {
+		return nil, err
+	}
+	taskID := req.GetTaskId()
+	if taskID == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id 必填")
+	}
+	ordered, enq, err := validateWindowChunks(req.GetChunks())
+	if err != nil {
+		return nil, err
+	}
+
+	t.mu.Lock()
+	tk, ok := t.tasks[taskID]
+	t.mu.Unlock()
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "task_id %q 不存在", taskID)
+	}
+
+	curGen := tk.generation.Load()
+	if req.GetGeneration() < curGen {
+		slog.Warn("preheat: 拒绝陈旧 generation",
+			"rpc", "UpdatePreheat", "task_id", taskID,
+			"generation", req.GetGeneration(), "current_generation", curGen)
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"generation %d 低于 Agent 当前代际 %d", req.GetGeneration(), curGen)
+	}
+	if tk.canceled.Load() {
+		return nil, status.Errorf(codes.FailedPrecondition, "task_id %q 已取消,不能更新", taskID)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, status.FromContextError(ctxErr).Err()
+	}
+	tk.advanceGeneration(req.GetGeneration())
+	tk.resetWindow(ordered, enq, req.GetPriority())
+	slog.Info("preheat: 任务窗口全量更新",
+		"task_id", taskID, "generation", tk.generation.Load(), "chunks", len(ordered),
+		"seq", tk.seq.Load())
+
+	if len(enq) == 0 {
+		tk.finish() // 空列表:清空窗口后立即 DONE
+		return &agentpb.UpdatePreheatResponse{
+			Accepted: true,
+			Message:  fmt.Sprintf("任务已更新(状态 %s,窗口已清空)", tk.stateNow()),
+		}, nil
+	}
+	if t.pm == nil {
+		tk.markError("预取管理器未装配")
+	} else if err := t.pm.ForPreheat(ctx, tk.req.dataset, enq); err != nil {
+		tk.markError(fmt.Sprintf("P0 入队失败: %v", err))
+	} else {
+		tk.markRunning()
+	}
+	return &agentpb.UpdatePreheatResponse{
+		Accepted: true,
+		Message:  fmt.Sprintf("任务已更新(状态 %s)", tk.stateNow()),
+	}, nil
+}
+
+// Cancel 处理 CancelPreheat(8.x D55):仅标记取消并停止调度新块,不取消在途 P0;
+// 幂等(重复 Cancel/任务不存在均 accepted=true)。低 generation → FailedPrecondition。
+func (t *PreheatTasks) Cancel(ctx context.Context, req *agentpb.CancelPreheatRequest) (*agentpb.CancelPreheatResponse, error) {
+	t.expireTasks()
+	if err := t.checkNode(req.GetNode()); err != nil {
+		return nil, err
+	}
+	taskID := req.GetTaskId()
+	if taskID == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id 必填")
+	}
+
+	t.mu.Lock()
+	tk, ok := t.tasks[taskID]
+	t.mu.Unlock()
+	if !ok {
+		slog.Info("preheat: 取消不存在的任务(幂等空操作)", "task_id", taskID,
+			"generation", req.GetGeneration())
+		return &agentpb.CancelPreheatResponse{Accepted: true}, nil
+	}
+	curGen := tk.generation.Load()
+	if req.GetGeneration() < curGen {
+		slog.Warn("preheat: 拒绝陈旧 generation",
+			"rpc", "CancelPreheat", "task_id", taskID,
+			"generation", req.GetGeneration(), "current_generation", curGen)
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"generation %d 低于 Agent 当前代际 %d", req.GetGeneration(), curGen)
+	}
+	tk.advanceGeneration(req.GetGeneration())
+	tk.canceled.Store(true)
+	slog.Info("preheat: 任务取消(在途 P0 不取消)",
+		"task_id", taskID, "generation", tk.generation.Load(), "state", tk.stateNow().String())
+	return &agentpb.CancelPreheatResponse{Accepted: true}, nil
+}
+
+// checkNode 校验请求 node 必填且等于本节点(design §5.1;InvalidArgument)。
+func (t *PreheatTasks) checkNode(node string) error {
+	if node == "" || node != t.cfg.NodeName.String() {
+		return status.Errorf(codes.InvalidArgument,
+			"node %q 必填且须等于本节点 %q(design §5.1)", node, t.cfg.NodeName.String())
+	}
+	return nil
+}
+
+// validateWindowChunks 校验 Update 的 chunks 形状并返回:
+//   - ordered:原样保序(含重复)的位序列表,位图长度 = ceil(len(ordered)/8);
+//   - enq:去重保序的入队列表(同一 ref 只下载一次)。
+//
+// path 为空或 chunk 为负视为请求形状非法 → InvalidArgument(Q15)。
+func validateWindowChunks(chunks []*agentpb.ChunkRef) (ordered, enq []prefetch.ChunkRef, err error) {
+	ordered = make([]prefetch.ChunkRef, 0, len(chunks))
+	enq = make([]prefetch.ChunkRef, 0, len(chunks))
+	seen := make(map[prefetch.ChunkRef]struct{}, len(chunks))
+	for i, c := range chunks {
+		if c == nil || c.GetPath() == "" {
+			return nil, nil, status.Errorf(codes.InvalidArgument, "chunks[%d].path 必填", i)
+		}
+		if c.GetChunk() < 0 {
+			return nil, nil, status.Errorf(codes.InvalidArgument,
+				"chunks[%d].chunk = %d 非法(须 >= 0)", i, c.GetChunk())
+		}
+		r := prefetch.ChunkRef{Path: c.GetPath(), Chunk: c.GetChunk()}
+		ordered = append(ordered, r)
+		if _, dup := seen[r]; !dup {
+			seen[r] = struct{}{}
+			enq = append(enq, r)
+		}
+	}
+	return ordered, enq, nil
+}
+
 // Status 返回任务状态(§5.1 PreheatStatus 字段逐一映射);task_id 缺失(空、不存在或
 // 已过 taskTTL 被入口清理)→ NotFound。计数走 atomic;入口在表锁内顺带惰性清理过期任务。
 func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.PreheatStatus, error) {
@@ -301,6 +519,19 @@ func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.Preh
 	t.mu.Unlock()
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "task_id %q 不存在", taskID)
+	}
+	tk.mu.Lock()
+	chunkCount := len(tk.chunks)
+	readyBitmap := slices.Clone(tk.bitmap)
+	tk.mu.Unlock()
+	// Q15:位图长度/位序形状非法按请求形状错误返回 InvalidArgument(正常路径不会触发;
+	// 防御内部状态损坏,避免把不可解码的位图交给 Controller)。
+	if len(readyBitmap) != bitmapLen(chunkCount) {
+		slog.Error("preheat: 位图长度与 chunks 数不匹配",
+			"task_id", taskID, "bitmap_bytes", len(readyBitmap), "chunks", chunkCount)
+		return nil, status.Errorf(codes.InvalidArgument,
+			"ready_bitmap 长度 %d 与 chunks 数 %d 不匹配(应为 %d)",
+			len(readyBitmap), chunkCount, bitmapLen(chunkCount))
 	}
 	return &agentpb.PreheatStatus{
 		TaskId:          tk.taskID,
@@ -314,6 +545,9 @@ func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.Preh
 		FailedBlocks:    tk.failed.Load(),
 		StartedAt:       timestamppb.New(tk.startedAt),
 		UpdatedAt:       timestamppb.New(time.Unix(0, tk.updatedAt.Load())),
+		Generation:      tk.generation.Load(),
+		Seq:             tk.seq.Load(),
+		ReadyBitmap:     readyBitmap,
 	}, nil
 }
 
@@ -380,14 +614,35 @@ func (t *PreheatTasks) expireLocked(now time.Time) {
 }
 
 // register 填写块列表并登记进 dataset 索引(先登记后入队):total 与回调认领表由本次
-// 入队定盘;byDataset 以 COW 快照整体替换,回调路径无锁读。
+// 入队定盘;byDataset 以 COW 快照整体替换,回调路径无锁读。按 refs 原样计数(重复
+// ref 计多次),供白盒用例直接构造认领表;生产 Submit 走 registerSubmit。
 func (t *PreheatTasks) register(tk *preheatTask, refs []prefetch.ChunkRef) {
 	pending := make(map[prefetch.ChunkRef]int, len(refs))
 	for _, r := range refs {
 		pending[r]++
 	}
+	t.installWindow(tk, refs, pending, int64(len(refs)))
+}
+
+// registerSubmit 是 Submit 的生产登记:ordered 保留请求 chunks 顺序(含重复项,定义
+// 位序),enq 为去重后的下载/回调认领列表;total 按唯一块计,重复位置由同一次成功
+// 回调一并置位(与 Update 一致)。
+func (t *PreheatTasks) registerSubmit(tk *preheatTask, ordered, enq []prefetch.ChunkRef) {
+	pending := make(map[prefetch.ChunkRef]int, len(enq))
+	for _, r := range enq {
+		pending[r]++
+	}
+	t.installWindow(tk, ordered, pending, int64(len(enq)))
+}
+
+// installWindow 写入 chunks/位图/回调认领表并把任务追加进 dataset 索引。
+func (t *PreheatTasks) installWindow(tk *preheatTask, ordered []prefetch.ChunkRef, pending map[prefetch.ChunkRef]int, total int64) {
+	tk.mu.Lock()
 	tk.pending = pending
-	tk.total.Store(int64(len(refs)))
+	tk.chunks = slices.Clone(ordered) // 位序 = 请求块顺序(含重复项)
+	tk.bitmap = make([]byte, bitmapLen(len(ordered)))
+	tk.total.Store(total)
+	tk.mu.Unlock()
 	tk.touch()
 
 	t.mu.Lock()
@@ -398,6 +653,48 @@ func (t *PreheatTasks) register(tk *preheatTask, refs []prefetch.ChunkRef) {
 		nw[k] = v
 	}
 	nw[tk.req.dataset] = append(slices.Clone(nw[tk.req.dataset]), tk)
+	t.byDataset.Store(&nw)
+}
+
+// resetWindow 全量替换窗口(Update;调用方已校验代际/取消状态):
+// chunks 原样保序定义位序,enq 为去重后的入队列表;旧位图失效并重置,seq 递增,
+// 进度计数归零、状态回到 QUEUED。已落盘块不清理(由预取器本地命中直接回调置位)。
+func (t *preheatTask) resetWindow(chunks, enq []prefetch.ChunkRef, priority agentpb.PreheatPriority) {
+	t.mu.Lock()
+	t.chunks = slices.Clone(chunks)
+	t.bitmap = make([]byte, bitmapLen(len(chunks)))
+	pending := make(map[prefetch.ChunkRef]int, len(enq))
+	for _, r := range enq {
+		pending[r]++
+	}
+	t.pending = pending
+	t.priority = priority
+	t.total.Store(int64(len(enq)))
+	t.completed.Store(0)
+	t.failed.Store(0)
+	t.seq.Add(1) // 位图重置 → seq 递增(D56)
+	t.state.Store(int32(agentpb.PreheatStatus_QUEUED))
+	t.mu.Unlock()
+	t.touch()
+}
+
+// removeDatasetLocked 从 byDataset 快照剔除任务(调用方持表锁;COW 整体替换,
+// 回调路径无锁读)。用于 Cancel 后同名同代际重建新任务。
+func (t *PreheatTasks) removeDatasetLocked(tk *preheatTask) {
+	old := t.byDataset.Load()
+	if old == nil {
+		return
+	}
+	nw := make(map[string][]*preheatTask, len(*old))
+	for ds, list := range *old {
+		kept := make([]*preheatTask, 0, len(list))
+		for _, x := range list {
+			if x != tk {
+				kept = append(kept, x)
+			}
+		}
+		nw[ds] = kept
+	}
 	t.byDataset.Store(&nw)
 }
 
@@ -413,15 +710,17 @@ func (t *PreheatTasks) drop(taskID string, tk *preheatTask) {
 // resolveRefs 解析预热块列表(只经 Catalog.List 只读查询,不切换内存映射):
 //   - prefixes:含空串 → 只调一次 List("")(全量,覆盖其余前缀);否则逐个 List(prefix);
 //     结果按 (path, chunk) 去重合并;
-//   - chunks 非空:prefixes 为空 → 以 chunks 为准(去重保序);否则与 prefix 结果求交
+//   - chunks 非空:prefixes 为空 → 以 chunks 为准;否则与 prefix 结果求交
 //     (交集为空 → 空列表,调用方立即 DONE);
+//   - ordered 保留请求 chunks 顺序(含重复项,定义位图位序);enq 去重保序,供下载/回调
+//     认领(与 Update 同口径,D56);
 //   - ErrNoCurrent(该 dataset 尚无 CURRENT 快照)→ 视作空列表(与 ListSnapshot 同口径)。
-func (t *PreheatTasks) resolveRefs(ctx context.Context, dataset string, prefixes []string, chunks []*agentpb.ChunkRef) ([]prefetch.ChunkRef, error) {
+func (t *PreheatTasks) resolveRefs(ctx context.Context, dataset string, prefixes []string, chunks []*agentpb.ChunkRef) (ordered, enq []prefetch.ChunkRef, err error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if t.pm == nil {
-		return nil, errors.New("预取管理器未装配") // 防御:Submit 已在解析前拦截
+		return nil, nil, errors.New("预取管理器未装配") // 防御:Submit 已在解析前拦截
 	}
 	cat := t.pm.bundleFor(dataset).catalog
 
@@ -439,9 +738,9 @@ func (t *PreheatTasks) resolveRefs(ctx context.Context, dataset string, prefixes
 			entries, err := cat.List(ctx, p)
 			if err != nil {
 				if errors.Is(err, index.ErrNoCurrent) {
-					return nil, nil
+					return nil, nil, nil
 				}
-				return nil, err
+				return nil, nil, err
 			}
 			for _, e := range entries {
 				r := prefetch.ChunkRef{Path: e.Path, Chunk: e.Chunk}
@@ -454,25 +753,27 @@ func (t *PreheatTasks) resolveRefs(ctx context.Context, dataset string, prefixes
 		}
 	}
 	if len(chunks) == 0 {
-		return listed, nil
+		return listed, listed, nil // prefixes 路径已去重,位序=目录顺序
 	}
 
-	out := make([]prefetch.ChunkRef, 0, len(chunks))
+	ordered = make([]prefetch.ChunkRef, 0, len(chunks))
+	enq = make([]prefetch.ChunkRef, 0, len(chunks))
 	seen := make(map[prefetch.ChunkRef]struct{}, len(chunks))
 	for _, c := range chunks {
 		r := prefetch.ChunkRef{Path: c.GetPath(), Chunk: c.GetChunk()}
-		if _, dup := seen[r]; dup {
-			continue
-		}
-		seen[r] = struct{}{}
 		if listedSet != nil {
 			if _, ok := listedSet[r]; !ok {
 				continue // 与 prefixes 求交:未列出即剔除
 			}
 		}
-		out = append(out, r)
+		ordered = append(ordered, r) // 保留重复项与请求顺序(位序定义)
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		enq = append(enq, r)
 	}
-	return out, nil
+	return ordered, enq, nil
 }
 
 // chunkRefsFromProto 把 proto chunks 转成保序 ChunkRef 列表(幂等摘要用;索引结果映射
