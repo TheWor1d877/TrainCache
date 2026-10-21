@@ -1,0 +1,31 @@
+# e2e tenant namespace and object-store credentials.
+#
+# Two Secrets are needed because the controller reads the DataSet credential
+# from the workload namespace (Q9 namespaced RBAC) while the Agent DaemonSet
+# reads its own copy from the traincache namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traincache-e2e
+  labels:
+    app.kubernetes.io/part-of: traincache
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: traincache-objstore
+  namespace: traincache
+type: Opaque
+stringData:
+  accessKey: traincache
+  secretKey: traincache-probe
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: traincache-objstore
+  namespace: traincache-e2e
+type: Opaque
+stringData:
+  accessKey: traincache
+  secretKey: traincache-probe

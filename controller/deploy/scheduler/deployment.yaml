@@ -1,0 +1,186 @@
+# Custom TrainCache scheduler (Q2(a)). Runs beside the stock scheduler under a
+# distinct profile name; training Pods select it via spec.schedulerName.
+#
+# Build/load the image first (see Dockerfile):
+#   docker build -f deploy/scheduler/Dockerfile \
+#     -t dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0 .
+#   kind load docker-image ...:0.8.0 --name <cluster>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traincache-scheduler
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-scheduler
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: kube-system
+---
+# The stock scheduler's identity is the User system:kube-scheduler, which
+# already has these two bindings; a dedicated ServiceAccount does not inherit
+# them. Without system:volume-scheduler the StorageClass informer cannot sync,
+# and without the authentication-reader Role the requestheader ConfigMap cannot
+# be read; either failure keeps the scheduler from ever becoming leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-scheduler-volume
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:volume-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-scheduler-auth-reader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: kube-system
+---
+# system:kube-scheduler only grants lease access to the resourceName
+# "kube-scheduler"; this scheduler deliberately uses a distinct lease name so
+# it can coexist with the stock scheduler, so it needs its own grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: traincache-scheduler-leader-election
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["traincache-scheduler"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-scheduler-leader-election
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: traincache-scheduler-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-scheduler
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traincache-scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traincache-scheduler
+    spec:
+      serviceAccountName: traincache-scheduler
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: kube-scheduler
+          # Registry mirror domain from /etc/docker/daemon.json; never :latest.
+          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/kubernetes/traincache-scheduler.yaml
+            - --v=2
+          env:
+            # Must match the controller's annotation prefix and TTL.
+            - name: CONTROLLER_SCORE_ANNOTATION
+              value: traincache.io/scores
+            - name: SCHEDULER_SCORE_TTL
+              value: 10m
+            - name: CONTROLLER_HEALTH_ADDR
+              value: ":8081"
+            # Debug emits one "scheduler score" line per (pod,node) decision.
+            - name: CONTROLLER_LOG_LEVEL
+              value: debug
+          ports:
+            - name: health
+              containerPort: 8081
+            - name: https
+              containerPort: 10259
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kubernetes/traincache-scheduler.yaml
+              subPath: scheduler.yaml
+              readOnly: true
+            # kube-scheduler generates its own serving certificate here; the
+            # root filesystem is read-only.
+            - name: certs
+              mountPath: /var/run/kubernetes
+      securityContext:
+        fsGroup: 65534
+      volumes:
+        - name: config
+          configMap:
+            name: traincache-scheduler-config
+        - name: certs
+          emptyDir: {}

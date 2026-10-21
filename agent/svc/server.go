@@ -269,7 +269,30 @@ func (s *Server) GetPreheatStatus(ctx context.Context, req *agentpb.GetPreheatSt
 	return s.ag.Preheat.Status(ctx, req.GetTaskId())
 }
 
-// ReportBlocks 未实现(decisions Q1:北向流服务端实现推迟至 Controller 里程碑)。
+// UpdatePreheat 全量更新预热窗口(8.x D55/D56;位序=本次 chunks 顺序)。
+// 延迟线:入口 defer 打点(observeRequest)。
+func (s *Server) UpdatePreheat(ctx context.Context, req *agentpb.UpdatePreheatRequest) (resp *agentpb.UpdatePreheatResponse, err error) {
+	start := time.Now()
+	defer func() { s.observeRequest(metrics.EndpointUpdatePreheat, start, err) }()
+	if s.ag == nil || s.ag.Preheat == nil {
+		return nil, status.Error(codes.Unavailable, "预热服务未装配")
+	}
+	return s.ag.Preheat.Update(ctx, req)
+}
+
+// CancelPreheat 取消预热任务(8.x D55;幂等,不取消在途 P0)。
+// 延迟线:入口 defer 打点(observeRequest)。
+func (s *Server) CancelPreheat(ctx context.Context, req *agentpb.CancelPreheatRequest) (resp *agentpb.CancelPreheatResponse, err error) {
+	start := time.Now()
+	defer func() { s.observeRequest(metrics.EndpointCancelPreheat, start, err) }()
+	if s.ag == nil || s.ag.Preheat == nil {
+		return nil, status.Error(codes.Unavailable, "预热服务未装配")
+	}
+	return s.ag.Preheat.Cancel(ctx, req)
+}
+
+// ReportBlocks 未实现(decisions Q1:北向流服务端实现推迟至 Controller 里程碑;8.x
+// 不使用推送模型,D55)。
 func (s *Server) ReportBlocks(_ agentpb.ReportService_ReportBlocksServer) error {
 	return status.Error(codes.Unimplemented, "ReportBlocks 未实现(Controller 里程碑,decisions Q1)")
 }

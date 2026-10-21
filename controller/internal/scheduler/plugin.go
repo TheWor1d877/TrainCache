@@ -1,0 +1,249 @@
+// Package scheduler implements the TrainCache kube-scheduler score plugin.
+//
+// The plugin only reads Node annotations written by the controller. It never
+// mutates Nodes, Pods, or any other API object. Every failure mode returns a
+// score of 0 with a nil status so a malformed annotation can never make a Pod
+// unschedulable (docs/8.1 design.md §5.8/D7).
+package scheduler
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	schedframework "k8s.io/kube-scheduler/framework"
+
+	"traincache/controller/internal/scorefmt"
+)
+
+const (
+	// Name is the plugin name used in KubeSchedulerConfiguration.
+	Name = "TrainCacheScore"
+
+	// AnnotationWarmupTask is injected by the mutating webhook and holds
+	// "<namespace>/<name>" (docs/8.1 design.md §6.3).
+	AnnotationWarmupTask = "traincache.io/warmup-task"
+
+	// AnnotationPodIndex is injected by the mutating webhook and holds the
+	// decimal pod index within the WarmupTask.
+	AnnotationPodIndex = "traincache.io/pod-index"
+
+	defaultTTL = 5 * time.Minute
+)
+
+// Options configures the plugin. Zero values fall back to the defaults that
+// match docs/8.1 design.md §8.
+type Options struct {
+	// Prefix is the Node annotation key prefix (CONTROLLER_SCORE_ANNOTATION).
+	Prefix string
+	// TTL is the maximum age of a score entry (SCHEDULER_SCORE_TTL).
+	TTL time.Duration
+	// Logger receives Debug score decisions and Warn parse failures.
+	Logger *slog.Logger
+	// Now is replaceable in tests.
+	Now func() time.Time
+}
+
+// Plugin implements framework.ScorePlugin.
+type Plugin struct {
+	prefix string
+	ttl    time.Duration
+	log    *slog.Logger
+	now    func() time.Time
+}
+
+var (
+	_ schedframework.ScorePlugin     = (*Plugin)(nil)
+	_ schedframework.ScoreExtensions = (*Plugin)(nil)
+)
+
+// New is the registry factory with default options. It exists so the plugin
+// can be registered with a stock signature; cmd/scheduler uses Factory to
+// inject the environment configuration.
+func New(_ context.Context, _ runtime.Object, _ schedframework.Handle) (schedframework.Plugin, error) {
+	return NewWithOptions(Options{})
+}
+
+// NewWithOptions builds the plugin and validates its options.
+func NewWithOptions(opts Options) (*Plugin, error) {
+	if opts.Prefix == "" {
+		opts.Prefix = scorefmt.DefaultPrefix
+	}
+	if opts.TTL == 0 {
+		opts.TTL = defaultTTL
+	}
+	if opts.TTL < 0 {
+		return nil, fmt.Errorf("scheduler: TTL must be positive, got %s", opts.TTL)
+	}
+	if opts.Prefix != strings.TrimSpace(opts.Prefix) ||
+		strings.HasSuffix(opts.Prefix, "-") || strings.HasSuffix(opts.Prefix, ".") {
+		return nil, fmt.Errorf("scheduler: invalid annotation prefix %q", opts.Prefix)
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	return &Plugin{
+		prefix: opts.Prefix,
+		ttl:    opts.TTL,
+		log:    opts.Logger,
+		now:    opts.Now,
+	}, nil
+}
+
+// Factory returns a registry factory that is assignable to the scheduler's
+// runtime.PluginFactory. cmd/scheduler passes environment-derived options
+// here so the plugin and controller share one key prefix and TTL.
+func Factory(opts Options) func(context.Context, runtime.Object, schedframework.Handle) (schedframework.Plugin, error) {
+	return func(_ context.Context, _ runtime.Object, _ schedframework.Handle) (schedframework.Plugin, error) {
+		return NewWithOptions(opts)
+	}
+}
+
+// Name returns the plugin name.
+func (p *Plugin) Name() string { return Name }
+
+// Score returns the per-pod score stored by the controller for this Node.
+//
+// Missing annotations, a mismatched task, an invalid or stale generation,
+// malformed JSON, an expired entry, and a missing pod entry all return 0 with
+// a nil status. Any error is logged but never fails scheduling.
+func (p *Plugin) Score(_ context.Context, _ schedframework.CycleState, pod *corev1.Pod, nodeInfo schedframework.NodeInfo) (int64, *schedframework.Status) {
+	if pod == nil || nodeInfo == nil {
+		return 0, nil
+	}
+	node := nodeInfo.Node()
+	if node == nil {
+		return 0, nil
+	}
+
+	return p.scoreNode(pod, node, p.now()), nil
+}
+
+// scoreNode evaluates and emits the §9.1 log points: Debug for every scoring
+// decision and Warn for malformed annotations.
+func (p *Plugin) scoreNode(pod *corev1.Pod, node *corev1.Node, now time.Time) int64 {
+	score, key, stale, err := p.evaluate(pod, node, now)
+	podKey := pod.Namespace + "/" + pod.Name
+	if err != nil {
+		p.log.Warn("scheduler score rejected",
+			"pod", podKey,
+			"node", node.Name,
+			"annotation_key", key,
+			"err", err,
+		)
+	}
+	p.log.Debug("scheduler score",
+		"pod", podKey,
+		"node", node.Name,
+		"annotation_key", key,
+		"score", score,
+		"stale", stale,
+	)
+	return score
+}
+
+// ScoreExtensions implements framework.ScorePlugin.
+func (p *Plugin) ScoreExtensions() schedframework.ScoreExtensions { return p }
+
+// NormalizeScore scales the raw scores to 0..100 relative to the maximum.
+// An all-zero list stays all zero; negative values (which Score never emits)
+// are clamped to zero.
+func (p *Plugin) NormalizeScore(_ context.Context, _ schedframework.CycleState, _ *corev1.Pod, scores schedframework.NodeScoreList) *schedframework.Status {
+	var max int64
+	for _, s := range scores {
+		if s.Score > max {
+			max = s.Score
+		}
+	}
+	if max <= 0 {
+		for i := range scores {
+			scores[i].Score = 0
+		}
+		return nil
+	}
+	for i := range scores {
+		s := scores[i].Score
+		if s <= 0 {
+			scores[i].Score = 0
+			continue
+		}
+		// Integer rounding: floor((s*100 + max/2) / max).
+		normalized := (s*100 + max/2) / max
+		if normalized > 100 {
+			normalized = 100
+		}
+		scores[i].Score = normalized
+	}
+	return nil
+}
+
+// evaluate reads the controller-written annotation for the Pod's task and
+// pod index. stale is true whenever the entry must not influence scheduling.
+// err is non-nil only for malformed inputs, which are worth a Warn log;
+// legitimate absences (no annotation, no entry, expired TTL) are silent.
+func (p *Plugin) evaluate(pod *corev1.Pod, node *corev1.Node, now time.Time) (score int64, key string, stale bool, err error) {
+	if pod == nil || node == nil {
+		return 0, "", true, nil
+	}
+
+	taskRef := pod.Annotations[AnnotationWarmupTask]
+	namespace, name, ok := splitTaskRef(taskRef)
+	if !ok {
+		if taskRef == "" {
+			return 0, "", true, nil
+		}
+		return 0, "", true, fmt.Errorf("invalid %s annotation %q", AnnotationWarmupTask, taskRef)
+	}
+	key = scorefmt.KeyWithPrefix(p.prefix, namespace, name)
+
+	indexRaw, ok := pod.Annotations[AnnotationPodIndex]
+	if !ok {
+		return 0, key, true, nil
+	}
+	index, err := strconv.ParseInt(indexRaw, 10, 32)
+	if err != nil || index < 0 {
+		return 0, key, true, fmt.Errorf("invalid %s annotation %q", AnnotationPodIndex, indexRaw)
+	}
+
+	raw, ok := node.Annotations[key]
+	if !ok {
+		return 0, key, true, nil
+	}
+	value, err := scorefmt.DecodeValue(raw)
+	if err != nil {
+		return 0, key, true, err
+	}
+	if value.Task != taskRef {
+		return 0, key, true, fmt.Errorf("annotation task %q does not match pod task %q", value.Task, taskRef)
+	}
+	if value.G < 1 {
+		return 0, key, true, fmt.Errorf("stale generation %d", value.G)
+	}
+	if !scorefmt.Fresh(value, now, p.ttl) {
+		return 0, key, true, nil
+	}
+
+	podScore, ok := value.P[strconv.FormatInt(index, 10)]
+	if !ok {
+		return 0, key, true, nil
+	}
+	return int64(podScore), key, false, nil
+}
+
+// splitTaskRef splits the webhook's "<namespace>/<name>" annotation. Exactly
+// one separator is required; empty components are rejected.
+func splitTaskRef(ref string) (namespace, name string, ok bool) {
+	namespace, name, found := strings.Cut(ref, "/")
+	if !found || namespace == "" || name == "" || strings.Contains(name, "/") {
+		return "", "", false
+	}
+	return namespace, name, true
+}

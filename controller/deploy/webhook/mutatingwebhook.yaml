@@ -1,0 +1,36 @@
+# Pod gate-injection webhook (docs/8.1 §5.7, D9).
+#
+# caBundle is intentionally empty in the static manifest: the operator (or
+# e2e/run.sh) injects the serving CA after creating traincache-webhook-tls.
+# With failurePolicy=Ignore an unpatched bundle only makes injection a no-op.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: traincache-pod-warmup
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+    app.kubernetes.io/part-of: traincache
+webhooks:
+  - name: pods.traincache.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    matchPolicy: Equivalent
+    timeoutSeconds: 5
+    reinvocationPolicy: Never
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: "*"
+    objectSelector:
+      matchLabels:
+        traincache.io/warmup: enabled
+    clientConfig:
+      service:
+        namespace: traincache
+        name: traincache-webhook
+        path: /mutate-v1-pod
+        port: 443
+      caBundle: ""

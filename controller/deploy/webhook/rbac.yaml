@@ -1,0 +1,42 @@
+# The mutating webhook only reads WarmupTasks and patches their status when it
+# records GateInjectionDegraded. It never touches Nodes or Secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traincache-webhook
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+    app.kubernetes.io/part-of: traincache
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traincache-webhook
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+rules:
+  - apiGroups: ["traincache.io"]
+    resources: ["warmuptasks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["traincache.io"]
+    resources: ["warmuptasks/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-webhook
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traincache-webhook
+subjects:
+  - kind: ServiceAccount
+    name: traincache-webhook
+    namespace: traincache

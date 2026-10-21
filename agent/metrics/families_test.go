@@ -192,7 +192,7 @@ func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 
 // TestSevenLinePointValues:打满一遍专用 API 后按 Gather 逐 family 断言点值:
 // dataset 白名单命中原名、白名单外(打点入口)归并 other(全快照无白名单外 dataset 取值);
-// result 取值集合逐 family 等于冻结词汇表;endpoint 取值恰为冻结四方法名;
+// result 取值集合逐 family 等于冻结词汇表;endpoint 取值恰为冻结六方法名;
 // 命中率 gauge = 命中/(命中+未命中) 按 dataset 独立维护。
 func TestSevenLinePointValues(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track", "b-track"}, Node: "node-1"})
@@ -361,7 +361,7 @@ func TestSevenLinePointValues(t *testing.T) {
 		}
 	}
 
-	// endpoint 取值恰为冻结四方法名。
+	// endpoint 取值恰为冻结六方法名。
 	gotEndpoints := map[string]bool{}
 	for _, m := range family(t, snap, requestDurationName).metrics {
 		gotEndpoints[m.labels["endpoint"]] = true
@@ -369,6 +369,7 @@ func TestSevenLinePointValues(t *testing.T) {
 	wantEndpoints := valueSet(
 		metrics.EndpointSubmitPreheat, metrics.EndpointGetPreheatStatus,
 		metrics.EndpointListSnapshot, metrics.EndpointGetNodeStatus,
+		metrics.EndpointUpdatePreheat, metrics.EndpointCancelPreheat,
 	)
 	if !maps.Equal(gotEndpoints, wantEndpoints) {
 		t.Errorf("request_duration endpoint 取值 = %v, want %v",
@@ -388,7 +389,7 @@ func TestSevenLineInvalidResultAndEndpointIgnored(t *testing.T) {
 	r.IncEvictProtectedSkipped("a-track", metrics.ResultError, 1)
 	r.ObserveCacheMiss("a-track", "hit")
 	r.ObserveCacheMiss("a-track", "")
-	r.ObserveRequestDuration("ReportBlocks", metrics.ResultSuccess, 1) // ReportService(北向)不在冻结四端点
+	r.ObserveRequestDuration("ReportBlocks", metrics.ResultSuccess, 1) // ReportService(北向)不在冻结端点
 	r.ObserveRequestDuration(metrics.EndpointGetNodeStatus, "timeout", 1)
 
 	snap := snapshotFamilies(t, r)
@@ -419,9 +420,9 @@ func TestSevenLineInvalidResultAndEndpointIgnored(t *testing.T) {
 	if m := metric(t, snap, cacheHitRatioName, labels("dataset", "other", "phase", "unknown")); m.value != 0 {
 		t.Errorf("无效 result 打点后 cache_hit_ratio{other,unknown} = %v, want 0", m.value)
 	}
-	// request_duration 仍只有构造预置的 8 个 series(4 endpoint × 2 result)。
-	if n := len(family(t, snap, requestDurationName).metrics); n != 8 {
-		t.Errorf("request_duration 子指标数 = %d, want 8(无效 endpoint/result 不应新增)", n)
+	// request_duration 仍只有构造预置的 12 个 series(6 endpoint × 2 result)。
+	if n := len(family(t, snap, requestDurationName).metrics); n != 12 {
+		t.Errorf("request_duration 子指标数 = %d, want 12(无效 endpoint/result 不应新增)", n)
 	}
 }
 

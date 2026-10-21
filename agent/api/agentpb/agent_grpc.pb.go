@@ -21,6 +21,8 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	PreheatService_SubmitPreheat_FullMethodName    = "/traincache.agent.v1.PreheatService/SubmitPreheat"
 	PreheatService_GetPreheatStatus_FullMethodName = "/traincache.agent.v1.PreheatService/GetPreheatStatus"
+	PreheatService_UpdatePreheat_FullMethodName    = "/traincache.agent.v1.PreheatService/UpdatePreheat"
+	PreheatService_CancelPreheat_FullMethodName    = "/traincache.agent.v1.PreheatService/CancelPreheat"
 )
 
 // PreheatServiceClient is the client API for PreheatService service.
@@ -31,6 +33,9 @@ const (
 type PreheatServiceClient interface {
 	SubmitPreheat(ctx context.Context, in *SubmitPreheatRequest, opts ...grpc.CallOption) (*SubmitPreheatResponse, error)
 	GetPreheatStatus(ctx context.Context, in *GetPreheatStatusRequest, opts ...grpc.CallOption) (*PreheatStatus, error)
+	// 8.x 增量（2026-10-20）：窗口全量更新与取消；进度查询复用 GetPreheatStatus。
+	UpdatePreheat(ctx context.Context, in *UpdatePreheatRequest, opts ...grpc.CallOption) (*UpdatePreheatResponse, error)
+	CancelPreheat(ctx context.Context, in *CancelPreheatRequest, opts ...grpc.CallOption) (*CancelPreheatResponse, error)
 }
 
 type preheatServiceClient struct {
@@ -61,6 +66,26 @@ func (c *preheatServiceClient) GetPreheatStatus(ctx context.Context, in *GetPreh
 	return out, nil
 }
 
+func (c *preheatServiceClient) UpdatePreheat(ctx context.Context, in *UpdatePreheatRequest, opts ...grpc.CallOption) (*UpdatePreheatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdatePreheatResponse)
+	err := c.cc.Invoke(ctx, PreheatService_UpdatePreheat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *preheatServiceClient) CancelPreheat(ctx context.Context, in *CancelPreheatRequest, opts ...grpc.CallOption) (*CancelPreheatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelPreheatResponse)
+	err := c.cc.Invoke(ctx, PreheatService_CancelPreheat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PreheatServiceServer is the server API for PreheatService service.
 // All implementations must embed UnimplementedPreheatServiceServer
 // for forward compatibility.
@@ -69,6 +94,9 @@ func (c *preheatServiceClient) GetPreheatStatus(ctx context.Context, in *GetPreh
 type PreheatServiceServer interface {
 	SubmitPreheat(context.Context, *SubmitPreheatRequest) (*SubmitPreheatResponse, error)
 	GetPreheatStatus(context.Context, *GetPreheatStatusRequest) (*PreheatStatus, error)
+	// 8.x 增量（2026-10-20）：窗口全量更新与取消；进度查询复用 GetPreheatStatus。
+	UpdatePreheat(context.Context, *UpdatePreheatRequest) (*UpdatePreheatResponse, error)
+	CancelPreheat(context.Context, *CancelPreheatRequest) (*CancelPreheatResponse, error)
 	mustEmbedUnimplementedPreheatServiceServer()
 }
 
@@ -84,6 +112,12 @@ func (UnimplementedPreheatServiceServer) SubmitPreheat(context.Context, *SubmitP
 }
 func (UnimplementedPreheatServiceServer) GetPreheatStatus(context.Context, *GetPreheatStatusRequest) (*PreheatStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPreheatStatus not implemented")
+}
+func (UnimplementedPreheatServiceServer) UpdatePreheat(context.Context, *UpdatePreheatRequest) (*UpdatePreheatResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdatePreheat not implemented")
+}
+func (UnimplementedPreheatServiceServer) CancelPreheat(context.Context, *CancelPreheatRequest) (*CancelPreheatResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelPreheat not implemented")
 }
 func (UnimplementedPreheatServiceServer) mustEmbedUnimplementedPreheatServiceServer() {}
 func (UnimplementedPreheatServiceServer) testEmbeddedByValue()                        {}
@@ -142,6 +176,42 @@ func _PreheatService_GetPreheatStatus_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PreheatService_UpdatePreheat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePreheatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PreheatServiceServer).UpdatePreheat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PreheatService_UpdatePreheat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PreheatServiceServer).UpdatePreheat(ctx, req.(*UpdatePreheatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PreheatService_CancelPreheat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelPreheatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PreheatServiceServer).CancelPreheat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PreheatService_CancelPreheat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PreheatServiceServer).CancelPreheat(ctx, req.(*CancelPreheatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PreheatService_ServiceDesc is the grpc.ServiceDesc for PreheatService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -156,6 +226,14 @@ var PreheatService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetPreheatStatus",
 			Handler:    _PreheatService_GetPreheatStatus_Handler,
+		},
+		{
+			MethodName: "UpdatePreheat",
+			Handler:    _PreheatService_UpdatePreheat_Handler,
+		},
+		{
+			MethodName: "CancelPreheat",
+			Handler:    _PreheatService_CancelPreheat_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

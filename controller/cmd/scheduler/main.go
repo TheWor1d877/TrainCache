@@ -1,0 +1,135 @@
+// Command scheduler is the TrainCache custom kube-scheduler. It embeds the
+// upstream kube-scheduler command and registers the TrainCacheScore plugin on
+// the score/normalizeScore extension points (docs/8.0, docs/8.1 §5.8, Q2(a)).
+//
+// The controller plane settings (annotation prefix, score TTL) come from the
+// same environment variables as the controller so both sides agree on the
+// annotation key and freshness window.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+	"k8s.io/kubernetes/cmd/kube-scheduler/app"
+
+	"traincache/controller/internal/config"
+	"traincache/controller/internal/logging"
+	"traincache/controller/internal/scheduler"
+)
+
+const component = "scheduler"
+
+// version is replaced at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", component, err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
+	bootstrapLog := logging.New(component, version, "info")
+	cfg, err := config.Load()
+	if err != nil {
+		bootstrapLog.Error("config load failed", "addr", "", "err", err)
+		return err
+	}
+	log := logging.New(component, version, cfg.LogLevel)
+	logStartup(log, cfg)
+
+	srv := newHealthServer(cfg.HealthAddr)
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	cmd := newSchedulerCommand(cfg, log)
+	cmdErr := make(chan error, 1)
+	go func() {
+		cmdErr <- cmd.ExecuteContext(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		logShutdown(log, cfg)
+		shutdownErr := shutdownHealthServer(srv)
+		// Give the scheduler's leader-election shutdown a bounded chance to
+		// release the lease before the process exits.
+		select {
+		case <-cmdErr:
+		case <-time.After(5 * time.Second):
+			log.Warn("kube-scheduler did not stop before timeout")
+		}
+		return shutdownErr
+	case err := <-serverErr:
+		return fmt.Errorf("health server: %w", err)
+	case err := <-cmdErr:
+		logShutdown(log, cfg)
+		if shutdownErr := shutdownHealthServer(srv); shutdownErr != nil {
+			return shutdownErr
+		}
+		if err != nil {
+			return fmt.Errorf("kube-scheduler: %w", err)
+		}
+		return nil
+	}
+}
+
+// newSchedulerCommand builds the upstream scheduler command with the
+// TrainCacheScore plugin registered. It is split out so tests can assert the
+// wiring without starting the process.
+func newSchedulerCommand(cfg *config.Config, log *slog.Logger) *cobra.Command {
+	return app.NewSchedulerCommand(app.WithPlugin(scheduler.Name, scheduler.Factory(scheduler.Options{
+		Prefix: cfg.ScoreAnnotationPrefix,
+		TTL:    cfg.SchedulerScoreTTL,
+		Logger: log,
+	})))
+}
+
+func newHealthServer(addr string) *http.Server {
+	mux := http.NewServeMux()
+	ok := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}
+	mux.HandleFunc("/healthz", ok)
+	mux.HandleFunc("/readyz", ok)
+	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+}
+
+func shutdownHealthServer(srv *http.Server) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+// logStartup is split out so tests can assert the structured startup fields.
+func logStartup(log *slog.Logger, cfg *config.Config) {
+	log.Info("config loaded",
+		"addr", cfg.HealthAddr,
+		"namespace", cfg.Namespace,
+		"score_prefix", cfg.ScoreAnnotationPrefix,
+		"score_ttl", cfg.SchedulerScoreTTL,
+	)
+	log.Info("starting", "addr", cfg.HealthAddr, "plugin", scheduler.Name)
+}
+
+func logShutdown(log *slog.Logger, cfg *config.Config) {
+	log.Info("shutting down", "addr", cfg.HealthAddr)
+}

@@ -14,3 +14,6 @@ bench/data/
 bench/.sudo-pass
 bench/results/
 bench/.venv/
+
+# controller e2e 运行时产物(kind 集群导出、镜像 tar、TLS 私钥、MinIO 数据)
+controller/e2e/results/

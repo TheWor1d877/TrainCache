@@ -1,0 +1,14 @@
+# kind cluster for the M11 end-to-end run (kind v0.33.0, node image v1.37.0).
+# Three workers so GWAA has a real per-node choice and the workload can pin
+# Pods to a two-node subset: with three Pods assigned to three distinct Nodes,
+# at least one lands outside the subset (deterministic NodeDeviation) while
+# every Pod still has two feasible Nodes (so kube-scheduler runs score plugins;
+# it skips scoring when only one Node is feasible). The control-plane taint
+# keeps the Agent DaemonSet and training Pods off the control-plane node.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker

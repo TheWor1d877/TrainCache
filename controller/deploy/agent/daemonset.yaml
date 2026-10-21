@@ -1,0 +1,138 @@
+# TrainCache node Agent DaemonSet.
+#
+# Prerequisites maintained by the cluster operator (never by TrainCache):
+#   * Nodes that may host training Pods must carry the MANUAL label
+#     traincache.io/s3-access=true (docs/8.0, D30). No component writes it.
+#   * The credential Secret traincache-objstore exists in this namespace
+#     (keys accessKey / secretKey). e2e/run.sh creates it from the MinIO root
+#     credentials.
+#
+# The Agent listens on the Pod IP; hostPort is also published so the
+# controller's Node InternalIP fallback route works. The cache directory is a
+# hostPath so a restarted Agent reuses already-verified blocks.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: traincache-agentd
+  namespace: traincache
+  labels:
+    app: traincache-agentd
+    app.kubernetes.io/name: traincache-agentd
+    app.kubernetes.io/part-of: traincache
+spec:
+  selector:
+    matchLabels:
+      app: traincache-agentd
+  template:
+    metadata:
+      labels:
+        app: traincache-agentd
+        app.kubernetes.io/name: traincache-agentd
+    spec:
+      # The control-plane taint keeps the Agent off kind's control-plane node.
+      containers:
+        - name: agentd
+          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: TRAINCACHE_GRPC_ADDR
+              value: ":9410"
+            - name: TRAINCACHE_METRICS_ADDR
+              value: ":9411"
+            - name: TRAINCACHE_VERIFY
+              value: "xxh3"
+            - name: TRAINCACHE_DATASET_WHITELIST
+              value: "train-data"
+            - name: TRAINCACHE_CACHE_ROOT
+              value: "/var/cache/traincache"
+            - name: TRAINCACHE_HEAT_DECAY_AGE
+              value: "24h"
+            - name: TRAINCACHE_HEAT_DUMP_INTERVAL
+              value: "30m"
+            - name: TRAINCACHE_HEAT_DECAY_INTERVAL
+              value: "24h"
+            - name: TRAINCACHE_HEAT_DECAY_FACTOR
+              value: "0.5"
+            - name: TRAINCACHE_HEAT_OPEN_BETA
+              value: "0.15"
+            - name: TRAINCACHE_HEAT_TOUCH_HALF_LIFE
+              value: "6h"
+            - name: TRAINCACHE_HEAT_CALIBRATE_WINDOW
+              value: "100"
+            - name: TRAINCACHE_HEAT_CALIBRATE_THRESHOLD
+              value: "0.8"
+            - name: TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT
+              value: "80"
+            - name: TRAINCACHE_HEAT_DISK_DELTA_PERCENT
+              value: "5"
+            - name: TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT
+              value: "90"
+            - name: TRAINCACHE_OBJSTORE_ENDPOINT
+              value: "minio.minio.svc.cluster.local:9000"
+            - name: TRAINCACHE_OBJSTORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: traincache-objstore
+                  key: accessKey
+            - name: TRAINCACHE_OBJSTORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: traincache-objstore
+                  key: secretKey
+            - name: TRAINCACHE_OBJSTORE_BUCKET
+              value: "traincache"
+            - name: TRAINCACHE_OBJSTORE_SECURE
+              value: "false"
+          ports:
+            - name: grpc
+              containerPort: 9410
+              hostPort: 9410
+            - name: metrics
+              containerPort: 9411
+              hostPort: 9411
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - traincache node status --node "$NODE_NAME" --item agent
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - traincache node status --node "$NODE_NAME" --item rescan
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/traincache
+            - name: run
+              mountPath: /run/traincache
+      volumes:
+        - name: cache
+          hostPath:
+            path: /var/cache/traincache
+            type: DirectoryOrCreate
+        - name: run
+          hostPath:
+            path: /run/traincache
+            type: DirectoryOrCreate

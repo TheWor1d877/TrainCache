@@ -1,0 +1,86 @@
+# controller-manager Deployment (single replica by default, docs/8.3 Q10).
+#
+# Watches all namespaces: DataSet/WarmupTask and the Pods selected by
+# traincache.io/warmup=enabled (DegradedReconciler). The Agent is discovered
+# through app=traincache-agentd Pods on each candidate Node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-controller-manager
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+    app.kubernetes.io/part-of: traincache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traincache-controller-manager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traincache-controller-manager
+    spec:
+      serviceAccountName: traincache-controller-manager
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: manager
+          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/controller-manager:0.8.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CONTROLLER_METRICS_ADDR
+              value: ":9412"
+            - name: CONTROLLER_HEALTH_ADDR
+              value: ":8081"
+            # Empty means all namespaces; the manager is the only cluster-wide
+            # control-plane component.
+            - name: CONTROLLER_NAMESPACE
+              value: ""
+            - name: CONTROLLER_AGENT_PORT
+              value: "9410"
+            - name: CONTROLLER_AGENT_TIMEOUT
+              value: 5s
+            - name: CONTROLLER_POLL_INTERVAL
+              value: 1s
+            - name: CONTROLLER_SCORE_TTL
+              value: 10m
+            - name: CONTROLLER_SCORE_ANNOTATION
+              value: traincache.io/scores
+            - name: CONTROLLER_GATE_NAME
+              value: traincache.io/warmup
+            - name: CONTROLLER_LEADER_ELECTION
+              value: "false"
+            - name: CONTROLLER_MAX_CHUNKS
+              value: "10000000"
+            - name: CONTROLLER_LOG_LEVEL
+              value: info
+          ports:
+            - name: metrics
+              containerPort: 9412
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534

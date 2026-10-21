@@ -129,6 +129,9 @@ const (
 	EndpointGetPreheatStatus = "GetPreheatStatus"
 	EndpointListSnapshot     = "ListSnapshot"
 	EndpointGetNodeStatus    = "GetNodeStatus"
+	// 8.x 增量(2026-10-20):两个动作 RPC,与既有 endpoint 标签同风格。
+	EndpointUpdatePreheat = "UpdatePreheat"
+	EndpointCancelPreheat = "CancelPreheat"
 )
 
 // endpointLabels 是全部合法 endpoint 值(构造时逐一预置)。
@@ -137,6 +140,8 @@ var endpointLabels = [...]string{
 	EndpointGetPreheatStatus,
 	EndpointListSnapshot,
 	EndpointGetNodeStatus,
+	EndpointUpdatePreheat,
+	EndpointCancelPreheat,
 }
 
 // fixedDurationBuckets 是固定 bucket 集 {.01,.05,.1,.5,1,5,10,30}s(design §5.8 冻结,延迟线);
@@ -465,8 +470,8 @@ func (r *Registry) IncEvictProtectedSkipped(dataset, result string, n int64) {
 // —— ⑥ 延迟线 ——
 
 // ObserveRequestDuration 记录一次 RPC 请求耗时:traincache_request_duration_seconds{endpoint,
-// result},endpoint∈{SubmitPreheat,GetPreheatStatus,ListSnapshot,GetNodeStatus},result∈{success,
-// error};集合外忽略;固定 bucket {.01,.05,.1,.5,1,5,10,30}s。
+// result},endpoint∈{SubmitPreheat,GetPreheatStatus,ListSnapshot,GetNodeStatus,UpdatePreheat,
+// CancelPreheat},result∈{success,error};集合外忽略;固定 bucket {.01,.05,.1,.5,1,5,10,30}s。
 func (r *Registry) ObserveRequestDuration(endpoint, result string, seconds float64) {
 	if !validEndpoint(endpoint) || !validSuccessError(result) {
 		return
@@ -526,7 +531,7 @@ func validEvictTrigger(result string) bool {
 	return validResult(result, ResultNormal, ResultDanger)
 }
 
-// validEndpoint 判断 endpoint 是否 ∈ 冻结的四个 RPC 方法名。
+// validEndpoint 判断 endpoint 是否 ∈ 冻结的 RPC 方法名(8.x 起六个)。
 func validEndpoint(endpoint string) bool {
 	for _, e := range endpointLabels {
 		if endpoint == e {

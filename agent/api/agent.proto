@@ -7,6 +7,9 @@ import "google/protobuf/timestamp.proto";
 service PreheatService {
   rpc SubmitPreheat(SubmitPreheatRequest) returns (SubmitPreheatResponse);
   rpc GetPreheatStatus(GetPreheatStatusRequest) returns (PreheatStatus);
+  // 8.x 增量（2026-10-20）：窗口全量更新与取消；进度查询复用 GetPreheatStatus。
+  rpc UpdatePreheat(UpdatePreheatRequest) returns (UpdatePreheatResponse);
+  rpc CancelPreheat(CancelPreheatRequest) returns (CancelPreheatResponse);
 }
 
 // 节点状态查询(CLI 与就绪探针)
@@ -29,6 +32,7 @@ message SubmitPreheatRequest {
   repeated string prefixes = 5; // 路径前缀,语义同 core Catalog.LoadPrefixes:空=空映射,含空串=全量
   repeated ChunkRef chunks = 6; // 可选,块级精确指定
   PreheatPriority priority = 7;
+  uint64 generation = 8; // 任务代际;0 表示未提供
 }
 
 message ChunkRef {
@@ -73,6 +77,35 @@ message PreheatStatus {
   int64 failed_blocks = 9;
   google.protobuf.Timestamp started_at = 10;
   google.protobuf.Timestamp updated_at = 11;
+  // 8.x 增量（2026-10-20）：代际与位图进度；seq 单调递增。
+  uint64 generation = 12;   // 任务代际
+  uint64 seq = 13;          // 位图变更序号，单调递增
+  bytes ready_bitmap = 14;  // 位 i 对应请求 chunks 第 i 项；1=已落盘且校验通过
+}
+
+// 8.x 增量:窗口全量更新(chunks 全量替换并重定义位序)。
+message UpdatePreheatRequest {
+  string task_id = 1;
+  string node = 2;
+  uint64 generation = 3;         // 必须 >= Agent 当前代际
+  repeated ChunkRef chunks = 4;  // 新的完整块列表，同时定义位序
+  PreheatPriority priority = 5;
+}
+
+message UpdatePreheatResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+// 8.x 增量:取消任务(幂等;仅停止调度新块,不取消在途 P0)。
+message CancelPreheatRequest {
+  string task_id = 1;
+  string node = 2;
+  uint64 generation = 3;
+}
+
+message CancelPreheatResponse {
+  bool accepted = 1;
 }
 
 message GetNodeStatusRequest {
