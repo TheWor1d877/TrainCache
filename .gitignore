@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 
+# 根目录 Python 虚拟环境(历史上误提交过)
+venv/
+
 # IDE
 .idea/
 
