@@ -128,9 +128,6 @@ type DataSetStatus struct {
 
 	// AccessibleNodes is the resolved, ascending node list.
 	AccessibleNodes []string `json:"accessibleNodes,omitempty"`
-
-	// WarmupTasks lists WarmupTask names that reference this DataSet.
-	WarmupTasks []string `json:"warmupTasks,omitempty"`
 }
 
 // DataSet is the schema for the datasets API.

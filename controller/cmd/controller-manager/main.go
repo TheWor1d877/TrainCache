@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -31,7 +33,13 @@ import (
 	"traincache/controller/internal/storage"
 )
 
-const component = "controller-manager"
+const (
+	component = "controller-manager"
+	// metricsPath is the controller-owned registry endpoint served by the
+	// manager metrics server. It must not be /metrics, which controller-runtime
+	// reserves for its built-in registry.
+	metricsPath = "/metrics/traincache"
+)
 
 // version is replaced at build time via -ldflags "-X main.version=...".
 var version = "dev"
@@ -56,23 +64,24 @@ func run(ctx context.Context) error {
 	log := logging.New(component, version, cfg.LogLevel)
 	logStartup(log, cfg)
 
-	// Independent registry owned by the control plane; families are added by
-	// the milestones that emit them (docs/8.1 design.md §9.5).
+	// Independent registry owned by the control plane. The reconcilers emit
+	// into it and managerOptions exposes it at metricsPath (docs/8.1 §9.5).
 	registry := metrics.New()
 	log.Info("metrics registry initialized",
 		"addr", cfg.MetricsAddr,
+		"path", metricsPath,
 		"registerer", fmt.Sprintf("%T", registry.Registerer),
 	)
 
-	if err := runBusiness(ctx, cfg, log); err != nil {
+	if err := runBusiness(ctx, cfg, log, registry); err != nil {
 		return err
 	}
 	logShutdown(log, cfg)
 	return nil
 }
 
-func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
-	opts := managerOptions(cfg, newScheme())
+func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, registry *metrics.Metrics) error {
+	opts := managerOptions(cfg, newScheme(), registry)
 	log.Debug("manager options prepared",
 		"metrics_addr", opts.Metrics.BindAddress,
 		"leader_election", opts.LeaderElection,
@@ -95,6 +104,7 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) erro
 		StoreFactory: factory,
 		Recorder:     mgr.GetEventRecorderFor("dataset-controller"),
 		Log:          log.With("controller", "dataset"),
+		Metrics:      registry,
 		MaxChunks:    cfg.MaxChunks,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
@@ -113,6 +123,7 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) erro
 		Agents:                agents,
 		Recorder:              mgr.GetEventRecorderFor("warmuptask-controller"),
 		Log:                   log.With("controller", "warmup"),
+		Metrics:               registry,
 		PollInterval:          cfg.PollInterval,
 		ScoreAnnotationPrefix: cfg.ScoreAnnotationPrefix,
 		GateName:              cfg.GateName,
@@ -129,6 +140,7 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) erro
 		Client:   mgr.GetClient(),
 		Log:      log.With("controller", "warmup-degraded"),
 		Recorder: mgr.GetEventRecorderFor("warmup-degraded"),
+		Metrics:  registry,
 	}
 	if err := degradedReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("register degraded controller: %w", err)
@@ -156,10 +168,18 @@ func newScheme() *runtime.Scheme {
 	return scheme
 }
 
-func managerOptions(cfg *config.Config, scheme *runtime.Scheme) ctrl.Options {
+func managerOptions(cfg *config.Config, scheme *runtime.Scheme, registry *metrics.Metrics) ctrl.Options {
 	return ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: cfg.MetricsAddr},
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: cfg.MetricsAddr,
+			// controller-runtime validates that ExtraHandlers never replaces
+			// its built-in /metrics, so the independent registry lives beside
+			// it at metricsPath.
+			ExtraHandlers: map[string]http.Handler{
+				metricsPath: promhttp.HandlerFor(registry.Gatherer, promhttp.HandlerOpts{}),
+			},
+		},
 		LeaderElection:         cfg.LeaderElection,
 		LeaderElectionID:       "traincache-controller-leader",
 		HealthProbeBindAddress: cfg.HealthAddr,

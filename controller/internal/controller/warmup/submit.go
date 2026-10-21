@@ -9,6 +9,7 @@ import (
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
+	"traincache/controller/internal/metrics"
 )
 
 // submitResult records per-node failures so the controller can report them
@@ -32,6 +33,7 @@ func newSubmitResult() submitResult {
 func submitToCandidates(
 	ctx context.Context,
 	pool agentclient.Pool,
+	metric *metrics.Metrics,
 	log *slog.Logger,
 	task *traincachev1alpha1.WarmupTask,
 	ds *traincachev1alpha1.DataSet,
@@ -63,6 +65,11 @@ func submitToCandidates(
 				Generation: uint64(task.Generation),
 			}
 			if err := pool.Submit(ctx, node, req); err != nil {
+				if errors.Is(err, agentclient.ErrPermanent) {
+					metric.ObservePreheatRPC(metrics.PreheatSubmit, metrics.RPCPermanent)
+				} else {
+					metric.ObservePreheatRPC(metrics.PreheatSubmit, metrics.RPCUnavailable)
+				}
 				logFields := []any{
 					"warmup_task", taskKey,
 					"task_id", taskID,
@@ -82,6 +89,7 @@ func submitToCandidates(
 				}
 				break
 			}
+			metric.ObservePreheatRPC(metrics.PreheatSubmit, metrics.RPCOK)
 			result.Submitted++
 			log.Info("agent submit",
 				"warmup_task", taskKey,

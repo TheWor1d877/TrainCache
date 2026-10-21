@@ -20,8 +20,7 @@ func TestReconcileDeviationRecordsActualNodeAndResubmits(t *testing.T) {
 	task := fixtureTask(1, 1, [][]int32{{0}})
 	task.Status.Phase = traincachev1alpha1.WarmupPhaseReleased
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
-		{PodIndex: 0, NodeName: "n1", AssignedNode: "n1"},
-		{PodIndex: 0, NodeName: "n2"},
+		{PodIndex: 0, AssignedNode: "n1"},
 	}
 	ds := fixtureDataSet(1, singleShardLayout(1), []string{"n1", "n2"})
 	pod := fixtureTargetPod(0)

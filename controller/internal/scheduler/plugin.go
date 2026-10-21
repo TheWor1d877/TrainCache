@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	schedframework "k8s.io/kube-scheduler/framework"
 
+	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/scorefmt"
 )
 
@@ -47,14 +48,18 @@ type Options struct {
 	Logger *slog.Logger
 	// Now is replaceable in tests.
 	Now func() time.Time
+	// Metrics is optional. Scheduler metrics live in this process's own
+	// independent registry, never the controller-manager one.
+	Metrics *metrics.Metrics
 }
 
 // Plugin implements framework.ScorePlugin.
 type Plugin struct {
-	prefix string
-	ttl    time.Duration
-	log    *slog.Logger
-	now    func() time.Time
+	prefix  string
+	ttl     time.Duration
+	log     *slog.Logger
+	now     func() time.Time
+	metrics *metrics.Metrics
 }
 
 var (
@@ -91,10 +96,11 @@ func NewWithOptions(opts Options) (*Plugin, error) {
 		opts.Now = time.Now
 	}
 	return &Plugin{
-		prefix: opts.Prefix,
-		ttl:    opts.TTL,
-		log:    opts.Logger,
-		now:    opts.Now,
+		prefix:  opts.Prefix,
+		ttl:     opts.TTL,
+		log:     opts.Logger,
+		now:     opts.Now,
+		metrics: opts.Metrics,
 	}, nil
 }
 
@@ -130,7 +136,8 @@ func (p *Plugin) Score(_ context.Context, _ schedframework.CycleState, pod *core
 // scoreNode evaluates and emits the §9.1 log points: Debug for every scoring
 // decision and Warn for malformed annotations.
 func (p *Plugin) scoreNode(pod *corev1.Pod, node *corev1.Node, now time.Time) int64 {
-	score, key, stale, err := p.evaluate(pod, node, now)
+	score, key, stale, result, err := p.evaluateResult(pod, node, now)
+	p.metrics.ObserveSchedulerScore(result)
 	podKey := pod.Namespace + "/" + pod.Name
 	if err != nil {
 		p.log.Warn("scheduler score rejected",
@@ -190,52 +197,59 @@ func (p *Plugin) NormalizeScore(_ context.Context, _ schedframework.CycleState, 
 // err is non-nil only for malformed inputs, which are worth a Warn log;
 // legitimate absences (no annotation, no entry, expired TTL) are silent.
 func (p *Plugin) evaluate(pod *corev1.Pod, node *corev1.Node, now time.Time) (score int64, key string, stale bool, err error) {
+	score, key, stale, _, err = p.evaluateResult(pod, node, now)
+	return score, key, stale, err
+}
+
+// evaluateResult is evaluate plus the fixed §9.5 result enum used by the
+// scheduler_score_total metric. Every return path sets exactly one branch.
+func (p *Plugin) evaluateResult(pod *corev1.Pod, node *corev1.Node, now time.Time) (score int64, key string, stale bool, result metrics.ScoreResult, err error) {
 	if pod == nil || node == nil {
-		return 0, "", true, nil
+		return 0, "", true, metrics.ScoreNoTaskRef, nil
 	}
 
 	taskRef := pod.Annotations[AnnotationWarmupTask]
 	namespace, name, ok := splitTaskRef(taskRef)
 	if !ok {
 		if taskRef == "" {
-			return 0, "", true, nil
+			return 0, "", true, metrics.ScoreNoTaskRef, nil
 		}
-		return 0, "", true, fmt.Errorf("invalid %s annotation %q", AnnotationWarmupTask, taskRef)
+		return 0, "", true, metrics.ScoreInvalidTaskRef, fmt.Errorf("invalid %s annotation %q", AnnotationWarmupTask, taskRef)
 	}
 	key = scorefmt.KeyWithPrefix(p.prefix, namespace, name)
 
 	indexRaw, ok := pod.Annotations[AnnotationPodIndex]
 	if !ok {
-		return 0, key, true, nil
+		return 0, key, true, metrics.ScoreNoPodIndex, nil
 	}
 	index, err := strconv.ParseInt(indexRaw, 10, 32)
 	if err != nil || index < 0 {
-		return 0, key, true, fmt.Errorf("invalid %s annotation %q", AnnotationPodIndex, indexRaw)
+		return 0, key, true, metrics.ScoreInvalidPodIndex, fmt.Errorf("invalid %s annotation %q", AnnotationPodIndex, indexRaw)
 	}
 
 	raw, ok := node.Annotations[key]
 	if !ok {
-		return 0, key, true, nil
+		return 0, key, true, metrics.ScoreNoAnnotation, nil
 	}
 	value, err := scorefmt.DecodeValue(raw)
 	if err != nil {
-		return 0, key, true, err
+		return 0, key, true, metrics.ScoreInvalidValue, err
 	}
 	if value.Task != taskRef {
-		return 0, key, true, fmt.Errorf("annotation task %q does not match pod task %q", value.Task, taskRef)
+		return 0, key, true, metrics.ScoreTaskMismatch, fmt.Errorf("annotation task %q does not match pod task %q", value.Task, taskRef)
 	}
 	if value.G < 1 {
-		return 0, key, true, fmt.Errorf("stale generation %d", value.G)
+		return 0, key, true, metrics.ScoreStaleGeneration, fmt.Errorf("stale generation %d", value.G)
 	}
 	if !scorefmt.Fresh(value, now, p.ttl) {
-		return 0, key, true, nil
+		return 0, key, true, metrics.ScoreExpired, nil
 	}
 
 	podScore, ok := value.P[strconv.FormatInt(index, 10)]
 	if !ok {
-		return 0, key, true, nil
+		return 0, key, true, metrics.ScoreNoPodEntry, nil
 	}
-	return int64(podScore), key, false, nil
+	return int64(podScore), key, false, metrics.ScoreOK, nil
 }
 
 // splitTaskRef splits the webhook's "<namespace>/<name>" annotation. Exactly

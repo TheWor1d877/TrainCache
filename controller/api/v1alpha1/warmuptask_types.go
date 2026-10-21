@@ -196,11 +196,13 @@ type WarmupTaskSpec struct {
 	Candidate CandidatePolicy `json:"candidate,omitempty"`
 }
 
-// PodNodeReadiness is one Pod's readiness fact on one candidate node.
+// PodNodeReadiness is one Pod's readiness fact on its assigned node. Status
+// stores exactly one entry per PodDetail.Index (M12/S15); per-candidate-node
+// ready-block counts live in WarmupTaskStatus.ReadinessTable.
 type PodNodeReadiness struct {
 	PodIndex int32  `json:"podIndex"`
 	PodName  string `json:"podName,omitempty"`
-	// NodeName is the candidate node this readiness fact was collected on.
+	// NodeName is unused by the M12 layout; the assigned node is AssignedNode.
 	NodeName     string `json:"nodeName,omitempty"`
 	AssignedNode string `json:"assignedNode,omitempty"`
 	ActualNode   string `json:"actualNode,omitempty"`
@@ -249,9 +251,12 @@ type WarmupTaskStatus struct {
 	// column order.
 	CandidateNodes []string `json:"candidateNodes,omitempty"`
 
-	// ReadinessTable is P x N window ready-block counts (not ratios).
+	// ReadinessTable is P x N window ready-block counts (not ratios). Rows are
+	// indexed by PodDetail.Index and columns follow CandidateNodes order.
 	ReadinessTable [][]int32 `json:"readinessTable,omitempty"`
 
+	// PodNodeReadiness has one entry per PodDetail.Index. Each entry carries the
+	// assigned node's fact; candidate-node granularity is in ReadinessTable.
 	PodNodeReadiness []PodNodeReadiness `json:"podNodeReadiness,omitempty"`
 
 	GateDecision GateDecision `json:"gateDecision,omitempty"`

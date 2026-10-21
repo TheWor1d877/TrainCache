@@ -78,7 +78,7 @@ type Reconciler struct {
 	Now          func() time.Time
 	Recorder     record.EventRecorder
 	Log          *slog.Logger
-	Metrics      *metrics.Registry
+	Metrics      *metrics.Metrics
 	PollInterval time.Duration
 
 	// ScoreAnnotationPrefix is the configured Node annotation prefix; it must
@@ -110,14 +110,22 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Reconcile implements docs/8.1 §7.2 steps 1-6 for M4.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	start := r.now()
+	// Registered before the first Get so every return path, including
+	// NotFound and DeletionTimestamp, is observed exactly once.
+	defer func() {
+		r.Metrics.ObserveReconcile(metrics.ControllerWarmup, retErr, result.RequeueAfter, r.now().Sub(start))
+	}()
+
 	task := &traincachev1alpha1.WarmupTask{}
 	if err := r.Get(ctx, req.NamespacedName, task); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.Metrics.ForgetGateTask(req.NamespacedName.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 	if !task.DeletionTimestamp.IsZero() {
+		r.Metrics.ForgetGateTask(TaskKey(task))
 		return ctrl.Result{}, nil
 	}
 
@@ -152,6 +160,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	r.reconcileDeviation(ctx, log, task)
 
 	if isTerminal(task) {
+		r.Metrics.ForgetGateTask(TaskKey(task))
 		log.Debug("warmup task already terminal; skipped",
 			"state", task.Status.GateDecision.State,
 			"reason", task.Status.GateDecision.Reason,
@@ -256,6 +265,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, err
 	}
 	candidates := candidatesWithAgent(filtered, agentReady)
+	r.Metrics.ObserveCandidateNodes(datasetKey(task), len(candidates))
 	log.Info("candidate filtering",
 		"nodes", len(nodeList.Items),
 		"accessible", accessible.Len(),
@@ -297,7 +307,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	submission := newSubmitResult()
 	var submitErr error
 	if fanout {
-		submission, submitErr = submitToCandidates(ctx, r.Agents, log, task, ds, windows, candidates, podNames)
+		submission, submitErr = submitToCandidates(ctx, r.Agents, r.Metrics, log, task, ds, windows, candidates, podNames)
 		if len(submission.Permanent) > 0 {
 			rejected := sortedErrorKeys(submission.Permanent)
 			message := fmt.Sprintf("Agent rejected preheat on %s", strings.Join(rejected, ", "))
@@ -329,8 +339,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// M5: poll every (pod,node) fact. Polling failures degrade individual
 	// pairs; they never replace the submission error/backoff.
 	outcome := pollOutcome{}
+	var facts map[readinessKey]readinessFact
 	if len(candidates) > 0 && len(windows) > 0 {
-		outcome = r.pollReadiness(ctx, log, task, windows, candidates, podNames)
+		outcome, facts = r.pollReadiness(ctx, log, task, windows, candidates, podNames)
 	}
 
 	// M6: recompute GWAA after each poll and issue only the RPC differences.
@@ -351,6 +362,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				Previous:  previousPreheat(task, windows, candidates, fanout),
 				Placement: placement,
 				PodNames:  podNames,
+				Metrics:   r.Metrics,
 			})
 			if applyErr != nil {
 				log.Warn("placement apply incomplete",
@@ -363,12 +375,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					submitErr = applyErr
 				}
 			}
-			applyAssignment(task, placement)
+			applyAssignment(task, placement, facts, podNames, candidates)
 		}
 
 		evaluation := r.evaluateGate(task)
 		logGateDecision(log, taskKey, evaluation)
 		if evaluation.Decision.State == gate.Hold {
+			r.Metrics.ObserveGateTask(taskKey, metrics.GateHold, r.now())
 			if !outcome.Pending {
 				task.Status.Phase = traincachev1alpha1.WarmupPhaseGating
 			}
@@ -376,7 +389,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			// still requeues until release or TMax.
 			return ctrl.Result{RequeueAfter: r.pollRequeueAfter()}, submitErr
 		}
-		return r.releaseGate(ctx, log, task, windows, candidates, podNames, evaluation)
+		released, releaseErr := r.releaseGate(ctx, log, task, windows, candidates, podNames, evaluation)
+		if releaseErr == nil {
+			// The task only leaves Hold once the score/gate writes succeeded.
+			r.Metrics.ObserveGateTask(taskKey, gateMetricState(evaluation.Decision.State), r.now())
+		}
+		return released, releaseErr
 	}
 	return ctrl.Result{}, submitErr
 }
@@ -463,6 +481,29 @@ func (r *Reconciler) now() time.Time {
 		return r.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// datasetKey is the bounded metric label for a DataSet: "<namespace>/<name>".
+// The WarmupTask namespace is also the DataSet namespace (the controller reads
+// the DataSet from task.Namespace), so this value cannot collide across
+// namespaces.
+func datasetKey(task *traincachev1alpha1.WarmupTask) string {
+	if task == nil {
+		return ""
+	}
+	return task.Namespace + "/" + task.Spec.DataSetRef.Name
+}
+
+// gateMetricState maps the gate package verdict to the frozen metric enum.
+func gateMetricState(state gate.GateState) metrics.GateState {
+	switch state {
+	case gate.Released:
+		return metrics.GateReleased
+	case gate.Degraded:
+		return metrics.GateDegraded
+	default:
+		return metrics.GateHold
+	}
 }
 
 func dataSetReady(ds *traincachev1alpha1.DataSet) bool {

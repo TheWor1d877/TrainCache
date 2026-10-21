@@ -321,8 +321,7 @@ func TestComputePlacementStopsFailedNodes(t *testing.T) {
 	task := fixtureTask(1, 2, nil)
 	task.Status.ReadinessTable = [][]int32{{0, 2}}
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
-		{PodIndex: 0, NodeName: "n1", State: traincachev1alpha1.PreheatStateFailed},
-		{PodIndex: 0, NodeName: "n2", State: traincachev1alpha1.PreheatStatePreheating},
+		{PodIndex: 0, AssignedNode: "n1", State: traincachev1alpha1.PreheatStateFailed},
 	}
 	r := &Reconciler{}
 	placement := r.computePlacement(task, []string{"n1", "n2"}, map[string]error{

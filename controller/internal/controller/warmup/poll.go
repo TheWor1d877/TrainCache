@@ -14,6 +14,7 @@ import (
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
+	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/nodescore"
 )
 
@@ -107,6 +108,30 @@ func (t *pollTracker) clearFailures(key failureKey) {
 	delete(t.failures, key)
 }
 
+// nodeFailed reports whether every Pod crossed the consecutive
+// ErrAgentUnavailable threshold on node in the current generation. It restores
+// the pre-M12 "stopped node" signal that no longer has a persisted per-pair
+// State.
+func (t *pollTracker) nodeFailed(taskUID, node string, generation uint64, pods int) bool {
+	if pods <= 0 {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for pod := 0; pod < pods; pod++ {
+		key := failureKey{
+			taskUID:    taskUID,
+			podIndex:   int32(pod),
+			node:       node,
+			generation: generation,
+		}
+		if t.failures[key] < unavailableFailureThreshold {
+			return false
+		}
+	}
+	return true
+}
+
 // recordRate keeps at most the two most recent samples and drops a sample that
 // arrives inside MinInterval of the previous one (D24, condition ② input).
 func (t *pollTracker) recordRate(taskUID string, podIndex int32, at time.Time, rate float64, minInterval time.Duration) {
@@ -146,10 +171,24 @@ type pollOutcome struct {
 	Pending bool
 }
 
+// readinessFact is one poll round's observation for a (Pod, candidate node).
+// It is never persisted: M12/S15 keeps only the assigned node's fact per Pod
+// in status, while candidate-node counts live in ReadinessTable.
+type readinessFact struct {
+	ready          int32
+	bitmap         []byte
+	rate           float64
+	state          traincachev1alpha1.PreheatState
+	lastReportTime *metav1.Time
+	hasData        bool
+}
+
 // pollReadiness polls every submitted (pod,node) pair, updates the P×N
-// readiness table and PodNodeReadiness, and records rateHistory. It never
+// readiness table, the per-Pod assigned-node facts and rateHistory. It never
 // returns an error: RPC failures degrade individual pairs and must not stop
-// the other polls (docs/8.1 §7.3).
+// the other polls (docs/8.1 §7.3). The returned facts are this round's
+// in-memory observations; applyAssignment uses them to refresh the per-Pod
+// details after GWAA has (re)assigned nodes.
 func (r *Reconciler) pollReadiness(
 	ctx context.Context,
 	log *slog.Logger,
@@ -157,42 +196,14 @@ func (r *Reconciler) pollReadiness(
 	windows [][]*agentpb.ChunkRef,
 	candidates []string,
 	podNames map[int32]string,
-) pollOutcome {
+) (pollOutcome, map[readinessKey]readinessFact) {
 	if log == nil {
 		log = slog.Default()
 	}
 	pods := int(task.Spec.PodCount)
 	generation := uint64(task.Generation)
-
-	existing := make(map[readinessKey]traincachev1alpha1.PodNodeReadiness, len(task.Status.PodNodeReadiness))
-	for _, entry := range task.Status.PodNodeReadiness {
-		existing[readinessKey{podIndex: entry.PodIndex, node: entry.NodeName}] = entry
-	}
-
-	entries := make([]traincachev1alpha1.PodNodeReadiness, 0, pods*len(candidates))
-	slots := make([][]int, pods)
-	for pod := 0; pod < pods; pod++ {
-		k := int32(1)
-		if detail, ok := podDetail(task, int32(pod)); ok {
-			k = detail.K
-		}
-		slots[pod] = make([]int, len(candidates))
-		for nodeIndex, node := range candidates {
-			entry, ok := existing[readinessKey{podIndex: int32(pod), node: node}]
-			if !ok {
-				entry = traincachev1alpha1.PodNodeReadiness{PodIndex: int32(pod), NodeName: node}
-			}
-			entry.PodIndex = int32(pod)
-			entry.PodName = podNames[int32(pod)]
-			entry.NodeName = node
-			if entry.State == "" {
-				entry.State = traincachev1alpha1.PreheatStatePreheating
-			}
-			entry.RequiredReady = requiredReady(task.Spec.Gate.Threshold, k)
-			entries = append(entries, entry)
-			slots[pod][nodeIndex] = len(entries) - 1
-		}
-	}
+	facts := make(map[readinessKey]readinessFact)
+	table := remapReadinessTable(task, pods, candidates)
 
 	reported := make([]bool, pods)
 	for pod := 0; pod < pods; pod++ {
@@ -208,7 +219,6 @@ func (r *Reconciler) pollReadiness(
 		podName := podNames[int32(pod)]
 
 		for nodeIndex, node := range candidates {
-			entry := &entries[slots[pod][nodeIndex]]
 			pairLog := log.With(
 				"task_id", taskID,
 				"pod", podName,
@@ -228,6 +238,7 @@ func (r *Reconciler) pollReadiness(
 			duration := r.now().Sub(start).Milliseconds()
 			if err != nil {
 				if errors.Is(err, agentclient.ErrAgentUnavailable) {
+					r.Metrics.ObserveAgentPoll(metrics.PollUnavailable)
 					attempt := r.progress.fail(attemptKey)
 					pairLog.Warn("agent progress unavailable",
 						"attempt", attempt,
@@ -235,7 +246,9 @@ func (r *Reconciler) pollReadiness(
 						"err", err,
 					)
 					if attempt >= unavailableFailureThreshold {
-						entry.State = traincachev1alpha1.PreheatStateFailed
+						facts[readinessKey{podIndex: int32(pod), node: node}] = readinessFact{
+							state: traincachev1alpha1.PreheatStateFailed,
+						}
 						pairLog.Warn("preheat progress degraded",
 							"attempt", attempt,
 							"state", string(traincachev1alpha1.PreheatStateFailed),
@@ -243,6 +256,7 @@ func (r *Reconciler) pollReadiness(
 						)
 					}
 				} else {
+					r.Metrics.ObserveAgentPoll(metrics.PollError)
 					pairLog.Warn("agent progress failed",
 						"duration_ms", duration,
 						"err", err,
@@ -253,10 +267,12 @@ func (r *Reconciler) pollReadiness(
 			r.progress.clearFailures(attemptKey)
 			if resp == nil {
 				// Tests and defensive callers may return an empty payload.
+				r.Metrics.ObserveAgentPoll(metrics.PollError)
 				continue
 			}
 
 			if resp.GetGeneration() != generation {
+				r.Metrics.ObserveAgentPoll(metrics.PollStale)
 				pairLog.Debug("drop progress: generation mismatch",
 					"response_generation", resp.GetGeneration(),
 					"seq", resp.GetSeq(),
@@ -273,6 +289,7 @@ func (r *Reconciler) pollReadiness(
 			fresh, reason := r.progress.check(generation, resp.GetSeq(), markKey)
 			reported[pod] = true
 			if !fresh {
+				r.Metrics.ObserveAgentPoll(metrics.PollStale)
 				pairLog.Debug("drop progress: "+reason,
 					"seq", resp.GetSeq(),
 					"duration_ms", duration,
@@ -283,6 +300,7 @@ func (r *Reconciler) pollReadiness(
 			decoded, decodeErr := nodescore.DecodeReadiness(resp.GetReadyBitmap(), chunkCount, k)
 			if decodeErr != nil {
 				// A malformed bitmap must not change the table (criterion ②).
+				r.Metrics.ObserveAgentPoll(metrics.PollError)
 				pairLog.Warn("drop progress: invalid ready bitmap",
 					"seq", resp.GetSeq(),
 					"duration_ms", duration,
@@ -292,12 +310,17 @@ func (r *Reconciler) pollReadiness(
 			}
 
 			r.progress.record(markKey, generation, resp.GetSeq())
-			entry.ReadyBlockBitmap = append([]byte(nil), resp.GetReadyBitmap()...)
-			entry.StartupWindowReady = decoded.ReadyInWindow
-			entry.ReadyInWindow = decoded.ReadyInWindow
-			entry.StartupWindowReadyRate = windowReadyRate(decoded.ReadyInWindow, k)
-			entry.State = preheatState(resp)
-			entry.LastReportTime = reportTime(resp, r.now())
+			r.Metrics.ObserveAgentPoll(metrics.PollOK)
+			fact := readinessFact{
+				ready:          decoded.ReadyInWindow,
+				bitmap:         append([]byte(nil), resp.GetReadyBitmap()...),
+				rate:           windowReadyRate(decoded.ReadyInWindow, k),
+				state:          preheatState(resp),
+				lastReportTime: reportTime(resp, r.now()),
+				hasData:        true,
+			}
+			facts[readinessKey{podIndex: int32(pod), node: node}] = fact
+			table[pod][nodeIndex] = decoded.ReadyInWindow
 
 			pairLog.Debug("progress updated",
 				"seq", resp.GetSeq(),
@@ -317,26 +340,25 @@ func (r *Reconciler) pollReadiness(
 		if !reported[pod] {
 			continue
 		}
-		assigned := ""
-		for _, index := range slots[pod] {
-			if entries[index].AssignedNode != "" {
-				assigned = entries[index].AssignedNode
-				break
-			}
-		}
+		assigned := assignedNode(task, int32(pod))
 		best := 0.0
 		found := false
-		for _, index := range slots[pod] {
-			entry := entries[index]
-			if entry.LastReportTime == nil {
-				continue
+		if assigned != "" {
+			if fact, ok := facts[readinessKey{podIndex: int32(pod), node: assigned}]; ok && fact.hasData {
+				best, found = fact.rate, true
+			} else if prev := readinessByPod(task, int32(pod)); prev != nil &&
+				prev.AssignedNode == assigned && prev.LastReportTime != nil {
+				best, found = prev.StartupWindowReadyRate, true
 			}
-			if assigned != "" && entry.NodeName != assigned {
-				continue
-			}
-			if !found || entry.StartupWindowReadyRate > best {
-				best = entry.StartupWindowReadyRate
-				found = true
+		} else {
+			for _, node := range candidates {
+				fact, ok := facts[readinessKey{podIndex: int32(pod), node: node}]
+				if !ok || !fact.hasData {
+					continue
+				}
+				if !found || fact.rate > best {
+					best, found = fact.rate, true
+				}
 			}
 		}
 		if found {
@@ -344,31 +366,189 @@ func (r *Reconciler) pollReadiness(
 		}
 	}
 
-	table := make([][]int32, pods)
-	for pod := 0; pod < pods; pod++ {
-		table[pod] = make([]int32, len(candidates))
-		for nodeIndex := range candidates {
-			table[pod][nodeIndex] = entries[slots[pod][nodeIndex]].ReadyInWindow
-		}
-	}
-
 	before := task.Status.DeepCopy()
 	task.Status.ReadinessTable = table
-	task.Status.PodNodeReadiness = entries
+	buildPodDetails(task, facts, podNames, candidates, nil)
 	if !equality.Semantic.DeepEqual(before, &task.Status) {
 		lastUpdated := metav1.NewTime(now)
 		task.Status.LastUpdated = &lastUpdated
 	}
 
-	pending := false
-	for i := range entries {
-		if entries[i].State != traincachev1alpha1.PreheatStateReady &&
-			entries[i].State != traincachev1alpha1.PreheatStateFailed {
-			pending = true
-			break
+	return pollOutcome{Pending: pollPending(task, facts, candidates, pods)}, facts
+}
+
+// remapReadinessTable starts from the published table and remaps its columns
+// by node name. Keeping the last known counts for candidate columns that were
+// not observed this round preserves the pre-M12 table semantics without
+// persisting P×N per-node details.
+func remapReadinessTable(task *traincachev1alpha1.WarmupTask, pods int, candidates []string) [][]int32 {
+	oldColumns := make(map[string]int, len(task.Status.CandidateNodes))
+	for column, node := range task.Status.CandidateNodes {
+		oldColumns[node] = column
+	}
+	table := make([][]int32, pods)
+	for pod := 0; pod < pods; pod++ {
+		table[pod] = make([]int32, len(candidates))
+		for column, node := range candidates {
+			oldColumn, ok := oldColumns[node]
+			if !ok || pod >= len(task.Status.ReadinessTable) {
+				continue
+			}
+			oldRow := task.Status.ReadinessTable[pod]
+			if oldColumn >= 0 && oldColumn < len(oldRow) {
+				table[pod][column] = oldRow[oldColumn]
+			}
 		}
 	}
-	return pollOutcome{Pending: pending && len(entries) > 0}
+	return table
+}
+
+// pollPending reports whether any (Pod, candidate node) pair is still
+// non-terminal. A fresh observation is authoritative; without one, a fully
+// ready table cell counts as terminal and anything else keeps polling.
+func pollPending(task *traincachev1alpha1.WarmupTask, facts map[readinessKey]readinessFact, candidates []string, pods int) bool {
+	for pod := 0; pod < pods; pod++ {
+		k := int32(1)
+		if detail, ok := podDetail(task, int32(pod)); ok {
+			k = detail.K
+		}
+		for column, node := range candidates {
+			if fact, ok := facts[readinessKey{podIndex: int32(pod), node: node}]; ok {
+				if fact.state != traincachev1alpha1.PreheatStateReady &&
+					fact.state != traincachev1alpha1.PreheatStateFailed {
+					return true
+				}
+				continue
+			}
+			if pod < len(task.Status.ReadinessTable) &&
+				column < len(task.Status.ReadinessTable[pod]) &&
+				task.Status.ReadinessTable[pod][column] >= k {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// buildPodDetails writes exactly one PodNodeReadiness per PodDetail.Index.
+// assignment == nil keeps the assignment currently recorded in status. The
+// assigned node's fact is taken from this round's facts; without a fresh
+// observation the previous fact is preserved when the assignment did not
+// change. An unassigned Pod has an empty AssignedNode and the Pod-level
+// aggregate State.
+func buildPodDetails(
+	task *traincachev1alpha1.WarmupTask,
+	facts map[readinessKey]readinessFact,
+	podNames map[int32]string,
+	candidates []string,
+	assignment map[int32]string,
+) {
+	previous := make(map[int32]traincachev1alpha1.PodNodeReadiness, len(task.Status.PodNodeReadiness))
+	for _, entry := range task.Status.PodNodeReadiness {
+		if _, ok := previous[entry.PodIndex]; !ok {
+			previous[entry.PodIndex] = entry
+		}
+	}
+
+	entries := make([]traincachev1alpha1.PodNodeReadiness, 0, len(task.Spec.PodDetails))
+	for index := int32(0); index < task.Spec.PodCount; index++ {
+		detail, ok := podDetail(task, index)
+		if !ok {
+			continue
+		}
+		prev, hadPrev := previous[index]
+		assigned := prev.AssignedNode
+		if assignment != nil {
+			assigned = assignment[index]
+		}
+		entry := traincachev1alpha1.PodNodeReadiness{
+			PodIndex:      index,
+			PodName:       podNames[index],
+			AssignedNode:  assigned,
+			ActualNode:    prev.ActualNode,
+			RequiredReady: requiredReady(task.Spec.Gate.Threshold, detail.K),
+		}
+
+		fact, hasFact := facts[readinessKey{podIndex: index, node: assigned}]
+		switch {
+		case assigned == "":
+			entry.State = aggregatePodState(facts, index, candidates)
+		case hasFact && fact.hasData:
+			applyReadinessFact(&entry, fact)
+		case hasFact:
+			if hadPrev && prev.AssignedNode == assigned {
+				carryReadinessFact(&entry, prev)
+			} else {
+				entry.State = traincachev1alpha1.PreheatStatePreheating
+			}
+			entry.State = fact.state
+		case hadPrev && prev.AssignedNode == assigned:
+			carryReadinessFact(&entry, prev)
+		default:
+			entry.State = traincachev1alpha1.PreheatStatePreheating
+		}
+		entries = append(entries, entry)
+	}
+	task.Status.PodNodeReadiness = entries
+}
+
+func applyReadinessFact(entry *traincachev1alpha1.PodNodeReadiness, fact readinessFact) {
+	entry.ReadyBlockBitmap = append([]byte(nil), fact.bitmap...)
+	entry.StartupWindowReady = fact.ready
+	entry.ReadyInWindow = fact.ready
+	entry.StartupWindowReadyRate = fact.rate
+	entry.LastReportTime = fact.lastReportTime
+	entry.State = fact.state
+}
+
+func carryReadinessFact(entry *traincachev1alpha1.PodNodeReadiness, prev traincachev1alpha1.PodNodeReadiness) {
+	entry.ReadyBlockBitmap = append([]byte(nil), prev.ReadyBlockBitmap...)
+	entry.StartupWindowReady = prev.StartupWindowReady
+	entry.ReadyInWindow = prev.ReadyInWindow
+	entry.StartupWindowReadyRate = prev.StartupWindowReadyRate
+	entry.GlobalDecayScore = prev.GlobalDecayScore
+	entry.State = prev.State
+	entry.LastReportTime = prev.LastReportTime
+}
+
+// aggregatePodState summarizes an unassigned Pod: Ready when any candidate is
+// Ready, Failed only when every candidate is Failed, otherwise Preheating.
+func aggregatePodState(facts map[readinessKey]readinessFact, pod int32, candidates []string) traincachev1alpha1.PreheatState {
+	seen := false
+	anyReady := false
+	allFailed := len(candidates) > 0
+	for _, node := range candidates {
+		fact, ok := facts[readinessKey{podIndex: pod, node: node}]
+		if !ok {
+			allFailed = false
+			continue
+		}
+		seen = true
+		if fact.state == traincachev1alpha1.PreheatStateReady {
+			anyReady = true
+		}
+		if fact.state != traincachev1alpha1.PreheatStateFailed {
+			allFailed = false
+		}
+	}
+	if seen && allFailed {
+		return traincachev1alpha1.PreheatStateFailed
+	}
+	if anyReady {
+		return traincachev1alpha1.PreheatStateReady
+	}
+	return traincachev1alpha1.PreheatStatePreheating
+}
+
+// readinessByPod returns the current single PodNodeReadiness entry for a Pod.
+func readinessByPod(task *traincachev1alpha1.WarmupTask, pod int32) *traincachev1alpha1.PodNodeReadiness {
+	for i := range task.Status.PodNodeReadiness {
+		if task.Status.PodNodeReadiness[i].PodIndex == pod {
+			return &task.Status.PodNodeReadiness[i]
+		}
+	}
+	return nil
 }
 
 // pollRequeueAfter returns the bounded polling delay. Terminal tasks stop

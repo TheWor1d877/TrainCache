@@ -13,7 +13,13 @@
 #
 # Environment overrides:
 #   CLUSTER=traincache-e2e  REGISTRY=<mirror>  TAG=0.8.0  FORCE_BUILD=1
+#   SKIP_BUILD=1            (reuse images without a freshness check; may test
+#                            stale code, never the default)
 #   SKIP_NODE_LABELS=1      (skip the simulated admin labelling step)
+#
+# Images are rebuilt automatically when any of their build inputs (the
+# go.work files plus the per-component source trees listed next to each
+# build_image call) is newer than the image's creation time.
 #
 # The s3-access Node label is NEVER written by TrainCache components. This
 # script performs the labelling once in setup as an explicit simulation of the
@@ -70,6 +76,7 @@ ok()   { printf '  [OK]   %s\n' "$*"; }
 info() { printf '  [INFO] %s\n' "$*"; }
 fail() { printf '  [FAIL] %s\n' "$*"; FAILS=$((FAILS + 1)); }
 skip() { printf '  [SKIP] %s\n' "$*"; }
+warn() { printf '  [WARN] %s\n' "$*"; }
 
 start_logging() {
   mkdir -p "$RESULTS" "$LOGS" "$DATA" "$TLS"
@@ -126,11 +133,40 @@ cluster_up() {
   ok "cluster reachable ($(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion // "unknown"'))"
 }
 
+# image_is_fresh IMAGE PATH... — true when every file under the given source
+# paths is older than the image's creation time. Uses a temp reference file so
+# find's -newer comparison keeps the image timestamp's sub-second precision.
+image_is_fresh() {
+  local image="$1"; shift
+  local created ref newer
+  created="$(docker image inspect -f '{{.Created}}' "$image" 2>/dev/null)" || return 1
+  [[ -n "$created" ]] || return 1
+  ref="$(mktemp "${TMPDIR:-/tmp}/traincache-imgtime.XXXXXX")" || return 1
+  if ! touch -d "$created" "$ref" 2>/dev/null; then
+    rm -f "$ref"
+    return 1
+  fi
+  newer="$(find "$@" -type f -newer "$ref" -print -quit 2>/dev/null)"
+  rm -f "$ref"
+  [[ -z "$newer" ]]
+}
+
 build_image() {
   local name="$1" image="$2" dockerfile="$3" context="$4"
-  if [[ "${FORCE_BUILD:-0}" != "1" ]] && docker image inspect "$image" >/dev/null 2>&1; then
+  shift 4
+  if [[ "${SKIP_BUILD:-0}" == "1" ]] && docker image inspect "$image" >/dev/null 2>&1; then
+    warn "SKIP_BUILD=1: reusing $name image without a freshness check; may test stale code ($image)"
+    return 0
+  fi
+  if [[ "${FORCE_BUILD:-0}" == "1" ]]; then
+    info "rebuild because $name: FORCE_BUILD=1"
+  elif ! docker image inspect "$image" >/dev/null 2>&1; then
+    info "building $name: image not found"
+  elif image_is_fresh "$image" "$@"; then
     info "image $name already built ($image)"
     return 0
+  else
+    info "rebuild because $name: source newer than image"
   fi
   local log="$LOGS/build-$name.log"
   info "building $name -> $image (log: $log)"
@@ -158,10 +194,25 @@ build_images() {
   stage="$(mktemp -d "${TMPDIR:-/tmp}/traincache-build.XXXXXX")"
   cp -a "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum" "$REPO_ROOT/agent" "$REPO_ROOT/core" "$REPO_ROOT/controller" "$stage/" \
     || { fail "stage build context"; rm -rf "$stage"; return 1; }
-  build_image manager "$IMG_MANAGER" "$REPO_ROOT/controller/deploy/manager/Dockerfile" "$stage" || { rm -rf "$stage"; return 1; }
-  build_image webhook "$IMG_WEBHOOK" "$REPO_ROOT/controller/deploy/webhook/Dockerfile" "$stage" || { rm -rf "$stage"; return 1; }
-  build_image scheduler "$IMG_SCHEDULER" "$REPO_ROOT/controller/deploy/scheduler/Dockerfile" "$stage" || { rm -rf "$stage"; return 1; }
-  build_image agent "$IMG_AGENT" "$REPO_ROOT/agent/Dockerfile" "$stage" || { rm -rf "$stage"; return 1; }
+  # Per-component build inputs. The Dockerfiles copy the whole workspace, but
+  # controller binaries only import controller/, core/ and agent/api while
+  # agentd imports agent/ and core/. Checking each component separately means
+  # an agent-only edit does not needlessly rebuild the control plane.
+  local controller_src=(
+    "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum"
+    "$REPO_ROOT/controller/cmd" "$REPO_ROOT/controller/internal"
+    "$REPO_ROOT/controller/api" "$REPO_ROOT/controller/config"
+    "$REPO_ROOT/controller/deploy"
+    "$REPO_ROOT/core" "$REPO_ROOT/agent/api"
+  )
+  local agent_src=(
+    "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum"
+    "$REPO_ROOT/agent" "$REPO_ROOT/core"
+  )
+  build_image manager "$IMG_MANAGER" "$REPO_ROOT/controller/deploy/manager/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
+  build_image webhook "$IMG_WEBHOOK" "$REPO_ROOT/controller/deploy/webhook/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
+  build_image scheduler "$IMG_SCHEDULER" "$REPO_ROOT/controller/deploy/scheduler/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
+  build_image agent "$IMG_AGENT" "$REPO_ROOT/agent/Dockerfile" "$stage" "${agent_src[@]}" || { rm -rf "$stage"; return 1; }
   rm -rf "$stage"
 
   load_image "$IMG_MANAGER" || return 1
@@ -441,18 +492,22 @@ assert_webhook_injection() {
 
 assert_preheat_and_release() {
   step "assert 2: preheat progress and gate release"
-  local phase gate_state ready_rows
+  local phase gate_state ready_rows pod_count
   phase="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.phase}')"
   gate_state="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.gateDecision.state}')"
   ready_rows="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json | jq '[.status.podNodeReadiness[]?] | length')"
+  pod_count="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.spec.podCount}')"
   [[ "$phase" == "Released" ]] && ok "WarmupTask phase=Released" || fail "WarmupTask phase=$phase"
   [[ "$gate_state" == "Released" ]] && ok "gateDecision.state=Released ($(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.gateDecision.reason}'))" \
     || fail "gateDecision.state=$gate_state"
-  [[ "$ready_rows" -ge 4 ]] && ok "preheat progress rows=$ready_rows" || fail "podNodeReadiness rows=$ready_rows (<4)"
+  # M12/S15: exactly one PodNodeReadiness entry per Pod; candidate-node
+  # granularity lives in status.readinessTable.
+  [[ "$ready_rows" -eq "$pod_count" ]] && ok "preheat progress rows=$ready_rows (one per Pod)" \
+    || fail "podNodeReadiness rows=$ready_rows, want podCount=$pod_count"
   # The readiness facts must show actual ready blocks on the assigned nodes.
   local progress
   progress="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json | jq '[.status.podNodeReadiness[]? | select((.readyInWindow // 0) > 0 or ((.readyBlockBitmap // "") | length > 0))] | length')"
-  [[ "$progress" -ge 1 ]] && ok "ready-block facts observed ($progress pairs)" || fail "no ready-block progress recorded"
+  [[ "$progress" -ge 1 ]] && ok "ready-block facts observed ($progress Pod(s))" || fail "no ready-block progress recorded"
   local consumed
   consumed="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.consumeOrderSource}')"
   info "consumeOrderSource=$consumed"

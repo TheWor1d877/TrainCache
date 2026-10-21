@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
+	"traincache/controller/internal/metrics"
 )
 
 // Pod association and injection keys frozen by docs/8.1 §5.7/§6.3 and
@@ -306,6 +307,7 @@ type DegradedReconciler struct {
 	Log      *slog.Logger
 	Recorder record.EventRecorder
 	Now      func() time.Time
+	Metrics  *metrics.Metrics
 }
 
 // SetupWithManager registers the degraded-condition reconciler for Pods
@@ -324,8 +326,12 @@ func (r *DegradedReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Reconcile detects a selected Pod with no warmup-task annotation and writes
 // the degraded condition to its matching task. It never mutates the Pod and
 // never blocks Pod admission.
-func (r *DegradedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DegradedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	start := r.now()
+	defer func() {
+		r.Metrics.ObserveReconcile(metrics.ControllerWarmupDegraded, retErr, result.RequeueAfter, r.now().Sub(start))
+	}()
+
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, req.NamespacedName, pod); err != nil {
 		if apierrors.IsNotFound(err) {
