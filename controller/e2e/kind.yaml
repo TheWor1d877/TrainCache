@@ -9,6 +9,30 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: KubeletConfiguration
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        containerLogMaxSize: 50Mi
+        containerLogMaxFiles: 3
   - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: KubeletConfiguration
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        containerLogMaxSize: 50Mi
+        containerLogMaxFiles: 3
   - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: KubeletConfiguration
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        containerLogMaxSize: 50Mi
+        containerLogMaxFiles: 3
   - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: KubeletConfiguration
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        containerLogMaxSize: 50Mi
+        containerLogMaxFiles: 3

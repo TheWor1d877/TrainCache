@@ -74,6 +74,12 @@ func TestCRDShapeAndValidation(t *testing.T) {
 		t.Errorf("WarmupTask CRD has no score.cutoff")
 	}
 
+	// preheatFanout defaults to 1 and rejects zero/negative values (M13).
+	fanout := regexp.MustCompile(`(?s)preheatFanout:\n\s+default: 1\n.*?\n\s+minimum: 1\n`)
+	if !fanout.MatchString(warmups) {
+		t.Errorf("WarmupTask CRD preheatFanout is missing default: 1 and minimum: 1")
+	}
+
 	// podCount and dataSetRef are immutable via CEL.
 	if got := strings.Count(warmups, "rule: self == oldSelf"); got < 2 {
 		t.Errorf("WarmupTask CRD has %d `self == oldSelf` rules, want at least 2", got)
@@ -120,16 +126,36 @@ func TestGoContractSurface(t *testing.T) {
 
 	wt := reflect.TypeOf(WarmupTaskSpec{})
 	for _, field := range []string{
-		"DataSetRef", "TargetRef", "PodCount", "Affinity", "TrainingType",
-		"PodDetails", "Gate", "Score", "Candidate",
+		"DataSetRef", "TargetRef", "PodCount", "PreheatFanout", "Affinity",
+		"TrainingType", "PodDetails", "Gate", "Score", "Candidate",
 	} {
 		if _, ok := wt.FieldByName(field); !ok {
 			t.Errorf("WarmupTaskSpec is missing %s", field)
 		}
 	}
+	fanout, _ := wt.FieldByName("PreheatFanout")
+	if fanout.Type != reflect.TypeOf(int32(0)) {
+		t.Errorf("WarmupTaskSpec.PreheatFanout = %v, want int32", fanout.Type)
+	}
 	candidate, _ := wt.FieldByName("Candidate")
 	if candidate.Type != reflect.TypeOf(CandidatePolicy{}) {
 		t.Errorf("WarmupTaskSpec.Candidate = %v, want CandidatePolicy", candidate.Type)
+	}
+
+	// M13: one entry per (Pod, preheat node); AssignedNode is replaced by
+	// NodeName.
+	readiness := reflect.TypeOf(PodNodeReadiness{})
+	for _, field := range []string{
+		"PodIndex", "PodName", "NodeName", "ActualNode", "ReadyBlockBitmap",
+		"StartupWindowReady", "ReadyInWindow", "RequiredReady",
+		"StartupWindowReadyRate", "GlobalDecayScore", "State", "LastReportTime",
+	} {
+		if _, ok := readiness.FieldByName(field); !ok {
+			t.Errorf("PodNodeReadiness is missing %s", field)
+		}
+	}
+	if _, ok := readiness.FieldByName("AssignedNode"); ok {
+		t.Errorf("PodNodeReadiness still has AssignedNode")
 	}
 
 	meta, _ := ds.FieldByName("Metadata")

@@ -69,8 +69,8 @@ func TestM12RestartRebuildsStateFromStatus(t *testing.T) {
 		CandidateNodes:     []string{"n1", "n2"},
 		ReadinessTable:     [][]int32{{2, 1}, {1, 2}},
 		PodNodeReadiness: []traincachev1alpha1.PodNodeReadiness{
-			{PodIndex: 0, PodName: "trainer-0", AssignedNode: "n1", ReadyInWindow: 2, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
-			{PodIndex: 1, PodName: "trainer-1", AssignedNode: "n2", ReadyInWindow: 2, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
+			{PodIndex: 0, PodName: "trainer-0", NodeName: "n1", ReadyInWindow: 2, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
+			{PodIndex: 1, PodName: "trainer-1", NodeName: "n2", ReadyInWindow: 2, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
 		},
 	}
 
@@ -128,7 +128,7 @@ func TestM12RestartRebuildsStateFromStatus(t *testing.T) {
 	for i, before := range task.Status.PodNodeReadiness {
 		after := updated.Status.PodNodeReadiness[i]
 		if after.PodIndex != before.PodIndex ||
-			after.AssignedNode != before.AssignedNode || after.ReadyInWindow != before.ReadyInWindow {
+			after.NodeName != before.NodeName || after.ReadyInWindow != before.ReadyInWindow {
 			t.Fatalf("entry[%d] after restart = %#v, want facts from %#v", i, after, before)
 		}
 	}

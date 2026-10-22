@@ -35,6 +35,9 @@ func ValidateTask(task *traincachev1alpha1.WarmupTask) []string {
 	if spec.PodCount > maxPods {
 		reasons = append(reasons, fmt.Sprintf("spec.podCount %d exceeds limit %d", spec.PodCount, maxPods))
 	}
+	if spec.PreheatFanout < 0 {
+		reasons = append(reasons, fmt.Sprintf("spec.preheatFanout must be >= 0, got %d", spec.PreheatFanout))
+	}
 	if int32(len(spec.PodDetails)) != spec.PodCount {
 		reasons = append(reasons, fmt.Sprintf("spec.podDetails has %d entries, want podCount %d", len(spec.PodDetails), spec.PodCount))
 	}

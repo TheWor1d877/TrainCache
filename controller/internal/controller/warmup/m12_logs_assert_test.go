@@ -199,7 +199,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 			in: func() PlacementApplyInput {
 				in := testPlacementInput()
 				in.Previous = map[PreheatPair]ExistingPreheat{}
-				in.Placement = gwaa.Output{Assignment: map[int32]string{0: "n0"}}
+				in.Placement = gwaa.Output{Assignment: map[int32][]string{0: {"n0"}}}
 				return in
 			},
 			msg: "agent submit failed",
@@ -211,7 +211,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 				in.Previous = map[PreheatPair]ExistingPreheat{
 					{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("old"), Generation: 7},
 				}
-				in.Placement = gwaa.Output{Assignment: map[int32]string{0: "n0"}}
+				in.Placement = gwaa.Output{Assignment: map[int32][]string{0: {"n0"}}}
 				return in
 			},
 			msg: "agent update failed",

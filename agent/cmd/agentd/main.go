@@ -11,25 +11,38 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 
+	"traincache/agent/internal/logging"
 	"traincache/agent/svc"
 )
 
 // metricsShutdownTimeout 是 /metrics 服务优雅停止的上限(与 gRPC GracefulStop 并发执行)。
 const metricsShutdownTimeout = 3 * time.Second
 
+// buildVersion 取 Go 构建信息中的主模块版本;代理模块未注入 ldflags 版本,
+// 构建信息为空时回退 "dev"。
+func buildVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
+
 func main() {
 	// 结构化 JSON 日志(slog;Q6 结案:高基数维度 path/fp/task_id 走行级日志)。
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	// component/version 由 logging.New 注入并设为默认 logger;P0 级别固定 info,
+	// 动态级别属于 P1。
+	logging.New("agentd", buildVersion(), "info")
 
 	cfg, err := svc.Load()
 	if err != nil {
-		slog.Error("配置加载失败", "error", err)
+		slog.Error("配置加载失败", "err", err)
 		os.Exit(1)
 	}
 
@@ -37,7 +50,7 @@ func main() {
 	// collector 例外:绑单个 ring,首个订单 ring 被发现时才构造并启动,见 svc wire.go)。
 	ag, err := svc.Assemble(*cfg)
 	if err != nil {
-		slog.Error("装配失败", "error", err)
+		slog.Error("装配失败", "err", err)
 		os.Exit(1)
 	}
 
@@ -46,7 +59,7 @@ func main() {
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
-		slog.Error("监听 gRPC 地址失败", "addr", cfg.GRPCAddr, "error", err)
+		slog.Error("监听 gRPC 地址失败", "addr", cfg.GRPCAddr, "err", err)
 		os.Exit(1)
 	}
 
@@ -57,7 +70,7 @@ func main() {
 	}
 	metricsLis, err := net.Listen("tcp", cfg.MetricsAddr)
 	if err != nil {
-		slog.Error("监听 metrics 地址失败", "addr", cfg.MetricsAddr, "error", err)
+		slog.Error("监听 metrics 地址失败", "addr", cfg.MetricsAddr, "err", err)
 		os.Exit(1)
 	}
 
@@ -105,12 +118,12 @@ func main() {
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			slog.Error("gRPC 服务异常退出", "error", err)
+			slog.Error("gRPC 服务异常退出", "err", err)
 			os.Exit(1)
 		}
 	case err := <-metricsErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics 服务异常退出", "error", err)
+			slog.Error("metrics 服务异常退出", "err", err)
 			os.Exit(1)
 		}
 	case <-ctx.Done():

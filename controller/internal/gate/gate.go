@@ -1,8 +1,9 @@
 // Package gate implements the three-condition WarmupTask gate from
-// docs/8.1 design.md §5.6 and docs/8.3 D14/D15/D26. It is a pure package: it
-// reads only its Input and returns a Decision. Rate/Gap/Slope are observations
-// for logging and the marginal-gain condition; condition ① compares the
-// integer Ready count against the integer Required count.
+// docs/8.1 design.md §5.6, §7.5 and docs/8.3 D14/D15/D26. It is a pure package:
+// it reads only its Input and returns a Decision. Rate/Gap/Slope are
+// observations for logging and the marginal-gain condition; condition ① is an
+// existential quantifier over the Pod's preheat node set and compares each
+// node's integer ready count against the integer required count.
 package gate
 
 import (
@@ -43,16 +44,21 @@ type GatePolicy struct {
 	MinInterval time.Duration
 }
 
-// PodGateState is one Pod's gate input on its assigned node.
+// PodGateState is one Pod's gate input over its preheat node set.
 type PodGateState struct {
 	Index int32
-	// AssignedNode is the GWAA assignment. An empty value means no assigned
-	// node, so condition ① cannot be satisfied.
-	AssignedNode string
-	K            int32
-	// Ready is the ready-block count in the startup window on AssignedNode.
-	Ready int32
-	// Rate is Ready/K. It is observation-only for condition ①.
+	// AssignedNodes is the GWAA preheat node set for this Pod. An empty set
+	// means condition ① cannot be satisfied; a non-empty set is satisfied as
+	// soon as at least one node reaches RequiredReady.
+	AssignedNodes []string
+	// ReadyByNode is the number of validated, persisted blocks in the startup
+	// window on each preheat node. A missing entry is treated as 0.
+	ReadyByNode map[string]int32
+	K           int32
+	// Rate is the caller-observed maximum ReadyByNode[node]/K over
+	// AssignedNodes, kept for observation parity. Evaluate derives the same
+	// value from AssignedNodes/ReadyByNode when the set is non-empty; it falls
+	// back to this field only when no node set is supplied.
 	Rate float64
 	// PrevRate and PrevAt describe the previous rate sample. FirstSampleSeen
 	// reports that the caller has at least one sample; a slope is only valid
@@ -96,13 +102,14 @@ func Evaluate(in Input) Decision {
 	for i := range in.Pods {
 		pod := in.Pods[i]
 		required := RequiredReady(in.Policy.Threshold, pod.K)
-		slope, valid := slopeOf(in, pod)
+		rate := podRate(pod)
+		slope, valid := slopeOf(in, pod, rate)
 		rates[i] = PodRate{
 			PodIndex:   pod.Index,
-			Ready:      pod.Ready,
+			Ready:      podBestReady(pod),
 			Required:   required,
-			Rate:       pod.Rate,
-			Gap:        in.Policy.Threshold - pod.Rate,
+			Rate:       rate,
+			Gap:        in.Policy.Threshold - rate,
 			Slope:      slope,
 			SlopeValid: valid,
 		}
@@ -117,11 +124,11 @@ func Evaluate(in Input) Decision {
 		return decision
 	}
 
-	// ① Every Pod must reach its integer threshold on its assigned node.
+	// ① Every Pod must reach its integer threshold on at least one preheat
+	// node (existential quantifier, docs/8.1 §5.6, §7.5).
 	allReady := len(in.Pods) > 0
 	for i := range in.Pods {
-		pod := in.Pods[i]
-		if pod.AssignedNode == "" || pod.Ready < rates[i].Required {
+		if !podMeetsThreshold(in.Pods[i], rates[i].Required) {
 			allReady = false
 			break
 		}
@@ -139,8 +146,7 @@ func Evaluate(in Input) Decision {
 		in.Now.Sub(in.FirstReadyAt) >= nonNegative(in.Policy.MinInterval)
 	if eligible {
 		for i := range in.Pods {
-			pod := in.Pods[i]
-			if pod.AssignedNode != "" && pod.Ready >= rates[i].Required {
+			if podMeetsThreshold(in.Pods[i], rates[i].Required) {
 				continue
 			}
 			if !rates[i].SlopeValid ||
@@ -179,7 +185,48 @@ func RequiredReady(threshold float64, k int32) int32 {
 	return required
 }
 
-func slopeOf(in Input, pod PodGateState) (float64, bool) {
+// podMeetsThreshold reports whether at least one node in the Pod's preheat set
+// has reached required. An empty set never satisfies condition ①.
+func podMeetsThreshold(pod PodGateState, required int32) bool {
+	for _, node := range pod.AssignedNodes {
+		if pod.ReadyByNode[node] >= required {
+			return true
+		}
+	}
+	return false
+}
+
+// podBestReady is the largest ready-block count over the preheat set, used for
+// observation in PodRate.Ready.
+func podBestReady(pod PodGateState) int32 {
+	var best int32
+	for _, node := range pod.AssignedNodes {
+		if ready := pod.ReadyByNode[node]; ready > best {
+			best = ready
+		}
+	}
+	return best
+}
+
+// podRate is the maximum ReadyByNode[node]/K over the preheat set. It falls
+// back to the caller-observed Rate only when no node set is supplied.
+func podRate(pod PodGateState) float64 {
+	if len(pod.AssignedNodes) == 0 {
+		return pod.Rate
+	}
+	if pod.K <= 0 {
+		return 0
+	}
+	best := 0.0
+	for _, node := range pod.AssignedNodes {
+		if rate := float64(pod.ReadyByNode[node]) / float64(pod.K); rate > best {
+			best = rate
+		}
+	}
+	return best
+}
+
+func slopeOf(in Input, pod PodGateState, rate float64) (float64, bool) {
 	if !pod.FirstSampleSeen || pod.PrevAt.IsZero() {
 		return 0, false
 	}
@@ -187,7 +234,7 @@ func slopeOf(in Input, pod PodGateState) (float64, bool) {
 	if elapsed < nonNegative(in.Policy.MinInterval) || elapsed <= 0 {
 		return 0, false
 	}
-	return (pod.Rate - pod.PrevRate) / elapsed.Seconds(), true
+	return (rate - pod.PrevRate) / elapsed.Seconds(), true
 }
 
 func nonNegative(d time.Duration) time.Duration {

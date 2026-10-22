@@ -4,7 +4,8 @@
 // Compute is a pure function: it reads only its Input, performs no I/O, does
 // not touch Kubernetes types and emits no log records. Callers own logging and
 // RPC orchestration. Pods that must share a node (AffinityGroup) are merged
-// into one placement unit; every tie is broken through the injected
+// into one placement unit; each unit claims up to Input.Fanout feasible nodes
+// in descending c_ij order. Every tie is broken through the injected
 // *rand.Rand, so a fixed seed reproduces the same placement (D32).
 package gwaa
 
@@ -68,13 +69,20 @@ type Input struct {
 	// Zero means len(Pods), the contract from docs/8.2 M6; larger values are
 	// clamped to len(Pods).
 	MaxRounds int
+
+	// Fanout is the number of preheat nodes each Pod claims (docs/8.1 §5.5).
+	// Zero means 1; the CRD rejects zero and negative values, but Compute still
+	// treats zero as the single-node default for callers that predate M13.
+	Fanout int32
 }
 
-// Output is the GWAA result. Assignment maps podIndex -> nodeName and omits
-// unassigned Pods. PreheatSet is the node -> sorted podIndex view of the same
-// mapping. UnassignedPods lists Pods for which no feasible placement exists.
+// Output is the GWAA result. Assignment maps podIndex -> up to Fanout node
+// names sorted by c_ij descending and omits Pods with no feasible node.
+// PreheatSet is the node -> sorted podIndex view and covers every (Pod, node)
+// pair in Assignment. UnassignedPods lists Pods for which no feasible node
+// exists at all.
 type Output struct {
-	Assignment     map[int32]string
+	Assignment     map[int32][]string
 	PreheatSet     map[string][]int32
 	UnassignedPods []int32
 	Rounds         int
@@ -112,6 +120,9 @@ type groupSeed struct {
 func Validate(in Input) error {
 	if in.MaxRounds < 0 {
 		return fmt.Errorf("%w: max rounds %d is negative", ErrInvalidInput, in.MaxRounds)
+	}
+	if in.Fanout < 0 {
+		return fmt.Errorf("%w: fanout %d is negative", ErrInvalidInput, in.Fanout)
 	}
 	if len(in.Pods) > MaxPods {
 		return fmt.Errorf("%w: pod count %d exceeds limit %d", ErrInvalidInput, len(in.Pods), MaxPods)
@@ -178,12 +189,15 @@ func Compute(in Input) Output {
 	}
 	order := orderUnits(units, active, rng)
 
+	fanout := in.Fanout
+	if fanout <= 0 {
+		fanout = 1
+	}
+	k := int(fanout)
 	allowMulti := in.AllowMultiPodPerNode
 	first := newState(len(units), len(nodes))
 	for _, u := range order {
-		if n := first.bestFeasible(u, -1, units, allowMulti); n >= 0 {
-			first.assignUnit(u, n)
-		}
+		first.fillUnit(u, k, units, allowMulti)
 	}
 
 	maxRounds := len(in.Pods)
@@ -198,31 +212,48 @@ func Compute(in Input) Output {
 	resolve := func() bool {
 		changed := false
 		for _, u := range order {
-			if st.assign[u] >= 0 {
+			if len(st.claims[u]) >= k {
 				continue
 			}
 			for idx := nextRank[u]; idx < len(units[u].pref); idx++ {
 				n := units[u].pref[idx]
+				if st.claimed[u][n] {
+					nextRank[u] = idx + 1
+					continue
+				}
 				blockers := st.blockers(u, n, units, allowMulti)
 				if len(blockers) == 0 {
-					st.assignUnit(u, n)
+					st.addClaim(u, n)
 					changed = true
-					break
+					nextRank[u] = idx + 1
+					if len(st.claims[u]) >= k {
+						break
+					}
+					continue
 				}
 				if st.winsAll(u, blockers, n, units, rng) {
 					for _, b := range blockers {
-						st.unassign(b)
+						st.removeClaim(b, n)
 						if rank := units[b].rank[n]; rank >= 0 && rank+1 > nextRank[b] {
 							nextRank[b] = rank + 1
 						}
 					}
-					st.assignUnit(u, n)
+					st.addClaim(u, n)
 					changed = true
-					break
+					nextRank[u] = idx + 1
+					if len(st.claims[u]) >= k {
+						break
+					}
+					continue
 				}
 				// The yielding unit may only retreat to its next-best node
-				// (docs/8.0 conflict adjudication).
+				// (docs/8.0 conflict adjudication). A retreat with untried
+				// candidates left is progress: reporting "no change" here
+				// would declare convergence while the unit is still below K.
 				nextRank[u] = idx + 1
+				if nextRank[u] < len(units[u].pref) {
+					changed = true
+				}
 				break
 			}
 		}
@@ -250,6 +281,13 @@ func Compute(in Input) Output {
 	if fellBack {
 		rounds = maxRounds
 	}
+	// The bounded-round conflict resolution may stop with a unit below K even
+	// though acceptable free nodes remain. Fill those units without evicting
+	// anyone, so the docs/8.1 §5.5 postcondition holds: every Pod gets K
+	// nodes when K feasible nodes exist, or all feasible nodes otherwise.
+	for _, u := range order {
+		st.topUp(u, k, units, allowMulti)
+	}
 	return buildOutput(in, units, st, rounds, fellBack)
 }
 
@@ -260,7 +298,7 @@ func invalidOutput(in Input, err error) Output {
 	}
 	sort.Slice(pods, func(i, j int) bool { return pods[i] < pods[j] })
 	return Output{
-		Assignment:     map[int32]string{},
+		Assignment:     map[int32][]string{},
 		PreheatSet:     map[string][]int32{},
 		UnassignedPods: pods,
 		Err:            err,
@@ -476,30 +514,47 @@ func shareAnti(a, b *unit) bool {
 }
 
 type state struct {
-	assign    []int
+	// claims holds, per unit, the node positions it currently claims (at most
+	// Fanout, in discovery order; buildOutput sorts them by c_ij).
+	claims [][]int
+	// claimed is a units x nodes membership bitmap. Units are small (<= MaxPods)
+	// and nodes bounded by MaxNodes, so O(units*nodes) bools are cheap and keep
+	// claim removal O(1) before the nodeUnits list is adjusted.
+	claimed   [][]bool
 	nodeUnits [][]int
 }
 
 func newState(units, nodes int) *state {
 	st := &state{
-		assign:    make([]int, units),
+		claims:    make([][]int, units),
+		claimed:   make([][]bool, units),
 		nodeUnits: make([][]int, nodes),
 	}
-	for i := range st.assign {
-		st.assign[i] = -1
+	for i := range st.claimed {
+		st.claimed[i] = make([]bool, nodes)
 	}
 	return st
 }
 
-func (s *state) assignUnit(u, n int) {
-	s.assign[u] = n
+func (s *state) addClaim(u, n int) {
+	if s.claimed[u][n] {
+		return
+	}
+	s.claimed[u][n] = true
+	s.claims[u] = append(s.claims[u], n)
 	s.nodeUnits[n] = append(s.nodeUnits[n], u)
 }
 
-func (s *state) unassign(u int) {
-	n := s.assign[u]
-	if n < 0 {
+func (s *state) removeClaim(u, n int) {
+	if !s.claimed[u][n] {
 		return
+	}
+	s.claimed[u][n] = false
+	for i, other := range s.claims[u] {
+		if other == n {
+			s.claims[u] = append(s.claims[u][:i], s.claims[u][i+1:]...)
+			break
+		}
 	}
 	for i, other := range s.nodeUnits[n] {
 		if other == u {
@@ -507,25 +562,42 @@ func (s *state) unassign(u int) {
 			break
 		}
 	}
-	s.assign[u] = -1
 }
 
-// bestFeasible returns the highest-c non-stopped node that can host u without
-// violating one-unit-per-node or anti-affinity. ignore skips one unit (used by
-// conflict relocation); pass -1 otherwise.
-func (s *state) bestFeasible(u, ignore int, units []unit, allowMulti bool) int {
+// fillUnit greedily claims up to k acceptable nodes in preference order. This
+// is the non-confrontational first pass; it never evicts anyone.
+func (s *state) fillUnit(u, k int, units []unit, allowMulti bool) {
 	for _, n := range units[u].pref {
-		if !s.nodeAccepts(u, n, ignore, units, allowMulti) {
+		if len(s.claims[u]) >= k {
+			return
+		}
+		if s.nodeAccepts(u, n, units, allowMulti) {
+			s.addClaim(u, n)
+		}
+	}
+}
+
+// topUp completes one unit to k claims by scanning its preference order and
+// claiming every node that currently accepts it, without evicting anyone. It
+// is the final safety net after convergence or fallback: an underfilled unit
+// must take any acceptable free node before output.
+func (s *state) topUp(u, k int, units []unit, allowMulti bool) {
+	for _, n := range units[u].pref {
+		if len(s.claims[u]) >= k {
+			return
+		}
+		if s.claimed[u][n] {
 			continue
 		}
-		return n
+		if s.nodeAccepts(u, n, units, allowMulti) {
+			s.addClaim(u, n)
+		}
 	}
-	return -1
 }
 
-func (s *state) nodeAccepts(u, n, ignore int, units []unit, allowMulti bool) bool {
+func (s *state) nodeAccepts(u, n int, units []unit, allowMulti bool) bool {
 	for _, other := range s.nodeUnits[n] {
-		if other == u || other == ignore {
+		if other == u {
 			continue
 		}
 		if !allowMulti {
@@ -582,19 +654,31 @@ func (s *state) winsAll(u int, blockers []int, n int, units []unit, rng *rand.Ra
 
 func buildOutput(in Input, units []unit, st *state, rounds int, fellBack bool) Output {
 	out := Output{
-		Assignment: map[int32]string{},
+		Assignment: map[int32][]string{},
 		PreheatSet: map[string][]int32{},
 		Rounds:     rounds,
 		FellBack:   fellBack,
 	}
 	for u := range units {
-		if st.assign[u] < 0 {
+		if len(st.claims[u]) == 0 {
 			continue
 		}
-		name := in.Nodes[st.assign[u]].Name
+		// Claim discovery order is not necessarily c_ij order after a unit has
+		// yielded and re-claimed; rank encodes the (already randomized) pref.
+		claims := append([]int(nil), st.claims[u]...)
+		sort.Slice(claims, func(i, j int) bool {
+			return units[u].rank[claims[i]] < units[u].rank[claims[j]]
+		})
+		names := make([]string, len(claims))
+		for i, n := range claims {
+			names[i] = in.Nodes[n].Name
+		}
 		for _, index := range units[u].pods {
-			out.Assignment[index] = name
-			out.PreheatSet[name] = append(out.PreheatSet[name], index)
+			out.Assignment[index] = append([]string(nil), names...)
+			for _, n := range claims {
+				name := in.Nodes[n].Name
+				out.PreheatSet[name] = append(out.PreheatSet[name], index)
+			}
 		}
 	}
 	out.UnassignedPods = make([]int32, 0, len(in.Pods)-len(out.Assignment))

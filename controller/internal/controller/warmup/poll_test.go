@@ -94,7 +94,7 @@ func reconcileResult(t *testing.T, r *Reconciler) (ctrl.Result, error) {
 func readinessEntry(task *traincachev1alpha1.WarmupTask, pod int32, node string) *traincachev1alpha1.PodNodeReadiness {
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
-		if entry.PodIndex == pod && (entry.AssignedNode == node || entry.NodeName == node) {
+		if entry.PodIndex == pod && entry.NodeName == node {
 			return entry
 		}
 	}
@@ -415,13 +415,13 @@ func TestPollReadinessTableShape(t *testing.T) {
 		}
 		column := -1
 		for i, node := range updated.Status.CandidateNodes {
-			if node == got.AssignedNode {
+			if node == got.NodeName {
 				column = i
 				break
 			}
 		}
 		if column < 0 {
-			t.Fatalf("entry[%d] assignedNode = %q, not in candidateNodes", pod, got.AssignedNode)
+			t.Fatalf("entry[%d] nodeName = %q, not in candidateNodes", pod, got.NodeName)
 		}
 		if got.ReadyInWindow != want[pod][column] {
 			t.Fatalf("entry[%d].readyInWindow = %d, want assigned-node table value %d",

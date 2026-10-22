@@ -17,6 +17,10 @@ import (
 // output; production always writes to stderr like agentd.
 var output io.Writer = os.Stderr
 
+// logSchemaVersion is the public log field schema version (docs/9.1 §3.1).
+// It only increases; never change the meaning of an existing value.
+const logSchemaVersion = 1
+
 // New builds a JSON logger bound to component and version, and installs it
 // as slog.Default so that packages logging through the default logger emit
 // the same structured JSON.
@@ -29,6 +33,7 @@ func New(component, version, level string) *slog.Logger {
 	logger := slog.New(handler).With(
 		slog.String("component", component),
 		slog.String("version", version),
+		slog.Int("log_schema_version", logSchemaVersion),
 	)
 	slog.SetDefault(logger)
 	return logger

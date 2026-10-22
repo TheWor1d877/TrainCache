@@ -42,6 +42,8 @@ type PlacementApplyInput struct {
 	Previous  map[PreheatPair]ExistingPreheat
 	Placement gwaa.Output
 	PodNames  map[int32]string
+	// Fanout is the effective K (0 means 1) and is only used for log fields.
+	Fanout int32
 	// Metrics is optional; nil keeps the RPC orchestration metric-free.
 	Metrics *metrics.Metrics
 }
@@ -109,37 +111,38 @@ func PlacementActions(in PlacementApplyInput) ([]PlacementAction, error) {
 	desired := make(map[PreheatPair]struct{}, len(pods))
 	actions := make([]PlacementAction, 0, len(pods)+len(in.Previous))
 	for _, index := range pods {
-		node := in.Placement.Assignment[index]
-		if node == "" {
-			continue
-		}
-		pair := PreheatPair{PodIndex: index, Node: node}
-		desired[pair] = struct{}{}
 		chunks, err := placementWindow(in.Windows, index)
 		if err != nil {
 			return nil, err
 		}
-		if previous, ok := in.Previous[pair]; ok {
-			// Generation 0 means the submitted generation is unknown, so it
-			// cannot be trusted as current and forces an Update.
-			generationChanged := previous.Generation != uint64(in.Task.Generation)
-			if chunkRefsEqual(previous.Chunks, chunks) && !generationChanged {
+		for _, node := range in.Placement.Assignment[index] {
+			if node == "" {
+				continue
+			}
+			pair := PreheatPair{PodIndex: index, Node: node}
+			desired[pair] = struct{}{}
+			if previous, ok := in.Previous[pair]; ok {
+				// Generation 0 means the submitted generation is unknown, so it
+				// cannot be trusted as current and forces an Update.
+				generationChanged := previous.Generation != uint64(in.Task.Generation)
+				if chunkRefsEqual(previous.Chunks, chunks) && !generationChanged {
+					continue
+				}
+				actions = append(actions, PlacementAction{
+					Kind:     ActionUpdate,
+					PodIndex: index,
+					Node:     node,
+					Chunks:   chunks,
+				})
 				continue
 			}
 			actions = append(actions, PlacementAction{
-				Kind:     ActionUpdate,
+				Kind:     ActionSubmit,
 				PodIndex: index,
 				Node:     node,
 				Chunks:   chunks,
 			})
-			continue
 		}
-		actions = append(actions, PlacementAction{
-			Kind:     ActionSubmit,
-			PodIndex: index,
-			Node:     node,
-			Chunks:   chunks,
-		})
 	}
 
 	pairs := make([]PreheatPair, 0, len(in.Previous))
@@ -191,7 +194,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 	}
 
 	taskKey := TaskKey(in.Task)
-	logPlacementChange(log, taskKey, in.Placement, len(actions))
+	logPlacementChange(log, taskKey, in.Placement, normalizeFanout(in.Fanout), len(actions))
 
 	failed := make(map[string]struct{})
 	for _, action := range actions {
@@ -312,14 +315,17 @@ func chunkRefsEqual(a, b []*agentpb.ChunkRef) bool {
 	return true
 }
 
-// logPlacementChange records the M6 log points: assignment changes, rounds and
-// the non-convergence fallback reason (docs/8.1 §9.3).
-func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, actions int) {
+// logPlacementChange records the M6/M13 log points: top-K assignment changes,
+// rounds, per-Pod warm-node counts and the non-convergence fallback reason
+// (docs/8.1 §6.5, §9.3).
+func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, fanout int32, actions int) {
 	assign := formatAssignment(placement.Assignment)
 	if placement.FellBack {
 		log.Warn("gwaa assignment not converged, keeping first greedy result",
 			"warmup_task", taskKey,
+			"fanout", fanout,
 			"assign", assign,
+			"warm_node_count", formatWarmNodeCounts(placement.Assignment),
 			"rounds", placement.Rounds,
 			"reason", "round_limit_exceeded",
 			"unassigned", len(placement.UnassignedPods),
@@ -328,7 +334,9 @@ func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output,
 	if actions > 0 {
 		log.Info("gwaa assignment changed",
 			"warmup_task", taskKey,
+			"fanout", fanout,
 			"assign", assign,
+			"warm_node_count", formatWarmNodeCounts(placement.Assignment),
 			"rounds", placement.Rounds,
 			"actions", actions,
 			"reason", "desired assignment differs from submitted tasks",
@@ -337,7 +345,7 @@ func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output,
 	}
 }
 
-func formatAssignment(assign map[int32]string) string {
+func formatAssignment(assign map[int32][]string) string {
 	if len(assign) == 0 {
 		return "none"
 	}
@@ -348,7 +356,25 @@ func formatAssignment(assign map[int32]string) string {
 	sort.Slice(pods, func(i, j int) bool { return pods[i] < pods[j] })
 	parts := make([]string, 0, len(pods))
 	for _, index := range pods {
-		parts = append(parts, fmt.Sprintf("p%d=%s", index, assign[index]))
+		parts = append(parts, fmt.Sprintf("p%d=%s", index, strings.Join(assign[index], "+")))
+	}
+	return strings.Join(parts, ",")
+}
+
+// formatWarmNodeCounts renders the per-Pod warm-node count for logs, e.g.
+// "p0=2,p1=1". Pods without a feasible node are omitted.
+func formatWarmNodeCounts(assign map[int32][]string) string {
+	if len(assign) == 0 {
+		return "none"
+	}
+	pods := make([]int32, 0, len(assign))
+	for index := range assign {
+		pods = append(pods, index)
+	}
+	sort.Slice(pods, func(i, j int) bool { return pods[i] < pods[j] })
+	parts := make([]string, 0, len(pods))
+	for _, index := range pods {
+		parts = append(parts, fmt.Sprintf("p%d=%d", index, len(assign[index])))
 	}
 	return strings.Join(parts, ",")
 }

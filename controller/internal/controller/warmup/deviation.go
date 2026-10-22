@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,22 +86,23 @@ func (r *Reconciler) reconcileDeviation(ctx context.Context, log *slog.Logger, t
 		if actual == "" {
 			continue
 		}
-		assigned := assignedNode(task, index)
-		if assigned == "" || assigned == actual {
+		nodes := assignedNodes(task, index)
+		if len(nodes) == 0 {
 			continue
 		}
-		entry := readinessFor(task, index, assigned)
-		if entry == nil {
+		// Landing inside the Pod's warm-node set is not a deviation: only
+		// backfill ActualNode on every entry (docs/8.1 §7.8).
+		if containsString(nodes, actual) {
+			setActualNode(task, index, actual)
 			continue
 		}
-		if entry.ActualNode != actual {
-			entry.ActualNode = actual
+		if setActualNode(task, index, actual) {
 			r.event(task, corev1.EventTypeWarning, EventNodeDeviation,
-				fmt.Sprintf("pod %s landed on node %s, GWAA assigned %s", pod.Name, actual, assigned))
+				fmt.Sprintf("pod %s landed on node %s, GWAA preheated %s", pod.Name, actual, strings.Join(nodes, ",")))
 			log.Warn("node deviation detected",
 				"pod", pod.Name,
 				"pod_index", index,
-				"assigned_node", assigned,
+				"warm_nodes", strings.Join(nodes, ","),
 				"actual_node", actual,
 			)
 		}
@@ -124,6 +126,34 @@ func (r *Reconciler) reconcileDeviation(ctx context.Context, log *slog.Logger, t
 			)
 		}
 	}
+}
+
+// containsString reports whether values contains target.
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+// setActualNode writes actual to every PodNodeReadiness entry of the Pod and
+// reports whether the value changed. All entries of one Pod must agree
+// (docs/8.1 §6.1).
+func setActualNode(task *traincachev1alpha1.WarmupTask, pod int32, actual string) bool {
+	changed := false
+	for i := range task.Status.PodNodeReadiness {
+		entry := &task.Status.PodNodeReadiness[i]
+		if entry.PodIndex != pod {
+			continue
+		}
+		if entry.ActualNode != actual {
+			entry.ActualNode = actual
+			changed = true
+		}
+	}
+	return changed
 }
 
 // targetPodMap lists target Pods keyed by their resolved Pod index. A Pod

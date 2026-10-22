@@ -224,6 +224,14 @@ spec:
                   - resources
                   type: object
                 type: array
+              preheatFanout:
+                default: 1
+                description: |-
+                  PreheatFanout is the number of preheat nodes each Pod claims: default 1,
+                  typical value 2. Zero and negative values are rejected by the CRD.
+                format: int32
+                minimum: 1
+                type: integer
               score:
                 description: |-
                   ScorePolicy configures the global decay score. There is no window field:
@@ -459,17 +467,20 @@ spec:
                 type: string
               podNodeReadiness:
                 description: |-
-                  PodNodeReadiness has one entry per PodDetail.Index. Each entry carries the
-                  assigned node's fact; candidate-node granularity is in ReadinessTable.
+                  PodNodeReadiness has one entry per (Pod, preheat node) pair; entries per
+                  Pod do not exceed spec.preheatFanout (P x preheatFanout bounded).
                 items:
                   description: |-
-                    PodNodeReadiness is one Pod's readiness fact on its assigned node. Status
-                    stores exactly one entry per PodDetail.Index (M12/S15); per-candidate-node
-                    ready-block counts live in WarmupTaskStatus.ReadinessTable.
+                    PodNodeReadiness is one Pod's readiness fact on one of its preheat nodes.
+                    Status stores one entry per (Pod, preheat node) pair (M13); the number of
+                    entries per Pod does not exceed spec.preheatFanout, so the total is bounded
+                    by P x preheatFanout. Per-candidate-node ready-block counts live in
+                    WarmupTaskStatus.ReadinessTable.
                   properties:
                     actualNode:
-                      type: string
-                    assignedNode:
+                      description: |-
+                        ActualNode is the Pod's actual landing node; all entries of the same Pod
+                        carry the same value.
                       type: string
                     globalDecayScore:
                       format: int32
@@ -478,8 +489,7 @@ spec:
                       format: date-time
                       type: string
                     nodeName:
-                      description: NodeName is unused by the M12 layout; the assigned
-                        node is AssignedNode.
+                      description: NodeName is this entry's preheat node.
                       type: string
                     podIndex:
                       format: int32
@@ -498,6 +508,8 @@ spec:
                       format: int32
                       type: integer
                     requiredReady:
+                      description: RequiredReady is floor(threshold*K_i) for the owning
+                        Pod.
                       format: int32
                       type: integer
                     startupWindowReady:
@@ -506,9 +518,13 @@ spec:
                       format: int32
                       type: integer
                     startupWindowReadyRate:
+                      description: StartupWindowReadyRate is observability only and
+                        never gates.
                       type: number
                     state:
-                      description: PreheatState is the per-(pod,node) preheat state.
+                      description: |-
+                        State is this preheat node's state. When a Pod has no feasible node it
+                        gets one summary entry with an empty NodeName and the Pod-level state.
                       enum:
                       - Preheating
                       - Ready

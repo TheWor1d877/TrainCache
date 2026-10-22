@@ -331,24 +331,32 @@ func (r *Reconciler) pollReadiness(
 		}
 	}
 
-	// Sample one rate per Pod. After GWAA (M6) has recorded AssignedNode the
-	// sample follows that node (D14); before assignment it follows the best
-	// reported candidate. Samples stay in memory only.
+	// Sample one rate per Pod. After GWAA (M6/M13) has recorded the Pod's
+	// preheat node set the sample is the maximum over that set (D14); before
+	// assignment it follows the best reported candidate. Samples stay in
+	// memory only.
 	minInterval := task.Spec.Gate.MinInterval.Duration
 	now := r.now()
 	for pod := 0; pod < pods; pod++ {
 		if !reported[pod] {
 			continue
 		}
-		assigned := assignedNode(task, int32(pod))
+		nodes := assignedNodes(task, int32(pod))
 		best := 0.0
 		found := false
-		if assigned != "" {
-			if fact, ok := facts[readinessKey{podIndex: int32(pod), node: assigned}]; ok && fact.hasData {
-				best, found = fact.rate, true
-			} else if prev := readinessByPod(task, int32(pod)); prev != nil &&
-				prev.AssignedNode == assigned && prev.LastReportTime != nil {
-				best, found = prev.StartupWindowReadyRate, true
+		if len(nodes) > 0 {
+			for _, node := range nodes {
+				if fact, ok := facts[readinessKey{podIndex: int32(pod), node: node}]; ok && fact.hasData {
+					if !found || fact.rate > best {
+						best, found = fact.rate, true
+					}
+					continue
+				}
+				if prev := readinessFor(task, int32(pod), node); prev != nil && prev.LastReportTime != nil {
+					if !found || prev.StartupWindowReadyRate > best {
+						best, found = prev.StartupWindowReadyRate, true
+					}
+				}
 			}
 		} else {
 			for _, node := range candidates {
@@ -431,66 +439,98 @@ func pollPending(task *traincachev1alpha1.WarmupTask, facts map[readinessKey]rea
 	return false
 }
 
-// buildPodDetails writes exactly one PodNodeReadiness per PodDetail.Index.
-// assignment == nil keeps the assignment currently recorded in status. The
-// assigned node's fact is taken from this round's facts; without a fresh
-// observation the previous fact is preserved when the assignment did not
-// change. An unassigned Pod has an empty AssignedNode and the Pod-level
-// aggregate State.
+// buildPodDetails writes one PodNodeReadiness per (Pod, preheat node) pair
+// (M13). assignment == nil keeps the node set currently recorded in status.
+// Each entry's fact is this round's observation for the pair; without a fresh
+// observation the previous fact is preserved when the pair did not change. A
+// Pod with no feasible preheat node gets exactly one summary entry with an
+// empty NodeName and the Pod-level aggregate State. ActualNode is Pod-wide, so
+// every entry of the same Pod carries the same value.
 func buildPodDetails(
 	task *traincachev1alpha1.WarmupTask,
 	facts map[readinessKey]readinessFact,
 	podNames map[int32]string,
 	candidates []string,
-	assignment map[int32]string,
+	assignment map[int32][]string,
 ) {
-	previous := make(map[int32]traincachev1alpha1.PodNodeReadiness, len(task.Status.PodNodeReadiness))
+	previous := make(map[readinessKey]traincachev1alpha1.PodNodeReadiness, len(task.Status.PodNodeReadiness))
+	actual := make(map[int32]string, task.Spec.PodCount)
 	for _, entry := range task.Status.PodNodeReadiness {
-		if _, ok := previous[entry.PodIndex]; !ok {
-			previous[entry.PodIndex] = entry
+		if entry.NodeName != "" {
+			previous[readinessKey{podIndex: entry.PodIndex, node: entry.NodeName}] = entry
+		}
+		if entry.ActualNode != "" && actual[entry.PodIndex] == "" {
+			actual[entry.PodIndex] = entry.ActualNode
 		}
 	}
 
-	entries := make([]traincachev1alpha1.PodNodeReadiness, 0, len(task.Spec.PodDetails))
+	capacity := len(task.Spec.PodDetails) * int(normalizeFanout(task.Spec.PreheatFanout))
+	entries := make([]traincachev1alpha1.PodNodeReadiness, 0, capacity)
 	for index := int32(0); index < task.Spec.PodCount; index++ {
 		detail, ok := podDetail(task, index)
 		if !ok {
 			continue
 		}
-		prev, hadPrev := previous[index]
-		assigned := prev.AssignedNode
+		nodes := assignedNodes(task, index)
 		if assignment != nil {
-			assigned = assignment[index]
+			nodes = assignment[index]
 		}
-		entry := traincachev1alpha1.PodNodeReadiness{
-			PodIndex:      index,
-			PodName:       podNames[index],
-			AssignedNode:  assigned,
-			ActualNode:    prev.ActualNode,
-			RequiredReady: requiredReady(task.Spec.Gate.Threshold, detail.K),
+		nodes = uniqueStrings(nodes)
+		if len(nodes) == 0 {
+			entries = append(entries, traincachev1alpha1.PodNodeReadiness{
+				PodIndex:      index,
+				PodName:       podNames[index],
+				ActualNode:    actual[index],
+				RequiredReady: requiredReady(task.Spec.Gate.Threshold, detail.K),
+				State:         aggregatePodState(facts, index, candidates),
+			})
+			continue
 		}
-
-		fact, hasFact := facts[readinessKey{podIndex: index, node: assigned}]
-		switch {
-		case assigned == "":
-			entry.State = aggregatePodState(facts, index, candidates)
-		case hasFact && fact.hasData:
-			applyReadinessFact(&entry, fact)
-		case hasFact:
-			if hadPrev && prev.AssignedNode == assigned {
+		for _, node := range nodes {
+			prev, hadPrev := previous[readinessKey{podIndex: index, node: node}]
+			entry := traincachev1alpha1.PodNodeReadiness{
+				PodIndex:      index,
+				PodName:       podNames[index],
+				NodeName:      node,
+				ActualNode:    actual[index],
+				RequiredReady: requiredReady(task.Spec.Gate.Threshold, detail.K),
+			}
+			fact, hasFact := facts[readinessKey{podIndex: index, node: node}]
+			switch {
+			case hasFact && fact.hasData:
+				applyReadinessFact(&entry, fact)
+			case hasFact:
+				entry.State = fact.state
+			case hadPrev:
 				carryReadinessFact(&entry, prev)
-			} else {
+			default:
 				entry.State = traincachev1alpha1.PreheatStatePreheating
 			}
-			entry.State = fact.state
-		case hadPrev && prev.AssignedNode == assigned:
-			carryReadinessFact(&entry, prev)
-		default:
-			entry.State = traincachev1alpha1.PreheatStatePreheating
+			entries = append(entries, entry)
 		}
-		entries = append(entries, entry)
 	}
 	task.Status.PodNodeReadiness = entries
+}
+
+// uniqueStrings removes empty and duplicate node names while preserving the
+// top-K order.
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, dup := seen[value]; dup {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func applyReadinessFact(entry *traincachev1alpha1.PodNodeReadiness, fact readinessFact) {
@@ -541,7 +581,11 @@ func aggregatePodState(facts map[readinessKey]readinessFact, pod int32, candidat
 	return traincachev1alpha1.PreheatStatePreheating
 }
 
-// readinessByPod returns the current single PodNodeReadiness entry for a Pod.
+// readinessByPod returns the first PodNodeReadiness entry whose PodIndex
+// matches pod. After M13 a Pod normally has one entry per preheat node, so this
+// helper does not identify a specific node; it is currently only used by tests
+// that expect a single-entry Pod. Production code uses readinessFor to select
+// a (Pod, node) pair.
 func readinessByPod(task *traincachev1alpha1.WarmupTask, pod int32) *traincachev1alpha1.PodNodeReadiness {
 	for i := range task.Status.PodNodeReadiness {
 		if task.Status.PodNodeReadiness[i].PodIndex == pod {

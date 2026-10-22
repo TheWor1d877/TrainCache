@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -84,9 +86,10 @@ func (r *Reconciler) computePlacement(
 		})
 	}
 	placement := gwaa.Compute(gwaa.Input{
-		Pods:  pods,
-		Nodes: nodes,
-		Rand:  r.Rand,
+		Pods:   pods,
+		Nodes:  nodes,
+		Rand:   r.Rand,
+		Fanout: normalizeFanout(task.Spec.PreheatFanout),
 	})
 	r.Metrics.ObservePlacement(datasetKey(task), placement.PreheatSet, len(placement.UnassignedPods), placement.FellBack)
 	return placement
@@ -119,11 +122,7 @@ func (r *Reconciler) nodeStopped(task *traincachev1alpha1.WarmupTask, node strin
 	found := false
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
-		entryNode := entry.NodeName
-		if entryNode == "" {
-			entryNode = entry.AssignedNode
-		}
-		if entryNode != node {
+		if entry.NodeName != node {
 			continue
 		}
 		found = true
@@ -139,34 +138,33 @@ func (r *Reconciler) nodeStopped(task *traincachev1alpha1.WarmupTask, node strin
 // first Submit failed.
 func hasAssignment(task *traincachev1alpha1.WarmupTask) bool {
 	for i := range task.Status.PodNodeReadiness {
-		if task.Status.PodNodeReadiness[i].AssignedNode != "" {
+		if task.Status.PodNodeReadiness[i].NodeName != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// assignedNode returns the current GWAA assignment for a Pod.
-func assignedNode(task *traincachev1alpha1.WarmupTask, pod int32) string {
+// assignedNodes returns the current GWAA preheat node set for a Pod, in
+// assignment (c_ij descending) order. A Pod with no feasible node has only a
+// summary entry with an empty NodeName, so the result is empty.
+func assignedNodes(task *traincachev1alpha1.WarmupTask, pod int32) []string {
+	var nodes []string
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
-		if entry.PodIndex == pod && entry.AssignedNode != "" {
-			return entry.AssignedNode
+		if entry.PodIndex == pod && entry.NodeName != "" {
+			nodes = append(nodes, entry.NodeName)
 		}
 	}
-	return ""
+	return nodes
 }
 
-// readinessFor returns the readiness fact for (pod,node), or nil. Under the
-// M12 layout each Pod has exactly one entry, so only the assigned node (or a
-// legacy NodeName match) yields a fact.
+// readinessFor returns the readiness fact for (pod,node), or nil. Status keeps
+// one entry per (Pod, preheat node) pair (M13), so NodeName is the identity.
 func readinessFor(task *traincachev1alpha1.WarmupTask, pod int32, node string) *traincachev1alpha1.PodNodeReadiness {
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
-		if entry.PodIndex != pod {
-			continue
-		}
-		if entry.AssignedNode == node || entry.NodeName == node {
+		if entry.PodIndex == pod && entry.NodeName == node {
 			return entry
 		}
 	}
@@ -212,10 +210,12 @@ func previousPreheat(
 			chunks = windows[pod]
 		}
 		if !initial {
-			if node := assignedNode(task, int32(pod)); node != "" {
-				previous[PreheatPair{PodIndex: int32(pod), Node: node}] = ExistingPreheat{
-					Chunks:     chunks,
-					Generation: generation,
+			if nodes := assignedNodes(task, int32(pod)); len(nodes) > 0 {
+				for _, node := range nodes {
+					previous[PreheatPair{PodIndex: int32(pod), Node: node}] = ExistingPreheat{
+						Chunks:     chunks,
+						Generation: generation,
+					}
 				}
 				continue
 			}
@@ -232,8 +232,10 @@ func previousPreheat(
 
 // gateEvaluation bundles the pure decision with the assembled input for logs.
 type gateEvaluation struct {
-	Decision gate.Decision
-	Pods     []gate.PodGateState
+	Decision      gate.Decision
+	Pods          []gate.PodGateState
+	Fanout        int32
+	StatusEntries int
 }
 
 // evaluateGate assembles PodGateState from status and invokes gate.Evaluate.
@@ -246,23 +248,27 @@ func (r *Reconciler) evaluateGate(task *traincachev1alpha1.WarmupTask) gateEvalu
 			continue
 		}
 		k := detail.K
-		assigned := assignedNode(task, index)
-		ready := int32(0)
-		if assigned != "" {
-			if entry := readinessFor(task, index, assigned); entry != nil {
+		nodes := assignedNodes(task, index)
+		readyByNode := make(map[string]int32, len(nodes))
+		rate := 0.0
+		for _, node := range nodes {
+			ready := int32(0)
+			if entry := readinessFor(task, index, node); entry != nil {
 				ready = entry.ReadyInWindow
 			}
-		}
-		rate := 0.0
-		if k > 0 {
-			rate = float64(ready) / float64(k)
+			readyByNode[node] = ready
+			if k > 0 {
+				if nodeRate := float64(ready) / float64(k); nodeRate > rate {
+					rate = nodeRate
+				}
+			}
 		}
 		prevRate, prevAt, seen := rateSample(r.progress.samples(string(task.UID), index), now)
 		pods = append(pods, gate.PodGateState{
 			Index:           index,
-			AssignedNode:    assigned,
+			AssignedNodes:   nodes,
+			ReadyByNode:     readyByNode,
 			K:               k,
-			Ready:           ready,
 			Rate:            rate,
 			PrevRate:        prevRate,
 			PrevAt:          prevAt,
@@ -290,7 +296,9 @@ func (r *Reconciler) evaluateGate(task *traincachev1alpha1.WarmupTask) gateEvalu
 			FirstReadyAt: firstReady,
 			StartedAt:    started,
 		}),
-		Pods: pods,
+		Pods:          pods,
+		Fanout:        normalizeFanout(task.Spec.PreheatFanout),
+		StatusEntries: len(task.Status.PodNodeReadiness),
 	}
 }
 
@@ -302,21 +310,21 @@ func (r *Reconciler) ensureFirstReady(task *traincachev1alpha1.WarmupTask, pods 
 	}
 	threshold := task.Spec.Gate.Threshold
 	for _, pod := range pods {
-		if pod.AssignedNode == "" {
-			continue
+		required := requiredReady(threshold, pod.K)
+		for _, node := range pod.AssignedNodes {
+			if pod.ReadyByNode[node] < required {
+				continue
+			}
+			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+				Type:               ConditionFirstReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             reasonFirstReady,
+				Message:            fmt.Sprintf("pod %d reached required ready blocks on node %s", pod.Index, node),
+				ObservedGeneration: task.Generation,
+				LastTransitionTime: metav1.NewTime(now),
+			})
+			return now
 		}
-		if pod.Ready < requiredReady(threshold, pod.K) {
-			continue
-		}
-		meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
-			Type:               ConditionFirstReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             reasonFirstReady,
-			Message:            fmt.Sprintf("pod %d reached required ready blocks", pod.Index),
-			ObservedGeneration: task.Generation,
-			LastTransitionTime: metav1.NewTime(now),
-		})
-		return now
 	}
 	return time.Time{}
 }
@@ -337,7 +345,9 @@ func rateSample(history []RateSample, now time.Time) (float64, time.Time, bool) 
 	return 0, time.Time{}, false
 }
 
-// logGateDecision records the mandatory M7 fields on every evaluation.
+// logGateDecision records the mandatory M7/M13 fields on every evaluation:
+// fanout, per-Pod warm-node counts, the preheat nodes that met the integer
+// threshold and the status entry count (docs/8.1 §6.5).
 func logGateDecision(log *slog.Logger, taskKey string, evaluation gateEvaluation) {
 	n := len(evaluation.Decision.Rates)
 	required := make([]int32, n)
@@ -355,11 +365,53 @@ func logGateDecision(log *slog.Logger, taskKey string, evaluation gateEvaluation
 		"warmup_task", taskKey,
 		"state", string(evaluation.Decision.State),
 		"reason", evaluation.Decision.Reason,
+		"fanout", evaluation.Fanout,
+		"warm_node_count", gateWarmNodeCounts(evaluation.Pods),
+		"status_entries", evaluation.StatusEntries,
+		"hit_nodes", gateHitNodes(evaluation),
 		"required", required,
 		"gap", gaps,
 		"slope", slopes,
 		"rates", rates,
 	)
+}
+
+// gateWarmNodeCounts renders each Pod's preheat node count for logs.
+func gateWarmNodeCounts(pods []gate.PodGateState) string {
+	if len(pods) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		parts = append(parts, fmt.Sprintf("p%d=%d", pod.Index, len(pod.AssignedNodes)))
+	}
+	return strings.Join(parts, ",")
+}
+
+// gateHitNodes lists, per Pod, the preheat nodes whose window ready count
+// reached the integer threshold. Pods with no hit are omitted.
+func gateHitNodes(evaluation gateEvaluation) string {
+	rates := evaluation.Decision.Rates
+	hits := make([]string, 0, len(evaluation.Pods))
+	for i := range evaluation.Pods {
+		if i >= len(rates) {
+			break
+		}
+		pod := evaluation.Pods[i]
+		var nodes []string
+		for _, node := range pod.AssignedNodes {
+			if pod.ReadyByNode[node] >= rates[i].Required {
+				nodes = append(nodes, node)
+			}
+		}
+		if len(nodes) > 0 {
+			hits = append(hits, fmt.Sprintf("p%d=%s", pod.Index, strings.Join(nodes, "+")))
+		}
+	}
+	if len(hits) == 0 {
+		return "none"
+	}
+	return strings.Join(hits, ",")
 }
 
 // releaseGate performs the frozen release order from docs/8.1 §7.5:
@@ -370,14 +422,13 @@ func (r *Reconciler) releaseGate(
 	log *slog.Logger,
 	task *traincachev1alpha1.WarmupTask,
 	windows [][]*agentpb.ChunkRef,
-	candidates []string,
 	podNames map[int32]string,
 	evaluation gateEvaluation,
 ) (ctrl.Result, error) {
 	decision := evaluation.Decision
 	taskKey := TaskKey(task)
 
-	if err := r.writeScores(ctx, log, task, windows, candidates); err != nil {
+	if err := r.writeScores(ctx, log, task, windows); err != nil {
 		log.Warn("release blocked: score annotation write failed",
 			"warmup_task", taskKey,
 			"state", string(decision.State),
@@ -453,14 +504,15 @@ func podRates(rates []gate.PodRate) []traincachev1alpha1.PodRate {
 	return out
 }
 
-// writeScores computes S(node) for every candidate and writes the task's own
-// Node annotation key. Any failure aborts the whole release (no gate removal).
+// writeScores computes S(node) for every (Pod, preheat node) pair and writes
+// the task's own Node annotation key. Each node's annotation only contains the
+// Pods warmed on that node (M13); the union covers all P x K pairs. Any failure
+// aborts the whole release (no gate removal).
 func (r *Reconciler) writeScores(
 	ctx context.Context,
 	log *slog.Logger,
 	task *traincachev1alpha1.WarmupTask,
 	windows [][]*agentpb.ChunkRef,
-	candidates []string,
 ) error {
 	writer := &ScoreWriter{
 		Client: r.Client,
@@ -474,9 +526,25 @@ func (r *Reconciler) writeScores(
 	}
 	ctx = logging.Into(ctx, log)
 
-	for _, node := range candidates {
-		entries := make([]ScoreEntry, 0, task.Spec.PodCount)
-		for index := int32(0); index < task.Spec.PodCount; index++ {
+	byNode := make(map[string][]int32, len(task.Status.PodNodeReadiness))
+	for i := range task.Status.PodNodeReadiness {
+		entry := &task.Status.PodNodeReadiness[i]
+		if entry.NodeName == "" {
+			continue
+		}
+		byNode[entry.NodeName] = append(byNode[entry.NodeName], entry.PodIndex)
+	}
+	nodes := make([]string, 0, len(byNode))
+	for node := range byNode {
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+
+	for _, node := range nodes {
+		indexes := byNode[node]
+		sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
+		entries := make([]ScoreEntry, 0, len(indexes))
+		for _, index := range indexes {
 			detail, ok := podDetail(task, index)
 			if !ok {
 				continue
@@ -577,7 +645,7 @@ func (r *Reconciler) removeGates(
 				"warmup_task", TaskKey(task),
 				"pod", name,
 				"pod_index", index,
-				"node", assignedNode(task, index),
+				"node", strings.Join(assignedNodes(task, index), ","),
 				"err", patchErr,
 			)
 			continue
@@ -587,7 +655,7 @@ func (r *Reconciler) removeGates(
 			"warmup_task", TaskKey(task),
 			"pod", name,
 			"pod_index", index,
-			"node", assignedNode(task, index),
+			"node", strings.Join(assignedNodes(task, index), ","),
 		)
 	}
 	if len(errs) > 0 {

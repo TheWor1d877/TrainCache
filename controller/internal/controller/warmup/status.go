@@ -57,9 +57,18 @@ func reportTime(resp *agentpb.PreheatStatus, now time.Time) *metav1.Time {
 	return &local
 }
 
-// readinessKey identifies one (Pod, candidate node) readiness fact. The
-// 8.0 baseline stores one PodNodeReadiness per mapping, so the node name is
-// part of the identity.
+// normalizeFanout is the controller-side view of spec.preheatFanout: zero
+// means the single-node default, matching gwaa.Compute (docs/8.1 §5.5, D38).
+func normalizeFanout(fanout int32) int32 {
+	if fanout <= 0 {
+		return 1
+	}
+	return fanout
+}
+
+// readinessKey identifies one (Pod, node) readiness fact. Status stores one
+// PodNodeReadiness per (Pod, preheat node) pair (M13), so the node name is part
+// of the identity.
 type readinessKey struct {
 	podIndex int32
 	node     string

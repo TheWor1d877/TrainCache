@@ -27,6 +27,9 @@ func TestNewEmitsJSONWithComponentVersion(t *testing.T) {
 	if got["version"] != "v1.2.3" {
 		t.Fatalf("version = %v, want v1.2.3", got["version"])
 	}
+	if got["log_schema_version"] != float64(1) {
+		t.Fatalf("log_schema_version = %v (%T), want 1", got["log_schema_version"], got["log_schema_version"])
+	}
 	if got["addr"] != ":8081" {
 		t.Fatalf("addr = %v, want :8081", got["addr"])
 	}

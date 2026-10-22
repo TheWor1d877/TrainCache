@@ -13,6 +13,7 @@ const (
 	m12StatusPods       = 64  // Q11 upper bound
 	m12StatusNodes      = 256 // Q11 upper bound
 	m12StatusChunksPerP = 8   // e2e manifest K (1 MiB chunks)
+	m12StatusFanout     = 2   // M13 typical spec.preheatFanout
 	m12StatusLimit      = 1 << 20
 )
 
@@ -20,11 +21,12 @@ const (
 // status at the Q11 limits P=64, N=256 must serialize below 1 MiB.
 //
 // Every field that the controller writes to PodNodeReadiness/status is
-// populated, with exactly one PodNodeReadiness entry per Pod (M12/S15); the
-// test deliberately does not trim optional fields to make the limit pass. The
-// per-Pod window K is 8 (controller/e2e/manifests/warmuptask.yaml); larger K
-// only increases ReadyBlockBitmap and the table values, so this is a
-// conservative lower bound on the worst case.
+// populated, with one PodNodeReadiness entry per (Pod, preheat node) pair:
+// P x spec.preheatFanout entries (M13); the test deliberately does not trim
+// optional fields to make the limit pass. The per-Pod window K is 8
+// (controller/e2e/manifests/warmuptask.yaml); larger K only increases
+// ReadyBlockBitmap and the table values, so this is a conservative lower bound
+// on the worst case.
 func TestM12WarmupTaskStatusSize(t *testing.T) {
 	status := m12WorstCaseStatus()
 
@@ -48,9 +50,9 @@ func TestM12WarmupTaskStatusSize(t *testing.T) {
 			m12StatusPods, m12StatusNodes, len(payload),
 			float64(len(payload))/(1<<20), m12StatusLimit)
 	}
-	if len(status.PodNodeReadiness) != m12StatusPods {
-		t.Fatalf("podNodeReadiness entries = %d, want one per Pod (%d)",
-			len(status.PodNodeReadiness), m12StatusPods)
+	if len(status.PodNodeReadiness) != m12StatusPods*m12StatusFanout {
+		t.Fatalf("podNodeReadiness entries = %d, want P x fanout (%d)",
+			len(status.PodNodeReadiness), m12StatusPods*m12StatusFanout)
 	}
 }
 
@@ -62,7 +64,7 @@ func m12WorstCaseStatus() WarmupTaskStatus {
 	}
 
 	table := make([][]int32, m12StatusPods)
-	entries := make([]PodNodeReadiness, 0, m12StatusPods)
+	entries := make([]PodNodeReadiness, 0, m12StatusPods*m12StatusFanout)
 	rates := make([]PodRate, 0, m12StatusPods)
 	bitmap := make([]byte, (m12StatusChunksPerP+7)/8)
 	for i := range bitmap {
@@ -74,21 +76,24 @@ func m12WorstCaseStatus() WarmupTaskStatus {
 		for node := range table[pod] {
 			table[pod][node] = m12StatusChunksPerP
 		}
-		assigned := candidates[pod%len(candidates)]
-		entries = append(entries, PodNodeReadiness{
-			PodIndex:               int32(pod),
-			PodName:                fmt.Sprintf("trainer-pod-%02d", pod),
-			AssignedNode:           assigned,
-			ActualNode:             assigned,
-			ReadyBlockBitmap:       append([]byte(nil), bitmap...),
-			StartupWindowReady:     m12StatusChunksPerP,
-			ReadyInWindow:          m12StatusChunksPerP,
-			RequiredReady:          7,
-			StartupWindowReadyRate: 1,
-			GlobalDecayScore:       m12StatusChunksPerP,
-			State:                  PreheatStateReady,
-			LastReportTime:         &now,
-		})
+		actual := candidates[pod%len(candidates)]
+		for slot := 0; slot < m12StatusFanout; slot++ {
+			node := candidates[(pod*m12StatusFanout+slot)%len(candidates)]
+			entries = append(entries, PodNodeReadiness{
+				PodIndex:               int32(pod),
+				PodName:                fmt.Sprintf("trainer-pod-%02d", pod),
+				NodeName:               node,
+				ActualNode:             actual,
+				ReadyBlockBitmap:       append([]byte(nil), bitmap...),
+				StartupWindowReady:     m12StatusChunksPerP,
+				ReadyInWindow:          m12StatusChunksPerP,
+				RequiredReady:          7,
+				StartupWindowReadyRate: 1,
+				GlobalDecayScore:       m12StatusChunksPerP,
+				State:                  PreheatStateReady,
+				LastReportTime:         &now,
+			})
+		}
 		rates = append(rates, PodRate{
 			PodIndex: int32(pod),
 			Rate:     1,

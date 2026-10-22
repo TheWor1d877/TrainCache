@@ -132,11 +132,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	base := task.DeepCopy()
 	taskKey := TaskKey(task)
 	requestID := fmt.Sprintf("%s/%d/%d", task.UID, task.Generation, start.UnixNano())
+	fanout := normalizeFanout(task.Spec.PreheatFanout)
 	log := r.logger(ctx).With(
 		"warmup_task", taskKey,
 		"namespace", task.Namespace,
 		"generation", task.Generation,
 		"request_id", requestID,
+		"fanout", fanout,
 	)
 	log.Info("warmup reconcile start")
 	defer func() {
@@ -303,10 +305,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// M4 submits every candidate until GWAA has produced an assignment. From
 	// then on only the diff RPCs run, so a cancelled preheat task is not
 	// recreated on every reconcile.
-	fanout := task.Status.StartedAt == nil || !hasAssignment(task)
+	initialFanout := task.Status.StartedAt == nil || !hasAssignment(task)
 	submission := newSubmitResult()
 	var submitErr error
-	if fanout {
+	if initialFanout {
 		submission, submitErr = submitToCandidates(ctx, r.Agents, r.Metrics, log, task, ds, windows, candidates, podNames)
 		if len(submission.Permanent) > 0 {
 			rejected := sortedErrorKeys(submission.Permanent)
@@ -359,9 +361,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				Task:      task,
 				DataSet:   ds,
 				Windows:   windows,
-				Previous:  previousPreheat(task, windows, candidates, fanout),
+				Previous:  previousPreheat(task, windows, candidates, initialFanout),
 				Placement: placement,
 				PodNames:  podNames,
+				Fanout:    fanout,
 				Metrics:   r.Metrics,
 			})
 			if applyErr != nil {
@@ -376,6 +379,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				}
 			}
 			applyAssignment(task, placement, facts, podNames, candidates)
+			log.Info("gwaa placement applied",
+				"fanout", fanout,
+				"assign", formatAssignment(placement.Assignment),
+				"warm_node_count", formatWarmNodeCounts(placement.Assignment),
+				"status_entries", len(task.Status.PodNodeReadiness),
+				"unassigned", len(placement.UnassignedPods),
+			)
 		}
 
 		evaluation := r.evaluateGate(task)
@@ -389,7 +399,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			// still requeues until release or TMax.
 			return ctrl.Result{RequeueAfter: r.pollRequeueAfter()}, submitErr
 		}
-		released, releaseErr := r.releaseGate(ctx, log, task, windows, candidates, podNames, evaluation)
+		released, releaseErr := r.releaseGate(ctx, log, task, windows, podNames, evaluation)
 		if releaseErr == nil {
 			// The task only leaves Hold once the score/gate writes succeeded.
 			r.Metrics.ObserveGateTask(taskKey, gateMetricState(evaluation.Decision.State), r.now())

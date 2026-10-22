@@ -289,7 +289,7 @@ func TestScoreWriterPrefixInjection(t *testing.T) {
 
 func TestPlacementGenerationChangeSendsUpdate(t *testing.T) {
 	in := testPlacementInput()
-	in.Placement.Assignment = map[int32]string{0: "n0"}
+	in.Placement.Assignment = map[int32][]string{0: {"n0"}}
 	in.Previous = map[PreheatPair]ExistingPreheat{
 		{PodIndex: 0, Node: "n0"}: {
 			Chunks:     testChunks("a"),
@@ -321,7 +321,7 @@ func TestComputePlacementStopsFailedNodes(t *testing.T) {
 	task := fixtureTask(1, 2, nil)
 	task.Status.ReadinessTable = [][]int32{{0, 2}}
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
-		{PodIndex: 0, AssignedNode: "n1", State: traincachev1alpha1.PreheatStateFailed},
+		{PodIndex: 0, NodeName: "n1", State: traincachev1alpha1.PreheatStateFailed},
 	}
 	r := &Reconciler{}
 	placement := r.computePlacement(task, []string{"n1", "n2"}, map[string]error{
@@ -330,8 +330,8 @@ func TestComputePlacementStopsFailedNodes(t *testing.T) {
 	if placement.Err != nil {
 		t.Fatalf("Compute: %v", placement.Err)
 	}
-	if got := placement.Assignment[0]; got != "n2" {
-		t.Fatalf("assignment = %q, want n2 (n1 stopped)", got)
+	if got := placement.Assignment[0]; len(got) != 1 || got[0] != "n2" {
+		t.Fatalf("assignment = %v, want [n2] (n1 stopped)", got)
 	}
 }
 

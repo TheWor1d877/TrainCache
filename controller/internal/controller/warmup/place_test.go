@@ -89,11 +89,11 @@ func testPlacementInput() PlacementApplyInput {
 			{PodIndex: 4, Node: "n0"}: {Chunks: testChunks("old"), Generation: 7}, // same pair, new window
 		},
 		Placement: gwaa.Output{
-			Assignment: map[int32]string{
-				0: "n0",
-				1: "n3",
-				3: "n0",
-				4: "n0",
+			Assignment: map[int32][]string{
+				0: {"n0"},
+				1: {"n3"},
+				3: {"n0"},
+				4: {"n0"},
 			},
 			UnassignedPods: []int32{2},
 		},
@@ -128,7 +128,7 @@ func TestPlacementActionsOnlyDifferences(t *testing.T) {
 
 func TestPlacementActionsUnknownGenerationForcesUpdate(t *testing.T) {
 	in := testPlacementInput()
-	in.Placement.Assignment = map[int32]string{0: "n0"}
+	in.Placement.Assignment = map[int32][]string{0: {"n0"}}
 	in.Previous = map[PreheatPair]ExistingPreheat{
 		{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("a"), Generation: 0},
 	}
@@ -167,10 +167,12 @@ func TestApplyPlacementOnlyDiffRPC(t *testing.T) {
 
 	// A second pass with the same desired state must not issue any RPC.
 	previous := map[PreheatPair]ExistingPreheat{}
-	for index, node := range in.Placement.Assignment {
-		previous[PreheatPair{PodIndex: index, Node: node}] = ExistingPreheat{
-			Chunks:     in.Windows[index],
-			Generation: uint64(in.Task.Generation),
+	for index, nodes := range in.Placement.Assignment {
+		for _, node := range nodes {
+			previous[PreheatPair{PodIndex: index, Node: node}] = ExistingPreheat{
+				Chunks:     in.Windows[index],
+				Generation: uint64(in.Task.Generation),
+			}
 		}
 	}
 	in.Previous = previous
@@ -190,7 +192,7 @@ func TestApplyPlacementSubmitClearsSnapshotID(t *testing.T) {
 	in := testPlacementInput()
 	in.DataSet.Status.SnapshotID = "snap-1"
 	in.Previous = map[PreheatPair]ExistingPreheat{}
-	in.Placement = gwaa.Output{Assignment: map[int32]string{0: "n0"}}
+	in.Placement = gwaa.Output{Assignment: map[int32][]string{0: {"n0"}}}
 
 	pool := &fakeAgentPool{}
 	result, err := ApplyPlacement(context.Background(), pool, nil, in)
@@ -217,7 +219,7 @@ func TestApplyPlacementFailureClassification(t *testing.T) {
 	in := testPlacementInput()
 	in.Previous = map[PreheatPair]ExistingPreheat{}
 	in.Placement = gwaa.Output{
-		Assignment: map[int32]string{0: "n0", 1: "n0", 2: "n1"},
+		Assignment: map[int32][]string{0: {"n0"}, 1: {"n0"}, 2: {"n1"}},
 	}
 	rpc := &fakePlacementRPC{fail: map[string]error{"n0": agentclient.ErrPermanent}}
 	result, err := ApplyPlacement(context.Background(), rpc, nil, in)
@@ -251,7 +253,7 @@ func TestApplyPlacementLogsFallback(t *testing.T) {
 	in := testPlacementInput()
 	in.Previous = map[PreheatPair]ExistingPreheat{}
 	in.Placement = gwaa.Output{
-		Assignment:     map[int32]string{0: "n0"},
+		Assignment:     map[int32][]string{0: {"n0"}},
 		UnassignedPods: []int32{1, 2, 3, 4},
 		Rounds:         4,
 		FellBack:       true,
@@ -299,7 +301,7 @@ func TestPlacementActionsInvalidInput(t *testing.T) {
 	}
 
 	in = testPlacementInput()
-	in.Placement.Assignment = map[int32]string{9: "n0"}
+	in.Placement.Assignment = map[int32][]string{9: {"n0"}}
 	if _, err := PlacementActions(in); err == nil {
 		t.Fatal("PlacementActions accepted an out-of-range window")
 	}

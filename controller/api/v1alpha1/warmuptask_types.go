@@ -179,6 +179,13 @@ type WarmupTaskSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="podCount is immutable"
 	PodCount int32 `json:"podCount"`
 
+	// PreheatFanout is the number of preheat nodes each Pod claims: default 1,
+	// typical value 2. Zero and negative values are rejected by the CRD.
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	PreheatFanout int32 `json:"preheatFanout,omitempty"`
+
 	// Affinity is recorded for v1 and does not affect GWAA.
 	// +optional
 	Affinity AffinityPolicy `json:"affinity,omitempty"`
@@ -196,28 +203,35 @@ type WarmupTaskSpec struct {
 	Candidate CandidatePolicy `json:"candidate,omitempty"`
 }
 
-// PodNodeReadiness is one Pod's readiness fact on its assigned node. Status
-// stores exactly one entry per PodDetail.Index (M12/S15); per-candidate-node
-// ready-block counts live in WarmupTaskStatus.ReadinessTable.
+// PodNodeReadiness is one Pod's readiness fact on one of its preheat nodes.
+// Status stores one entry per (Pod, preheat node) pair (M13); the number of
+// entries per Pod does not exceed spec.preheatFanout, so the total is bounded
+// by P x preheatFanout. Per-candidate-node ready-block counts live in
+// WarmupTaskStatus.ReadinessTable.
 type PodNodeReadiness struct {
 	PodIndex int32  `json:"podIndex"`
 	PodName  string `json:"podName,omitempty"`
-	// NodeName is unused by the M12 layout; the assigned node is AssignedNode.
-	NodeName     string `json:"nodeName,omitempty"`
-	AssignedNode string `json:"assignedNode,omitempty"`
-	ActualNode   string `json:"actualNode,omitempty"`
+	// NodeName is this entry's preheat node.
+	NodeName string `json:"nodeName,omitempty"`
+	// ActualNode is the Pod's actual landing node; all entries of the same Pod
+	// carry the same value.
+	ActualNode string `json:"actualNode,omitempty"`
 	// ReadyBlockBitmap is the per-request-chunk readiness bitmap reported by
 	// the Agent (bit i == submitted chunks[i]); 1 means persisted and verified.
 	ReadyBlockBitmap []byte `json:"readyBlockBitmap,omitempty"`
 	// StartupWindowReady is the ready-block count inside the startup window.
 	StartupWindowReady int32 `json:"startupWindowReady,omitempty"`
 	// ReadyInWindow mirrors StartupWindowReady for the 8.1 gate contract.
-	ReadyInWindow          int32        `json:"readyInWindow,omitempty"`
-	RequiredReady          int32        `json:"requiredReady,omitempty"`
-	StartupWindowReadyRate float64      `json:"startupWindowReadyRate,omitempty"`
-	GlobalDecayScore       int32        `json:"globalDecayScore,omitempty"`
-	State                  PreheatState `json:"state,omitempty"`
-	LastReportTime         *metav1.Time `json:"lastReportTime,omitempty"`
+	ReadyInWindow int32 `json:"readyInWindow,omitempty"`
+	// RequiredReady is floor(threshold*K_i) for the owning Pod.
+	RequiredReady int32 `json:"requiredReady,omitempty"`
+	// StartupWindowReadyRate is observability only and never gates.
+	StartupWindowReadyRate float64 `json:"startupWindowReadyRate,omitempty"`
+	GlobalDecayScore       int32   `json:"globalDecayScore,omitempty"`
+	// State is this preheat node's state. When a Pod has no feasible node it
+	// gets one summary entry with an empty NodeName and the Pod-level state.
+	State          PreheatState `json:"state,omitempty"`
+	LastReportTime *metav1.Time `json:"lastReportTime,omitempty"`
 }
 
 // GateDecision is the frozen gate verdict.
@@ -255,8 +269,8 @@ type WarmupTaskStatus struct {
 	// indexed by PodDetail.Index and columns follow CandidateNodes order.
 	ReadinessTable [][]int32 `json:"readinessTable,omitempty"`
 
-	// PodNodeReadiness has one entry per PodDetail.Index. Each entry carries the
-	// assigned node's fact; candidate-node granularity is in ReadinessTable.
+	// PodNodeReadiness has one entry per (Pod, preheat node) pair; entries per
+	// Pod do not exceed spec.preheatFanout (P x preheatFanout bounded).
 	PodNodeReadiness []PodNodeReadiness `json:"podNodeReadiness,omitempty"`
 
 	GateDecision GateDecision `json:"gateDecision,omitempty"`
