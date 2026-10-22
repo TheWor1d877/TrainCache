@@ -132,14 +132,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	base := task.DeepCopy()
 	taskKey := TaskKey(task)
 	requestID := fmt.Sprintf("%s/%d/%d", task.UID, task.Generation, start.UnixNano())
-	fanout := normalizeFanout(task.Spec.PreheatFanout)
+	fanout, fanoutMin, clamped := normalizeFanoutRange(task.Spec.PreheatFanout, task.Spec.PreheatFanoutMin)
 	log := r.logger(ctx).With(
 		"warmup_task", taskKey,
 		"namespace", task.Namespace,
 		"generation", task.Generation,
 		"request_id", requestID,
 		"fanout", fanout,
+		"fanout_min", fanoutMin,
+		"fanout_max", fanout,
 	)
+	if clamped {
+		// The CRD CEL rule rejects this, so reaching here means admission was
+		// bypassed. Clamp defensively and let ValidateTask flag the spec.
+		log.Warn("preheat fanout minimum exceeds maximum; clamping to max",
+			"reason", "min_gt_max",
+			"requested_fanout_min", normalizeFanoutMin(task.Spec.PreheatFanoutMin),
+			"fanout_min", fanoutMin,
+			"fanout_max", fanout,
+		)
+	}
 	log.Info("warmup reconcile start")
 	defer func() {
 		task.Status.ObservedGeneration = task.Generation
@@ -365,6 +377,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				Placement: placement,
 				PodNames:  podNames,
 				Fanout:    fanout,
+				FanoutMin: fanoutMin,
 				Metrics:   r.Metrics,
 			})
 			if applyErr != nil {
@@ -379,13 +392,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				}
 			}
 			applyAssignment(task, placement, facts, podNames, candidates)
-			log.Info("gwaa placement applied",
+			fields := []any{
 				"fanout", fanout,
+				"fanout_min", fanoutMin,
+				"fanout_max", fanout,
 				"assign", formatAssignment(placement.Assignment),
 				"warm_node_count", formatWarmNodeCounts(placement.Assignment),
 				"status_entries", len(task.Status.PodNodeReadiness),
 				"unassigned", len(placement.UnassignedPods),
-			)
+			}
+			fields = append(fields, summarizeFanout(placement, applied.Actions).fields()...)
+			log.Info("gwaa placement applied", fields...)
 		}
 
 		evaluation := r.evaluateGate(task)

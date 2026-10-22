@@ -66,6 +66,27 @@ func normalizeFanout(fanout int32) int32 {
 	return fanout
 }
 
+// normalizeFanoutMin is the controller-side view of spec.preheatFanoutMin:
+// zero or a negative value means the single-node lower bound (M14, D39).
+func normalizeFanoutMin(fanoutMin int32) int32 {
+	if fanoutMin <= 0 {
+		return 1
+	}
+	return fanoutMin
+}
+
+// normalizeFanoutRange normalizes the M14 bounds and defensively clamps a
+// minimum above the maximum down to the maximum. The CRD rejects that case, so
+// clamped only fires for objects that bypassed admission or for direct callers.
+func normalizeFanoutRange(fanout, fanoutMin int32) (fanoutMax, min int32, clamped bool) {
+	fanoutMax = normalizeFanout(fanout)
+	min = normalizeFanoutMin(fanoutMin)
+	if min > fanoutMax {
+		return fanoutMax, fanoutMax, true
+	}
+	return fanoutMax, min, false
+}
+
 // readinessKey identifies one (Pod, node) readiness fact. Status stores one
 // PodNodeReadiness per (Pod, preheat node) pair (M13), so the node name is part
 // of the identity.

@@ -4,9 +4,15 @@
 // Compute is a pure function: it reads only its Input, performs no I/O, does
 // not touch Kubernetes types and emits no log records. Callers own logging and
 // RPC orchestration. Pods that must share a node (AffinityGroup) are merged
-// into one placement unit; each unit claims up to Input.Fanout feasible nodes
-// in descending c_ij order. Every tie is broken through the injected
-// *rand.Rand, so a fixed seed reproduces the same placement (D32).
+// into one placement unit.
+//
+// M14 splits placement into two steps. First each unit gets a deterministic
+// target set within [FanoutMin, Fanout], chosen from the window cache
+// distribution (docs/8.3 D39). Then claims, conflict adjudication, top-up and
+// out-of-target fallback run only inside that target set. Target-set ordering
+// is deterministic (c_ij descending, node name ascending); ties during
+// assignment are still broken through the injected *rand.Rand, so a fixed seed
+// reproduces the same placement (D32).
 package gwaa
 
 import (
@@ -70,17 +76,51 @@ type Input struct {
 	// clamped to len(Pods).
 	MaxRounds int
 
-	// Fanout is the number of preheat nodes each Pod claims (docs/8.1 §5.5).
-	// Zero means 1; the CRD rejects zero and negative values, but Compute still
-	// treats zero as the single-node default for callers that predate M13.
+	// Fanout is the upper bound on the number of preheat nodes each Pod claims
+	// (docs/8.1 §5.5). Zero means 1; the CRD rejects zero and negative values,
+	// but Compute still treats zero as the single-node default for callers that
+	// predate M13.
 	Fanout int32
+
+	// FanoutMin is the lower bound on the number of preheat nodes each Pod
+	// claims (M14). Zero or negative means 1; Compute rejects a normalized
+	// minimum larger than the normalized maximum.
+	FanoutMin int32
 }
 
-// Output is the GWAA result. Assignment maps podIndex -> up to Fanout node
-// names sorted by c_ij descending and omits Pods with no feasible node.
+// PodDecision records why GWAA chose a Pod's target fanout (M14). It is the
+// per-Pod explanation attached to Output.Decisions.
+type PodDecision struct {
+	// TargetFanout is the number of nodes chosen for this Pod, within
+	// [FanoutMin, Fanout].
+	TargetFanout int32
+	// LowSignal reports that the readiness signal was too weak to raise the
+	// target above the minimum.
+	LowSignal bool
+	// ForcedByMin reports that the target was raised to FanoutMin.
+	ForcedByMin bool
+	// MinUnmet reports that the final Assignment claims fewer than FanoutMin
+	// nodes. Conflicts, capacity pressure or an out-of-target fallback can leave
+	// the actual count below the lower bound even when the planned target was
+	// large enough, so the actual claim count is authoritative.
+	MinUnmet bool
+	// FallbackOutOfTarget reports that a node outside the target set was used
+	// as a fallback.
+	FallbackOutOfTarget bool
+}
+
+// Output is the GWAA result. Assignment maps podIndex -> up to the unit's
+// target count node names sorted by c_ij descending and omits Pods with no
+// feasible node.
 // PreheatSet is the node -> sorted podIndex view and covers every (Pod, node)
 // pair in Assignment. UnassignedPods lists Pods for which no feasible node
 // exists at all.
+//
+// TargetSet maps podIndex -> the adaptive target node names, ordered by c_ij
+// descending and node name ascending. Assignment is a subset of TargetSet
+// except for the single out-of-target fallback described by
+// Decisions[pod].FallbackOutOfTarget. Decisions carries the per-Pod target
+// explanation.
 type Output struct {
 	Assignment     map[int32][]string
 	PreheatSet     map[string][]int32
@@ -88,6 +128,9 @@ type Output struct {
 	Rounds         int
 	FellBack       bool
 	Err            error
+
+	TargetSet map[int32][]string
+	Decisions map[int32]PodDecision
 }
 
 // Placement is the docs/8.1 §5.5 name for Output. New code should use Output.
@@ -100,10 +143,19 @@ type unit struct {
 	top1     float64
 	top2     float64
 	top1Hits int
-	pref     []int // node positions, best first, ties already randomized
-	rank     []int // node position -> pref index, -1 if excluded
+	// target is the M14 target set in deterministic order: c_ij descending,
+	// node name ascending.
+	target []int
+	// pref is the target set in claim order. It keeps the injected RNG for
+	// equal-c_ij ties, so conflict adjudication stays reproducible per seed.
+	pref []int
+	// fallback holds feasible nodes outside the target set in claim order. It
+	// is only consulted when a unit cannot claim any target node.
+	fallback []int
+	rank     []int // node position -> pref/fallback index, -1 if excluded
 	anti     map[string]struct{}
 	feasible bool // at least one non-stopped node and no internal contradiction
+	decision PodDecision
 }
 
 type node struct {
@@ -123,6 +175,10 @@ func Validate(in Input) error {
 	}
 	if in.Fanout < 0 {
 		return fmt.Errorf("%w: fanout %d is negative", ErrInvalidInput, in.Fanout)
+	}
+	fanout, fanoutMin := normalizedFanout(in)
+	if fanoutMin > fanout {
+		return fmt.Errorf("%w: fanout minimum %d exceeds fanout maximum %d", ErrInvalidInput, fanoutMin, fanout)
 	}
 	if len(in.Pods) > MaxPods {
 		return fmt.Errorf("%w: pod count %d exceeds limit %d", ErrInvalidInput, len(in.Pods), MaxPods)
@@ -162,12 +218,28 @@ func Validate(in Input) error {
 	return nil
 }
 
+// normalizedFanout applies the M14 defaults: a non-positive maximum or
+// minimum means 1. Validate rejects a negative maximum before Compute reaches
+// this helper, but the helper stays total for direct callers.
+func normalizedFanout(in Input) (fanout, fanoutMin int32) {
+	fanout = in.Fanout
+	if fanout <= 0 {
+		fanout = 1
+	}
+	fanoutMin = in.FanoutMin
+	if fanoutMin <= 0 {
+		fanoutMin = 1
+	}
+	return fanout, fanoutMin
+}
+
 // Compute runs GWAA. It is deterministic for a fixed Input.Rand seed and
 // returns Output.Err instead of panicking on invalid input.
 func Compute(in Input) Output {
 	if err := Validate(in); err != nil {
 		return invalidOutput(in, err)
 	}
+	fanout, fanoutMin := normalizedFanout(in)
 	rng := in.Rand
 	if rng == nil {
 		// Production injects a time-seeded source. A fixed fallback keeps the
@@ -180,7 +252,10 @@ func Compute(in Input) Output {
 		nodes[i] = node{name: in.Nodes[i].Name, stopped: in.Nodes[i].Stopped}
 	}
 
-	units := buildUnits(in, nodes, rng)
+	units, err := buildUnits(in, nodes, rng, fanout, fanoutMin)
+	if err != nil {
+		return invalidOutput(in, err)
+	}
 	active := make([]int, 0, len(units))
 	for i := range units {
 		if units[i].feasible {
@@ -189,15 +264,11 @@ func Compute(in Input) Output {
 	}
 	order := orderUnits(units, active, rng)
 
-	fanout := in.Fanout
-	if fanout <= 0 {
-		fanout = 1
-	}
-	k := int(fanout)
+	targetLen := func(u int) int { return len(units[u].target) }
 	allowMulti := in.AllowMultiPodPerNode
 	first := newState(len(units), len(nodes))
 	for _, u := range order {
-		first.fillUnit(u, k, units, allowMulti)
+		first.fillUnit(u, targetLen(u), units, allowMulti)
 	}
 
 	maxRounds := len(in.Pods)
@@ -212,7 +283,7 @@ func Compute(in Input) Output {
 	resolve := func() bool {
 		changed := false
 		for _, u := range order {
-			if len(st.claims[u]) >= k {
+			if len(st.claims[u]) >= targetLen(u) {
 				continue
 			}
 			for idx := nextRank[u]; idx < len(units[u].pref); idx++ {
@@ -226,7 +297,7 @@ func Compute(in Input) Output {
 					st.addClaim(u, n)
 					changed = true
 					nextRank[u] = idx + 1
-					if len(st.claims[u]) >= k {
+					if len(st.claims[u]) >= targetLen(u) {
 						break
 					}
 					continue
@@ -241,7 +312,7 @@ func Compute(in Input) Output {
 					st.addClaim(u, n)
 					changed = true
 					nextRank[u] = idx + 1
-					if len(st.claims[u]) >= k {
+					if len(st.claims[u]) >= targetLen(u) {
 						break
 					}
 					continue
@@ -249,7 +320,7 @@ func Compute(in Input) Output {
 				// The yielding unit may only retreat to its next-best node
 				// (docs/8.0 conflict adjudication). A retreat with untried
 				// candidates left is progress: reporting "no change" here
-				// would declare convergence while the unit is still below K.
+				// would declare convergence while the unit is still below its target.
 				nextRank[u] = idx + 1
 				if nextRank[u] < len(units[u].pref) {
 					changed = true
@@ -281,14 +352,36 @@ func Compute(in Input) Output {
 	if fellBack {
 		rounds = maxRounds
 	}
-	// The bounded-round conflict resolution may stop with a unit below K even
-	// though acceptable free nodes remain. Fill those units without evicting
-	// anyone, so the docs/8.1 §5.5 postcondition holds: every Pod gets K
-	// nodes when K feasible nodes exist, or all feasible nodes otherwise.
+	// The bounded-round conflict resolution may stop with a unit below its
+	// target even though acceptable free target nodes remain. Fill those units
+	// without evicting anyone. The ceiling is the M14 target, never Fanout.
 	for _, u := range order {
-		st.topUp(u, k, units, allowMulti)
+		st.topUp(u, targetLen(u), units, allowMulti)
 	}
-	return buildOutput(in, units, st, rounds, fellBack)
+	// A unit that could not claim any target node would otherwise be fully
+	// unassigned. M14 allows exactly one out-of-target fallback in that case;
+	// only a unit with no feasible node at all stays unassigned.
+	fallback := make([]bool, len(units))
+	for _, u := range order {
+		if len(st.claims[u]) > 0 {
+			continue
+		}
+		for _, n := range units[u].fallback {
+			if st.nodeAccepts(u, n, units, allowMulti) {
+				st.addClaim(u, n)
+				fallback[u] = true
+				break
+			}
+		}
+	}
+	// MinUnmet describes the final Assignment, not the planned target. Conflict
+	// adjudication, top-up and the single out-of-target fallback are all done by
+	// now, so the claim count is the actual number of preheat nodes each Pod
+	// gets. A zero-claim unit is below any positive minimum too.
+	for u := range units {
+		units[u].decision.MinUnmet = int32(len(st.claims[u])) < fanoutMin
+	}
+	return buildOutput(in, units, st, rounds, fellBack, fallback)
 }
 
 func invalidOutput(in Input, err error) Output {
@@ -300,14 +393,17 @@ func invalidOutput(in Input, err error) Output {
 	return Output{
 		Assignment:     map[int32][]string{},
 		PreheatSet:     map[string][]int32{},
+		TargetSet:      map[int32][]string{},
+		Decisions:      map[int32]PodDecision{},
 		UnassignedPods: pods,
 		Err:            err,
 	}
 }
 
 // buildUnits merges affinity groups and precomputes the per-node readiness
-// aggregate, preference order and dependency (c_ij - alternative) data.
-func buildUnits(in Input, nodes []node, rng *rand.Rand) []unit {
+// aggregate, target set, preference order and dependency (c_ij - alternative)
+// data.
+func buildUnits(in Input, nodes []node, rng *rand.Rand, fanout, fanoutMin int32) ([]unit, error) {
 	sortedPods := append([]PodState(nil), in.Pods...)
 	sort.Slice(sortedPods, func(i, j int) bool { return sortedPods[i].Index < sortedPods[j].Index })
 
@@ -343,6 +439,10 @@ func buildUnits(in Input, nodes []node, rng *rand.Rand) []unit {
 
 	units := make([]unit, 0, len(seeds))
 	for _, seed := range seeds {
+		unitMin, unitMax, err := memberBounds(seed.pods, fanout, fanoutMin)
+		if err != nil {
+			return nil, fmt.Errorf("affinity group %q: %w", seed.key, err)
+		}
 		u := unit{
 			pods:     append([]int32(nil), seed.pods...),
 			c:        make([]float64, len(nodes)),
@@ -352,6 +452,15 @@ func buildUnits(in Input, nodes []node, rng *rand.Rand) []unit {
 		}
 		for i := range u.rank {
 			u.rank[i] = -1
+		}
+		// The unit window length is the largest member K: S_min must cover the
+		// widest member window the merged unit has to satisfy. All members share
+		// the same target set, so the conservative length is the safe one.
+		var unitK int32
+		for _, index := range u.pods {
+			if k := byIndex[index].K; k > unitK {
+				unitK = k
+			}
 		}
 		antiSeen := make(map[string]struct{})
 		for _, index := range u.pods {
@@ -369,6 +478,9 @@ func buildUnits(in Input, nodes []node, rng *rand.Rand) []unit {
 			u.anti[pod.AntiAffinityGroup] = struct{}{}
 		}
 		if !u.feasible {
+			// No feasible node: the target set is empty and the unit is
+			// unassigned. Record the unavoidable MinUnmet explanation.
+			u.decision = PodDecision{MinUnmet: unitMin > 0}
 			units = append(units, u)
 			continue
 		}
@@ -387,17 +499,147 @@ func buildUnits(in Input, nodes []node, rng *rand.Rand) []unit {
 		}
 		u.feasible = stopped < len(nodes)
 		if !u.feasible {
+			u.decision = PodDecision{MinUnmet: unitMin > 0}
 			units = append(units, u)
 			continue
 		}
 		setTops(&u, nodes)
-		u.pref = preference(u.c, nodes, rng)
-		for i, n := range u.pref {
-			u.rank[n] = i
-		}
+		fullPref := preference(u.c, nodes, rng)
+		planUnit(&u, nodes, fullPref, unitK, unitMax, unitMin)
 		units = append(units, u)
 	}
-	return units
+	return units, nil
+}
+
+// memberBounds computes an affinity unit's fanout bounds: the lower bound is
+// the maximum of the members' minima and the upper bound the minimum of their
+// maxima. PodState does not carry per-Pod bounds yet, so every member inherits
+// Input.FanoutMin/Fanout and both folds collapse to the input values. Keeping
+// the folds explicit means a future per-Pod constraint only has to change
+// this function.
+func memberBounds(pods []int32, fanout, fanoutMin int32) (unitMin, unitMax int32, err error) {
+	for i := range pods {
+		memberMin, memberMax := fanoutMin, fanout
+		if i == 0 || memberMin > unitMin {
+			unitMin = memberMin
+		}
+		if i == 0 || memberMax < unitMax {
+			unitMax = memberMax
+		}
+	}
+	if unitMin > unitMax {
+		return 0, 0, fmt.Errorf("%w: member fanout minimum %d exceeds member maximum %d", ErrInvalidInput, unitMin, unitMax)
+	}
+	return unitMin, unitMax, nil
+}
+
+// planUnit fills the deterministic target set and the claim orders from the
+// per-node readiness aggregate. It implements docs/8.1 §5.5 steps 1-9.
+//
+// target is ordered by c_ij descending and node name ascending, independent of
+// the input node order and of the RNG. pref keeps the injected RNG for equal
+// c_ij ties, so assignment order stays reproducible per seed while the target
+// set itself is stable. fallback holds the excluded feasible nodes.
+func planUnit(u *unit, nodes []node, fullPref []int, unitK, fanout, fanoutMin int32) {
+	order := targetOrder(u.c, nodes)
+	feasible := len(order)
+	u.target = nil
+	u.pref = nil
+	u.fallback = nil
+	if feasible == 0 {
+		u.decision = PodDecision{MinUnmet: fanoutMin > 0}
+		return
+	}
+
+	best := u.c[order[0]]
+	sMin := int32(0)
+	if unitK > 0 {
+		sMin = (unitK + 3) / 4
+	}
+
+	band := 0
+	lowSignal := false
+	if best <= float64(sMin) {
+		// Low signal: the cache distribution cannot separate nodes, so keep the
+		// widest target the upper bound allows.
+		lowSignal = true
+		band = int(fanout)
+	} else {
+		// Retention line: 2*c_ij >= best keeps nodes within half of the best.
+		for _, n := range order {
+			if 2*u.c[n] >= best {
+				band++
+			}
+		}
+		if band < 1 {
+			band = 1
+		}
+	}
+	if band > int(fanout) {
+		band = int(fanout)
+	}
+	if band > feasible {
+		band = feasible
+	}
+
+	target := int(fanoutMin)
+	if band > target {
+		target = band
+	}
+	if target > int(fanout) {
+		target = int(fanout)
+	}
+	if target > feasible {
+		target = feasible
+	}
+	if target < 0 {
+		target = 0
+	}
+
+	u.target = append([]int(nil), order[:target]...)
+	u.decision = PodDecision{
+		TargetFanout: int32(target),
+		LowSignal:    lowSignal,
+		ForcedByMin:  fanoutMin > int32(band),
+		MinUnmet:     fanoutMin > int32(feasible),
+	}
+
+	inTarget := make(map[int]struct{}, len(u.target))
+	for _, n := range u.target {
+		inTarget[n] = struct{}{}
+	}
+	for _, n := range fullPref {
+		if _, ok := inTarget[n]; ok {
+			u.pref = append(u.pref, n)
+		}
+	}
+	// Fallback order stays deterministic (c_ij descending, node name ascending)
+	// because it is a new M14 path, not one of the existing RNG tie-breaks.
+	u.fallback = append([]int(nil), order[target:]...)
+	for i, n := range u.pref {
+		u.rank[n] = i
+	}
+	for i, n := range u.fallback {
+		u.rank[n] = len(u.pref) + i
+	}
+}
+
+// targetOrder lists non-stopped nodes by c_ij descending and node name
+// ascending. This is the deterministic M14 target-set order.
+func targetOrder(c []float64, nodes []node) []int {
+	order := make([]int, 0, len(nodes))
+	for n := range nodes {
+		if !nodes[n].stopped {
+			order = append(order, n)
+		}
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if c[order[i]] != c[order[j]] {
+			return c[order[i]] > c[order[j]]
+		}
+		return nodes[order[i]].name < nodes[order[j]].name
+	})
+	return order
 }
 
 func setTops(u *unit, nodes []node) {
@@ -515,7 +757,8 @@ func shareAnti(a, b *unit) bool {
 
 type state struct {
 	// claims holds, per unit, the node positions it currently claims (at most
-	// Fanout, in discovery order; buildOutput sorts them by c_ij).
+	// the unit's target count, in discovery order; buildOutput sorts them by
+	// c_ij).
 	claims [][]int
 	// claimed is a units x nodes membership bitmap. Units are small (<= MaxPods)
 	// and nodes bounded by MaxNodes, so O(units*nodes) bools are cheap and keep
@@ -652,14 +895,30 @@ func (s *state) winsAll(u int, blockers []int, n int, units []unit, rng *rand.Ra
 	return true
 }
 
-func buildOutput(in Input, units []unit, st *state, rounds int, fellBack bool) Output {
+func buildOutput(in Input, units []unit, st *state, rounds int, fellBack bool, fallback []bool) Output {
 	out := Output{
 		Assignment: map[int32][]string{},
 		PreheatSet: map[string][]int32{},
+		TargetSet:  map[int32][]string{},
+		Decisions:  map[int32]PodDecision{},
 		Rounds:     rounds,
 		FellBack:   fellBack,
 	}
 	for u := range units {
+		// Every member of a unit shares the target set and the decision; the
+		// fallback flag is per unit because the unit claims as one placement.
+		decision := units[u].decision
+		if fallback[u] {
+			decision.FallbackOutOfTarget = true
+		}
+		target := make([]string, len(units[u].target))
+		for i, n := range units[u].target {
+			target[i] = in.Nodes[n].Name
+		}
+		for _, index := range units[u].pods {
+			out.TargetSet[index] = append([]string(nil), target...)
+			out.Decisions[index] = decision
+		}
 		if len(st.claims[u]) == 0 {
 			continue
 		}

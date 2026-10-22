@@ -167,6 +167,8 @@ type CandidatePolicy struct {
 
 // WarmupTaskSpec is immutable in podCount and dataSetRef; all other fields may
 // be updated. The controller never creates, deletes or scales Pods (D31).
+//
+// +kubebuilder:validation:XValidation:rule="self.preheatFanoutMin <= self.preheatFanout",message="preheatFanoutMin must not exceed preheatFanout"
 type WarmupTaskSpec struct {
 	// DataSetRef points at a same-namespace DataSet.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dataSetRef is immutable"
@@ -179,12 +181,27 @@ type WarmupTaskSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="podCount is immutable"
 	PodCount int32 `json:"podCount"`
 
-	// PreheatFanout is the number of preheat nodes each Pod claims: default 1,
-	// typical value 2. Zero and negative values are rejected by the CRD.
+	// PreheatFanout is the upper bound on the number of preheat nodes each Pod
+	// claims: default 1, typical value 2. Zero and negative values are rejected
+	// by the CRD. GWAA chooses the target count within
+	// [PreheatFanoutMin, PreheatFanout]. The actual Assignment may be below
+	// the lower bound when conflicts, capacity limits or out-of-target fallback
+	// cause MinUnmet, but it never exceeds this upper bound.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	PreheatFanout int32 `json:"preheatFanout,omitempty"`
+
+	// PreheatFanoutMin is the target lower bound on the number of preheat nodes
+	// each Pod claims. Default 1; values below 1 are rejected by the CRD. GWAA
+	// chooses the target count within [PreheatFanoutMin, PreheatFanout]. The
+	// actual Assignment may fall below this bound when conflicts, capacity
+	// limits or out-of-target fallback cause MinUnmet; it is not a hard
+	// guarantee. The actual Assignment never exceeds PreheatFanout.
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	PreheatFanoutMin int32 `json:"preheatFanoutMin,omitempty"`
 
 	// Affinity is recorded for v1 and does not affect GWAA.
 	// +optional
@@ -204,10 +221,13 @@ type WarmupTaskSpec struct {
 }
 
 // PodNodeReadiness is one Pod's readiness fact on one of its preheat nodes.
-// Status stores one entry per (Pod, preheat node) pair (M13); the number of
-// entries per Pod does not exceed spec.preheatFanout, so the total is bounded
-// by P x preheatFanout. Per-candidate-node ready-block counts live in
-// WarmupTaskStatus.ReadinessTable.
+// Status stores one entry per actual (Pod, preheat node) pair. The entry count
+// per Pod is usually between spec.preheatFanoutMin and spec.preheatFanout, but
+// it may fall below the minimum when too few nodes are feasible, conflicts
+// leave a Pod with fewer claims, or capacity limits the assignment; that case
+// is reported as MinUnmet. It never exceeds spec.preheatFanout. A Pod with no
+// feasible node gets a single summary entry. Per-candidate-node ready-block
+// counts live in WarmupTaskStatus.ReadinessTable.
 type PodNodeReadiness struct {
 	PodIndex int32  `json:"podIndex"`
 	PodName  string `json:"podName,omitempty"`
@@ -269,8 +289,12 @@ type WarmupTaskStatus struct {
 	// indexed by PodDetail.Index and columns follow CandidateNodes order.
 	ReadinessTable [][]int32 `json:"readinessTable,omitempty"`
 
-	// PodNodeReadiness has one entry per (Pod, preheat node) pair; entries per
-	// Pod do not exceed spec.preheatFanout (P x preheatFanout bounded).
+	// PodNodeReadiness has one entry per actual (Pod, preheat node) pair.
+	// Entries per Pod are usually between spec.preheatFanoutMin and
+	// spec.preheatFanout and never exceed the maximum. They can fall below the
+	// minimum when infeasible nodes, conflicts or capacity limits leave a Pod
+	// short; MinUnmet reports that case. A Pod with no feasible node gets one
+	// summary entry.
 	PodNodeReadiness []PodNodeReadiness `json:"podNodeReadiness,omitempty"`
 
 	GateDecision GateDecision `json:"gateDecision,omitempty"`

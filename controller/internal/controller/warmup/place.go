@@ -42,8 +42,10 @@ type PlacementApplyInput struct {
 	Previous  map[PreheatPair]ExistingPreheat
 	Placement gwaa.Output
 	PodNames  map[int32]string
-	// Fanout is the effective K (0 means 1) and is only used for log fields.
-	Fanout int32
+	// Fanout is the effective upper bound (0 means 1) and is only used for log
+	// fields. FanoutMin is the effective lower bound (0 means 1).
+	Fanout    int32
+	FanoutMin int32
 	// Metrics is optional; nil keeps the RPC orchestration metric-free.
 	Metrics *metrics.Metrics
 }
@@ -194,7 +196,8 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 	}
 
 	taskKey := TaskKey(in.Task)
-	logPlacementChange(log, taskKey, in.Placement, normalizeFanout(in.Fanout), len(actions))
+	fanoutMax, fanoutMin, _ := normalizeFanoutRange(in.Fanout, in.FanoutMin)
+	logPlacementChange(log, taskKey, in.Placement, fanoutMax, fanoutMin, actions)
 
 	failed := make(map[string]struct{})
 	for _, action := range actions {
@@ -240,6 +243,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 				Node:       action.Node,
 				Generation: uint64(in.Task.Generation),
 			})
+			fields = append(fields, "prune_reason", pruneReason(in.Placement, action.PodIndex, action.Node))
 		default:
 			return result, fmt.Errorf("warmup: unknown placement action %q", action.Kind)
 		}
@@ -315,33 +319,37 @@ func chunkRefsEqual(a, b []*agentpb.ChunkRef) bool {
 	return true
 }
 
-// logPlacementChange records the M6/M13 log points: top-K assignment changes,
-// rounds, per-Pod warm-node counts and the non-convergence fallback reason
-// (docs/8.1 §6.5, §9.3).
-func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, fanout int32, actions int) {
+// logPlacementChange records the M6/M13/M14 log points: top-K assignment
+// changes, rounds, per-Pod warm-node counts, the adaptive fanout decisions and
+// the non-convergence fallback reason (docs/8.1 §6.5, §9.3, D39).
+func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, fanoutMax, fanoutMin int32, actions []PlacementAction) {
 	assign := formatAssignment(placement.Assignment)
+	warmCounts := formatWarmNodeCounts(placement.Assignment)
+	summary := summarizeFanout(placement, actions)
+	base := []any{
+		"warmup_task", taskKey,
+		"fanout", fanoutMax,
+		"fanout_min", fanoutMin,
+		"fanout_max", fanoutMax,
+		"assign", assign,
+		"warm_node_count", warmCounts,
+		"rounds", placement.Rounds,
+	}
+	base = append(base, summary.fields()...)
 	if placement.FellBack {
-		log.Warn("gwaa assignment not converged, keeping first greedy result",
-			"warmup_task", taskKey,
-			"fanout", fanout,
-			"assign", assign,
-			"warm_node_count", formatWarmNodeCounts(placement.Assignment),
-			"rounds", placement.Rounds,
+		fields := append(append([]any(nil), base...),
 			"reason", "round_limit_exceeded",
 			"unassigned", len(placement.UnassignedPods),
 		)
+		log.Warn("gwaa assignment not converged, keeping first greedy result", fields...)
 	}
-	if actions > 0 {
-		log.Info("gwaa assignment changed",
-			"warmup_task", taskKey,
-			"fanout", fanout,
-			"assign", assign,
-			"warm_node_count", formatWarmNodeCounts(placement.Assignment),
-			"rounds", placement.Rounds,
-			"actions", actions,
+	if len(actions) > 0 {
+		fields := append(append([]any(nil), base...),
+			"actions", len(actions),
 			"reason", "desired assignment differs from submitted tasks",
 			"unassigned", len(placement.UnassignedPods),
 		)
+		log.Info("gwaa assignment changed", fields...)
 	}
 }
 

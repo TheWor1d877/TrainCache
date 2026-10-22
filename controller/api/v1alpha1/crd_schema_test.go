@@ -80,6 +80,20 @@ func TestCRDShapeAndValidation(t *testing.T) {
 		t.Errorf("WarmupTask CRD preheatFanout is missing default: 1 and minimum: 1")
 	}
 
+	// M14: preheatFanout is the upper bound and preheatFanoutMin the lower
+	// bound. The minimum side gets the same default/minimum constraints, and a
+	// type-level CEL rule rejects min > max.
+	fanoutMin := regexp.MustCompile(`(?s)preheatFanoutMin:\n\s+default: 1\n.*?\n\s+minimum: 1\n`)
+	if !fanoutMin.MatchString(warmups) {
+		t.Errorf("WarmupTask CRD preheatFanoutMin is missing default: 1 and minimum: 1")
+	}
+	if !strings.Contains(warmups, "rule: self.preheatFanoutMin <= self.preheatFanout") {
+		t.Errorf("WarmupTask CRD has no CEL rule rejecting preheatFanoutMin > preheatFanout")
+	}
+	if !strings.Contains(warmups, "message: preheatFanoutMin must not exceed preheatFanout") {
+		t.Errorf("WarmupTask CRD has no CEL message for preheatFanoutMin > preheatFanout")
+	}
+
 	// podCount and dataSetRef are immutable via CEL.
 	if got := strings.Count(warmups, "rule: self == oldSelf"); got < 2 {
 		t.Errorf("WarmupTask CRD has %d `self == oldSelf` rules, want at least 2", got)
@@ -126,8 +140,8 @@ func TestGoContractSurface(t *testing.T) {
 
 	wt := reflect.TypeOf(WarmupTaskSpec{})
 	for _, field := range []string{
-		"DataSetRef", "TargetRef", "PodCount", "PreheatFanout", "Affinity",
-		"TrainingType", "PodDetails", "Gate", "Score", "Candidate",
+		"DataSetRef", "TargetRef", "PodCount", "PreheatFanout", "PreheatFanoutMin",
+		"Affinity", "TrainingType", "PodDetails", "Gate", "Score", "Candidate",
 	} {
 		if _, ok := wt.FieldByName(field); !ok {
 			t.Errorf("WarmupTaskSpec is missing %s", field)
@@ -136,6 +150,13 @@ func TestGoContractSurface(t *testing.T) {
 	fanout, _ := wt.FieldByName("PreheatFanout")
 	if fanout.Type != reflect.TypeOf(int32(0)) {
 		t.Errorf("WarmupTaskSpec.PreheatFanout = %v, want int32", fanout.Type)
+	}
+	fanoutMin, _ := wt.FieldByName("PreheatFanoutMin")
+	if fanoutMin.Type != reflect.TypeOf(int32(0)) {
+		t.Errorf("WarmupTaskSpec.PreheatFanoutMin = %v, want int32", fanoutMin.Type)
+	}
+	if !strings.Contains(string(fanoutMin.Tag), "omitempty") {
+		t.Errorf("PreheatFanoutMin is not optional: %q", fanoutMin.Tag)
 	}
 	candidate, _ := wt.FieldByName("Candidate")
 	if candidate.Type != reflect.TypeOf(CandidatePolicy{}) {

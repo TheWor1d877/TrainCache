@@ -38,6 +38,16 @@ func ValidateTask(task *traincachev1alpha1.WarmupTask) []string {
 	if spec.PreheatFanout < 0 {
 		reasons = append(reasons, fmt.Sprintf("spec.preheatFanout must be >= 0, got %d", spec.PreheatFanout))
 	}
+	if spec.PreheatFanoutMin < 0 {
+		reasons = append(reasons, fmt.Sprintf("spec.preheatFanoutMin must be >= 0, got %d", spec.PreheatFanoutMin))
+	}
+	// Zero means the default 1 on both bounds. Reject an effective minimum above
+	// the effective maximum even though the CRD CEL rule already does (M14).
+	if normalizeFanoutMin(spec.PreheatFanoutMin) > normalizeFanout(spec.PreheatFanout) {
+		reasons = append(reasons, fmt.Sprintf(
+			"spec.preheatFanoutMin %d must not exceed spec.preheatFanout %d",
+			normalizeFanoutMin(spec.PreheatFanoutMin), normalizeFanout(spec.PreheatFanout)))
+	}
 	if int32(len(spec.PodDetails)) != spec.PodCount {
 		reasons = append(reasons, fmt.Sprintf("spec.podDetails has %d entries, want podCount %d", len(spec.PodDetails), spec.PodCount))
 	}

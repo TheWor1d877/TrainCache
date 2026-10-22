@@ -85,11 +85,13 @@ func (r *Reconciler) computePlacement(
 			Stopped: r.nodeStopped(task, node, submitFailed),
 		})
 	}
+	fanoutMax, fanoutMin, _ := normalizeFanoutRange(task.Spec.PreheatFanout, task.Spec.PreheatFanoutMin)
 	placement := gwaa.Compute(gwaa.Input{
-		Pods:   pods,
-		Nodes:  nodes,
-		Rand:   r.Rand,
-		Fanout: normalizeFanout(task.Spec.PreheatFanout),
+		Pods:      pods,
+		Nodes:     nodes,
+		Rand:      r.Rand,
+		Fanout:    fanoutMax,
+		FanoutMin: fanoutMin,
 	})
 	r.Metrics.ObservePlacement(datasetKey(task), placement.PreheatSet, len(placement.UnassignedPods), placement.FellBack)
 	return placement
@@ -235,6 +237,7 @@ type gateEvaluation struct {
 	Decision      gate.Decision
 	Pods          []gate.PodGateState
 	Fanout        int32
+	FanoutMin     int32
 	StatusEntries int
 }
 
@@ -298,6 +301,7 @@ func (r *Reconciler) evaluateGate(task *traincachev1alpha1.WarmupTask) gateEvalu
 		}),
 		Pods:          pods,
 		Fanout:        normalizeFanout(task.Spec.PreheatFanout),
+		FanoutMin:     normalizeFanoutMin(task.Spec.PreheatFanoutMin),
 		StatusEntries: len(task.Status.PodNodeReadiness),
 	}
 }
@@ -366,6 +370,9 @@ func logGateDecision(log *slog.Logger, taskKey string, evaluation gateEvaluation
 		"state", string(evaluation.Decision.State),
 		"reason", evaluation.Decision.Reason,
 		"fanout", evaluation.Fanout,
+		"fanout_min", evaluation.FanoutMin,
+		"fanout_max", evaluation.Fanout,
+		"fanout_actual", gateWarmNodeCounts(evaluation.Pods),
 		"warm_node_count", gateWarmNodeCounts(evaluation.Pods),
 		"status_entries", evaluation.StatusEntries,
 		"hit_nodes", gateHitNodes(evaluation),
