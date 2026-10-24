@@ -1,286 +1,262 @@
-# bench 实验装置说明(核心1 步骤1 交付物;2026-10-14 第二步完成态增补)
+# 5 bench 装置说明书（手册版 v2，2026-10-24 重写）
 
-> 目录:`bench/`。装置目标:后面每做完一个零件都能立刻看到效果,而"看到效果"
-> 全靠这套装置——它必须稳定、可重复、一键启动,否则后面所有实验数字都不可信。
+> 这份文档是 `bench/` 实验装置的说明书：文件是什么、命令怎么敲、一键化做到哪、出了毛病查哪行。
+> 两类读者：维护这套装置的人（§2、§3），和将来迭代版本的我自己（§4 起）。
+> 路径一律写相对路径 `bench/...`。`/home/howardhe/tc` 是指向项目根的符号链接，不是另一份拷贝，看到旧文档里的 tc/ 前缀就当项目根。
+> 状态图例：**✅ 已实现**｜**🔧 改造中**｜**📝 规划待建**。本文只把已实现的当现状，规划项明确标注，不混。
+> 纪律：文档是代码的声明式。以磁盘代码为准，发现对不上，当天改文档。
 
-## 1. 这套装置解决什么问题
+## 1. 装置是什么
 
-TrainCache 的每个零件(Controller、Agent、门控、打分)做完后都要有数字证明效果。
-但单机开发环境有个天然缺陷:**没有"本地 NVMe 对网络取数"的速度差**,做不出冷热
-对比;也没有一键可复现的数据与集群。本装置解决三件事:
+一套在单机（32 核 / 30 GiB 内存 / 4 worker kind 集群）上复刻"分布式训练存储"的实验装置，做三件事：
 
-1. **在单机上造出真实、可控的冷热差**:tc(tbf+netem)对"源站出站路径"做受控
-   限速与延迟注入(默认 100Mbps/20ms)——两个挂点:kind 内 MinIO Pod(A/B/C 轨)
-   与宿主机本地源站容器 traincache-source-d(D 轨,见 §2.4);命中本地缓存的读
-   不经过该路径,冷热差真实且限速档位是可扫点的实验自变量。
-2. **四轨负载一键生成**(数据可复现、可扩缩):
-   - A 轨:100 万×4KB 小文件(元数据压力臂,io_uring 战场;不再自称训练主流);
-   - B 轨(主力):合成 JPEG 真实编码 → webdataset 百 MB tar 分片(32×256MB≈8GB),
-     解码成本真实、确定性 shuffle 可复现,对应 2026 年训练真实形态;
-   - C 轨:多 Job 倾斜清单(Job A 反复读 10% 热分片,Job B 全量扫描,步骤 8 用);
-   - D 轨(第二步新增):16×800 张 512px JPEG ≈2.0GiB,单 Job 连续 10 epoch、
-     每 epoch 换 seed、缓存欠配 50%——v4"全程收益"专用本地通路场景(见 §2.4)。
-3. **冷态规程标准化**:每组实验前 `sync + drop_caches` + 重启源站 + 重挂 tc,
-   保证每一次冷读都一样冷;过关标准是**两次冷读结果对得上(相对差 ≤10%)**
-   (D 轨冷态规程同构、内置在 track_d_up/verify,判据口径见 §2.5)。
+1. **造冷热差**：tc 把源站出站路径限到 100mbit/20ms（100Mbps≈12.5MB/s，读 8GB 光传输 640 秒），本地缓存命中绕开这条路，冷读慢热读快是真差不是假差。
+2. **造负载**：四轨合成数据（A 小文件元数据、B 8GB webdataset tar、C 倾斜访问清单、D 2GiB 连续 epoch），固定种子、逐字节可复现。
+3. **同台跑分**：TrainCache 与 direct/juicefs/fluid 五个对照组吃同一份轨迹、同一个限速档、同一个容量的缓存，一键起拆、一键出指标（§4.3、§9）。
 
-## 2. 解决方法(装置设计)
+```text
+bench/
+├── Makefile          # 主实验入口（四轨+限速+冷态+verify）
+├── config.py         # 唯一参数源：python3 config.py --sh KEY 查询
+├── scripts/          # 数据生成、负载器、tc、冷态、verify、trainpublish 二进制
+├── k8s/              # kind 集群配置 + MinIO manifest
+├── data/             # (gitignore) 四轨数据，种子固定可再生成
+├── results/          # 归档：冷读验证、D 轨对账、扫点
+├── compare/          # 五组对照装置（run_bench.py + 每组目录）
+└── experiments/      # 条件化实验层（COND 契约、runner、统计、出图）
+```
 
-### 2.1 冷热差:tc 挂在"源站出站"方向
+一句话：装置把"冷读多慢、换个策略快多少、跟对手比赢在哪"变成同一条命令能重复测量的数字。
 
-- 挂点:**kind 集群内 MinIO Pod 的 netns 中 eth0 的 egress**(不是节点网卡、不是
-  veth host 侧——这两个挂点在探针阶段被实证否决过,记录在
-  `probes/design.md` 与长期备忘)。第二步新增第二个挂点:**本地源站容器
-  traincache-source-d 的 eth0 egress**(D 轨宿主机本地通路,见 §2.4)。
-- 定位方式:`tc_apply.sh` 经 `crictl pods/inspectp` 在节点容器内找到 MinIO Pod
-  sandbox 的 netns,`nsenter` 进去挂 qdisc——MinIO 重启换 netns 后由冷态规程自动重挂。
-  Pod sandbox 选取经 `crictl pods --state Ready` 过滤(规避节点上 NotReady 的
-  残留 sandbox,见 §5 第 10 条);source-d 挂点则在宿主机上 `docker inspect` 取
-  容器 PID 后 `nsenter -n`,root 通道(root 直跑 → `sudo -n` →
-  `sudo -S(.sudo-pass)`)不可用时回退特权 docker 容器
-  (`--net=container:… --cap-add=NET_ADMIN`)。
-- 档位即自变量:`tc_apply.sh <rate> <delay>`,如 `100mbit 20ms` / `300mbit 10ms`。
-- 限速脚本接口(第二步冻结,缺省行为与改造前兼容):
+## 2. 文件与接口（给维护者）
 
-  | 脚本             | 用法                                                            | 说明                                                                                                                                                   |
-  |------------------|-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-  | `tc_apply.sh`    | `<rate> <delay> [burst] [--target minio\|source-d] [--dry-run]` | 缺省 `minio`(既有调用逐字兼容);`source-d` 缺省档位取 config 的 TRACK_D_TC_*;`--dry-run` 只打印命令;Pod sandbox 选取经 `crictl pods --state Ready` 过滤 |
-  | `tc_teardown.sh` | `[--target minio\|source-d] [--dry-run]`                        | 无参即拆 MinIO 挂点(既有行为不变)                                                                                                                      |
+### 2.1 主实验层（bench/ 根 + scripts/）
 
-### 2.2 四轨数据(固定种子,一键可重新生成逐字节一致的数据)
+| 文件 | 作用 | 接口 / 被谁调用 | 状态 |
+|------|------|-----------------|------|
+| `Makefile` | 全部入口 | `bench-up`/`bench-down`/`kind-up`/`k8s-up`/`data-up`/`upload`/`tc-up RATE= DELAY=`/`tc-down`/`bench-cold`/`bench-verify QUICK=`/`bench-data`/`bench-tc`/`track-d-data|up|verify|down`/`e2e-local`/`e2e-k8s`/`bench COND= REPS=`/`bench-list` | ✅ |
+| `config.py` | 唯一参数源 | `python3 config.py --sh <KEY>`；被所有脚本读 | ✅ |
+| `scripts/synth_track_{a,b,c,d}.py` | 四轨数据生成 | 参数全在 config；幂等，已存在即跳过 | ✅ |
+| `scripts/bench_track_d.py` | D 轨负载器 + verify 判据 | `--epochs --seed --workers --out-dir`；`--selftest` 自测判据函数 `compare_epoch_medians` | ✅ |
+| `scripts/bench_track_c.py` | C 轨双 Job 倾斜负载器 | M3/M5 用（热集循环 + 全量扫描） | ✅ |
+| `scripts/tc_apply.sh` / `tc_teardown.sh` | 挂/拆限速 | `<rate> <delay> [burst] [--target minio\|source-d] [--dry-run]` | ✅ |
+| `scripts/cold_reset.sh` | 冷态规程 | 无参；sync+drop_caches+重启 MinIO+重挂 tc；每组实验前必跑 | ✅ |
+| `scripts/verify_cold.sh` | 装置可信性 | `[--quick]`；两轮冷读相对差 ≤10% 判过 | ✅ |
+| `scripts/track_d_{up,verify,down}.sh` | D 轨编排 | 零参数，`--dry-run`；up=容器+欠配+tc+10 epoch，verify=两轮×3 epoch 对账，down=拆除保留数据 | ✅ |
+| `scripts/upload_bench.py` | B 轨灌 MinIO | 无参；每次全量重传（同键覆盖+重设公开读 policy），无"存在即跳过" | ✅ |
+| `scripts/trainpublish` | 发布 TrainCache 块快照 | Go 二进制（源码 `core/cmd/trainpublish`，重编：`/usr/local/go/bin/go build`）；关键旗标 `-chunk-size`（实验取 8388608，见 §3） | ✅ |
+| `k8s/kind-config.yaml`、`k8s/minio.yaml` | 集群与源站基座 | kind 5 节点配置；MinIO 带 30Gi PVC（必须，见 §7 第 6 条） | ✅ |
 
-- **B 轨合成纪律**(零下载、真解码):随机像素图 + 真实 JPEG 编码(质量/分辨率
-  参数化,σ 自动校准到目标体积 160KB/张,防纯色块被过度压缩),按 webdataset 规范
-  打成 256MB tar。报告口径:**合成数据,I/O 与解码路径真实,语义内容随机**;
-  外推威胁:合成图的解码成本分布可能不同于真实 ImageNet(有条件时用小样本真实
-  数据做 sanity check)。
-- A 轨:种子派生的 4KB 确定性字节,100 子目录 × 1 万文件,32 进程并行生成。
-- C 轨:数据复用 B 轨,只生成访问模式清单(`hot-shards.txt` / `full-shards.txt`)。
-- D 轨(第二步新增,与 B 轨同构管线、以 B 轨生成器为权威参考):16×800 张
-  512px JPEG(q85,σ 校准到 ~160KB/张)≈2.0GiB,seed=20261015,
-  `shard-%06d.tar` 落宿主机本地目录 `data/track_d/`(**不上传 MinIO**),
-  幂等(已存在分片默认跳过、可增量补齐);报告口径同 B 轨。
+### 2.2 五组对照层（compare/）
 
-四轨规格一览:
+| 文件 | 作用 | 接口 / 说明 | 状态 |
+|------|------|-------------|------|
+| `compare/Makefile` | 对照入口 | `compare-up/down GROUP=`、`compare-all-up/down`、`trace`（生成统一轨迹）、`check`、`help` | ✅ |
+| `compare/run_bench.py` | 跑分编排器 | `--reps N --groups <组...> --out <csv>`；7 个组名映射 4 个目录组（direct、juicefs-{cold,warm}、fluid-{cold,warm}、traincache-{cold,warm}） | ✅ |
+| `compare/direct/` | 组 1：HTTP 直读 MinIO，零缓存 | `up.sh` 建 ns/secret/trace ConfigMap+tc；无预热 | ✅ |
+| `compare/juicefs/` | 组 2/3：JuiceFS 冷/热 | `up.sh`：Redis+mount Pod（缓存 hostPath `/var/cache/jfs`）；`JFS_WARMUP=1` 时预热在 up.sh 内完成（15 分钟硬超时，超时整轮作废）；`--cache-size` **单位是 MiB** | 🔧✅（合一改造已完成） |
+| `compare/fluid/` | 组 4/5：Fluid 冷/热 | `up.sh`：Dataset+JuiceFSRuntime+PVC；`FLUID_PREHEAT=1` 时 DataLoad 在 up.sh 内等待完成；`FLUID_CACHE_GI` 控容量 | ✅ |
+| `compare/traincache/` | 组 6/7：TrainCache 冷/热 | `up.sh`：发布快照（`publish_snapshot`）、打 `s3-access` 标签（`label_s3_nodes`）、注入 agentd 配置（`ensure_agent_config`）、建 DataSet/WarmupTask（`TRAINCACHE_WARMUP_K`）；**sleep 占位 compare-job 已删** | 🔧（8MiB 重发布与 k 值调整待做，§3） |
+| 统一测量体 | **每组只有一个 train-job Pod**：measure 脚本是主容器；traincache 组走 webhook gate（Pending 等待计入 startup），其余组普通调度；`t_submit` = 创建该 Pod 之前的时刻，五组同尺 | `run_bench.py create_measure_pod()` | ✅ |
 
-| 轨 | 生成器             | 数据规格                                                   | 通路与用途(du 实测体积)                                                      |
-|----|--------------------|------------------------------------------------------------|------------------------------------------------------------------------------|
-| A  | `synth_track_a.py` | 100 万×4KB(100 子目录)                                     | 本地目录(3.9G);元数据压力臂                                                  |
-| B  | `synth_track_b.py` | 32×256MB tar≈8GB(~160KB/张)                                | 上传 MinIO(7.9G);旗舰数字数据源                                              |
-| C  | `synth_track_c.py` | 复用 B 轨,仅热/全量分片清单                                | MinIO;多 Job 倾斜(步骤 8)                                                    |
-| D  | `synth_track_d.py` | 16 tar×800 张 512px JPEG q85≈2.0GiB,seed 20261015,幂等确定 | 宿主机本地 nginx(端口 9100,2.0G);单 Job 连续 10 epoch、欠配 50%(v4 全程收益) |
+### 2.3 条件化实验层（experiments/）
 
-### 2.3 一键编排与幂等
+| 文件 | 作用 | 状态 |
+|------|------|------|
+| `cond.py` + `cond.schema.md` | COND 契约（v1）：一个 JSON = 一个实验点；解析器校验字段全集并产出环境变量 | ✅（`capacity_ratio`、`chunk_size_bytes`、`warmup_seconds` 字段待补，📝） |
+| `conds/*.json` | 现存 6 个点：policy-{heat,lru,lfu,wtinylfu}、pareto2-lookahead{2,8} | ✅ |
+| `run.py` | 主实验 runner：冷态→搭负载→采集→归档，失败标 `void` | ✅ |
+| `run_policy.py` | M5 淘汰×预取实验执行体（注入 `TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_PREFETCH_LOOKAHEAD`） | ✅ |
+| `collect.py` | 离线汇总：makespan 两边界、三笔字节成本、分阶段命中率 → `metrics.csv`/`collect.json`；`--selftest` | ✅ |
+| `stats.py` | 中位数 + bootstrap 95% CI（10000 次重采样） | ✅ |
+| `lock.py` | 环境清单：镜像 digest、kubectl 版本、tc 档位、种子写进产物目录 | ✅ |
+| `plot.py` | 五张旗舰图统一绘制 | ✅ |
+| `preregister.md` | 预注册文件（冻结前允许追加假设；S/M/L 档位假设待写入，📝随 M6） | ✅ |
 
-- `make bench-up`:集群(复用或创建)→ k8s → 四轨数据(存在则跳过)→ 上传
-  (自动建桶+公开读 policy)→ tc → 两轮冷读验证。
-- D 轨装置另走 `make track-d-up` / `track-d-verify` / `track-d-down`(数据生成
-  并入 `bench-data`;训练进程宿主机直跑,不占集群)。
-- 全部目标幂等,重跑不破坏已有装置;数据生成可分别重跑。
-- sudo(tc/drop_caches)经 `bench/.sudo-pass`(gitignore,600 权限)自动执行。
+一句话：三层各管一件事——主实验层管"造冷热差"，对照层管"同台跑分"，实验层管"条件可复现"。
 
-### 2.4 D 轨:本地通路 + 缓存欠配 + 连续 epoch(第二步新增)
+## 3. 参数总表（哪个旋钮影响什么）
 
-- **本地通路**:独立 nginx 容器 `traincache-source-d`(端口 9100,只读挂
-  `bench/data/track_d/` → 容器内 `/usr/share/nginx/html/track-d`),训练进程在
-  宿主机直跑 `bench/scripts/bench_track_d.py`,经
-  `http://127.0.0.1:9100/track-d/shard-%06d.tar` 取数;限速挂该容器 eth0
-  egress(`tc_apply.sh 100mbit 20ms --target source-d`)。
-- **欠配手段**:`docker update --memory/--memory-swap = 1GiB`(=2GiB 数据集的
-  50%,与第一步 D 轨勘测同构);跑后以 128GiB 等效恢复(本机 docker 将
-  `--memory 0` 视为"不变更",见 §5 第 11 条)。
-- **负载**:单 Job 连续 `TRACK_D_EPOCHS=10` epoch × `TRACK_D_STEPS_PER_EPOCH=400`
-  步(batch 32、workers 4);每 epoch 重建 loader 并换 seed(seed+epoch,分片级
-  置换 + 样本级 shuffle),epoch 之间不清缓存;per-step 记录 7 字段
-  `epoch/step_in_epoch/global_step/warmup/wait_s/step_s/shard`;warmup=10 步仅
-  epoch0 前标记排除(口径同探针C)。
-- **冷态规程(D 轨版)**:跑前一次 `sync + drop_caches + docker restart` 源站容器
-  (重建 netns 后复挂 tc 并断言 tbf),**全程只此一次**(epoch 间不清——欠配重复
-  形态是测量对象);由 track_d_up.sh / track_d_verify.sh 内置执行。
-- **编排**:`track_d_up.sh`(容器→欠配→tc→冷态→10 epoch→恢复→磁盘足迹);
-  `track_d_verify.sh`(两轮 ×3 epoch 冷跑对账);`track_d_down.sh`(拆 tc→停容器
-  →删容器,数据/结果目录保留)。均零参数(自读 config.py)、支持 `--dry-run`,
-  verify 另支持 `--selftest`(判据函数级自测)。
+| 旋钮 | 现值 | 写在哪 | 影响 |
+|------|------|--------|------|
+| `TC_RATE / TC_DELAY` | 100mbit / 20ms | `config.py`；`make bench-tc RATE= DELAY=` | 回源管道粗细；是图一的自变量，对照三档实验不许动（10.1 D21） |
+| `TRACK_B_N_TARS` | 32（~264MB/个，≈8GiB） | `config.py` | 源数据规模 |
+| `N_TARS`（对照） | 8（≈2GiB，S 档） | `run_bench.py` 环境变量 | 每组读的分片数；M/L 档改这里 + 灌新数据 |
+| `chunk-size`（实验块） | **8MiB**（生产默认 64MiB） | `trainpublish -chunk-size 8388608`，随产物归档 | 块=缓存与预取最小单位；1GiB 缓存=128 块（10.1 D20） |
+| `TRAINCACHE_CACHE_CAPACITY_BYTES` | 1GiB（`1073741824`） | traincache `up.sh` `ensure_agent_config` 注入 agentd；代码实现在 `agent/svc/config.go` | TrainCache 缓存字节上限，淘汰按它触发 |
+| `JFS_CACHE_MB` | 1024 | juicefs `up.sh` | JuiceFS 缓存上限；`--cache-size` 直接收 MiB 数值，**别再乘 1024** |
+| `FLUID_CACHE_GI` | 1 | fluid `up.sh` | Fluid 缓存配额（Gi） |
+| `TRAINCACHE_WARMUP_K` | warm=16 / cold=0 | `run_bench.py` 环境变量 → WarmupTask `podDetails[0].k` | 预热块数。**预热量 = k × chunk-size**：k=16 配 64MiB 块 =1GiB；改 8MiB 块后 S 档 warm 要 **k=128**（📝待改，10.1 D20 连带） |
+| `TRAINCACHE_PREFETCH_LOOKAHEAD` | 16（默认） | `agent/svc/assemble.go`；experiments/run_policy.py 注入 | Agent 持续预取窗口；对照三档统一 16（D21） |
+| `TRAINCACHE_PREFETCH_K` | 8（默认） | compare train-job 侧 ordersrc 消费窗口 | 训练侧消费深度，与 lookahead 是两个旋钮 |
+| `TRAINCACHE_EVICT_POLICY` | heat（默认）/lru/lfu/wtinylfu | env 注入，非法名拒启 | M4/M5 用；对照实验一律 heat |
+| `EPOCHS / STEPS_PER_EPOCH` | 3 / 6 | `run_bench.py` 环境变量 | 对照训练形态；L 档 EPOCHS=1 |
+| `TRAINCACHE_DATASET_WHITELIST / OBJSTORE_BUCKET` | compare-data / bench-b | `ensure_agent_config` | agentd 服务哪些数据集/桶。快照改名 `compare-data-8m` 后**这里要同步**（10.1 Q12） |
+| seed | 20261015（D 轨）等 | `config.py`/COND | 数据与 shuffle 可复现的根 |
 
-### 2.5 D 轨 verify 判据口径(第二步冻结)
+一句话：调什么之前先在这张表里找到它，改表外没有的参数说明装置跑偏了。
 
-- **主判据(epoch 级聚合)**:两轮各自完整冷态后各跑 3 epoch;每轮每 epoch 的
-  median_stall(= 每步 wait_s/step_s 的中位数,epoch0 前 warmup 步不计)逐 epoch
-  相对差 ≤10%(COLD_VERIFY_TOLERANCE)且两轮全轮 median_stall 相对差 ≤10%,
-  判"对上"(同档位 tc 前置门不满足 → BLOCKED 退出码 2;对不上 → FAIL 退出码 1)。
-- **报告项(不参与 verdict)**:20 步窗口 stall 均值曲线逐点对账照常计算并全量
-  写进 json(`role=report_only`)。**降级理由(主对话裁决,2026-10-13)**:窗口均值
-  被 wait 分布重尾毛刺主导——同一冷启内相邻 epoch 曲线逐点最大相对差实测已达
-  37%~56%,高于指标噪声底、无判别力;而聚合口径两轮仅差 0.5%~0.6%,与第一步
-  D 轨判据③降级同模式(存档:verify_*.json 的 downgrade_reason 字段)。
-- 历史留痕:窗口判据作为主判据的首轮判 FAIL(max_rel_diff 0.593,
-  `verify_20261013-232832.json`)→ 裁决降级为报告项后重判 PASS
-  (`verify_final_20261014-000012.json`)→ 终验 PASS(`verify_20261014-004535.json`)。
+## 4. 操作手册（给我自己：命令干了什么、进度怎么看）
 
-### 2.6 档位扫点:指标灵敏度(第二步实测)
-
-100mbit/20ms ↔ 300mbit/10ms 两档各 1 epoch、均为冷启(同 seed/口径;
-per_step 首步 wait 7.1s/2.1s 可见冷读特征):
-
-| 档位         | 吞吐              | p90 wait | mean stall | median stall |
-|--------------|-------------------|----------|------------|--------------|
-| 100mbit/20ms | ≈12.4 MB/s        | 1.23 s   | 28.5%      | 8.53%        |
-| 300mbit/10ms | ≈32.8 MB/s(≈2.6×) | 0.013 s  | 10.5%      | 8.38%        |
-
-结论:吞吐、p90 wait、mean stall 对档位灵敏;median stall 几乎不动
-(8.53%→8.38%,被 prefetch 流水线吸收)。**扫点指标建议用 mean stall / 吞吐 /
-尾部等待(p90)**,中位数留给"是否在 stall"的形态判定。
-证据:`bench/results/track_d/sweep_100m/`、`sweep_300m/`(epochs_meta.json +
-per_step jsonl;吞吐口径 = 标称 2.0GB ÷ 全轮 measured 步耗时之和)。
-
-## 3. 怎么使用
+### 4.1 从零拉起（新机器/集群重建后）
 
 ```bash
 cd bench
-
-# 一键拉起整套装置(首次含数据生成:四轨约 1 小时;之后秒级复用)
-make bench-up
-
-# 常用子目标
-make bench-data                # 只生成四轨数据(A/B/C/D)
-make bench-tc RATE=300mbit DELAY=10ms   # 换限速档位(MinIO 挂点)
-make bench-cold                # 冷态规程(每组实验前)
-make bench-verify              # 两次冷读验证(过关标准)
-make bench-verify QUICK=--quick  # 快速版(只读 1 个 tar)
-make bench-down                # 拆 tc(集群与数据保留)
-
-# D 轨(第二步新增;训练进程宿主机直跑,数据 ≈2.0GiB)
-make track-d-data              # 只生成 D 轨数据(16 tar;幂等)
-make track-d-up                # 源站容器+欠配 50%+tc+冷态+连续 10 epoch+恢复
-make track-d-verify            # 两轮各 3 epoch 冷跑对账(过关标准 ≤10%,见 §2.5)
-make track-d-down              # 拆 tc、恢复内存限制、停/删容器(数据保留)
-
-# 参数都在 config.py(四轨规模/欠配/档位/桶名/种子),改一处全装置生效
+make kind-up          # 建 kind 5 节点集群（镜像需已 docker 导入，见 §7）
+make k8s-up           # 装 MinIO（带 PVC）
+make data-up          # 生成四轨数据（首次约 1 小时；幂等，已存在跳过）
+make upload           # B 轨灌 MinIO + 公开读 policy（全量重传）
+make tc-up            # 挂限速 100mbit/20ms（需要 sudo，走 .sudo-pass）
+make bench-verify     # 两轮冷读对账 ≤10%，过了才配谈实验
 ```
 
-**验证装置是否可信**(过关标准):`make bench-verify` 输出两轮冷读数字,
-相对差 ≤10% 判"对上"。当前验证结果(第二步验收复跑,2026-10-14):
+查状态：`kubectl get nodes` / `kubectl -n minio get pods` / `tc -s qdisc`。
 
-> **第一轮 710 秒,第二轮 710 秒,相对差 0.0% —— 过关**(8GB 全量
-> @ 100mbit/20ms 档,理论 640s + 延迟与协议开销;两次冷读结果对上,
-> 装置可复现性成立)。结果归档:`bench/results/cold-verify.txt`。
+### 4.2 主实验（D 轨与淘汰/预取）
 
-**第二步(实验装置)验收记录(4/4 通过)**:
-
-| 验收项                                         | 结果                                                  | 证据                                                       |
-|------------------------------------------------|-------------------------------------------------------|------------------------------------------------------------|
-| `make bench-up` 全链路(四轨数据→集群→冷读两轮) | 两轮 710s/710s,相对差 0.0%                            | `bench/results/cold-verify.txt`                            |
-| D 轨 10 epoch 连续跑(欠配 50%+tc 100mbit/20ms) | 全程跑通、无中断;磁盘零膨胀(df 已用 166G 不变)        | `bench/results/track_d/epochs_meta.json`、`disk_usage.txt` |
-| D 轨 verify 两轮冷跑对账                       | PASS:epoch 级 max_rel_diff 1.6%、全轮 0.5%(判据 ≤10%) | `bench/results/track_d/verify_20261014-004535.json`        |
-| 档位扫点(100mbit/20ms ↔ 300mbit/10ms)          | 吞吐 ≈12.4→32.8MB/s、p90 wait 1.23→0.013s(见 §2.6)    | `bench/results/track_d/sweep_100m/`、`sweep_300m/`         |
-
-## 4. 目录结构与文件清单
-
-```
-bench/
-├── Makefile               # bench-up/down/data/tc/cold/verify + track-d-data/up/verify/down
-├── config.py              # 唯一参数源(四轨规模/欠配/档位/桶名/种子)
-├── .sudo-pass             # (gitignore)sudo 密码,scripts 自动读取
-├── .venv/                 # (gitignore)boto3 安装目的地(经 PYTHONPATH 使用,见 §5 第 5 条)
-├── scripts/
-│   ├── synth_track_a.py   # A 轨:100 万×4KB 小文件(并行,~6 分钟)
-│   ├── synth_track_b.py   # B 轨:JPEG→256MB tar ×32≈8GB(~50 分钟)
-│   ├── synth_track_c.py   # C 轨:热/全量分片清单
-│   ├── synth_track_d.py   # D 轨:16×800 张 ≈2.0GiB(幂等,seed 20261015)
-│   ├── bench_track_d.py   # D 轨负载器:连续 N epoch/每 epoch 换 seed/per-step 打点
-│   │                      #   (verify 判据函数 compare_epoch_medians 也在此,可 --selftest)
-│   ├── upload_bench.py    # boto3 上传 MinIO(经节点 InternalIP)+公开读 policy
-│   ├── tc_apply.sh        # 参数化限速(minio|source-d 双挂点,见 §2.1)
-│   ├── tc_teardown.sh     # 拆限速(同上双挂点)
-│   ├── cold_reset.sh      # 冷态规程(drop_caches+重启 MinIO+重挂 tc;MinIO 挂点)
-│   ├── verify_cold.sh     # 两轮冷读一致性验证(A/B/C 装置)
-│   ├── track_d_up.sh      # D 轨编排:容器+欠配+tc+冷态+10 epoch+恢复+磁盘足迹
-│   ├── track_d_verify.sh  # D 轨编排:两轮 ×3 epoch 冷跑对账(判据见 §2.5)
-│   └── track_d_down.sh    # D 轨编排:拆 tc/停容器/删容器(数据与结果保留,幂等)
-├── k8s/                   # kind 3 节点配置 + MinIO manifest
-├── data/                  # (gitignore)四轨数据(种子固定可再生成;track_d 不上传 MinIO)
-└── results/               # 归档:冷读验证(cold-verify.txt)与 D 轨对账(track_d/)
+```bash
+make track-d-up                       # D 轨 10 epoch 连跑（宿主机直跑，不占集群）
+make bench COND=policy-lru REPS=7     # 跑一个实验点（N 次含冷态循环）
+make bench-list                       # 有哪些 COND
+python3 experiments/collect.py ...    # 离线汇总出 metrics.csv
+python3 experiments/plot.py           # 出图
 ```
 
-## 5. 装置执行中的关键事实(踩坑与结论,勿回退)
+进度查看：`ls results/<run目录>` 逐轮增多；训练打点在 per-step jsonl，`tail -f` 即可。
 
-1. kind 节点容器**不映射 nodePort 到宿主机**,宿主机访问 MinIO 必须走节点
-   InternalIP(如 `http://172.19.0.4:30090`),`upload_bench.py` 已自动探测。
-2. `docker exec` 传 heredoc 脚本必须带 `-i`,否则脚本不进容器。
-3. MinIO 重启/重建后 **bucket 匿名读 policy 与 tc qdisc 都会丢**(policy 持久于
-   数据卷本应保留,但实测曾丢失)——冷态规程已内置重挂 tc;上传脚本每次重设 policy。
-   本地源站容器同理:**docker restart 重建 netns → eth0 qdisc 随之丢失**,
-   track_d_up/verify 在冷态重启后复挂并断言(以出现 tbf 为准);否则训练会跑在
-   无限速链路上,测量无效。
-4. numpy `RandomState` 种子必须 < 2³²,派生种子要取模(探针与 A 轨各踩一次)。
-5. **解释器统一(第二步冻结)**:系统 `/usr/bin/python3` 现为 3.14(`.venv/bin/python`
-   也链到它,与 venv 内 python3.12 的 site-packages 不匹配、已不可用)——装置内
-   python 调用统一走 `/usr/bin/python3.12`(Makefile 顶部 `PY`;各脚本同缺省),
-   第三方依赖(boto3)经 `PYTHONPATH` 指向
-   `bench/.venv/lib/python3.12/site-packages`;`.venv` 降级为 boto3 安装目的地。
-6. **MinIO 必须挂持久卷**(已修):无卷时 Deployment 的 /data 在容器可写层,
-   rollout restart 换 Pod 即丢光全部桶(实测:冷态规程的"重启源站"步骤曾因此
-   清空 train-data 与 bench-b,现勘装置数据一并丢失)。现用 PVC
-   (kind standard storageclass,30Gi),数据跨 Pod 存活。
-7. `kubectl run` 对 latest 标签默认 `imagePullPolicy=Always`(节点有镜像也强拉),
-   装置脚本一律显式 `--image-pull-policy=IfNotPresent`。
-8. **宿主机时钟回拨会静默打坏集群**(2026-10-09 实测):时钟回拨后,所有 SA token
-   的 nbf(not-before)落在未来 → API 401 Unauthorized → CoreDNS 无法 list/watch、
-   kube-proxy 不写 iptables 规则(进程活着但 Service 全不通)、组件 Ready 为假。
-   修复:重启对应 Deployment(kubelet 用当前时钟重签 token);若节点容器内部状态
-   已损坏(实测出现过 kube-proxy 的 systemd 服务与配置丢失),最干净是
-   `kind delete cluster && make bench-up` 重建(各轨数据在宿主机,重传 8 秒;
-   D 轨本就落宿主机本地,无重传)。
-9. 本地 `kindest/node:v1.28.15` 标签实际指向 v1.37 镜像(加速站内容),集群实测
-   v1.37.0,满足前置要求;版本以 `kubectl get nodes` 实测为准。
-10. **crictl 取 sandbox 必须带 `--state Ready`**(第二步踩坑):节点上可能残留
-    NotReady 的僵尸 sandbox(worker2 节点一条未删),不过滤会取到旧 CID、找不到
-    netns;tc_apply.sh 的 CID 选取已改为
-    `crictl pods --state Ready --name <pod> -q | head -1`(仅 MinIO 挂点在节点
-    容器内经 crictl 定位;source-d 挂点在宿主机用 `docker inspect` 取 PID)。
-11. **`docker update --memory 0` 被本机 docker 视为"不变更"**(零值语义,
-    probe_c 实证):D 轨欠配的恢复用 128GiB 等效大值,并记档
-    (`env_track_d_up.json` 的 restore_caveat)。
-12. D 轨冷态只在**跑前一次**(sync + drop_caches + docker restart + 复挂 tc),
-    epoch 之间不清缓存/不重启容器——欠配的重复形态是测量对象,不是脏数据。
+### 4.3 五组对照跑分
 
-**遗留事项(第二步收尾未清,已知不拦路)**:
+```bash
+cd bench/compare
+python3 run_bench.py --reps 5 --groups direct --out ../perf_results/s.csv   # 先单组试跑
+python3 run_bench.py --reps 5 --out ...csv                                   # 全量
+make compare-up GROUP=juicefs-warm     # 只起某组环境（预热在 up 内完成并等待）
+make compare-down GROUP=...           # 拆该组
+```
 
-- worker2 节点残留 NotReady 僵尸 sandbox 未删除(脚本侧已用 `--state Ready` 规避,见第 10 条);
-- `upload_bench.py` 无"存在即跳过"逻辑,每次上传全量重传 B 轨;
-- tc 断言留痕字段 `via`(env/verify json)为空——断言本身有效,仅"经哪条通道执行"未落档。
+跑中要盯的东西（每条都可核验，别信"应该快了"）：
 
-## 6. 模块使用地图(后续步骤怎么用它)
+```bash
+kubectl get pods -A -l app=train-job -o wide     # 当前哪个组在测、落在哪个节点
+kubectl -n <组ns> get pod train-job-0 -o jsonpath='{.status.phase}'   # traincache 组先看 Pending（gate 卡着）→Running
+kubectl logs -n <组ns> train-job-0 -f            # 每步的 wait_s/step_s 实时打点
+kubectl -n traincache get warmuptask             # 预热进度
+kubectl -n traincache get pods -o wide | grep agentd   # 4 worker 各一且 Ready
+```
 
-核心1 后续每个零件(步骤 2+:CRD/Controller/Agent;步骤 5:B 轨 dataloader
-复跑;步骤 8:C 轨缓存欠配;v4 全程收益:D 轨欠配连续 epoch 场景)都要在这套
-装置上拿数字。各模块在后续步骤中的用法:
+注意：**CSV 在全部 reps 跑完才落盘**，中途中断只剩 pod 日志与 `perf_results/logs/`。
 
-| 模块                                        | 接口                                                            | 后续步骤中的用法                                                                                                                                 |
-|---------------------------------------------|-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Makefile`                                  | `make bench-up`、`make track-d-*`                               | 装置编排入口;新实验目标(如跑训练负载)加在这里,保持一键;D 轨四目标已就位                                                                          |
-| `config.py`                                 | 唯一参数源                                                      | 规模/桶名/种子/档位改一处全装置生效;MinIO 扫点改 `TC_RATE`/`TC_DELAY`,D 轨改 `TRACK_D_*`(含欠配 `TRACK_D_CACHE_MB`)                              |
-| `scripts/tc_apply.sh`                       | `<rate> <delay> [burst] [--target minio\|source-d] [--dry-run]` | **扫点自变量**:模拟不同质量云存储(100mbit/20ms、300mbit/10ms…),换档后跑 `bench-cold` 再测;`--target source-d` 换 D 轨本地通路档位(接口表见 §2.1) |
-| `scripts/tc_teardown.sh`                    | `[--target minio\|source-d] [--dry-run]`                        | 实验结束拆限速,恢复全速;无参即 MinIO 挂点(既有行为不变)                                                                                          |
-| `scripts/cold_reset.sh`                     | 无参                                                            | **每组实验前必跑**:清 page cache + 重启 MinIO + 重挂 tc,保证冷读一样冷;D 轨对应规程内置在 track_d_up/verify(本地源站,不重启 MinIO)               |
-| `scripts/verify_cold.sh`                    | `[--quick]`                                                     | 装置可信性回归(A/B/C 装置):改动装置/换档后重跑,两轮相对差 ≤10% 才继续做实验;`--quick` 秒级自检                                                   |
-| `scripts/synth_track_a.py`                  | 参数在 config                                                   | 元数据压力臂(100 万×4KB),io_uring 支线专用;规模调 `TRACK_A_N_FILES`                                                                              |
-| `scripts/synth_track_b.py`                  | 参数在 config                                                   | **旗舰数字数据源**:步骤 5 真实 PyTorch DataLoader + webdataset 复跑读这批 tar;规模调 `TRACK_B_N_TARS`                                            |
-| `scripts/synth_track_c.py`                  | 参数在 config                                                   | 步骤 8 缓存欠配实验:Job A 按 `hot-shards.txt` 反复读 10% 热分片、Job B 按 `full-shards.txt` 全量扫描;比例调 `TRACK_C_HOT_RATIO`                  |
-| `scripts/synth_track_d.py`                  | 参数在 config(`TRACK_D_*`)                                      | **v4 全程收益专用数据源**:16×800 张 ≈2.0GiB,幂等可重生成;规模调 `TRACK_D_N_TARS`/`TRACK_D_IMAGES_PER_TAR`                                        |
-| `scripts/bench_track_d.py`                  | `--epochs/--seed/--workers/--out-dir …`(缺省取 config)          | D 轨负载器:连续 N epoch、每 epoch 换 seed、per-step 打点——后续缓存机制的 stall 收益都以此打点;verify 判据函数也在此(`--selftest`)                |
-| `scripts/track_d_up.sh` / `verify` / `down` | 零参数(`--dry-run`;verify 另 `--selftest`)                      | D 轨装置编排:up=搭装置+10 epoch、verify=两轮冷跑对账、down=拆除(见 §2.4)                                                                         |
-| `scripts/upload_bench.py`                   | 无参                                                            | 换数据/重建集群后重传 B 轨(自动建桶+公开读 policy,幂等)                                                                                          |
-| `k8s/minio.yaml`                            | `kubectl apply`                                                 | 层3 数据源基座(PVC 持久化);`k8s/kind-config.yaml` 重建集群用                                                                                     |
-| `data/`                                     | 目录                                                            | 四轨数据(含 track_d 2.0G,不上传 MinIO),种子固定可再生成,不必入库                                                                                 |
+### 4.4 拆除
 
-**一组实验的标准流程(A/B/C 装置)**:`bench-tc <新档位>` → `bench-cold` → 跑被测
-负载(零件/训练 Job)→ 记数字 → `bench-verify --quick` 自检装置仍可信 →
-下一档位。测"热读"时不跑 `bench-cold`(热 = 本地缓存+page cache 命中),
-直接复跑同一负载;测"冷读"必须先跑 `bench-cold`。
+```bash
+make compare-down          # 或 make compare-all-down（拆尽四组）
+make bench-down / tc-down  # 主实验拆限速；集群与数据保留
+```
 
-**D 轨标准流程(v4 全程收益)**:`make track-d-up`(或换档
-`tc_apply.sh <档位> --target source-d` 后)跑被测负载,或直接调
-`/usr/bin/python3.12 scripts/bench_track_d.py --epochs N --out-dir <目录>`;
-装置可信性用 `make track-d-verify`(自带两轮冷态与 epoch 级聚合对账,判据见
-§2.5);扫点按 §2.6 的建议指标取数。
+一句话：拉起跑验用 4.1，日常实验按轨选 4.2/4.3，进度永远用 kubectl 实况说话。
+
+## 5. 一键化规程（目标形态，状态标注）
+
+| 动作 | 命令 | 干什么 | 状态 |
+|------|------|--------|------|
+| 体检 | `make bench-doctor` | 一次跑完 §5.1 清单，输出逐项绿/红 | 📝 待建 |
+| 冷态 | `make bench-cold` | drop_caches + 重启 MinIO + 重挂 tc；每 rep 前 runner 自动调 | ✅ |
+| 开始 | `make bench COND=` / `run_bench.py` | 见 §4 | ✅ |
+| 清场 | `make compare-all-down` + cold_reset | 组间零残留 | ✅ |
+| 出指标 | `collect.py`（主）/ `--out` CSV（对照） | 统一四指标 + 档位 + 预热时长列 | ✅（tier/预热列 📝随 M6） |
+| 出图 | `python3 experiments/plot.py` | 五张图，负收益区域照画 | ✅ |
+| 存档 | `make bench-save` | 镜像 docker save + MinIO 对象清单快照 + CRD/配置 dump + 产物打包 | 📝 待建 |
+| 恢复 | `make bench-restore` | 从存档反向重建（kind 对时钟回拨等很脆，见 §7 第 8 条，恢复能力是刚需） | 📝 待建 |
+
+### 5.1 doctor 检查清单（待建脚本的验收单）
+
+1. kind 集群 5 节点 Ready；`kubectl version` 与镜像匹配（§7 第 9 条）。
+2. 训练镜像 `python:3.12-alpine`、控制面镜像（REGISTRY=dgl3i4ucowsgvvdwty.xuanyuan.run TAG=0.8.0）已在 4 节点 containerd 里。
+3. MinIO 桶 `bench-b`：32 个 `shard-*.tar` 在位、可读；`compare-data/`（旧 64MiB 快照）与 `compare-data-8m/`（新）在位。
+4. agentd DaemonSet 4/4 Ready，`TRAINCACHE_CACHE_CAPACITY_BYTES` 已注入，`traincache_agent_degraded` 指标为 0。
+5. 4 个 worker 均有 `traincache.io/s3-access=true` 标签。
+6. tc qdisc 在位且档位 = COND 声明值。
+7. `df` 磁盘余量 ≥ 实验预算（L 档全量口径约需 100GiB，预算上限 200GiB，10.1 Q11）。
+8. `/var/cache/traincache/blocks`、`/var/cache/jfs`、`/runtime-mnt` 三个缓存目录已按规程清空（或声明本轮不清）。
+
+一句话：凡是"手动记得的下一步"，都要变成 doctor/save/restore 的脚本行。
+
+## 6. 每组独立 smoke（M6 验收执行体）
+
+接口定义（📝 待建）：`make compare-smoke GROUP=<组名>`，内部四步：起该组 → 低负载一轮（`N_TARS=2 EPOCHS=1 STEPS_PER_EPOCH=4`）→ 判定 → 拆该组清缓存。任何装置改动后，先跑受影响组的 smoke 再谈正式实验。
+
+| 组 | 通过判据 |
+|----|----------|
+| direct | train-job Running 到完成；四指标 CSV 行齐全；stall>0（限速生效） |
+| juicefs-cold | 同上 + 缓存目录 `--cache-size` 生效（跑前 `du /var/cache/jfs` = 0） |
+| juicefs-warm | up.sh 内 warmup 完成才创建 train-job；`du` 缓存非 0；startup 不含 warmup 时间 |
+| fluid-cold / fluid-warm | PVC 挂载成功；warm 组 DataLoad 完成事件晚于 up、早于 t_submit |
+| traincache-cold | k=0：WarmupTask 不创建，gate 立即放行，train-job 正常跑完 |
+| traincache-warm | k=128（8MiB 块）：预热完成 → gate 放行；agentd 命中指标非零；落点节点的 blocks 目录有数据 |
+
+全部组共判：`kubectl get events` 无 ImagePullBackOff/CrashLoop；产物含 run ID 并能关联 COND。
+
+一句话：smoke 是装置的体温计——低负载、快出结果、只回答"这组还能不能用"。
+
+## 7. 故障速查表（现象 → 根因 → 处置；都是真实踩过的，勿回退）
+
+| # | 现象 | 根因 | 处置 |
+|---|------|------|------|
+| 1 | 训练 Pod ImagePullBackOff | 离线环境拉不到 docker hub；k8s/containerd 不读 daemon.json 的镜像加速 | 镜像 `image:` 必须写加速域名全称；或 docker 拉好 `kind load image-archive` 导入；训练镜像用 `python:3.12-alpine`（slim 拉不到） |
+| 2 | 宿主机访问 MinIO NodePort 不通 | kind 不映射 nodePort 到宿主机 | 走节点 InternalIP（`http://172.19.0.x:30090`），upload 脚本已自动探测 |
+| 3 | 冷读结果忽快忽慢 | MinIO/源站重启后 tc qdisc 与匿名读 policy 都丢 | 冷态规程自动重挂；不复挂 = 跑在无限速链路，该轮作废 |
+| 4 | crictl 找不到 MinIO netns | 节点残留 NotReady 僵尸 sandbox（worker2 实测有一条） | `crictl pods --state Ready --name <pod> -q` 过滤，tc_apply 已改 |
+| 5 | VM 重启后 fluid mount "not formatted" + redis format FATAL | redis 无 AOF，元数据没了；MinIO 前缀非空拒绝重新 format | 不是代码 bug：`kubectl delete ns fluid` 后重 up（down.sh 会清派生前缀）；kubeadm 证书过期先 `kubeadm certs renew all` |
+| 6 | 全 API 401、Service 不通 | 宿主机时钟回拨，SA token nbf 在未来 | 重启 Deployment 重签；坏透就 `kind delete cluster && make bench-up`（数据在宿主机，重传 8 秒） |
+| 7 | fluid-cold 等组跑出裸 Pod/NameError | 组名精确匹配漏改（7 组名 vs 4 目录） | run_bench 已改 startswith 分流；改组名时全局搜 `== "fluid"` 这类精确比较 |
+| 8 | juicefs 缓存 1GiB 限制从不生效 | `--cache-size` 单位是 **MiB**，装置曾注释成 KiB 配了 1048576（=1TiB） | 配 1024；见 §3；历史 juicefs 结果因此作废过一轮 |
+| 9 | warmup 了但测量组读不到缓存 | `warm.sh` 暖的是 jfs-mount 的 emptyDir，测量 Pod 用另一个 emptyDir | 缓存改 hostPath `/var/cache/jfs`；预热挪进 up.sh（D23/D24） |
+| 10 | measure 的 startup 712 秒异常 | Pod 内 warmup 耗时被计进 t_submit→首步 | 预热外移 group_up 后特判 `TRAINCACHE_JOB_CREATED_AT="0"` 已删 |
+| 11 | DataSet SnapshotNotFound | 快照没发布过（CURRENT 缺失） | up.sh `publish_snapshot` 调 trainpublish；8MiB 块要发布到 `compare-data-8m`（Q12） |
+| 12 | NoAccessibleNodes | worker 缺 s3-access 标签 | `label_s3_nodes` 自动打；重建集群后要重跑 |
+| 13 | preheat 全失败 | agentd WHITELIST/BUCKET 与实际数据集/桶不匹配 | `ensure_agent_config` 运行时 `kubectl set env`；换快照名记得同步改（§3） |
+| 14 | shard 数量算错、读一半没数据 | 按 128MB 假设算 count，实际 ~264MB | 从对象 stat 读实际大小 |
+| 15 | pkill 把 shell 自己杀了（exit 143） | `pkill -f 'kubectl'` 匹配到自己的命令行 | 用 `pgrep -f 'run_bench\.py'` 精确找人再杀 |
+| 16 | drop_caches/tc 需要 root 卡住 | sudo 交互不可用 | `bench/.sudo-pass`（gitignore、600 权限）；文档不展开内容 |
+| 17 | python 依赖炸（boto3 找不到） | 系统 python3 是 3.14，venv 里是 3.12 site-packages | 装置统一 `/usr/bin/python3.12`（Makefile `PY`），boto3 走 PYTHONPATH 指 `.venv` |
+| 18 | `docker update --memory 0` 没恢复 | 本机 docker 把 0 当"不变更" | 恢复用 128GiB 等效大值，记录在 env json `restore_caveat` |
+
+一句话：这张表是装置的全部病史，动环境之前先来对一遍。
+
+## 8. 禁改清单（清理磁盘、重置实验时一律不动）
+
+1. MinIO `bench-b/shard-*.tar`——五组共同源数据（32 个 ~8GiB），删了等于重造数据。
+2. 旧 `bench-b/compare-data/`（64MiB 块快照）——保留供历史产物复现（10.1 Q12）。
+3. kind 集群本体与 MinIO PVC——清理脚本不许 `kind delete`。
+4. `bench/data/`（宿主机四轨数据，种子可再生成但重生成很贵）、`tmp_shards/`。
+5. `results/`、`perf_results/` 已归档产物——只追加不覆盖不删。
+6. `bench/.sudo-pass` 内容——任何文档、日志、回复里不出现。
+
+## 9. 产物目录规范（一键出指标/出图的读取约定）
+
+```text
+bench/results/
+├── cold-verify.txt              # 装置可信性
+├── track_d/                     # D 轨：epochs_meta.json、per_step jsonl、verify_*.json、sweep_*/
+├── <COND 运行目录>/              # 主实验：run.json + metrics.csv + collect.json + env.lock
+└── compare/                     # 📝 目标形态（迁移前对照产物暂在 repo 根 perf_results/）
+    └── <tier S|M|L>/<组>/<repNN>/
+        ├── run.json             # t_submit/t_first_step/t_last_step、per-step、预热时长
+        ├── metrics.csv          # 四指标 + tier + 预热时长列
+        ├── env.lock             # 镜像 digest、tc 档位、seed、chunk-size、cache 配置
+        └── status               # ok | void | exploratory（L 档探点标这个）
+```
+
+约定：每行数据能回答「哪一档、哪个组、第几次、哪个 COND」四件事；`void` 轮不进汇总（10.1 D14）；`exploratory` 不进正式表。`--out` CSV 与 summary.csv 的列以 §2.3 collect/stats 实现为准。
+
+一句话：产物结构先冻结，脚本才有的读、图才有的画、别人才能复跑。
+
+## 10. 不可再生的实测基准（引用时注意出处）
+
+- **默认档 100mbit/20ms**：冷读 8GiB 两轮对账 710s/710s、相对差 0.0%（理论传输 640s，`results/cold-verify.txt`）。
+- **指标灵敏度（D 轨两档扫点，各 1 epoch）**：吞吐 12.4→32.8MB/s、p90 wait 1.23→0.013s、mean stall 28.5%→10.5%，而 **median stall 8.53%→8.38% 几乎不动**（prefetch 吸收了）。结论：扫点用 mean/p90/吞吐，中位数只判形态（`results/track_d/sweep_100m|300m/`）。
+- **D 轨 verify 判据降级史**：20 步窗口均值被重尾毛刺主导（相邻 epoch 逐点相对差实测 37%~56%），主判据降为 epoch 级 `median_stall` ≤10%；窗口曲线标 `report_only`。首轮 FAIL（max_rel_diff 0.593）→降级后 PASS→终验 PASS（1.6%/0.5%）。
+- **kindest/node:v1.28.15 标签实指 v1.37 镜像**：版本以 `kubectl get nodes` 实测为准。
+- **遗留矛盾**：Makefile 注释 B 轨生成"约 25 分钟"vs 旧文档"~50 分钟"，待实测统一。
+
+一句话：这些数字是装置的地基，换环境后必须重测，不许直接引用。
