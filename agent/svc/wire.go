@@ -321,6 +321,7 @@ func (a *Agent) catalogFor(_ context.Context, dataset string) (*index.Catalog, e
 type evictHeatSource struct{ ag *Agent }
 
 // ListForEviction 返回热度表全量快照(转换出栈后所有权归 evictor,可原地排序)。
+// M4:透传 Accesses 字段供 LFU/W-TinyLFU 档策略消费。
 func (h evictHeatSource) ListForEviction() []evictor.EvictionEntry {
 	c := h.ag.collector()
 	if c == nil {
@@ -329,7 +330,7 @@ func (h evictHeatSource) ListForEviction() []evictor.EvictionEntry {
 	src := c.ListForEviction()
 	out := make([]evictor.EvictionEntry, 0, len(src))
 	for _, e := range src {
-		out = append(out, evictor.EvictionEntry{FP: e.FP, Heat: e.Heat, LastTouch: e.LastTouch})
+		out = append(out, evictor.EvictionEntry{FP: e.FP, Heat: e.Heat, LastTouch: e.LastTouch, Accesses: e.Accesses})
 	}
 	return out
 }

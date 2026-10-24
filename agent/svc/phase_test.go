@@ -162,7 +162,7 @@ func TestPhaseOrderPrefetchChunksWindow(t *testing.T) {
 	}
 }
 
-// TestPhaseOrderKFallback:未注入订单 K 的 dataset 回退构造缺省 K(prefetchLookahead=8)。
+// TestPhaseOrderKFallback:未注入订单 K 的 dataset 回退构造缺省 K(prefetchLookahead=16)。
 func TestPhaseOrderKFallback(t *testing.T) {
 	p := newPhaseTracker(prefetchLookahead)
 	p.setDatasetResolver(phaseResolver)

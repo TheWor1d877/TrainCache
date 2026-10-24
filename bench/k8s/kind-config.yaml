@@ -1,4 +1,4 @@
-# bench 装置 kind 集群:1 control-plane + 2 worker
+# bench 装置 kind 集群:1 control-plane + 4 worker(D15 裁决,共 5 节点)
 # 注:本地 kindest/node:v1.28.15 标签实际指向 v1.37 镜像(加速站内容),
 # 实测 kubelet 版本 v1.37.0,满足 PodSchedulingGate ≥1.26 前置
 kind: Cluster
@@ -6,5 +6,7 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: traincache
 nodes:
   - role: control-plane
+  - role: worker
+  - role: worker
   - role: worker
   - role: worker

@@ -939,3 +939,46 @@ func TestEvictThenReput(t *testing.T) {
 	}
 	assertNoResidue(t, blocksDir, 1)
 }
+
+// TestVerifyXXH3SHA256Sha256Mismatch 覆盖双重校验分支——块头 SHA256 与数据实际
+// SHA256 不符（XXH3 仍正确）时，Open 必须返回 ErrCorrupt。
+// 现有 tampered_data / tampered_magic / sha256_catches_rekeyed_block 分别覆盖了
+// 数据区篡改（XXH3 失败）、magic 篡改、以及"重算 XXH3 通过但 SHA256 不匹配且指纹
+// 也变了"的场景。本测试补齐"指纹没变、XXH3 通过但 SHA256 签名被单独破坏"分支。
+//
+// 块头布局（header.go）：offset 28..60 是 SHA256 字段，offset 12..28 是 XXH3 字段。
+// 本测试只翻转 SHA256 区域的 1 字节，保证：
+//   - hdr.XXH3 == fp（步骤 2 通过）
+//   - 数据区完全不变 → 重算 XXH3 == hdr.XXH3（步骤 4 通过）
+//   - 重算 SHA256 != 被篡改的 hdr.SHA256（步骤 5 失败 → ErrCorrupt）
+func TestVerifyXXH3SHA256Sha256Mismatch(t *testing.T) {
+	s, blocksDir := newTestStore(t, VerifyXXH3SHA256)
+	content := testContent(16, 8<<10)
+	fp := putBlock(t, s, content)
+	path := blockFilePath(blocksDir, fp)
+
+	// 好块先验证能正常读回。
+	if got := readBlock(t, s, fp); !bytes.Equal(got, content) {
+		t.Fatal("写入后读回内容不一致")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读块文件失败: %v", err)
+	}
+	if _, err := ParseHeader(raw[:HeaderSize]); err != nil {
+		t.Fatalf("原始块头不可解析: %v", err)
+	}
+
+	// 翻转 SHA256 区域的 1 字节（offset 28 是块头 SHA256 字段首字节）。
+	// XXH3 区域（offset 12..28）与数据区（offset HeaderSize..末尾）一律不动。
+	tampered := append([]byte(nil), raw...)
+	tampered[28] ^= 0xFF
+	if err := os.WriteFile(path, tampered, 0o644); err != nil {
+		t.Fatalf("写篡改块失败: %v", err)
+	}
+
+	if _, err := s.Open(fp); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("SHA256 区域被单独篡改后 Open 错误 = %v，期望 ErrCorrupt", err)
+	}
+}

@@ -96,7 +96,7 @@ func (f *fakeHeat) callCount() int {
 	return f.calls
 }
 
-// fakeProtected 是注入的硬保护集合(D24:cursor + lookahead 8 块)。
+// fakeProtected 是注入的硬保护集合(D24:cursor + lookahead 16 块)。
 type fakeProtected struct {
 	fps []cas.Fingerprint
 }
@@ -158,7 +158,7 @@ func newEvictFixture(t *testing.T) *evictFixture {
 	}
 	fx.heat.log = &fx.order
 	fx.sweep.log = &fx.order
-	fx.ev = New(cs, fx.heat, fx.protected, fx.m, Config{
+	fx.ev = New(cs, fx.heat, fx.protected, fx.m, nil, Config{
 		Dataset: "ds",
 		Usage:   fx.usage.use,
 		Sweep:   fx.sweep.sweep,
@@ -528,7 +528,7 @@ func TestNewDefaultsAndNilSources(t *testing.T) {
 		{},
 		{Interval: -time.Second, TriggerPercent: -1, DeltaPercent: -1, CriticalPercent: -1},
 	} {
-		e := New(cs, nil, nil, nil, cfg)
+		e := New(cs, nil, nil, nil, nil, cfg)
 		if e.interval != 30*time.Second || e.trigger != 0.80 || e.delta != 0.05 || e.critical != 0.90 {
 			t.Errorf("cfg=%+v 默认 = %v/%v/%v/%v, want 30s/0.80/0.05/0.90",
 				cfg, e.interval, e.trigger, e.delta, e.critical)
@@ -539,7 +539,7 @@ func TestNewDefaultsAndNilSources(t *testing.T) {
 	}
 
 	// BlockDir 非空:Usage nil 时接线 statfs 默认实现(disk_test.go 另测实现本身)。
-	e := New(cs, nil, nil, nil, Config{BlockDir: t.TempDir()})
+	e := New(cs, nil, nil, nil, nil, Config{BlockDir: t.TempDir()})
 	if e.usage == nil {
 		t.Fatal("BlockDir 非空时 Usage nil 应取 statfs 默认实现")
 	}
@@ -549,7 +549,7 @@ func TestNewDefaultsAndNilSources(t *testing.T) {
 	}
 
 	// heat/protected/Sweep/m 全 nil:高利用率也不 panic(无候选、不打点)。
-	e2 := New(cs, nil, nil, nil, Config{Usage: func() (uint64, uint64, error) { return 85, 100, nil }})
+	e2 := New(cs, nil, nil, nil, nil, Config{Usage: func() (uint64, uint64, error) { return 85, 100, nil }})
 	e2.RunOnce(context.Background())
 }
 

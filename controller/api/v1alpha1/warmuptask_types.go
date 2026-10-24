@@ -239,7 +239,8 @@ type PodNodeReadiness struct {
 	// ReadyBlockBitmap is the per-request-chunk readiness bitmap reported by
 	// the Agent (bit i == submitted chunks[i]); 1 means persisted and verified.
 	ReadyBlockBitmap []byte `json:"readyBlockBitmap,omitempty"`
-	// StartupWindowReady is the ready-block count inside the startup window.
+	// StartupWindowReady is ReadyInWindow's source value; both are assigned in
+	// the same computation (D41) and this field is kept for compatibility.
 	StartupWindowReady int32 `json:"startupWindowReady,omitempty"`
 	// ReadyInWindow mirrors StartupWindowReady for the 8.1 gate contract.
 	ReadyInWindow int32 `json:"readyInWindow,omitempty"`
@@ -252,6 +253,10 @@ type PodNodeReadiness struct {
 	// gets one summary entry with an empty NodeName and the Pod-level state.
 	State          PreheatState `json:"state,omitempty"`
 	LastReportTime *metav1.Time `json:"lastReportTime,omitempty"`
+	// MinUnmet reports whether this Pod's final GWAA assignment claims fewer
+	// than spec.preheatFanoutMin nodes (D40). All entries of the same Pod
+	// carry the same value; the Poll loop never recomputes it.
+	MinUnmet bool `json:"minUnmet,omitempty"`
 }
 
 // GateDecision is the frozen gate verdict.

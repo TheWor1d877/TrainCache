@@ -101,6 +101,8 @@ func main() {
 	}()
 
 	slog.Info("traincache-agentd 启动",
+		"component", "agentd",
+		"version", buildVersion(),
 		"node", ag.Cfg.NodeName.String(),
 		"grpc_addr", cfg.GRPCAddr,
 		"metrics_addr", cfg.MetricsAddr,

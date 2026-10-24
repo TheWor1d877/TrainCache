@@ -177,6 +177,7 @@ func readinessFor(task *traincachev1alpha1.WarmupTask, pod int32, node string) *
 // entry per PodDetail.Index. A changed assignment replaces the entry's
 // assigned-node fact with this round's observation (or clears it when none is
 // available), so stale data from the previous node is never relabeled.
+// MinUnmet is stamped onto every entry from placement.Decisions (D40).
 func applyAssignment(
 	task *traincachev1alpha1.WarmupTask,
 	placement gwaa.Output,
@@ -184,7 +185,11 @@ func applyAssignment(
 	podNames map[int32]string,
 	candidates []string,
 ) {
-	buildPodDetails(task, facts, podNames, candidates, placement.Assignment)
+	minUnmet := make(map[int32]bool, len(placement.Decisions))
+	for idx, dec := range placement.Decisions {
+		minUnmet[idx] = dec.MinUnmet
+	}
+	buildPodDetails(task, facts, podNames, candidates, placement.Assignment, minUnmet)
 }
 
 // previousPreheat reconstructs the Agent tasks that should already exist.

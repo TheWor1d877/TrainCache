@@ -44,6 +44,10 @@ const (
 	envIndexRefreshInterval = "TRAINCACHE_INDEX_REFRESH_INTERVAL"
 	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;7.1 §5.12)。
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
+
+	// envCacheCapacityBytes 是字节维度缓存上限(M-debug-1/§14;默认 0=关闭字节淘汰,
+	// 只走磁盘水位)。
+	envCacheCapacityBytes = "TRAINCACHE_CACHE_CAPACITY_BYTES"
 )
 
 // HeatConfig 是热度与磁盘触发线参数(D14:N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%;
@@ -102,6 +106,9 @@ type Config struct {
 	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(7.1 §5.12;默认 false,
 	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
 	ObjstoreProbeConditionalWrite bool
+	// CacheCapacityBytes 是字节维度缓存上限(§14;默认 0=关闭,只走磁盘水位)。
+	// TRAINCACHE_CACHE_CAPACITY_BYTES 覆盖;>0 时 evictor 启用双维度淘汰判定。
+	CacheCapacityBytes int64
 }
 
 // indexRefreshInterval 返回生效的快照跟随刷新周期(未配置/非正 → 默认 5s;
@@ -142,6 +149,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	cacheCapacityBytes, err := envNonNegInt64(envCacheCapacityBytes, 0)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		NodeName:                      node,
@@ -160,6 +171,7 @@ func Load() (*Config, error) {
 		ReadStallMinWaitMS:            readStallMinWaitMS,
 		IndexRefreshInterval:          indexRefreshInterval,
 		ObjstoreProbeConditionalWrite: envBool(envObjstoreProbeConditionalWrite),
+		CacheCapacityBytes:            cacheCapacityBytes,
 	}, nil
 }
 
@@ -326,6 +338,23 @@ func envPositiveInt(key string, def int) (int, error) {
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("svc: %s=%d 非法(需 > 0)", key, n)
+	}
+	return n, nil
+}
+
+// envNonNegInt64 解析非负整数 env(字节上限等;允许 0)。
+// 未设置或全空白 → 默认值;非法取值或 <0 → 错误。
+func envNonNegInt64(key string, def int64) (int64, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("svc: %s=%q 非法(需非负整数): %w", key, v, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("svc: %s=%d 非法(需 >= 0)", key, n)
 	}
 	return n, nil
 }

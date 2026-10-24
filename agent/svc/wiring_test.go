@@ -326,7 +326,7 @@ func TestWiringCollectorHooksAndEvictor(t *testing.T) {
 
 	// 淘汰闭环:与装配同构的淘汰器(Usage 注入固定利用率,不依赖宿主磁盘水位;
 	// HeatSource/ProtectedSource/Sweep 均为装配层真实接线适配)。
-	ev := evictor.New(ag.CS, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, evictor.Config{
+	ev := evictor.New(ag.CS, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, nil, evictor.Config{
 		TriggerPercent:  1,
 		DeltaPercent:    5,
 		CriticalPercent: 90,

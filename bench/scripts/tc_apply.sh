@@ -22,7 +22,7 @@
 # 镜像取本机已有的 TC_IMAGE,与第一步探针实测形态一致)。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3.12}"   # 与 Makefile/探针先例统一(config.py 仅标准库,无第三方依赖)
+PY="${PY:-/usr/bin/python3}"   # 与 Makefile/探针先例统一(config.py 仅标准库,无第三方依赖)
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 usage() {

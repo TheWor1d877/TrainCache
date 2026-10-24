@@ -381,3 +381,166 @@ func TestSweepNeverDeletesCurrent(t *testing.T) {
 		t.Fatal("无 CURRENT 时对象被删除")
 	}
 }
+
+// TestSweepRetainSnapshotsOne 覆盖 RetainSnapshots 边界最小值 1——保护窗口只有
+// CURRENT 自身，旧快照无一保留。提交 4 次快照，前 3 次全部出窗口：其 manifest/
+// 分片对象被删，引用的块（不再被 CURRENT 引用）成孤儿被删；CURRENT 引用的块
+// 与其 manifest/分片、CurrentKey 一律保留。
+func TestSweepRetainSnapshotsOne(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+	cfg := Config{RetainSnapshots: 1, MaxEntriesPerShard: 10}
+	const dataset = "retain-1"
+
+	w := NewWriter(env.store, env.cs, cfg)
+
+	var (
+		v1 = env.putBlock(t, "r1-v1")
+		v2 = env.putBlock(t, "r1-v2")
+		v3 = env.putBlock(t, "r1-v3")
+		v4 = env.putBlock(t, "r1-v4")
+	)
+
+	// 4 次 Commit，每次换不同块 → s1/s2/s3 依次出窗口，s4 是 CURRENT。
+	s1, _ := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v1)})
+	s2, _ := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v2)})
+	s3, _ := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v3)})
+	s4, m4 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v4)})
+
+	col := NewCollector(env.store, env.cs, cfg)
+	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	// 出窗口快照数 = 3（s1, s2, s3），各 1 manifest + 1 分片 = 6 对象；块 v1/v2/v3 成孤儿 = 3。
+	if removedBlocks != 3 || removedObjects != 6 {
+		t.Fatalf("Sweep 删除 (%d, %d)，期望 (3, 6)", removedBlocks, removedObjects)
+	}
+
+	// 孤儿块 v1/v2/v3 全删；CURRENT 引用的 v4 保留。
+	for _, fp := range []cas.Fingerprint{v1, v2, v3} {
+		if blockExists(t, env.cs, fp) {
+			t.Fatalf("RetainSnapshots=1 窗口外孤儿块 %s 未被删除", fp)
+		}
+	}
+	if !blockExists(t, env.cs, v4) {
+		t.Fatal("CURRENT 引用的块被删除")
+	}
+
+	// 出窗口 manifest 全删；CURRENT 的 manifest + 分片保留。
+	for _, id := range []string{s1, s2, s3} {
+		if objectExists(t, env.store, ManifestKey(dataset, id)) {
+			t.Fatalf("RetainSnapshots=1 窗口外 manifest %s 未被删除", id)
+		}
+	}
+	if !objectExists(t, env.store, ManifestKey(dataset, s4)) {
+		t.Fatal("CURRENT 的 manifest 被删除")
+	}
+	for _, ref := range m4.Shards {
+		if !objectExists(t, env.store, ref.Key) {
+			t.Fatalf("CURRENT 的分片 %q 被删除", ref.Key)
+		}
+	}
+	// CurrentKey 对象永不删。
+	if !objectExists(t, env.store, CurrentKey(dataset)) {
+		t.Fatal("CURRENT 对象被删除")
+	}
+	gotSnap, _ := currentSnapshot(t, env.store, dataset)
+	if gotSnap != s4 {
+		t.Fatalf("CURRENT snapID = %q，期望 %q", gotSnap, s4)
+	}
+}
+
+// TestSweepRetainSnapshotsFive 覆盖 RetainSnapshots 边界较大值 5——保护窗口
+// CURRENT + 最近 4 个旧快照，窗口相当宽。提交 3 次快照（全部在窗口内），
+// 同时放一个不被任何快照引用的孤儿块 → 对象一个不删（所有快照都还活着），
+// 只有孤儿块被删；再加一次提交让最老的快照刚好出窗口，验证窗口边界切换。
+func TestSweepRetainSnapshotsFive(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t)
+	cfg := Config{RetainSnapshots: 5, MaxEntriesPerShard: 10}
+	const dataset = "retain-5"
+
+	w := NewWriter(env.store, env.cs, cfg)
+
+	var (
+		b1 = env.putBlock(t, "r5-v1")
+		b2 = env.putBlock(t, "r5-v2")
+		b3 = env.putBlock(t, "r5-v3")
+	)
+
+	// 3 次 Commit，全部在 RetainSnapshots=5 窗口内。
+	s1, m1 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b1)})
+	s2, m2 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b2)})
+	s3, m3 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b3)})
+
+	// 放一个孤儿块：不被任何快照引用 → Sweep 应删。
+	orphan := env.putBlock(t, "r5-orphan")
+
+	col := NewCollector(env.store, env.cs, cfg)
+	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	// 保护窗口宽 → 3 个快照都活，窗口外无对象；仅孤儿块被删。
+	if removedBlocks != 1 || removedObjects != 0 {
+		t.Fatalf("Sweep 删除 (%d, %d)，期望 (1, 0)：孤儿块应删，窗口宽不应删任何快照对象",
+			removedBlocks, removedObjects)
+	}
+	if blockExists(t, env.cs, orphan) {
+		t.Fatal("孤儿块未被删除")
+	}
+	for _, fp := range []cas.Fingerprint{b1, b2, b3} {
+		if !blockExists(t, env.cs, fp) {
+			t.Fatalf("窗口内快照引用的块 %s 被误删", fp)
+		}
+	}
+
+	// 全部 3 个快照的 manifest + 分片都保留。
+	for _, id := range []string{s1, s2, s3} {
+		if !objectExists(t, env.store, ManifestKey(dataset, id)) {
+			t.Fatalf("RetainSnapshots=5 窗口内 manifest %s 被误删", id)
+		}
+	}
+	for _, ref := range append(append([]ShardRef{}, m1.Shards...), append(m2.Shards, m3.Shards...)...) {
+		if !objectExists(t, env.store, ref.Key) {
+			t.Fatalf("RetainSnapshots=5 窗口内分片 %q 被误删", ref.Key)
+		}
+	}
+	if !objectExists(t, env.store, CurrentKey(dataset)) {
+		t.Fatal("CURRENT 对象被删除")
+	}
+
+	// 再加 3 次 Commit（s4, s5, s6）→ 总共 6 个快照，RetainSnapshots=5 →
+	// s1 刚好出窗口（s2..s6 保留）。s1 引用的 b1 仍被 s2 复用？不一定，
+	// 因为每次 Commit 都换了不同的块。让 s4/s5/s6 继续用新块，保证 s1
+	// 完全不被复用，b1 也成孤儿被删。
+	b4 := env.putBlock(t, "r5-v4")
+	b5 := env.putBlock(t, "r5-v5")
+	b6 := env.putBlock(t, "r5-v6")
+	_, _ = commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b4)})
+	_, _ = commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b5)})
+	s6, _ := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b6)})
+
+	removedBlocks, removedObjects, err = col.Sweep(ctx, dataset)
+	if err != nil {
+		t.Fatalf("second Sweep: %v", err)
+	}
+	// s1 出窗口：1 manifest + 1 分片 = 2 对象；b1 不再被保留快照引用 = 1 块。
+	if removedBlocks != 1 || removedObjects != 2 {
+		t.Fatalf("second Sweep 删除 (%d, %d)，期望 (1, 2)：s1 刚出 RetainSnapshots=5 窗口",
+			removedBlocks, removedObjects)
+	}
+	if blockExists(t, env.cs, b1) {
+		t.Fatal("RetainSnapshots=5 窗口刚外的孤儿块 b1 未被删除")
+	}
+	if objectExists(t, env.store, ManifestKey(dataset, s1)) {
+		t.Fatal("RetainSnapshots=5 窗口刚外的 manifest s1 未被删除")
+	}
+	// s2..s6 全保留。
+	for _, id := range []string{s2, s3, s6} {
+		if !objectExists(t, env.store, ManifestKey(dataset, id)) {
+			t.Fatalf("RetainSnapshots=5 窗口内 manifest %s 被误删", id)
+		}
+	}
+}

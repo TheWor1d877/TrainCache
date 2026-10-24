@@ -1,7 +1,7 @@
 // Package prefetch 实现持久预取器 PersistentPrefetcher(design §5.2、§7.3;decisions D16/D25)。
 //
 // 结构:四个严格优先级队列(P0>P1>P2>P3)+ 单调度协程串行出队,每块一个抓取 goroutine
-// (并发受 core fetch 字节信号量统一约束);Start 后维持 cursor+lookahead(默认 8)的 P2
+// (并发受 core fetch 字节信号量统一约束);Start 后维持 cursor+lookahead(默认 16)的 P2
 // 邻域窗口,每完成一块推进 cursor 并上报 /metrics;阶段切换时旧阶段未出队块降级 P3、
 // 新阶段开头 K 块以 P1 入队,返回"新窗口就绪"ETA(剩余未就绪字节 ÷ EMA 吞吐,α=0.3)。
 // P0 为显式预热入队(EnqueueP0;D27):不参与阶段簿记,每块完成经 Config.OnP0Done 回调
@@ -48,7 +48,7 @@ const (
 
 const (
 	// defaultLookahead 是邻域预取提前量默认值(D16)。
-	defaultLookahead = 8
+	defaultLookahead = 16
 	// throughputAlpha 是吞吐 EMA 平滑系数(D16:α=0.3)。
 	throughputAlpha = 0.3
 	// throughputWindow 是"最近 30s"吞吐窗口(design §5.2)的落地口径:相邻完成的间隔
@@ -63,7 +63,7 @@ const (
 
 // Config 是预取器配置(design §5.2 冻结;D27 增 OnP0Done,D28 增 OnDone/OnCorrupt)。
 type Config struct {
-	Lookahead int // 邻域预取提前量,默认 8(≤0 取默认;D16)
+	Lookahead int // 邻域预取提前量,默认 16(≤0 取默认;D16)
 	// SelfOpenGuard 记录 Agent 自身打开本地块的动作(D49 self-open guard):本地命中、
 	// 下载后读回校验、ETA 探测等打开点在 Open 前 Mark,collector 的 inotify 兜底据此
 	// 跳过对应 OPEN(避免把 Agent 自身读取误判为训练消费)。nil = 不记录。
@@ -101,7 +101,7 @@ func (c Config) withDefaults() Config {
 type Status struct {
 	Stage            string   // 当前阶段标识
 	Cursor           ChunkRef // 纯消费位点:仅由 OnConsumeSideAdvance 推进
-	PrefetchFrontier ChunkRef // 预取前沿:连续已完成就绪的最远块
+	PrefetchFrontier ChunkRef // 预取前沿:已就绪的最远块(不要求连续)
 	QueueDepth       [4]int   // P0..P3 各队列长度
 	HitRate          float64  // 预取命中率(窗口内消费时块已就绪的比例),供自适应 K 调参
 }
@@ -289,7 +289,7 @@ func (p *PersistentPrefetcher) Start(ctx context.Context) {
 }
 
 // OnConsumeSideAdvance DataLoader 钩子每消费完一块调用,推进消费位点;预取提前量 =
-// consume + lookahead(默认 8)。
+// consume + lookahead(默认 16)。
 //
 // 返回是否真正推进了消费位点:ref 不在当前订单内、ctx 已取消、尚无阶段,或 idx <= consume
 // (重复/回退的消费事件)→ false,且不产生任何副作用(包括不计入 HitRate 窗口)。真正推进时

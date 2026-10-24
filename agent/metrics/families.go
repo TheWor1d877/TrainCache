@@ -38,6 +38,12 @@ const (
 	// ⑤ 磁盘淘汰线。
 	evictBlocksName           = "traincache_evict_blocks_total"
 	evictProtectedSkippedName = "traincache_evict_protected_skipped_total"
+	// capacityBytesName 是字节累计 gauge(§14 D58;source∈{disk,bytes})。
+	capacityBytesName = "traincache_cache_capacity_bytes_total"
+	// M4 策略相关指标(标签只放策略名 policy)。
+	evictPolicySwitchesName  = "traincache_evict_policy_switches_total"
+	evictAdmitRejectionsName = "traincache_evict_admit_rejections_total"
+	evictFreqHalvingsName    = "traincache_evict_freq_halvings_total"
 	// ⑥ 延迟线(stage_switch_eta_seconds 已由 M3 注册)。
 	requestDurationName = "traincache_request_duration_seconds"
 	// ⑦ 节点状态线(prefetch_queue_depth / prefetch_cursor 已由 M3 注册)。
@@ -121,6 +127,34 @@ const (
 	ResultNormal    = "normal"
 	ResultDanger    = "danger"
 )
+
+// policy 标签词汇表(M4 淘汰策略;编译期固定;集合外忽略该次打点)。
+const (
+	PolicyHeat     = "heat"
+	PolicyLRU      = "lru"
+	PolicyLFU      = "lfu"
+	PolicyWTinyLFU = "wtinylfu"
+)
+
+// policyLabels 是全部合法 policy 取值(构造时逐一预置)。
+var policyLabels = [...]string{
+	PolicyHeat,
+	PolicyLRU,
+	PolicyLFU,
+	PolicyWTinyLFU,
+}
+
+// capacitySource 是 capacity_bytes gauge 的 source 标签取值(§14 D58;编译期固定)。
+const (
+	CapacitySourceDisk  = "disk"
+	CapacitySourceBytes = "bytes"
+)
+
+// capacitySources 是全部合法 source 取值(构造时逐一预置)。
+var capacitySources = [...]string{
+	CapacitySourceDisk,
+	CapacitySourceBytes,
+}
 
 // endpoint 标签词汇表(RPC 方法名;DECISIONS 回传):取值字面即 agent.proto 服务定义中的
 // 方法名,不带服务前缀;ReportService(北向)不参与本线。
@@ -215,6 +249,19 @@ func (r *Registry) initSevenLine() {
 		Name: evictProtectedSkippedName,
 		Help: "受保护(cursor+lookahead)跳过淘汰的块数(result=normal|danger,取触发线;D24)",
 	}, []string{"dataset", "result"})
+	// M4 策略相关指标(标签只放 policy;heat/lru/lfu/wtinylfu)。
+	r.evictPolicySwitches = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: evictPolicySwitchesName,
+		Help: "淘汰策略切换次数(M4;policy=heat|lru|lfu|wtinylfu)",
+	}, []string{"policy"})
+	r.evictAdmitRejections = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: evictAdmitRejectionsName,
+		Help: "准入拒绝次数(M4 Admit 返回 false 的次数;policy=策略名)",
+	}, []string{"policy"})
+	r.evictFreqHalvings = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: evictFreqHalvingsName,
+		Help: "频率减半次数(M4 W-TinyLFU 每 10×capacity 访问触发;policy=策略名)",
+	}, []string{"policy"})
 	r.requestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    requestDurationName,
 		Help:    "RPC 请求耗时秒数(endpoint=RPC 方法名;result=success|error;固定 bucket {.01,.05,.1,.5,1,5,10,30}s)",
@@ -240,6 +287,10 @@ func (r *Registry) initSevenLine() {
 		Name: diskUsageRatioName,
 		Help: "缓存盘利用率 0..1(decisions D24 淘汰触发线的输入)",
 	}, []string{"dataset"})
+	r.capacityBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: capacityBytesName,
+		Help: "缓存字节累计(§14 D58;source=disk 为磁盘已用、source=bytes 为字节累计)",
+	}, []string{"source"})
 
 	r.reg.MustRegister(
 		r.cacheHits, r.cacheMisses, r.cacheHitRatio,
@@ -247,8 +298,10 @@ func (r *Registry) initSevenLine() {
 		r.indexRefresh, r.indexRefreshDuration, r.indexShardsLoaded,
 		r.gcSweeps, r.gcBlocksRemoved, r.gcObjectsRemoved,
 		r.evictBlocks, r.evictProtectedSkipped,
+		r.evictPolicySwitches, r.evictAdmitRejections, r.evictFreqHalvings,
 		r.requestDuration,
 		r.agentUp, r.agentDegraded, r.rescanProgress, r.quarantined, r.diskUsageRatio,
+		r.capacityBytes,
 	)
 
 	// 预置 dataset="other" × 固定 result 取值:family 自启动即出现,取值词汇表可见。
@@ -271,6 +324,12 @@ func (r *Registry) initSevenLine() {
 	preset(r.gcObjectsRemoved, ResultSuccess)
 	preset(r.evictBlocks, ResultNormal, ResultDanger)
 	preset(r.evictProtectedSkipped, ResultNormal, ResultDanger)
+	// M4 策略指标:预置全部合法 policy 取值。
+	for _, pol := range policyLabels {
+		r.evictPolicySwitches.WithLabelValues(pol)
+		r.evictAdmitRejections.WithLabelValues(pol)
+		r.evictFreqHalvings.WithLabelValues(pol)
+	}
 	r.indexRefreshDuration.WithLabelValues(otherDatasetLabel, ResultSuccess)
 	// dataset 单标签 gauge 预置 "other"。
 	r.cacheHitRatio.WithLabelValues(otherDatasetLabel, PhaseUnknown)
@@ -278,6 +337,10 @@ func (r *Registry) initSevenLine() {
 	r.indexShardsLoaded.WithLabelValues(otherDatasetLabel)
 	r.quarantined.WithLabelValues(otherDatasetLabel)
 	r.diskUsageRatio.WithLabelValues(otherDatasetLabel)
+	// capacity_bytes:预置全部合法 source 取值(family 自启动可见)。
+	for _, src := range capacitySources {
+		r.capacityBytes.WithLabelValues(src)
+	}
 	// 四 endpoint × {success,error} 全量预置。
 	for _, ep := range endpointLabels {
 		r.requestDuration.WithLabelValues(ep, ResultSuccess)
@@ -467,6 +530,45 @@ func (r *Registry) IncEvictProtectedSkipped(dataset, result string, n int64) {
 	r.evictProtectedSkipped.WithLabelValues(r.DatasetLabel(dataset), result).Add(float64(n))
 }
 
+// —— M4 策略相关指标 ——
+
+// IncEvictPolicySwitch 记一次淘汰策略切换:traincache_evict_policy_switches_total{policy},
+// policy∈{heat,lru,lfu,wtinylfu};集合外忽略该次打点。
+func (r *Registry) IncEvictPolicySwitch(policy string) {
+	if !validPolicy(policy) {
+		return
+	}
+	r.evictPolicySwitches.WithLabelValues(policy).Inc()
+}
+
+// IncEvictAdmitRejection 记一次准入拒绝:traincache_evict_admit_rejections_total{policy},
+// policy=当前策略名;集合外忽略。
+func (r *Registry) IncEvictAdmitRejection(policy string) {
+	if !validPolicy(policy) {
+		return
+	}
+	r.evictAdmitRejections.WithLabelValues(policy).Inc()
+}
+
+// IncEvictFreqHalving 记一次频率减半:traincache_evict_freq_halvings_total{policy},
+// policy=当前策略名(W-TinyLFU 每 10×capacity 访问触发);集合外忽略。
+func (r *Registry) IncEvictFreqHalving(policy string) {
+	if !validPolicy(policy) {
+		return
+	}
+	r.evictFreqHalvings.WithLabelValues(policy).Inc()
+}
+
+// validPolicy 判断 policy ∈ {heat,lru,lfu,wtinylfu}(M4 编译期固定词汇表)。
+func validPolicy(policy string) bool {
+	for _, p := range policyLabels {
+		if policy == p {
+			return true
+		}
+	}
+	return false
+}
+
 // —— ⑥ 延迟线 ——
 
 // ObserveRequestDuration 记录一次 RPC 请求耗时:traincache_request_duration_seconds{endpoint,
@@ -507,6 +609,15 @@ func (r *Registry) SetQuarantined(dataset string, n int64) {
 // 与危险线的输入)。
 func (r *Registry) SetDiskUsageRatio(dataset string, v float64) {
 	r.diskUsageRatio.WithLabelValues(r.DatasetLabel(dataset)).Set(v)
+}
+
+// SetCapacityBytes 设置字节累计 gauge(traincache_cache_capacity_bytes_total{source};§14 D58;
+// source∈{disk,bytes};集合外忽略)。
+func (r *Registry) SetCapacityBytes(source string, n int64) {
+	if source != CapacitySourceDisk && source != CapacitySourceBytes {
+		return
+	}
+	r.capacityBytes.WithLabelValues(source).Set(float64(n))
 }
 
 // —— 取值校验(集合外取值忽略该次打点,不新增基数)——
@@ -783,6 +894,15 @@ func (r *Registry) EvictBlocks() *prometheus.CounterVec { return r.evictBlocks }
 // EvictProtectedSkipped 返回受保护跳过 counter(测试访问器)。
 func (r *Registry) EvictProtectedSkipped() *prometheus.CounterVec { return r.evictProtectedSkipped }
 
+// EvictPolicySwitches 返回策略切换 counter(测试访问器)。
+func (r *Registry) EvictPolicySwitches() *prometheus.CounterVec { return r.evictPolicySwitches }
+
+// EvictAdmitRejections 返回准入拒绝 counter(测试访问器)。
+func (r *Registry) EvictAdmitRejections() *prometheus.CounterVec { return r.evictAdmitRejections }
+
+// EvictFreqHalvings 返回频率减半 counter(测试访问器)。
+func (r *Registry) EvictFreqHalvings() *prometheus.CounterVec { return r.evictFreqHalvings }
+
 // RequestDuration 返回 RPC 耗时 histogram(测试访问器)。
 func (r *Registry) RequestDuration() *prometheus.HistogramVec { return r.requestDuration }
 
@@ -800,3 +920,6 @@ func (r *Registry) QuarantinedBlocks() *prometheus.GaugeVec { return r.quarantin
 
 // DiskUsageRatio 返回磁盘利用率 gauge(测试访问器)。
 func (r *Registry) DiskUsageRatio() *prometheus.GaugeVec { return r.diskUsageRatio }
+
+// CapacityBytes 返回字节累计 gauge(测试访问器)。
+func (r *Registry) CapacityBytes() *prometheus.GaugeVec { return r.capacityBytes }

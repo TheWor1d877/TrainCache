@@ -3,6 +3,7 @@ package fetch
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,5 +133,96 @@ func TestLimiterHostSemaphore(t *testing.T) {
 	}
 	if got := hostOf("plain-key"); got != "plain-key" {
 		t.Fatalf("hostOf = %q, want %q", got, "plain-key")
+	}
+}
+
+// TestLimiterByteSemaphoreConcurrentAcquireAndCancel 并发压力场景：10 个 goroutine
+// 同时 Acquire，cap=100、每个请求 20 → 前 5 个成功、后 5 个因额度耗尽阻塞。
+// ctx cancel 触发后：
+//   - 后 5 个阻塞者全部返回 ctx.Err()（且未占任何额度）
+//   - 成功的前 5 个持有 permit，bytesAvailable 归零
+//   - 释放后剩余 permit 全部归位、inflight 归零。
+//
+// 现有 limiter_test.go 仅顺序单测，缺竞争 + 混合取消的覆盖。
+func TestLimiterByteSemaphoreConcurrentAcquireAndCancel(t *testing.T) {
+	const nGoroutines = 10
+	const cap int64 = 100
+	const per int64 = 20 // 5 * 20 = 100，正好用完 cap
+
+	sem := newByteSem(cap)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
+		wgDone    sync.WaitGroup
+		wgRelease sync.WaitGroup
+		start     = make(chan struct{})
+		release   = make(chan struct{})
+		errs      = make([]error, nGoroutines)
+		held      = make([]int64, nGoroutines)
+	)
+
+	for i := 0; i < nGoroutines; i++ {
+		wgDone.Add(1)
+		go func(i int) {
+			defer wgDone.Done()
+			<-start
+			got, err := sem.acquire(ctx, per)
+			if err == nil {
+				held[i] = got
+				wgRelease.Add(1)
+				go func() {
+					defer wgRelease.Done()
+					<-release
+					sem.release(got)
+				}()
+			} else {
+				errs[i] = err
+			}
+		}(i)
+	}
+
+	close(start)
+	// 等待前 5 个拿到额度、后 5 个进入 select 等待状态。
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	wgDone.Wait()
+
+	// 断言：恰好 5 个成功 acquire，每个持有完整 20 字节。
+	var successCount int
+	for i := 0; i < nGoroutines; i++ {
+		if errs[i] == nil {
+			successCount++
+			if held[i] != per {
+				t.Fatalf("goroutine %d 持有 = %d，期望 %d", i, held[i], per)
+			}
+		}
+	}
+	if successCount != 5 {
+		t.Fatalf("成功 acquire 的 goroutine 数 = %d，期望 5", successCount)
+	}
+
+	// 断言：剩余 5 个阻塞者全部因 ctx cancel 返回 context.Canceled，
+	// 且它们未占任何额度（held 保持 0）。
+	for i := 0; i < nGoroutines; i++ {
+		if held[i] == 0 {
+			if !errors.Is(errs[i], context.Canceled) {
+				t.Fatalf("goroutine %d 阻塞 acquire 返回 = %v，期望 context.Canceled", i, errs[i])
+			}
+		}
+	}
+
+	// 断言：ctx cancel 后 inflight 恰好等于 cap（前 5 个持有的额度尚未释放），
+	// 即剩余 permit 为零、bytesAvailable 归零。
+	if got := sem.inflight(); got != cap {
+		t.Fatalf("ctx cancel 后 inflight = %d，期望 %d（已占满全部额度）", got, cap)
+	}
+
+	// 释放前 5 个持有的 permit，全部归位 → inflight 归零。
+	close(release)
+	wgRelease.Wait()
+	if got := sem.inflight(); got != 0 {
+		t.Fatalf("全部 release 后 inflight = %d，期望 0", got)
 	}
 }

@@ -63,7 +63,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: traincache-dataset-secrets
-  namespace: traincache-e2e
+  namespace: traincache
   labels:
     app.kubernetes.io/part-of: traincache
 rules:
@@ -75,7 +75,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: traincache-controller-manager-secrets
-  namespace: traincache-e2e
+  namespace: traincache
   labels:
     app.kubernetes.io/part-of: traincache
 roleRef:

@@ -3,6 +3,7 @@ package svc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -21,9 +22,26 @@ import (
 	"traincache/core/objectstore"
 )
 
-// prefetchLookahead 是 PersistentPrefetcher 邻域预取提前量(D16:7.0 默认 8);
-// 同时是淘汰硬保护窗口(§7.6:cursor 起 lookahead 块,"8 块为接线侧的约定值")。
-const prefetchLookahead = 8
+// prefetchLookahead 是邻域预取提前量与淘汰硬保护窗口的默认值(D16:16;
+// §7.6"cursor 起 lookahead 块")。保留为 const 供测试引用。
+// lookahead 是运行时值,由 TRAINCACHE_PREFETCH_LOOKAHEAD 环境变量覆盖
+// (装配期一次性设置,无并发写);生产代码统一使用 lookahead。
+const prefetchLookahead = 16
+
+var lookahead = prefetchLookahead
+
+// envEvictPolicy / envPrefetchLookahead 是 M4 淘汰策略与预取提前量的环境变量名。
+const (
+	envEvictPolicy       = "TRAINCACHE_EVICT_POLICY"
+	envPrefetchLookahead = "TRAINCACHE_PREFETCH_LOOKAHEAD"
+	envWTinyLFUCapacity  = "TRAINCACHE_WTINYLFU_CAPACITY"
+)
+
+// defaultEvictPolicy 是默认淘汰策略名(M4:D8 heat 档行为不变)。
+const defaultEvictPolicy = "heat"
+
+// defaultWTinyLFUCapacity 是 W-TinyLFU 容量默认值(M4 D9)。
+const defaultWTinyLFUCapacity = 1024
 
 // selfOpenGuardTTL 是 Agent 自打开守卫的有效期(D49;覆盖 inotify 轮询与处理延迟)。
 const selfOpenGuardTTL = 3 * time.Second
@@ -78,6 +96,19 @@ func Assemble(cfg Config) (*Agent, error) {
 // → PreheatTasks → Rescan(catalogFor 复用 bundle)→ HookSock → Evictor → OrderDiscovery
 // (+首 ring 回调);collector 由该回调在首个 ring 发现时构造并启动。
 func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
+	// M4:TRAINCACHE_PREFETCH_LOOKAHEAD 覆盖预取提前量(默认 16;装配期一次性设置)。
+	if n, err := envPositiveInt(envPrefetchLookahead, lookahead); err == nil {
+		lookahead = n
+	} else {
+		return nil, err
+	}
+
+	// M4:TRAINCACHE_EVICT_POLICY 选择淘汰策略(默认 heat;未知策略名拒绝启动)。
+	policy, err := newEvictPolicyFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	ag := &Agent{Cfg: cfg, ObjectStore: obj}
 
 	cs, err := cas.New(cfg.CacheRoot, verifyLevel(cfg.Verify))
@@ -91,7 +122,6 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// (Commit 校验、fetch 读回、rescan/backfill 等)都登记为自打开;显式 Mark 点保留
 	// (幂等无害)。必须在 fetch/prefetcher/rescan/backfill 构造之前完成。
 	ag.selfOpen = prefetch.NewSelfOpenGuard(selfOpenGuardTTL)
-	cs.SetOpenObserver(ag.selfOpen.Mark)
 	ag.Fetcher = fetch.New(obj, cs, fetch.Options{OnLocalOpen: ag.selfOpen.Mark}) // 其余零值回退 design §8 默认
 
 	// 指标层带 node 标签(traincache_agent_up / agent_degraded;§5.8 node 为第二正交维度)。
@@ -101,7 +131,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	})
 
 	// M9/D46 阶段跟踪器(窗口 K 取 lookahead)。
-	ag.phase = newPhaseTracker(prefetchLookahead)
+	ag.phase = newPhaseTracker(lookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
 	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
 	// R1/R2(7.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
@@ -146,20 +176,70 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	ag.HookSock = New(hookSockPath(cfg), ag.Metrics, ag.hookHandlers())
 
 	// 淘汰循环(M6/§7.6):HeatSource = collector 快照(懒绑定适配),ProtectedSource =
-	// 预取管理器(cursor 起 lookahead 8 块 + P0 在途),Sweep = 已知 dataset 逐个 core GC。
-	ag.Evictor = evictor.New(cs, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, evictor.Config{
-		BlockDir:        cfg.CacheRoot,
-		TriggerPercent:  cfg.Heat.DiskTriggerPercent,
-		DeltaPercent:    cfg.Heat.DiskDeltaPercent,
-		CriticalPercent: cfg.Heat.DiskCriticalPercent,
-		Sweep:           ag.sweepDatasets,
+	// 预取管理器(cursor 起 lookahead 块 + P0 在途),Sweep = 已知 dataset 逐个 core GC。
+	// M4:注入 Policy(heat/lru/lfu/wtinylfu,由 TRAINCACHE_EVICT_POLICY 选择)。
+	ag.Evictor = evictor.New(cs, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, policy, evictor.Config{
+		BlockDir:           cfg.CacheRoot,
+		TriggerPercent:     cfg.Heat.DiskTriggerPercent,
+		DeltaPercent:       cfg.Heat.DiskDeltaPercent,
+		CriticalPercent:    cfg.Heat.DiskCriticalPercent,
+		Sweep:              ag.sweepDatasets,
+		CacheCapacityBytes: cfg.CacheCapacityBytes,
 	})
+
+	// 统一注册 Store.Open 前置观察者(单槽 atomic.Pointer,必须合并两个回调):
+	// selfOpen.Mark(D49 自打开守卫) + evictor.OnStoreOpen(字节维度累计,内部 seenFPs 去重)。
+	// evictor.New 不再自动注册 SetOpenObserver,避免覆盖装配层的合并回调。
+	cs.SetOpenObserver(func(fp cas.Fingerprint) {
+		ag.selfOpen.Mark(fp)
+		ag.Evictor.OnStoreOpen(fp)
+	})
+
+	// M4:W-TinyLFU 频率减半回调 → traincache_evict_freq_halvings_total{policy="wtinylfu"}。
+	if wtlfu, ok := policy.(*evictor.WTinyLFUPolicy); ok {
+		m := ag.Metrics
+		wtlfu.SetHalveHook(func() {
+			if m != nil {
+				m.IncEvictFreqHalving(metrics.PolicyWTinyLFU)
+			}
+		})
+	}
 
 	// 发现循环由 agentd 在 signal ctx 下起 goroutine 运行(M2);handler = M2 日志行 + 预取
 	// 接线(M3);首个 ring 发现 → collector 绑定(M5,见 wire.go bindCollector)。
 	ag.Orders = NewOrderDiscovery(cfg.OrdersDir, ag.Metrics, HandleOrder(ag.Prefetch))
 	ag.Orders.SetOnReader(ag.bindCollector)
 	return ag, nil
+}
+
+// newEvictPolicyFromEnv 从 TRAINCACHE_EVICT_POLICY 环境变量创建淘汰策略(M4)。
+// 可选值:heat/lru/lfu/wtinylfu,默认 heat;未知策略名返回错误(拒绝启动)。
+// W-TinyLFU 的 capacity 从 TRAINCACHE_WTINYLFU_CAPACITY 读取,默认 1024。
+func newEvictPolicyFromEnv() (evictor.Policy, error) {
+	name := envOr(envEvictPolicy, defaultEvictPolicy)
+	switch name {
+	case "heat":
+		return evictor.NewHeatPolicy(), nil
+	case "lru":
+		return &evictor.LRUPolicy{}, nil
+	case "lfu":
+		return evictor.NewLFUPolicy(), nil
+	case "wtinylfu":
+		cap := envPositiveIntOrDefault(envWTinyLFUCapacity, defaultWTinyLFUCapacity)
+		return evictor.NewWTinyLFUPolicy(cap), nil
+	default:
+		return nil, fmt.Errorf("svc: TRAINCACHE_EVICT_POLICY=%q 非法(可选: heat / lru / lfu / wtinylfu)", name)
+	}
+}
+
+// envPositiveIntOrDefault 读取正整数 env,非法或未设置时回退默认值(不报错,与
+// envPositiveInt 的"非法即报错"口径区分:W-TinyLFU 容量非法时静默回退默认)。
+func envPositiveIntOrDefault(key string, def int) int {
+	n, err := envPositiveInt(key, def)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // markSelfOpen 在 Agent 自身读取本地块前登记指纹(D49;nil 安全)。
@@ -422,7 +502,7 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 	// StartBackground 对既有 bundle 补启动;followStarted 保证每 dataset 一次)。
 
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
-		Lookahead:     prefetchLookahead,
+		Lookahead:     lookahead,
 		SelfOpenGuard: m.selfOpen, // D49:本地命中/读回/ETA 探测打开前 Mark
 		OnP0Done: func(ref prefetch.ChunkRef, err error) {
 			// 完成即移出 P0 在途保护表(在分发预热状态机之前,保持保护表新鲜)。
@@ -518,7 +598,7 @@ func (m *PrefetchManager) OnConsumeSideAdvance(ctx context.Context, dataset stri
 }
 
 // ProtectedFPs 返回硬保护集合快照(§7.6;evictor.ProtectedSource,任何情况不淘汰):
-//   - 各 dataset:当前订单 cursor 起 lookahead 8 个块(经索引解析指纹);
+//   - 各 dataset:当前订单 cursor 起 lookahead 16 个块(经索引解析指纹);
 //   - 各 dataset:P0 在途块(ForPreheat 入队成功、完成回调移出)。
 //
 // 索引未命中/未加载映射的块跳过(无法解析指纹即不在淘汰候选表内)。纯读、不做 IO,
@@ -531,7 +611,7 @@ func (m *PrefetchManager) ProtectedFPs() []cas.Fingerprint {
 	}
 	m.mu.Unlock()
 
-	out := make([]cas.Fingerprint, 0, len(bundles)*(prefetchLookahead+1))
+	out := make([]cas.Fingerprint, 0, len(bundles)*(lookahead+1))
 	byName := make(map[string]*datasetBundle, len(bundles))
 	for _, b := range bundles {
 		byName[b.dataset] = b
@@ -572,7 +652,7 @@ func (b *datasetBundle) refWindowState(ref ordersource.ChunkRef) (known, inWindo
 	}
 	for i := range chunks {
 		if chunks[i] == ref {
-			return true, i >= cursor && i < cursor+prefetchLookahead
+			return true, i >= cursor && i < cursor+lookahead
 		}
 	}
 	return true, false
@@ -611,7 +691,7 @@ func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 	case fi >= 0:
 		start = fi
 	}
-	end := start + prefetchLookahead
+	end := start + lookahead
 	if end > len(chunks) {
 		end = len(chunks)
 	}

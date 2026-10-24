@@ -11,7 +11,7 @@
 # root 通道与回退同 tc_apply.sh(root 直跑 → sudo -n → sudo -S(.sudo-pass)→ 特权 docker)。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3.12}"   # 与 Makefile/探针先例统一(config.py 仅标准库)
+PY="${PY:-/usr/bin/python3}"   # 与 Makefile/探针先例统一(config.py 仅标准库)
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 usage() {

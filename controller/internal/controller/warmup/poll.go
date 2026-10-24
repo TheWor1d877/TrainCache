@@ -376,7 +376,7 @@ func (r *Reconciler) pollReadiness(
 
 	before := task.Status.DeepCopy()
 	task.Status.ReadinessTable = table
-	buildPodDetails(task, facts, podNames, candidates, nil)
+	buildPodDetails(task, facts, podNames, candidates, nil, nil)
 	if !equality.Semantic.DeepEqual(before, &task.Status) {
 		lastUpdated := metav1.NewTime(now)
 		task.Status.LastUpdated = &lastUpdated
@@ -441,6 +441,9 @@ func pollPending(task *traincachev1alpha1.WarmupTask, facts map[readinessKey]rea
 
 // buildPodDetails writes one PodNodeReadiness per (Pod, preheat node) pair
 // (M13). assignment == nil keeps the node set currently recorded in status.
+// minUnmet is a per-Pod map produced by GWAA; when non-nil, every entry of
+// the same Pod carries the same MinUnmet flag (D40). nil keeps the previous
+// value via carryReadinessFact.
 // Each entry's fact is this round's observation for the pair; without a fresh
 // observation the previous fact is preserved when the pair did not change. A
 // Pod with no feasible preheat node gets exactly one summary entry with an
@@ -452,6 +455,7 @@ func buildPodDetails(
 	podNames map[int32]string,
 	candidates []string,
 	assignment map[int32][]string,
+	minUnmet map[int32]bool,
 ) {
 	previous := make(map[readinessKey]traincachev1alpha1.PodNodeReadiness, len(task.Status.PodNodeReadiness))
 	actual := make(map[int32]string, task.Spec.PodCount)
@@ -471,6 +475,10 @@ func buildPodDetails(
 		if !ok {
 			continue
 		}
+		podMinUnmet := false
+		if minUnmet != nil {
+			podMinUnmet = minUnmet[index]
+		}
 		nodes := assignedNodes(task, index)
 		if assignment != nil {
 			nodes = assignment[index]
@@ -483,6 +491,7 @@ func buildPodDetails(
 				ActualNode:    actual[index],
 				RequiredReady: requiredReady(task.Spec.Gate.Threshold, detail.K),
 				State:         aggregatePodState(facts, index, candidates),
+				MinUnmet:      podMinUnmet,
 			})
 			continue
 		}
@@ -505,6 +514,9 @@ func buildPodDetails(
 				carryReadinessFact(&entry, prev)
 			default:
 				entry.State = traincachev1alpha1.PreheatStatePreheating
+			}
+			if minUnmet != nil {
+				entry.MinUnmet = podMinUnmet
 			}
 			entries = append(entries, entry)
 		}
@@ -550,6 +562,7 @@ func carryReadinessFact(entry *traincachev1alpha1.PodNodeReadiness, prev trainca
 	entry.GlobalDecayScore = prev.GlobalDecayScore
 	entry.State = prev.State
 	entry.LastReportTime = prev.LastReportTime
+	entry.MinUnmet = prev.MinUnmet
 }
 
 // aggregatePodState summarizes an unassigned Pod: Ready when any candidate is

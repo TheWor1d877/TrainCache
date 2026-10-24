@@ -437,13 +437,13 @@ func TestQueuePriorityPreemption(t *testing.T) {
 	}
 }
 
-// TestConfigLookaheadDefault:Lookahead ≤ 0 取默认 8(D16)。
+// TestConfigLookaheadDefault:Lookahead ≤ 0 取默认 16(D16)。
 func TestConfigLookaheadDefault(t *testing.T) {
-	if got := New(nil, nil, nil, nil, Config{}).cfg.Lookahead; got != 8 {
-		t.Errorf("零值 Lookahead = %d, want 8", got)
+	if got := New(nil, nil, nil, nil, Config{}).cfg.Lookahead; got != 16 {
+		t.Errorf("零值 Lookahead = %d, want 16", got)
 	}
-	if got := New(nil, nil, nil, nil, Config{Lookahead: -3}).cfg.Lookahead; got != 8 {
-		t.Errorf("负 Lookahead = %d, want 8(≤0 取默认)", got)
+	if got := New(nil, nil, nil, nil, Config{Lookahead: -3}).cfg.Lookahead; got != 16 {
+		t.Errorf("负 Lookahead = %d, want 16(≤0 取默认)", got)
 	}
 	if got := New(nil, nil, nil, nil, Config{Lookahead: 3}).cfg.Lookahead; got != 3 {
 		t.Errorf("Lookahead = %d, want 3", got)

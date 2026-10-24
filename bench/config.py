@@ -67,6 +67,13 @@ TRACK_D_RESULTS_DIR = RESULTS_DIR / "track_d"
 TRACK_D_TC_RATE = "100mbit"
 TRACK_D_TC_DELAY = "20ms"
 
+# ---- M1 打点口径(预注册 §1.3/§4.1)----
+TRACK_D_SHARD_BYTES = 128 << 20      # 单个 tar 目标字节(2GiB / 16)
+TRACK_D_CHUNK_BYTES = 64 << 20       # DataSet.spec.chunkSize
+TRACK_D_WINDOW_K = 8                 # 启动/切换窗口块数
+TRACK_D_BASELINE_STEPS = 20          # 回落基线:切换前 20 步
+TRACK_D_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
+
 # ---- tc 限速档位(扫点实验的自变量)----
 TC_RATE = "100mbit"
 TC_BURST = "1600k"

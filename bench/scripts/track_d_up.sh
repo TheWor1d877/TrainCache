@@ -30,7 +30,7 @@
 # ============================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3.12}"
+PY="${PY:-/usr/bin/python3}"
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 NAME="$(CFG TRACK_D_SOURCE_CONTAINER)"

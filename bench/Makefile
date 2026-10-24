@@ -13,10 +13,10 @@
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 # ---- python 解释器统一 ----
 # .venv/bin/python 链到 /usr/bin/python3(现为 3.14),与 .venv 里 python3.12 的
-# site-packages 不匹配,已不可执行;故全部 python 调用统一走 $(PY)(系统 3.12),
+# site-packages 不匹配,已不可执行;故全部 python 调用统一走 $(PY)(系统 python3),
 # 第三方依赖(boto3 1.43.x)经 PYTHONPATH 指向 .venv 的 python3.12 site-packages。
 # 注:make 中 $$PYTHONPATH 展开后是字面量 "$PYTHONPATH"(不会追加旧值),故这里写 $(PYTHONPATH)。
-PY := /usr/bin/python3.12
+PY := /usr/bin/python3
 VENV_SITE := $(ROOT)/.venv/lib/python3.12/site-packages
 export PYTHONPATH := $(VENV_SITE):$(PYTHONPATH)
 
@@ -109,3 +109,19 @@ e2e-local:
 
 e2e-k8s:
 	@bash $(ROOT)/../agent/e2e/run-k8s.sh
+
+# ---- M2 实验 runner:条件化入口 ----
+# make bench COND=<name> [REPS=7]   跑指定 COND 的重复采样
+# make bench-list                   列出 conds/ 下所有 COND 名
+REPS ?= 7
+.PHONY: bench bench-list
+
+bench:
+	$(PY) experiments/run.py --cond $(COND) --reps $(REPS)
+
+bench-list:
+	@if ls experiments/conds/*.json >/dev/null 2>&1; then \
+		ls experiments/conds/*.json | xargs -n1 basename | sed 's/.json//'; \
+	else \
+		echo "no conds found"; \
+	fi

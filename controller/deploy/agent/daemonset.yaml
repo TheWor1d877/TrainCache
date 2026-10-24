@@ -46,7 +46,7 @@ spec:
             - name: TRAINCACHE_VERIFY
               value: "xxh3"
             - name: TRAINCACHE_DATASET_WHITELIST
-              value: "train-data"
+              value: "compare-data"
             - name: TRAINCACHE_CACHE_ROOT
               value: "/var/cache/traincache"
             - name: TRAINCACHE_HEAT_DECAY_AGE
@@ -84,7 +84,7 @@ spec:
                   name: traincache-objstore
                   key: secretKey
             - name: TRAINCACHE_OBJSTORE_BUCKET
-              value: "traincache"
+              value: "bench-b"
             - name: TRAINCACHE_OBJSTORE_SECURE
               value: "false"
           ports:

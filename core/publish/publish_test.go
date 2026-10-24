@@ -332,3 +332,80 @@ func TestPublishZeroOptionsAndEmptySource(t *testing.T) {
 		t.Fatalf("one.tar 内容 = %q，期望 %q", got, "hello")
 	}
 }
+
+// TestSourceReaderAtConcurrent 验证 Publish 内部多 worker 并发 ReadAt 同一 Source
+// 的安全性：一个 1MB 大 Source 被切成 256 个 4KB chunk，Concurrency=8 并发上传，
+// 所有 chunk 内容必须与顺序切块完全一致，且 -race 不报警（无数据竞争）。
+// 现有 publish_test.go 全是小数据 + chunk 极少，worker 实际上几乎串行 ReadAt，
+// 缺多 goroutine 同时 ReadAt 的覆盖。
+//
+// bytes.Reader 的 ReadAt 本身是线程安全的（只读内部状态，每次调用固定偏移），
+// 本测试用 -race 保证该契约，并验证并发读取不丢数据、不重叠、内容准确。
+func TestSourceReaderAtConcurrent(t *testing.T) {
+	ctx := context.Background()
+	store, cs, w := newTestEnv(t)
+	const dataset = "readerat-concurrent"
+
+	// 构造 1MB 确定性数据（字节 pattern 便于验证）。
+	const totalBytes int64 = 1 << 20 // 1 MiB
+	const chunkSize int64 = 4 << 10  // 4 KiB → 256 个 chunk，整除无尾块
+	const wantChunks int64 = totalBytes / chunkSize
+	data := make([]byte, totalBytes)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+
+	src := sourceOf("big.tar", data)
+	res, err := Publish(ctx, store, cs, w, []Source{src}, Options{
+		Dataset:     dataset,
+		ChunkSize:   chunkSize,
+		Concurrency: 8, // 8 个 worker 并发 ReadAt 同一 ReaderAt
+	})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if int64(res.Entries) != wantChunks {
+		t.Fatalf("Entries = %d，期望 %d", res.Entries, wantChunks)
+	}
+	if res.Bytes != totalBytes {
+		t.Fatalf("Bytes = %d，期望 %d", res.Bytes, totalBytes)
+	}
+	if res.SnapID == "" {
+		t.Fatal("SnapID 为空")
+	}
+
+	// Catalog 逐条 Lookup，验证每个 chunk 的 CAS 内容精确匹配原数据切片
+	// （等价于顺序切块结果）。
+	catalog := index.NewCatalog(store, dataset, index.Config{})
+	if err := catalog.Refresh(ctx); err != nil {
+		t.Fatalf("Catalog.Refresh: %v", err)
+	}
+	for chunk := int64(0); chunk < wantChunks; chunk++ {
+		e, ok, err := catalog.Lookup(ctx, "big.tar", chunk)
+		if err != nil || !ok {
+			t.Fatalf("Lookup(big.tar,%d) = (_, %v, %v)", chunk, ok, err)
+		}
+		if e.Size != chunkSize {
+			t.Fatalf("chunk %d Size = %d，期望 %d", chunk, e.Size, chunkSize)
+		}
+		got := readCASBlock(t, cs, e.Fingerprint)
+		off := chunk * chunkSize
+		want := data[off : off+chunkSize]
+		if !bytes.Equal(got, want) {
+			t.Fatalf("chunk %d 内容不匹配：CAS 块（%d 字节）与原数据 [%d:%d] 不一致",
+				chunk, len(got), off, off+chunkSize)
+		}
+	}
+
+	// 对象存储中每个 chunk 的远端副本同样正确。
+	for chunk := int64(0); chunk < wantChunks; chunk++ {
+		key := objectstore.BlockKey(dataset, "big.tar", chunk)
+		got := getStoredObject(t, store, key)
+		off := chunk * chunkSize
+		want := data[off : off+chunkSize]
+		if !bytes.Equal(got, want) {
+			t.Fatalf("chunk %d 对象存储内容不匹配：%d 字节 vs 原数据 [%d:%d]",
+				chunk, len(got), off, off+chunkSize)
+		}
+	}
+}

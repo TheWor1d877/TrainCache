@@ -27,6 +27,18 @@ func NewWriter(store objectstore.Store, cs *cas.Store, cfg Config) *Writer {
 	return &Writer{store: store, cs: cs, cfg: cfg.withDefaults()}
 }
 
+// Delete 是一条删除描述：Path 必填；Chunk >= 0 只删该 path 的这一块，
+// Chunk == -1 删该 path 的全部块（D33）。
+//
+// 删除不产生 tombstone、不原地修改任何对象：commitOnce 本就把全量现存条目重新物化为
+// 新快照，"删除"只是"新快照里没带上它"（design.md §11.4 第 1 点）。dels 中的重复描述
+// （含同一 path 的 -1 与指定块并存）合法且坍缩为同一结果；指向不存在条目的描述是幂等
+// no-op（§11.4 第 2 点）。
+type Delete struct {
+	Path  string
+	Chunk int64
+}
+
 // Commit 将 entries（本次变更的增量 upsert）与当前快照合并，构建新快照并原子提交：
 // 读 CURRENT → 读当前 manifest+受影响分片 → 合并重排（分片 ≤ MaxEntriesPerShard 条，
 // 未变更分片物理复用同一对象键）→ 上传新分片与新 manifest（独立键，未提交不可见）→
@@ -37,13 +49,34 @@ func NewWriter(store objectstore.Store, cs *cas.Store, cfg Config) *Writer {
 // 条件提交冲突（objectstore.ErrConflict）时完整重走一次"读最新状态 → 合并 → 构建 →
 // 上传 → 验证 → 提交"（每次重试前重新读取 CURRENT 的最新 ETag）；总尝试次数上限为
 // CommitMaxAttempts（含首次，默认 5），耗尽仍未成功返回含尝试次数的错误。
+//
+// 等价于 CommitChanges(ctx, dataset, entries, nil)，行为与 M4/M5 建立的契约逐字一致。
 func (w *Writer) Commit(ctx context.Context, dataset string, entries []Entry) (snapID string, err error) {
+	return w.CommitChanges(ctx, dataset, entries, nil)
+}
+
+// CommitChanges 是 Commit 的扩展形态：puts 与 dels 可同时出现（改名 = put 新 + delete 旧）。
+// 合并规则：new = filter(old, dels) ∪ puts，同 (path, chunk) 冲突时 puts 赢（D33、
+// design.md §11.4 第 3 点）——dels 只过滤现有条目，随后叠加的 puts 始终生效。
+//
+// 其余流程（排序、切分、未变更分片物理复用、验证、PutIfMatch、冲突重试）与 Commit 逐字
+// 一致，同样受 CommitMaxAttempts 的冲突重试上限约束。
+//
+// dels 先于任何对象存储访问做整体校验：任一条描述 Path 为空（空 path + Chunk == -1
+// 会清空整个索引，CLI 的 --prefix 正是为此展开成显式 path 列表）或 Chunk < -1 时直接
+// 报错返回，错误信息点名出错的删除描述，且本次调用不产生任何写入（无分片、无 manifest、
+// 无 CURRENT 更新）。puts 的校验口径与 Commit 保持不变。
+func (w *Writer) CommitChanges(ctx context.Context, dataset string,
+	puts []Entry, dels []Delete) (snapID string, err error) {
+	if err := validateDeletes(dels); err != nil {
+		return "", err
+	}
 	var lastErr error
 	for attempt := 1; attempt <= w.cfg.CommitMaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		snapID, err = w.commitOnce(ctx, dataset, entries)
+		snapID, err = w.commitOnce(ctx, dataset, puts, dels)
 		if err == nil {
 			return snapID, nil
 		}
@@ -55,10 +88,24 @@ func (w *Writer) Commit(ctx context.Context, dataset string, entries []Entry) (s
 	return "", fmt.Errorf("index: commit conflict after %d attempts: %w", w.cfg.CommitMaxAttempts, lastErr)
 }
 
+// validateDeletes 校验删除描述列表：Path 必填、Chunk 只能取 -1（该 path 全部块）或
+// >= 0（该块）；首个非法描述即报错并点名它（dels 允许重复描述，此处不做去重）。
+func validateDeletes(dels []Delete) error {
+	for i, d := range dels {
+		if d.Path == "" {
+			return fmt.Errorf("index: invalid delete %d: empty path (chunk %d)", i, d.Chunk)
+		}
+		if d.Chunk < -1 {
+			return fmt.Errorf("index: invalid delete %d: %s chunk %d (want -1 or >= 0)", i, d.Path, d.Chunk)
+		}
+	}
+	return nil
+}
+
 // commitOnce 是一次提交尝试：读 CURRENT 的最新 ETag 与内容 → 读当前 manifest 与受影响
-// 分片 → 合并本次 entries → 构建新分片（未变更分片复用旧键）→ 上传 → 验证 → PutIfMatch。
-// ErrConflict 由 Commit 的循环基于最新快照重试处理。
-func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry) (snapID string, err error) {
+// 分片 → 按 dels 过滤现有条目后合并 puts → 构建新分片（未变更分片复用旧键）→ 上传 →
+// 验证 → PutIfMatch。ErrConflict 由 CommitChanges 的循环基于最新快照重试处理。
+func (w *Writer) commitOnce(ctx context.Context, dataset string, puts []Entry, dels []Delete) (snapID string, err error) {
 	// 记录本次 attempt 新 Put 的分片键与 manifest 键；任何失败（含冲突重试前、
 	// 验证失败）都 best-effort 删除它们。复用的旧分片键不在其中，绝不删除。
 	var uploaded []string
@@ -117,12 +164,30 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry
 		}
 	}
 
-	// 3) 合并本次 entries（upsert：同 (path, chunk) 覆盖；本次不出现的现有条目保留）。
-	merged := make(map[entryKey]Entry, len(oldEntries)+len(entries))
-	for _, e := range oldEntries {
-		merged[entryKey{path: e.Path, chunk: e.Chunk}] = e
+	// 3) 合并：new = filter(old, dels) ∪ puts。删除描述先归一（Chunk == -1 收进整路径
+	//    集合，其余收进 (path, chunk) 集合，重复描述自然坍缩），只作用于现有条目；
+	//    随后叠加 puts（同 (path, chunk) 冲突时 puts 赢）。本次不涉及的现有条目一律保留。
+	wholePath := make(map[string]struct{}, len(dels))
+	specific := make(map[entryKey]struct{}, len(dels))
+	for _, d := range dels {
+		if d.Chunk == -1 {
+			wholePath[d.Path] = struct{}{}
+			continue
+		}
+		specific[entryKey{path: d.Path, chunk: d.Chunk}] = struct{}{}
 	}
-	for _, e := range entries {
+	merged := make(map[entryKey]Entry, len(oldEntries)+len(puts))
+	for _, e := range oldEntries {
+		k := entryKey{path: e.Path, chunk: e.Chunk}
+		if _, ok := wholePath[e.Path]; ok {
+			continue
+		}
+		if _, ok := specific[k]; ok {
+			continue
+		}
+		merged[k] = e
+	}
+	for _, e := range puts {
 		merged[entryKey{path: e.Path, chunk: e.Chunk}] = e
 	}
 	all := make([]Entry, 0, len(merged))
@@ -193,7 +258,7 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry
 	//    ① 新 manifest 已上传成功（读回内容指纹一致）；
 	//    ② manifest 引用的所有分片可下载且内容指纹一致；
 	//    ③ 分片条目数与其上限相符；
-	//    ④ 本次 entries 引用的每个指纹经 cas.Open 校验通过。
+	//    ④ 本次 puts 引用的每个指纹经 cas.Open 校验通过。
 	back, err := getObject(ctx, w.store, manifestKey)
 	if err != nil {
 		return "", err
@@ -218,8 +283,8 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, entries []Entry
 				ref.Key, len(es), ref.Entries, w.cfg.MaxEntriesPerShard)
 		}
 	}
-	seen := make(map[cas.Fingerprint]struct{}, len(entries))
-	for _, e := range entries {
+	seen := make(map[cas.Fingerprint]struct{}, len(puts))
+	for _, e := range puts {
 		if _, ok := seen[e.Fingerprint]; ok {
 			continue
 		}

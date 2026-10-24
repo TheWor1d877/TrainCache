@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,6 +22,7 @@ import (
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
+	"traincache/controller/internal/gwaa"
 )
 
 type progressCall struct {
@@ -566,5 +569,376 @@ func TestPollPermanentErrorDoesNotFail(t *testing.T) {
 	entry := readinessEntry(readyTask(t, c), 0, "n1")
 	if entry == nil || entry.State == traincachev1alpha1.PreheatStateFailed {
 		t.Fatalf("entry = %#v, want not Failed", entry)
+	}
+}
+
+// --- MinUnmet end-to-end chain tests ---
+
+// TestPollMinUnmetFromGWAA 构造 conflict 场景（2 Pod, 3 node, max=2, min=2,
+// 两 Pod 分布相同），GWAA 返回 placement.Decisions[pod].MinUnmet=true。
+// applyAssignment → buildPodDetails 置位 → 断言 status 里每条 PodNodeReadiness
+// 的 MinUnmet 都 true，且同一 Pod 的各条值相同。
+func TestPollMinUnmetFromGWAA(t *testing.T) {
+	// 2 Pod × K=16，3 节点，PreheatFanout=2，PreheatFanoutMin=2，
+	// 每节点只能放 1 Pod（默认 AllowMultiPodPerNode=false）。
+	// 两 Pod 在三节点上的 ready 分布相同 {n0:11, n1:7, n2:3}。
+	task := fixtureTask(2, 16, [][]int32{nil, nil})
+	task.Spec.PreheatFanout = 2
+	task.Spec.PreheatFanoutMin = 2
+	ds := fixtureDataSet(32, singleShardLayout(32), []string{"n0", "n1", "n2"})
+	pool := newFakeProgressPool()
+	// 两个 Pod 在三个节点上都有进度，让 GWAA 看到 conflict 分布。
+	pool.set("train/t1/p0", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p1", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	c := fixtureClient(t, task, ds,
+		fixtureNode("n0"), fixtureNode("n1"), fixtureNode("n2"),
+		fixtureAgentPod("n0"), fixtureAgentPod("n1"), fixtureAgentPod("n2"),
+		fixtureTargetPod(0), fixtureTargetPod(1))
+	r := &Reconciler{Client: c, Agents: pool, PollInterval: time.Second}
+
+	// 第一轮 Reconcile 会提交 Pod 并 Poll。Gate 未满足则处于 Preheating/Gating。
+	if _, err := reconcileResult(t, r); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	updated := readyTask(t, c)
+
+	if len(updated.Status.PodNodeReadiness) == 0 {
+		t.Fatal("no PodNodeReadiness entries produced")
+	}
+
+	// 统计每个 Pod 下有多少条 MinUnmet=true 的记录，且同一 Pod 各条值相同。
+	for pod := int32(0); pod < 2; pod++ {
+		var (
+			values         []bool
+			nodeCount      int
+			anyMinUnmet    bool
+			anyNotMinUnmet bool
+		)
+		for _, entry := range updated.Status.PodNodeReadiness {
+			if entry.PodIndex != pod {
+				continue
+			}
+			nodeCount++
+			values = append(values, entry.MinUnmet)
+			if entry.MinUnmet {
+				anyMinUnmet = true
+			} else {
+				anyNotMinUnmet = true
+			}
+		}
+		if nodeCount == 0 {
+			t.Fatalf("pod %d has no PodNodeReadiness entries", pod)
+		}
+		// D40 冻结约定：同一 Pod 各条记录 MinUnmet 相同。
+		if anyMinUnmet && anyNotMinUnmet {
+			t.Fatalf("pod %d entries disagree on MinUnmet: %v", pod, values)
+		}
+	}
+
+	// 在这个 conflict 场景中（两 Pod 争三节点，min=2, max=2），
+	// 必有 Pod 拿不到 2 个节点 → MinUnmet=true 应该出现。
+	hasTrue := false
+	for _, entry := range updated.Status.PodNodeReadiness {
+		if entry.MinUnmet {
+			hasTrue = true
+			break
+		}
+	}
+	if !hasTrue {
+		t.Fatalf("conflict scenario should produce at least one MinUnmet=true: %#v",
+			updated.Status.PodNodeReadiness)
+	}
+}
+
+// TestPollMinUnmetCarryFromPrevious 直接测 buildPodDetails 的 carryReadinessFact 路径：
+// 上一次 status 已有 MinUnmet=true 的记录，本次调用 minUnmet=nil 且没有新 fact，
+// 走 carryReadinessFact 分支时 MinUnmet 应该保留。
+func TestPollMinUnmetCarryFromPrevious(t *testing.T) {
+	task := fixtureTask(1, 2, [][]int32{{0, 1, 2, 3}})
+	task.Spec.PreheatFanout = 2
+	task.Spec.PreheatFanoutMin = 2
+	// 预置 status：模拟上一次 GWAA 已经写好的 MinUnmet=true。
+	now := metav1.NewTime(time.Now())
+	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
+		{
+			PodIndex:       0,
+			PodName:        "trainer-0",
+			NodeName:       "n1",
+			ActualNode:     "trainer-0",
+			RequiredReady:  2,
+			ReadyInWindow:  2,
+			State:          traincachev1alpha1.PreheatStatePreheating,
+			LastReportTime: &now,
+			MinUnmet:       true,
+		},
+		{
+			PodIndex:       0,
+			PodName:        "trainer-0",
+			NodeName:       "n2",
+			ActualNode:     "trainer-0",
+			RequiredReady:  2,
+			ReadyInWindow:  1,
+			State:          traincachev1alpha1.PreheatStatePreheating,
+			LastReportTime: &now,
+			MinUnmet:       true,
+		},
+	}
+
+	podNames := map[int32]string{0: "trainer-0"}
+	candidates := []string{"n0", "n1", "n2", "n3"}
+	// assignment=nil + 保持现有 status 里的 assigned nodes
+	// facts=nil + minUnmet=nil → 两条 entry 都走 carryReadinessFact 分支
+	buildPodDetails(task, nil, podNames, candidates, nil, nil)
+
+	if len(task.Status.PodNodeReadiness) != 2 {
+		t.Fatalf("entries = %d, want 2", len(task.Status.PodNodeReadiness))
+	}
+	for _, entry := range task.Status.PodNodeReadiness {
+		if entry.NodeName == "" {
+			continue
+		}
+		if !entry.MinUnmet {
+			t.Fatalf("entry pod=%d node=%q MinUnmet=false, want true (carry from previous)",
+				entry.PodIndex, entry.NodeName)
+		}
+	}
+}
+
+// TestPollMinUnmetCarryLostOnFreshFact 对比路径：当 minUnmet=nil 但有新 fact
+// （hasFact && fact.hasData）时，走 applyReadinessFact 分支不会保留 MinUnmet
+// （这是 Poll 中间态的行为，会被后续 applyAssignment 覆盖回来）。
+func TestPollMinUnmetCarryLostOnFreshFact(t *testing.T) {
+	task := fixtureTask(1, 2, [][]int32{{0, 1, 2, 3}})
+	task.Spec.PreheatFanout = 2
+	task.Spec.PreheatFanoutMin = 2
+	now := metav1.NewTime(time.Now())
+	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
+		{
+			PodIndex:       0,
+			PodName:        "trainer-0",
+			NodeName:       "n1",
+			ActualNode:     "trainer-0",
+			RequiredReady:  2,
+			ReadyInWindow:  2,
+			State:          traincachev1alpha1.PreheatStatePreheating,
+			LastReportTime: &now,
+			MinUnmet:       true, // 预置 true
+		},
+	}
+
+	// 有新 fact + hasData=true → applyReadinessFact 分支
+	facts := map[readinessKey]readinessFact{
+		{podIndex: 0, node: "n1"}: {
+			ready:   2,
+			state:   traincachev1alpha1.PreheatStatePreheating,
+			hasData: true,
+		},
+	}
+	podNames := map[int32]string{0: "trainer-0"}
+	candidates := []string{"n1", "n2"}
+	buildPodDetails(task, facts, podNames, candidates, nil, nil)
+
+	// applyReadinessFact 不设置 MinUnmet，而 minUnmet map 也是 nil → 零值 false。
+	entry := readinessEntry(task, 0, "n1")
+	if entry == nil {
+		t.Fatal("entry for n1 missing")
+	}
+	if entry.MinUnmet {
+		t.Fatalf("fresh fact path: MinUnmet=true, want false (zero fill when minUnmet map is nil)")
+	}
+	// 但如果随后 applyAssignment 提供了正确的 minUnmet map，会再覆盖回来。
+}
+
+// TestPollMinUnmetFalseHappyPath 正常场景（足够节点、min=2, max=3、
+// 缓存分布均匀），Assignment >= min，断言 MinUnmet=false。
+func TestPollMinUnmetFalseHappyPath(t *testing.T) {
+	// 1 Pod, K=8, 4 节点，PreheatFanout=3, PreheatFanoutMin=2。
+	// 足够多的节点 → GWAA 能拿到 >= min 个节点 → MinUnmet=false。
+	task := fixtureTask(1, 8, [][]int32{{0, 1, 2, 3, 4, 5, 6, 7}})
+	task.Spec.PreheatFanout = 3
+	task.Spec.PreheatFanoutMin = 2
+	ds := fixtureDataSet(8, singleShardLayout(8), []string{"n0", "n1", "n2", "n3"})
+	pool := newFakeProgressPool()
+	for _, node := range []string{"n0", "n1", "n2", "n3"} {
+		pool.set("train/t1/p0", node, progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	}
+	c := fixtureClient(t, task, ds,
+		fixtureNode("n0"), fixtureNode("n1"), fixtureNode("n2"), fixtureNode("n3"),
+		fixtureAgentPod("n0"), fixtureAgentPod("n1"), fixtureAgentPod("n2"), fixtureAgentPod("n3"),
+		fixtureTargetPod(0))
+	r := &Reconciler{Client: c, Agents: pool, PollInterval: time.Second}
+
+	if _, err := reconcileResult(t, r); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	updated := readyTask(t, c)
+
+	for _, entry := range updated.Status.PodNodeReadiness {
+		if entry.MinUnmet {
+			t.Fatalf("happy path entry pod=%d node=%q MinUnmet=true, want false: %#v",
+				entry.PodIndex, entry.NodeName, entry)
+		}
+	}
+	// 同时确认 Assignment 数量 ≥ min=2。
+	count := 0
+	for _, entry := range updated.Status.PodNodeReadiness {
+		if entry.NodeName != "" {
+			count++
+		}
+	}
+	if count < 2 {
+		t.Fatalf("assigned node count = %d, want >= 2 (fanoutMin)", count)
+	}
+}
+
+// TestGWAAConflictMinUnmetEndToEnd 手动跑整条链路：
+// gwaa.Compute (conflict) → placement.Decisions[*].MinUnmet=true
+// → applyAssignment 转 map → buildPodDetails 置位。
+// 验证完整链路通。
+func TestGWAAConflictMinUnmetEndToEnd(t *testing.T) {
+	import_rand := rand.New(rand.NewSource(3))
+	placement := gwaa.Compute(gwaa.Input{
+		Pods: []gwaa.PodState{
+			{Index: 0, K: 16, ReadyCountByNode: map[string]int32{"n0": 11, "n1": 7, "n2": 3}},
+			{Index: 1, K: 16, ReadyCountByNode: map[string]int32{"n0": 11, "n1": 7, "n2": 3}},
+		},
+		Nodes: []gwaa.NodeState{
+			{Name: "n0"}, {Name: "n1"}, {Name: "n2"},
+		},
+		Rand:                 import_rand,
+		Fanout:               2,
+		FanoutMin:            2,
+		AllowMultiPodPerNode: false,
+	})
+	if placement.Err != nil {
+		t.Fatalf("GWAA Compute error: %v", placement.Err)
+	}
+
+	// 验证 placement.Decisions 与 Assignment 一致（GWAA 已保证，但显式断言）。
+	minUnmetMap := make(map[int32]bool, len(placement.Decisions))
+	for idx, dec := range placement.Decisions {
+		minUnmetMap[idx] = dec.MinUnmet
+		if got := int32(len(placement.Assignment[idx])); dec.MinUnmet {
+			if got >= 2 {
+				t.Fatalf("pod %d MinUnmet=true but assignment has %d >= min=2: decisions=%#v assignment=%v",
+					idx, got, placement.Decisions, placement.Assignment)
+			}
+		} else {
+			if got < 2 {
+				t.Fatalf("pod %d MinUnmet=false but assignment has %d < min=2: decisions=%#v assignment=%v",
+					idx, got, placement.Decisions, placement.Assignment)
+			}
+		}
+	}
+
+	// 必有至少一个 Pod MinUnmet=true（2 Pod × min=2 = 4 claim，只有 3 节点可放）。
+	hasTrue := false
+	for _, v := range minUnmetMap {
+		if v {
+			hasTrue = true
+			break
+		}
+	}
+	if !hasTrue {
+		t.Fatalf("conflict scenario expected at least one MinUnmet=true: %#v", placement.Decisions)
+	}
+
+	// 把 minUnmet map + placement.Assignment 喂进 buildPodDetails。
+	task := fixtureTask(2, 16, [][]int32{nil, nil})
+	task.Spec.PreheatFanout = 2
+	task.Spec.PreheatFanoutMin = 2
+	podNames := map[int32]string{0: "trainer-0", 1: "trainer-1"}
+	candidates := []string{"n0", "n1", "n2"}
+	buildPodDetails(task, nil, podNames, candidates, placement.Assignment, minUnmetMap)
+
+	if len(task.Status.PodNodeReadiness) == 0 {
+		t.Fatal("buildPodDetails produced no entries")
+	}
+
+	// 对每个 Pod：所有 entry 的 MinUnmet 相同，且等于 GWAA 决策。
+	for pod := int32(0); pod < 2; pod++ {
+		want := minUnmetMap[pod]
+		values := make([]bool, 0)
+		for _, entry := range task.Status.PodNodeReadiness {
+			if entry.PodIndex != pod {
+				continue
+			}
+			values = append(values, entry.MinUnmet)
+			if entry.MinUnmet != want {
+				t.Fatalf("pod %d node=%q MinUnmet=%v, want %v (GWAA decisions=%#v)",
+					pod, entry.NodeName, entry.MinUnmet, want, placement.Decisions)
+			}
+		}
+		if len(values) == 0 {
+			t.Fatalf("pod %d has no entries", pod)
+		}
+	}
+}
+
+// TestMinUnmetInCRDStatusPatch 跑完整 Reconcile（controller-runtime fake client），
+// 然后 Get 回 WarmupTask，断言 MinUnmet 字段真实存在于 status.PodNodeReadiness 中。
+func TestMinUnmetInCRDStatusPatch(t *testing.T) {
+	task := fixtureTask(2, 16, [][]int32{nil, nil})
+	task.Spec.PreheatFanout = 2
+	task.Spec.PreheatFanoutMin = 2
+	ds := fixtureDataSet(32, singleShardLayout(32), []string{"n0", "n1", "n2"})
+	pool := newFakeProgressPool()
+	pool.set("train/t1/p0", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p1", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	c := fixtureClient(t, task, ds,
+		fixtureNode("n0"), fixtureNode("n1"), fixtureNode("n2"),
+		fixtureAgentPod("n0"), fixtureAgentPod("n1"), fixtureAgentPod("n2"),
+		fixtureTargetPod(0), fixtureTargetPod(1))
+	r := &Reconciler{Client: c, Agents: pool, PollInterval: time.Second}
+
+	// Reconcile → computePlacement (GWAA) → applyAssignment → buildPodDetails → status patch。
+	if _, err := reconcileResult(t, r); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// 用同一个 fake client 读回 —— 等价于 Kubernetes 持久化后重新 Get。
+	var fetched traincachev1alpha1.WarmupTask
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "train", Name: "t1"}, &fetched); err != nil {
+		t.Fatalf("get patched task: %v", err)
+	}
+
+	if len(fetched.Status.PodNodeReadiness) == 0 {
+		t.Fatal("PodNodeReadiness is empty after Reconcile")
+	}
+
+	// 1) MinUnmet 字段已被 GWAA 设置，出现在 status 中。
+	hasTrue := false
+	for i, entry := range fetched.Status.PodNodeReadiness {
+		t.Logf("entry[%d] pod=%d node=%q minUnmet=%v state=%s",
+			i, entry.PodIndex, entry.NodeName, entry.MinUnmet, entry.State)
+		if entry.MinUnmet {
+			hasTrue = true
+		}
+	}
+	if !hasTrue {
+		t.Fatalf("MinUnmet=true expected in conflict scenario, got none: %#v",
+			fetched.Status.PodNodeReadiness)
+	}
+
+	// 2) 同一 Pod 各条 MinUnmet 值相同（D40 冻结约定）。
+	byPod := make(map[int32][]bool)
+	for _, entry := range fetched.Status.PodNodeReadiness {
+		byPod[entry.PodIndex] = append(byPod[entry.PodIndex], entry.MinUnmet)
+	}
+	for pod, values := range byPod {
+		first := values[0]
+		for i, v := range values {
+			if v != first {
+				t.Fatalf("pod %d entries disagree at index %d: %v", pod, i, values)
+			}
+		}
 	}
 }
