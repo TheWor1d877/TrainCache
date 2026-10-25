@@ -1706,7 +1706,8 @@ def main():
                         help="要跑的组态；缺省按档位取（D30：S=七组态，M=direct/fluid-cold/"
                              "traincache-cold，L=traincache-cold/fluid-cold）。"
                              "显式指定时与该档求交集，越档的组态会被剔除")
-    parser.add_argument("--out", type=str, default=str(BENCH_ROOT / "results" / "compare" / "summary.csv"))
+    parser.add_argument("--out", type=str,
+                        default=str(bench_config.RESULTS_DIR / "compare" / "summary.csv"))
     parser.add_argument("--selftest", action="store_true",
                         help="离线自检（不连集群、不起 Pod）后退出")
     parser.add_argument("--dry-run", action="store_true",

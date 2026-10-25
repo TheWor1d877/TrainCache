@@ -7,7 +7,8 @@
 #   --quick   冒烟模式: 2GiB + 6步 + 1次 + 1epoch (~25min)
 #   --full    完整模式: 8GiB + 24步 + 5次 + 3epoch (~8h)
 #   (默认)    标准模式: 2GiB + 6步 + 3次 + 3epoch (~90min)
-#   --out DIR 输出目录(默认 repo 根的 perf_results 软链接 → ~/tcd/perf_results)
+#   --out DIR 输出目录(默认运行时数据层 <repo 同级>/traincachedata/bench/perf_results,
+#             可用 TRAINCACHE_DATA_ROOT 覆盖)
 #
 # 产物:
 #   <out>/summary.csv   跑分原始数据
@@ -22,10 +23,9 @@ INVOKE_CWD="$(pwd)"
 cd "$PROJECT_ROOT"
 
 MODE="standard"
-# 锚定脚本自身位置(repo 根)再拼路径:repo 根的 perf_results 是指向
-# ~/tcd/perf_results 的软链接,无论从哪个 cwd 执行都落到同一软链接路径,
-# 不会在 bench/ 等目录下新建实体目录绕过软链接。
-OUT_BASE="$PROJECT_ROOT/perf_results"
+# 产物落运行时数据层,路径口径由 bench/config.py 的 DATA_ROOT 统一定义。
+DATA_ROOT="$(python3 "$PROJECT_ROOT/bench/config.py" --sh DATA_ROOT)"
+OUT_BASE="$DATA_ROOT/bench/perf_results"
 prev=""
 for arg in "$@"; do
   case "$arg" in

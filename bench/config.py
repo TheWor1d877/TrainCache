@@ -3,15 +3,21 @@
 
 bash 侧取值:python3 config.py --sh <KEY>
 """
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+REPO_ROOT = ROOT.parent
+# 数据与产物的唯一落点:repo 同级的 traincachedata,目录结构与 repo 模块一一对应。
+# repo 内不放数据,也不放指向数据层的软链接。CI 用 TRAINCACHE_DATA_ROOT 改到 workspace 内。
+DATA_ROOT = Path(os.environ.get("TRAINCACHE_DATA_ROOT") or (REPO_ROOT.parent / "traincachedata")).resolve()
+DATA_DIR = DATA_ROOT / "bench" / "data"
 TRACK_A_DIR = DATA_DIR / "track_a" / "files"
 TRACK_B_DIR = DATA_DIR / "track_b" / "tars"
 TRACK_C_DIR = DATA_DIR / "track_c"
-RESULTS_DIR = ROOT / "results"
+RESULTS_DIR = DATA_ROOT / "bench" / "results"
+LOGS_DIR = DATA_ROOT / "bench" / "logs"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"
 
 # ---- kind 集群 ----

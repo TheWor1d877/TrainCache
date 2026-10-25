@@ -35,7 +35,10 @@ import lock as lock_mod  # noqa: E402
 EXPERIMENTS_DIR = Path(__file__).resolve().parent
 BENCH_ROOT = EXPERIMENTS_DIR.parent
 SCRIPTS_DIR = BENCH_ROOT / "scripts"
-RESULTS_DIR = BENCH_ROOT / "results"
+sys.path.insert(0, str(BENCH_ROOT))
+import config as bench_config  # noqa: E402
+
+RESULTS_DIR = bench_config.RESULTS_DIR
 POLICY_RESULTS_DIR = RESULTS_DIR / "policy"
 
 COLD_RESET_SH = SCRIPTS_DIR / "cold_reset.sh"

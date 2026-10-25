@@ -61,22 +61,16 @@ GROUP_COLORS = {
 }
 
 
-def _repo_root() -> Path:
-    """从脚本所在目录往上找仓库根(以 .git 为标记)。
+def _data_root() -> Path:
+    """产物根目录:与其余 bench 脚本同口径,由 bench/config.py 的 DATA_ROOT 定义。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import config  # noqa: PLC0415
 
-    默认输出路径必须与当前工作目录无关,否则从不同 cwd 调用会写到不同地方。
-    """
-    here = Path(__file__).resolve().parent
-    for p in (here, *here.parents):
-        if (p / ".git").exists():
-            return p
-    return here.parents[1]  # 兜底:bench/ 的上一级即仓库根
+    return config.DATA_ROOT
 
 
-REPO_ROOT = _repo_root()
-# bench/results 是指向数据层(~/tcd/results)的相对软链接;resolve 后拿到数据层的
-# 绝对路径,从任意 cwd 调用都落到同一批产物上。
-RESULTS_DIR = (REPO_ROOT / "bench" / "results").resolve()
+DATA_ROOT = _data_root()
+RESULTS_DIR = DATA_ROOT / "bench" / "results"
 
 
 # ---------------------------------------------------------------------------
