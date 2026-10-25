@@ -2,7 +2,7 @@
 
 > 版本：v1
 > 对应需求：`docs/9.0 核心能力验收与测试.md`；执行计划：`docs/9.1 plan.md`
-> 冻结规则：第一次正式跑分前提交本文件并记录 git commit 与 sha256；之后只允许追加“偏离说明”，不允许回头改假设、档位或胜负判据。
+> 冻结规则：第一次正式跑分前提交本文件并记录 tag 名与 sha256；之后只允许追加“偏离说明”，不允许回头改假设、档位或胜负判据。
 
 ## 0. 一句话
 
@@ -309,7 +309,6 @@
 |---|---|
 | 冻结日期 | 2026-10-25 |
 | 冻结锚点 | tag `prereg-c1` |
-| tag 指向 commit | `9d1a33c2d64dd04fe9318e4fb4a6b721895362eb` |
 | 本文件 sha256 | 以 tag `prereg-c1` 中的版本为准，不单独记录 |
 | `cond.schema.md` sha256（tag 版本） | `17e9b56bfa6d25bef8f8d2d35f2cd57fa9e2f9e3161de8ed3d58327e7c7826ac` |
 | COND 集（34 个）合并 sha256 | `3f1927a4860923b4f91b6f4136fe0f294b955e6bf54d8bdbd0a9fcc614aae1d4` |
@@ -325,7 +324,7 @@
 ### 8.1 冻结清单（第一次正式跑分前，按顺序执行）
 
 1. 确认 `bench/experiments/preregister.md`、`bench/experiments/cond.schema.md`、`bench/experiments/conds/*.json`（34 个）、`bench/experiments/traces/*.json`（4 个）内容为终稿。
-2. 只提交上述冻结对象，打 tag `prereg-c1`，记下 tag 指向的 commit hash，填入上表。
+2. 只提交上述冻结对象，打 tag `prereg-c1`；上表只记 tag 名，tag 指向的 commit 用 `git rev-parse prereg-c1` 解析。
 3. 以 tag 为基准算 `cond.schema.md` 与 COND 集的哈希，填入上表。
 4. 从集群取四个控制面镜像的 digest（agent、controller、training、minio；JuiceFS/Fluid 参跑组再补对应两项），填进上表，并替换各 COND 里的 `environment.images` 占位符。
 5. 回填 `trace.sha256`：对 `bench/experiments/traces/` 实际使用的轨迹文件算 sha256，写进每个 COND 与产物目录。
