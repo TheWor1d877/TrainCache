@@ -299,6 +299,7 @@
 | 2026-10-25 | 冻结前修正：COND `environment.images` 九键的值由 docker image ID 换成集群 containerd manifest digest；`fluid`/`fluid-csi` 的 tag 由 `v1.1.0-36f0467` 改成在役的 `v1.0.8-6533239` | 原值不是任何一侧可解析的 digest 形式，且 tag 与集群实际部署不符（见 §8.3）。属于记录错误修正，不改假设 | 34 个 COND 的环境字段；性能口径无影响 |
 | 2026-10-25 | 冻结前修正：§9 机时估算 12~14 小时 → D32 的 7.2 小时；1.6 的五组次数口径 5/3/1 → 3/3/1（符号翻转格补 5） | D32 已裁决并被 1.9 表格接管，这两处是 D32 之前的正文残留 | 机时预算表；不影响任何假设与判据 |
 | 2026-10-25 | 前置探针出数（10.1 任务 7.7）：C ≈ 674 MB/s，D31 的 `ceiling` 塌缩分支不触发；§12 L 档单 run 13 分钟 → ≈6 分钟 | 实测推翻「MinIO 上限约 45 MB/s」的保守前提 | 机时表 L 档行；带宽档 {100,300,1000} 全部保留 |
+| 2026-10-25 | 补齐 MinIO 桶 `bench-b` 的分片（32 → 128 个对象，约 24 GiB），并把 `bench/scripts/upload_bench.py` 改成只追加不覆盖 | 桶里只有 32 个对象，L 档 `fluid-cold` 的 import Job 同步不到 32 GiB；同时该脚本原本对全部对象无条件 `upload_file`，重跑即覆盖源数据，与 Q12 冲突 | 数据面补齐；不改任何假设、档位与判据 |
 
 ## 8. 冻结记录
 
@@ -369,9 +370,9 @@
 | 1 | COND 的 `trace.sha256` / `environment.images` | 已填真值并复核（§8.1 第 5 条、§8.3）。原「全是 `aaaa…` 占位符」的记录作废——那是 10.22 写的，盘上早已是实值 |
 | 2 | `compare-data-8m` 快照 | **仍未发布到 MinIO**。但不需要人手做：`bench/compare/traincache/up.sh:87` `publish_snapshot()` 幂等，CURRENT 不存在时自动构建 `trainpublish` 并按 `-chunk-size` 切块上传，第一次 traincache 组 up 时会现场发布（S/M 档分别 8/32 个 shard，L 档 128 个） |
 | 3 | L 档 32 GiB 数据 | 宿主机侧**已生成**：`~/tcd/bench/data/track_b/tars/` 现有 128 个 shard（实测 `find … -name '*.tar' \| wc -l` = 128）。原「需新增约 24 GiB 分片」的记录作废 |
-| 3b | MinIO 桶 `bench-b` 的对象数 | **只有 32 个 shard（00000~00031），不是 128**。traincache 组不受影响（走 trainpublish 从宿主 tar 直接切块发布），但 juicefs / fluid 组的 import Job 是从桶里同步对象的，所以 **L 档的 fluid-cold（M7 任务 7.3）当前拿不到 32 GiB 数据**。跑 L 档前需把 `shard-00032.tar ~ shard-00127.tar` 追加上传进 `bench-b`（只追加不覆盖，Q12），约 24 GiB |
+| 3b | MinIO 桶 `bench-b` 的对象数 | **已补齐（2026-10-25）**：桶内 `shard-00000~00127` 共 128 个对象，逐个与宿主 tar 做字节数比对，0 不匹配；原有 32 个对象的 ETag/Size/LastModified 上传前后一致，未被改写（Q12 只追加不覆盖）。L 档 `fluid-cold` 的数据缺口关闭。顺带把 `bench/scripts/upload_bench.py` 改成幂等：桶里已存在的对象一律跳过，确要重写源数据得显式 `UPLOAD_FORCE=1`——改之前它对全部 128 个对象无条件 `upload_file`，重跑一次就把源数据覆盖了 |
 | 4 | `bench/experiments/` git 跟踪 | 已跟踪。原「整个目录尚未被 git 跟踪」的记录作废 |
-| 5 | D 轨解释器与依赖 | 本机无 `/usr/bin/python3.12`，`bench_track_d.py` 的 numpy/torch/webdataset 装不上 → D 轨（S 档的 7.1/7.8 与图二/图三）跑不了；对照层 `run_bench.py` 只用标准库，不受影响。装置侧留痕已修（`track_d_up.sh` 的 `loader.cmd` 改用 `$PY`） |
+| 5 | D 轨解释器与依赖 | 本机无 `/usr/bin/python3.12`，`bench_track_d.py` 的 numpy/torch/webdataset 装不上 → **真实 PyTorch 负载（D16）当前跑不了**，图二/图三与 M5 的 C 轨两 Job 都依赖它。对照层 M7 不受影响：`run_bench.py` 与它注入 train-job 的脚本只用标准库（实测该文件及其脚本模板里没有任何第三方 import），跑的是 D 轨的**负载形态**（400 步 × 200ms + 分段读）而非那个脚本本体 |
 
 ## 9. 机时粗估
 

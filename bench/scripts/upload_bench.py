@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""把 B 轨 tar 分片上传到 kind 内 MinIO 的 bench-b 桶(经 nodePort 30090)。"""
+"""把 B 轨 tar 分片上传到 kind 内 MinIO 的 bench-b 桶(经 nodePort 30090)。
+
+只追加不覆盖(Q12):桶里已有的 shard-*.tar 一律跳过,重跑本脚本是安全的补洞动作;
+确要重写源数据,显式设 UPLOAD_FORCE=1。
+"""
+import os
 import subprocess
 import sys
 import time
@@ -7,9 +12,18 @@ from pathlib import Path
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
+
+
+def _object_exists(s3, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=config.MINIO_BUCKET, Key=key)
+        return True
+    except ClientError:
+        return False
 
 
 def node_ip() -> str:
@@ -50,12 +64,21 @@ def main():
     if not tars:
         sys.exit("B 轨 tar 不存在,先跑 synth_track_b.py")
     t0 = time.time()
+    # Q12:bench-b/shard-*.tar 是五组共同的只读源数据,只追加不覆盖。
+    # 已存在的对象一律跳过;确要重写源数据得显式 UPLOAD_FORCE=1。
+    force = os.environ.get("UPLOAD_FORCE") == "1"
+    added = skipped = 0
     for i, p in enumerate(tars, 1):
+        if not force and _object_exists(s3, p.name):
+            skipped += 1
+            continue
         s3.upload_file(str(p), config.MINIO_BUCKET, p.name)
-        print(f"[{i}/{len(tars)}] {p.name} 完成,累计 {time.time() - t0:.0f}s", flush=True)
+        added += 1
+        print(f"[{i}/{len(tars)}] {p.name} 已上传,累计 {time.time() - t0:.0f}s", flush=True)
     resp = s3.list_objects_v2(Bucket=config.MINIO_BUCKET)
     objs = resp.get("Contents", [])
-    print(f"完成:{len(objs)} 个对象,共 {sum(o['Size'] for o in objs) / 2**30:.2f} GiB")
+    print(f"完成:本次追加 {added} 个,跳过已存在 {skipped} 个;"
+          f"桶内 {len(objs)} 个对象,共 {sum(o['Size'] for o in objs) / 2**30:.2f} GiB")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ PY := /usr/bin/python3
 VENV_SITE := $(ROOT)/.venv/lib/python3.12/site-packages
 export PYTHONPATH := $(VENV_SITE):$(PYTHONPATH)
 
-.PHONY: bench-up bench-down kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down e2e-local e2e-k8s
+.PHONY: bench-up bench-down kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down e2e-local e2e-k8s selftest
 
 # D 轨数据已挂在 data-up 之下(track-d-data);bench-up 显式列出,使全链路依赖面直读含 D 轨(幂等,不会重复执行)
 bench-up: kind-up k8s-up data-up track-d-data upload tc-up bench-verify
@@ -69,6 +69,21 @@ bench-cold cold-reset:
 
 bench-verify:
 	@bash $(ROOT)/scripts/verify_cold.sh $(QUICK)
+
+# ---- 装置自检(M9 9.4:全本地、不碰集群、不改数据) ----
+# 10.1 §11 记的「make verify 没把 bench 的 Python 自检串起来」由本目标补齐:
+# 跑正式轮前后各跑一遍,任何一项红即整轮不该开跑。
+selftest:
+	@echo "== 装置自检(纯本地) =="
+	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/trace.py
+	@$(PY) $(ROOT)/compare/run_bench.py --selftest
+	@$(PY) $(ROOT)/experiments/cond.py --selftest
+	@$(PY) $(ROOT)/experiments/lock.py --selftest
+	@$(PY) $(ROOT)/experiments/collect.py --selftest
+	@$(PY) -c "import json,sys,glob,os; sys.path.insert(0,'$(ROOT)/experiments'); import cond; bad=[(os.path.basename(f),e) for f in sorted(glob.glob('$(ROOT)/experiments/conds/*.json')) for e in cond.validate_cond(json.load(open(f)))]; print('COND 全量校验: %d 个文件, %d 条错误' % (len(glob.glob('$(ROOT)/experiments/conds/*.json')), len(bad))); [print(' ', b) for b in bad[:5]]; sys.exit(1 if bad else 0)"
+	@bash $(ROOT)/scripts/tc_apply.sh --self-test
+	@$(MAKE) --no-print-directory -C $(ROOT)/compare check
+	@echo "== 装置自检通过 =="
 
 bench-data: data-up
 
