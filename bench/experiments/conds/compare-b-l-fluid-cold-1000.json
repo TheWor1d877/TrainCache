@@ -70,15 +70,15 @@
     "kind_workers": 4,
     "k8s_version": "v1.37.0",
     "images": {
-      "agent": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.3@sha256:13f1ed3572ed85ec54fda3f01d9bb5a17dfc160e051605cb02f9afbd2e3aac04",
-      "controller": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/controller-manager:0.8.0@sha256:3ffc57b3ac2cbe7221990094a799f3e255fb67890ea64ad8d2ccca6fcf5a0514",
-      "webhook": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/webhook:0.8.0@sha256:e1f131a982471b685e03e438354e4d5eb982d21e03117fca5092bbbd38dc2403",
-      "scheduler": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0@sha256:28775802df5d410e461c8c57a86c8ac9d0b0282b0dd7efdaa9f98e92e378e5fd",
-      "training": "python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
-      "minio": "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372",
-      "juicefs": "juicedata/mount:ce-v1.3.0@sha256:9d498e18e566fab62373529cc295f33ee7716beaaac5601a7576622c464b3d03",
-      "fluid": "fluidcloudnative/fluid-webhook:v1.1.0-36f0467@sha256:a52409ab98750d8f96007d36e466ffbc1c3066e4277bf7f6c485ad528eeee981",
-      "fluid-csi": "fluidcloudnative/fluid-csi:v1.1.0-36f0467@sha256:405058c41dac7cd7220822ec63160d917e15b939352af9096634cd50085a5b46"
+      "agent": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.3@sha256:7c69317ad2c4a015e767b320e94d3856561ec3aa4073b5bd0905c189300ac9ea",
+      "controller": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/controller-manager:0.8.0@sha256:e0fd17cedaeadfc9c93ac190067c43dc01f9d7f3b8d4662e8131bf148f39f4b2",
+      "webhook": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/webhook:0.8.0@sha256:7bbf073986ee65bbbd9b7f3f4b2ba7947fcd4ee0fad33c74805d87de10748925",
+      "scheduler": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0@sha256:6d3b06ebc2709d7751d54bf471d9cecbe11e15205b5fa315108cce7eb4bc6cba",
+      "training": "python:3.12-alpine@sha256:d892f6cb770c805ca76e681cc356e88a535f0fcfe1ab6984ea7446f75dab783f",
+      "minio": "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:2cde0f1131c931e16cb0b00c1c86353c80833dbc85630b97d3317ac8644c6fac",
+      "juicefs": "juicedata/mount:ce-v1.3.0@sha256:81bbde1cd3e0fe6fbd393840fb7f4cfe321d259c78d01e7a975096c22567cb7f",
+      "fluid": "fluidcloudnative/fluid-webhook:v1.0.8-6533239@sha256:11a24597a81d2e183ba6c05ec4cad93715eed838510d2a5d3313aa4dd07f67f4",
+      "fluid-csi": "fluidcloudnative/fluid-csi:v1.0.8-6533239@sha256:df6c4d8c6f757f071d9444b91aa5763d9d754f3ac95f51339c04763cc5b1c875"
     },
     "lock_file": "locks/compare-b-l-fluid-cold-1000.lock.json"
   },
