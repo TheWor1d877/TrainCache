@@ -309,10 +309,10 @@
 |---|---|
 | 冻结日期 | 2026-10-25 |
 | 冻结锚点 | tag `prereg-c1` |
-| tag 指向 commit | `__C1_COMMIT__` |
+| tag 指向 commit | `9d1a33c2d64dd04fe9318e4fb4a6b721895362eb` |
 | 本文件 sha256 | 以 tag `prereg-c1` 中的版本为准，不单独记录 |
-| `cond.schema.md` sha256（tag 版本） | `__SHA_SCHEMA__` |
-| COND 集（34 个）合并 sha256 | `__SHA_CONDS__` |
+| `cond.schema.md` sha256（tag 版本） | `17e9b56bfa6d25bef8f8d2d35f2cd57fa9e2f9e3161de8ed3d58327e7c7826ac` |
+| COND 集（34 个）合并 sha256 | `3f1927a4860923b4f91b6f4136fe0f294b955e6bf54d8bdbd0a9fcc614aae1d4` |
 | `environment.images` 取值口径 | 见 §8.3；九个键逐个是集群 containerd 的 manifest digest，非人工编造 |
 | COND 契约版本 | v1（`bench/experiments/cond.schema.md`） |
 
