@@ -1,7 +1,7 @@
 # TrainCache 旗舰实验预注册
 
 > 版本：v1（冻结候选，2026-10-22）
-> 对应需求：`docs/10. 核心能力验收与测试.md`；执行计划：`docs/10.1 plan.md`
+> 对应需求：`docs/9.0 核心能力验收与测试.md`；执行计划：`docs/9.1 plan.md`
 > 冻结规则：第一次正式跑分前提交本文件并记录 git commit 与 sha256；之后只允许追加“偏离说明”，不允许回头改假设、档位或胜负判据。
 
 ## 0. 一句话
@@ -98,7 +98,7 @@
 
 命中率越高越好，方向反过来。图三的“回落时间”用 20% 作为赢/输阈值，其余规则相同。
 
-3 次采样只用于粗扫和定位符号变化，不用于最终结论。最终报告里任何“赢/输”必须跑满该点规定的次数：曲面与 Pareto 是 7 次（D18），五组对照按 1.9 的 S/M/L 分档是 3/3/1 次、符号翻转格补到 5（D19 的次数口径由 D32 按带宽分区接管；D19 起，五组对照不再适用“7 次”要求）。
+最终报告里任何“赢/输”必须跑满该点规定的次数：曲面与淘汰矩阵每点 3 次，两张 Pareto 每点 7 次（D18）；五组对照按 1.9 的 S/M/L 分档是 3/3/1 次（D19 的次数口径由 D32 按带宽分区接管；D19 起，五组对照不再适用“7 次”要求）。
 
 ### 1.7 冷态与作废
 
@@ -114,10 +114,10 @@
 ### 1.8 环境与轨迹
 
 - kind 集群：1 个 control-plane + 4 个 worker，共 5 个节点。对照组与主实验先同集群，资源吃紧再拆，拆组只允许整体迁移，不允许只迁一部分。
-- 请求轨迹：五组读同一份 `trace.json`，记录分片顺序、seed、每步样本数；文件 hash 写进每个 COND 与产物目录。
+- 请求轨迹：同一 track+档位的七组态共用一份轨迹文件——S/D 用 `traces/track-compare-d-s8-per-epoch.json`，M/B 用 `traces/track-compare-b-m32-per-epoch.json`，L/B 用 `traces/track-compare-b-l128-per-epoch.json`，C 用 `traces/track-c-32shard-per-epoch.json`；记录分片顺序、seed、每步样本数，文件 hash 写进每个 COND 与产物目录。
 - tc：速率按 COND，延迟统一 20 ms；`bench` 现有 300mbit/10ms 的扫点是另一套口径，不并入本预注册。
 - 数据源：图一、图三与 D 轨五组对照用本地 nginx（`track_d`，2 GiB，16 个 tar）；图二与 B 轨对照用 MinIO 上的 B 轨子集（8 或 32 个 tar，2 GiB 或 8 GiB），同一源站便于只变数据集大小。
-- 训练负载：真实 PyTorch + webdataset，CPU 训练循环；合成 `bench_track_d.py` 只用于装置自检与粗扫，不进入正式五组对照的结论。
+- 训练负载：真实 PyTorch + webdataset，CPU 训练循环，依赖由项目根 `.venv`（Python 3.14）提供——`bench/requirements.txt` 锁 numpy/pandas/matplotlib/boto3/webdataset，torch 由用户级安装或训练镜像经 `.pth` 暴露，图二/图三与 M5 的 C 轨两 Job 都直接跑它；合成 `bench_track_d.py` 只用于装置自检与粗扫，不进入正式五组对照的结论。对照层 M7 不受影响：`run_bench.py` 与它注入 train-job 的脚本只用标准库，复刻 D 轨负载形态（400 步 × 200ms + 分段读），不依赖上述训练脚本本体。
 - 对照组不可用预案：M6 先做仅验可行性的 Fluid 冒烟（控制面与 DataLoad/Runtime 全 Ready、D 轨 400 步经 FUSE 跑通、组件额外占用 ≤6 CPU / 6 GiB）。两次失败且归因环境时记 `fluid-unavailable-on-kind`，图二/图三主基线降级为 `juicefs-warm`，Fluid 行标 `unavailable`，不补跑、不另起集群；manifest 自身错误修好后重试不计次数。可行性冒烟不产生性能数字，不属于“看到结果再调参”。
 
 ### 1.9 容量比三档 S/M/L 与预注册假设（七组态对照，D19/D30/D31/D32）
@@ -126,7 +126,7 @@
 
 | 档 | 数据 | 缓存 | 容量比 | 参跑组 | 带宽 | 每点次数 | 定位 |
 |---|---|---|---|---|---|---|---|
-| S | 2 GiB | 1 GiB | 1:2 | 全部七组态 | @100 与 @1000（另有 @300 临界档三组） | 3+3，符号翻转格补到 5 | 正式结果，现状口径 |
+| S | 2 GiB | 1 GiB | 1:2 | 全部七组态 | @100 与 @1000（另有 @300 临界档三组） | 3（@100 与 @1000 各 3 次） | 正式结果，现状口径 |
 | M | 8 GiB | 1 GiB | 1:8 | `direct`、`fluid-cold`、`traincache-cold` | @1000 | 3 | 正式结果，欠配校验 |
 | L | 32 GiB | 1 GiB | 1:32 | `traincache-cold`、`fluid-cold` | @1000 | 1 | 探点，产物标 `exploratory` |
 
@@ -135,10 +135,10 @@
 - COND 的 `group` 用七值词表，与跑分器的组态名一一对应：`direct`、`juicefs-cold`、`juicefs-warm`、`fluid-cold`、`fluid-warm`、`traincache-cold`、`traincache-warm`。冷热由组态名表达，不再靠「M/L 档的 `traincache` 就是冷启动」这类隐含约定。
 - M 档与 L 档的基线用 `fluid-cold`（D30）：欠配校验必须压在最强工业基线上，只比 JuiceFS CE 会被质疑「绕过 Fluid」。`juicefs-cold`/`juicefs-warm` 仍留在 S 档七组态里。Fluid 若触发 Q6 的两次环境性失败，M/L 该组落回 `juicefs-cold` 补跑，产物记 `baseline_substituted`。
 - warm 组（`juicefs-warm`、Fluid 热读）只出现在 S 档：1:8 及以下预热至多覆盖数据的 1/8，热读相对冷读的优势缩小是算术事实，不是新发现，不陪跑 M/L。
-- L 档每点 1 次，低于 10.0 的“至少 3 次”硬纪律。因此 L 档标 `exploratory`（探点：只报单点值、不报 CI、不进正式表，只用来回答“M 的方向是否延续”），不支持任何正式结论。CI 指 1.6 的 bootstrap 95% 置信区间。
+- L 档每点 1 次，低于 9.0 的“至少 3 次”硬纪律。因此 L 档标 `exploratory`（探点：只报单点值、不报 CI、不进正式表，只用来回答“M 的方向是否延续”），不支持任何正式结论。CI 指 1.6 的 bootstrap 95% 置信区间。
 - 除容量档与带宽档外三档共用其余口径：同一轨迹、fanout=2、淘汰 `heat`、D16 训练负载、固定 delay 20 ms。
 - **带宽是第二个自变量**（D31）：tc rate 取 {100, 300, 1000} mbit，随 COND 落盘。burst 按「约 0.1 秒的传输量」推导（1250k / 3750k / 12500k），不跨档复用固定值；只有「链路带宽 ÷ 每步读量」落在 [1,2] 的临界档启用 netem 抖动（`delay 20ms 10ms distribution normal`），其余档保持固定 delay。实测比值：S 档 0.47 / 1.40 / 4.66，M 档 0.12 / 0.35 / 1.16，L 档 0.03 / 0.09 / 0.29——临界档只有 S@300 与 M@1000 两处。
-- 每点次数按带宽分区（D32）：S 档 @100 与 @1000 各 3 次，符号翻转格补到 5；M 档 @1000 3 次；L 档 @1000 1 次。3 次必须报均值 + bootstrap CI，只报中位数不满足 10.0 的硬纪律。
+- 每点次数按带宽分区（D32）：S 档 @100 与 @1000 各 3 次；M 档 @1000 3 次；L 档 @1000 1 次。3 次必须报均值 + bootstrap CI，只报中位数不满足 9.0 的硬纪律。
 - 块大小口径：正式实验一律用 8 MiB 块（8388608 字节）的 `compare-data-8m` 快照，生产默认 64 MiB 不变，旧 `compare-data` 快照只留作历史产物复现。块是缓存与预取的最小单位；1 GiB 缓存按 64 MiB 只有 16 块、按 8 MiB 有 128 块，后者淘汰排序统计才够用。
 - L 档 32 GiB 数据已生成（128 个 256 MiB 分片，2026-10-24 追加生成约 24 GiB，只追加不覆盖 `bench-b` 源数据）；实际每份约 252.6 MiB，实际数据量约 31 GiB，比声明值小约 3%，容量比相应约为 1:31。三档偏差同向、不影响组间可比性。
 - 跑分第一格先做前置探针：无 tc 状态下测 MinIO 实际吞吐上限。上限 < 125 MB/s 时 @1000 档失效，带宽轴缩为 {100, 上限} 两档，并回写 D31。**已实测（2026-10-25，§8.4）：C ≈ 674 MB/s，@1000 可达，三档独立，本条不触发。**
@@ -184,7 +184,7 @@
 
 ### 2.4 采样
 
-27 个点先各跑 3 次。按 1.6 的判据只看符号，不看效应大小：某点的启动收益符号与任一相邻点相反，或该点 3 次差值的 CI 跨 0，就把该点补到 7 次。符号变化点两侧的点也补到 7 次，用来把边界画清楚。
+27 个点每点 3 次，不做符号翻转补测；判据按 1.6 只看符号，不看效应大小。
 
 ## 3. 图二：全程 makespan 盈亏曲面
 
@@ -215,7 +215,7 @@
 
 ### 3.4 采样
 
-18 个点先各跑 3 次；符号变化规则同图一。Fluid 基线在同一 COND 下跑同样的次数；不允许用历史 Fluid 数字替代当轮基线。
+18 个点每点 3 次，不做符号翻转补测。Fluid 基线在同一 COND 下跑同样的次数；不允许用历史 Fluid 数字替代当轮基线。
 
 ## 4. 图三：阶段切换 stall 回落曲线
 
@@ -260,7 +260,7 @@
 
 ### 4.5 采样
 
-9 个点先各跑 3 次；符号变化规则同图一。凡是要写进“赢/输”结论的点，必须有 7 次样本。
+9 个点每点 3 次，不做符号翻转补测。
 
 ## 5. 次旗舰 Pareto
 
@@ -274,7 +274,7 @@
 
 ### 5.2 Pareto 二：全程收益 vs 持续预取总字节
 
-- 自变量：lookahead 8/16/32 × 淘汰策略 `heat`/`lru`/`lfu`，3 策略 × 3 档 lookahead = 9 点（`docs/10.0` 为准，D28）。W-TinyLFU 已撤档（D9），不实现、不参赛。
+- 自变量：lookahead 8/16/32 × 淘汰策略 `heat`/`lru`/`lfu`，3 策略 × 3 档 lookahead = 9 点（`docs/9.0` 为准，D28）。W-TinyLFU 已撤档（D9），不实现、不参赛。
 - 固定：C 轨倾斜场景（Job A 循环读 10% 热分片，Job B 顺序扫全量，两 Job 并发）、缓存容量 30%（显式上限 `floor(dataset.bytes × 0.30)`，不是按 `disk_usage_ratio` 事后调）、100 mbit/20 ms、3 epoch。
 - 横轴：持续推进预取总字节；纵轴：全程 makespan 相对 Fluid 的改善。另附 A 的命中率、A 的等待占比、B 挤占热数据次数。
 - 假设：收益随 lookahead 上升但在某档后转平，拐点预期落在 16 附近（16 块 × 8 MiB = 128 MiB，占 1 GiB 缓存的 1/8；32 档时窗口占到 1/4，欠配压力明显加大）；顺序单 Job 下三档淘汰策略差异不显著；倾斜场景下三档才有可见差异（存在一对策略，A 命中率中位数差超出 CI）。允许阴性结论：顺序场景三档无显著差异，就如实写“排序策略对单 Job 顺序训练不关键”；倾斜场景三档差异也落在 CI 内，同样如实写。
@@ -298,37 +298,40 @@
 |---|---|---|---|
 | 2026-10-25 | 冻结前修正：COND `environment.images` 九键的值由 docker image ID 换成集群 containerd manifest digest；`fluid`/`fluid-csi` 的 tag 由 `v1.1.0-36f0467` 改成在役的 `v1.0.8-6533239` | 原值不是任何一侧可解析的 digest 形式，且 tag 与集群实际部署不符（见 §8.3）。属于记录错误修正，不改假设 | 34 个 COND 的环境字段；性能口径无影响 |
 | 2026-10-25 | 冻结前修正：§9 机时估算 12~14 小时 → D32 的 7.2 小时；1.6 的五组次数口径 5/3/1 → 3/3/1（符号翻转格补 5） | D32 已裁决并被 1.9 表格接管，这两处是 D32 之前的正文残留 | 机时预算表；不影响任何假设与判据 |
-| 2026-10-25 | 前置探针出数（10.1 任务 7.7）：C ≈ 674 MB/s，D31 的 `ceiling` 塌缩分支不触发；§12 L 档单 run 13 分钟 → ≈6 分钟 | 实测推翻「MinIO 上限约 45 MB/s」的保守前提 | 机时表 L 档行；带宽档 {100,300,1000} 全部保留 |
+| 2026-10-25 | 前置探针出数（9.1 §12.2）：C ≈ 674 MB/s，D31 的 `ceiling` 塌缩分支不触发；§12 L 档单 run 13 分钟 → ≈6 分钟 | 实测推翻「MinIO 上限约 45 MB/s」的保守前提 | 机时表 L 档行；带宽档 {100,300,1000} 全部保留 |
 | 2026-10-25 | 补齐 MinIO 桶 `bench-b` 的分片（32 → 128 个对象，约 24 GiB），并把 `bench/scripts/upload_bench.py` 改成只追加不覆盖 | 桶里只有 32 个对象，L 档 `fluid-cold` 的 import Job 同步不到 32 GiB；同时该脚本原本对全部对象无条件 `upload_file`，重跑即覆盖源数据，与 Q12 冲突 | 数据面补齐；不改任何假设、档位与判据 |
 
 ## 8. 冻结记录
 
-冻结动作在 2026-10-25 完成，分两次提交（自引用无法在一次提交里闭合）：
-
-- **C1 内容冻结提交**：`preregister.md` 与 `cond.schema.md` 的假设、档位、判据、字段契约在此提交定稿；下表两个 sha256 取的是 **C1 版本的文件内容**（`git show C1:<path> | sha256sum`），事后任何人对 C1 复算都应得到同一值。
-- **C2 回填提交**：只往本节表格追加 C1 的 commit hash 与哈希，不改任何假设、档位、胜负判据（D12 允许的就是这种追加）。
+冻结锚点是轻量 tag `prereg-c1`。一次闭合：`preregister.md`、`cond.schema.md`、`conds/*.json`（34 个）、`traces/*.json`（4 个）在该 tag 指向的提交定稿。本文件的 sha256 不单独记录——记录自身哈希会改变文件内容，自引用无法闭合。
 
 | 项 | 值 |
 |---|---|
 | 冻结日期 | 2026-10-25 |
-| C1 内容冻结 commit | `__C1__` |
-| C2 回填 commit | `__C2__` |
-| 本文件 sha256（C1 版本） | `__SHA_PRE__` |
-| `cond.schema.md` sha256（C1 版本） | `__SHA_SCHEMA__` |
+| 冻结锚点 | tag `prereg-c1` |
+| tag 指向 commit | `__C1_COMMIT__` |
+| 本文件 sha256 | 以 tag `prereg-c1` 中的版本为准，不单独记录 |
+| `cond.schema.md` sha256（tag 版本） | `__SHA_SCHEMA__` |
 | COND 集（34 个）合并 sha256 | `__SHA_CONDS__` |
 | `environment.images` 取值口径 | 见 §8.3；九个键逐个是集群 containerd 的 manifest digest，非人工编造 |
 | COND 契约版本 | v1（`bench/experiments/cond.schema.md`） |
 
+三个哈希都以 tag 为基准复算：
+
+- 本文件：`git show prereg-c1:bench/experiments/preregister.md | sha256sum`
+- `cond.schema.md`：`git show prereg-c1:bench/experiments/cond.schema.md | sha256sum`
+- COND 集（34 个）：用 `git ls-tree -r --name-only prereg-c1 bench/experiments/conds/` 取路径并按路径排序；对每个文件跑 `git show prereg-c1:<path> | sha256sum` 得到 `<hex>`；把「`<hex>  <相对仓库根的路径>`」逐行拼接（两个空格分隔，行尾换行）；对拼接后的文本再算一次 sha256。
+
 ### 8.1 冻结清单（第一次正式跑分前，按顺序执行）
 
-1. 确认 `bench/experiments/preregister.md` 与 `bench/experiments/cond.schema.md` 内容为终稿。
-2. 只提交这两个文件，记下 commit hash，填入上表。
-3. 跑 `sha256sum bench/experiments/preregister.md bench/experiments/cond.schema.md`，把两个哈希填进上表。
+1. 确认 `bench/experiments/preregister.md`、`bench/experiments/cond.schema.md`、`bench/experiments/conds/*.json`（34 个）、`bench/experiments/traces/*.json`（4 个）内容为终稿。
+2. 只提交上述冻结对象，打 tag `prereg-c1`，记下 tag 指向的 commit hash，填入上表。
+3. 以 tag 为基准算 `cond.schema.md` 与 COND 集的哈希，填入上表。
 4. 从集群取四个控制面镜像的 digest（agent、controller、training、minio；JuiceFS/Fluid 参跑组再补对应两项），填进上表，并替换各 COND 里的 `environment.images` 占位符。
 5. 回填 `trace.sha256`：对 `bench/experiments/traces/` 实际使用的轨迹文件算 sha256，写进每个 COND 与产物目录。
 6. 此后内容冻结：只允许往 §7 追加偏离说明（D12），不允许回头改假设、档位或胜负判据。
 
-**执行结果（2026-10-25）**：1~3 见上表；4 见 §8.3（九键全填，且顺手纠正了两处错值）；5 复核通过——34 个 COND 的 `trace.sha256` 与 `bench/*/traces/*.json` 的 `per_epoch` 稳定哈希逐一对上（口径是 `bench/compare/trace.py:160` `trace_sha256()`，即对 `per_epoch` 数组做 `json.dumps(separators=(",",":"), sort_keys=True)` 后再 sha256；直接对轨迹整个文件算 sha256 得到的是另一个值，别拿错）；6 自 C1 起生效。
+**执行状态（2026-10-25）**：1~3 是冻结动作本身，随提交与 tag `prereg-c1` 成立；哈希以 tag 为基准计算，回填本节不改变 tag。4 已成立，见 §8.3（九键全填，且纠正了两处错值）。5 已成立——34 个 COND 的 `trace.sha256` 与 `bench/experiments/traces/*.json` 的 `per_epoch` 稳定哈希逐一对上（口径是 `bench/compare/trace.py` 的 `trace_sha256()`，即对 `per_epoch` 数组做 `json.dumps(separators=(",",":"), sort_keys=True)` 后再 sha256；直接对轨迹整个文件算 sha256 得到的是另一个值，别拿错）。6 自 tag `prereg-c1` 起生效。
 
 ### 8.3 镜像 digest 取值口径（冻结时现取）
 
@@ -346,16 +349,16 @@
 
 取法：`docker exec <kind 节点> ctr -n k8s.io images ls`，取第二列 ref 与第三列 Digest（三个节点 `traincache-worker` / `worker2` / `control-plane` 上同名镜像的 Digest 完全一致，已交叉核过）。
 
-冻结时纠正的两处错值：
+九键的两处取值口径：
 
-1. 原九键填的是 **docker image ID**（`docker images` 的 config digest，如 agent 的 `13f1ed…`），却写成 `repo:tag@sha256:` 的形式。`@sha256:` 在镜像引用里的语义是 manifest digest，两者不是同一个值，按原写法无法在任何一侧解析出来。
-2. `fluid` / `fluid-csi` 原写 `v1.1.0-36f0467`，而 `fluid-system` 里实际在跑的是 `v1.0.8-6533239`（`kubectl -n fluid-system get pods -o jsonpath=…image`）。节点上确实另存着 v1.1.0 的镜像，但那是没用上的库存。
+1. 表里填的是 containerd 的 manifest digest，不是 **docker image ID**（`docker images` 的 config digest，如 agent 的 `13f1ed…`）。`@sha256:` 在镜像引用里的语义是 manifest digest，两者不是同一个值。
+2. `fluid` / `fluid-csi` 取 `v1.0.8-6533239`，这是 `fluid-system` 里实际在跑的版本（`kubectl -n fluid-system get pods -o jsonpath=…image`）。节点上另存的 v1.1.0 镜像未使用。
 
 注意 kubelet 报的 `imageID` 是第三种值（形如 `docker.io/library/import-2026-10-24@sha256:f037d4…`），那是 kind `load docker-archive` 给导入镜像打的标记，不是内容摘要，别拿它当 digest。
 
 同一个镜像名在 docker 侧还能问出第四种值——`RepoDigests`（如 `python@sha256:1b668…`、`…/pgsty/minio@sha256:b6bfe…`），那是上游 registry 的清单摘要，与 containerd 本地存的摘要**本就不同**（本地 build 的四个 traincache 镜像则根本没有 RepoDigests）。本轮选 containerd 那一侧，理由是它是三节点一致、且正是集群里在跑的字节。`lock.py` 因此把两路分开记：`docker_images` 取 COND 冻结值，`docker_repo_digests` 只做交叉核对，谁也不覆盖谁。顺带修掉一个真 bug：旧 `lock.py` 拿去掉 tag 的 repo 名去 `docker inspect`，`python:3.12-alpine` 会命中宿主上任意一个 `python` 镜像的 RepoDigest——记下来的是别的镜像。
 
-### 8.4 前置探针实测（10.1 任务 7.7）
+### 8.4 前置探针实测（9.1 §12.2）
 
 无 tc 状态下 MinIO 源站吞吐上限 **C ≈ 674 MB/s（median of 9，区间 629~755；≈5.4 Gbit/s）**，采法：与 train-job 同路径（worker 节点上临时 Pod 经 `nodeIP:30090` nodePort），`mc cat bench-b/shard-xxxxx.tar | wc -c` 计时。并行 2 连接聚合 1120/870 MB/s、并行 3 聚合 1207 MB/s——上限随连接数增长，说明 674 MB/s 是单连接读者上限而非源站出口上限。
 
@@ -363,16 +366,11 @@
 
 探针用过的临时 Pod 已删除，MinIO Pod eth0 的 tc 状态前后一致（`qdisc noqueue 0: root refcnt 2`，即无调控）。
 
-### 8.2 冻结时刻仍未定的取值（如实列出）
+### 8.2 冻结时刻仍未定的取值
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | COND 的 `trace.sha256` / `environment.images` | 已填真值并复核（§8.1 第 5 条、§8.3）。原「全是 `aaaa…` 占位符」的记录作废——那是 10.22 写的，盘上早已是实值 |
-| 2 | `compare-data-8m` 快照 | **仍未发布到 MinIO**。但不需要人手做：`bench/compare/traincache/up.sh:87` `publish_snapshot()` 幂等，CURRENT 不存在时自动构建 `trainpublish` 并按 `-chunk-size` 切块上传，第一次 traincache 组 up 时会现场发布（S/M 档分别 8/32 个 shard，L 档 128 个） |
-| 3 | L 档 32 GiB 数据 | 宿主机侧**已生成**：`~/tcd/bench/data/track_b/tars/` 现有 128 个 shard（实测 `find … -name '*.tar' \| wc -l` = 128）。原「需新增约 24 GiB 分片」的记录作废 |
-| 3b | MinIO 桶 `bench-b` 的对象数 | **已补齐（2026-10-25）**：桶内 `shard-00000~00127` 共 128 个对象，逐个与宿主 tar 做字节数比对，0 不匹配；原有 32 个对象的 ETag/Size/LastModified 上传前后一致，未被改写（Q12 只追加不覆盖）。L 档 `fluid-cold` 的数据缺口关闭。顺带把 `bench/scripts/upload_bench.py` 改成幂等：桶里已存在的对象一律跳过，确要重写源数据得显式 `UPLOAD_FORCE=1`——改之前它对全部 128 个对象无条件 `upload_file`，重跑一次就把源数据覆盖了 |
-| 4 | `bench/experiments/` git 跟踪 | 已跟踪。原「整个目录尚未被 git 跟踪」的记录作废 |
-| 5 | D 轨解释器与依赖 | 本机无 `/usr/bin/python3.12`，`bench_track_d.py` 的 numpy/torch/webdataset 装不上 → **真实 PyTorch 负载（D16）当前跑不了**，图二/图三与 M5 的 C 轨两 Job 都依赖它。对照层 M7 不受影响：`run_bench.py` 与它注入 train-job 的脚本只用标准库（实测该文件及其脚本模板里没有任何第三方 import），跑的是 D 轨的**负载形态**（400 步 × 200ms + 分段读）而非那个脚本本体 |
+| 1 | `compare-data-8m` 快照 | 尚未发布到 MinIO；首次 traincache 组 up 时由 `bench/compare/traincache/up.sh` 的 `publish_snapshot()` 幂等现场发布（S/M/L 档分别 8/32/128 个 shard） |
 
 ## 9. 机时粗估
 
@@ -380,14 +378,14 @@
 
 | 实验 | 点数 | 每点次数 | 粗估 |
 |---|---|---|---|
-| 图一 | 27 | 3，边界补 7 | 6~12 小时 |
-| 图二 | 18 | 3，边界补 7 | 30~50 小时 |
-| 图三 | 9 | 3，边界补 7 | 12~20 小时 |
-| 五组对照 S 档 | 5 | 5 | 约 4.2 小时 |
+| 图一 | 27 | 3 | 6~12 小时 |
+| 图二 | 18 | 3 | 30~50 小时 |
+| 图三 | 9 | 3 | 12~20 小时 |
+| 五组对照 S 档 | 7 | 3 | 约 4.2 小时 |
 | 五组对照 M 档 | 3 | 3 | 约 5 小时 |
 | 五组对照 L 档 | 2 | 1 | 约 1.5 小时；另加 32 GiB 数据生成灌入 1~2 小时 |
 | Pareto 一 | 3 | 7 | 2~3 小时 |
 | Pareto 二 | 9 | 7 | 11~19 小时 |
 | 总计 | — | — | 约 75~120 小时 |
 
-五组对照按 1.9 的 D19 分档（3/3/1，符号翻转格补到 5），对照部分机时按 D32 的带宽分区结构是约 7.2 小时（本条原写「12~14 小时」，那是 D32 之前的估算，已由 `docs/10.1` §12 的 7.2h 表接管；次数与格子完全没变，只是 rep 复用控制面 + 删掉 M@100 参照 + L 档回 1 次把总时长压下来）。W-TinyLFU 撤档后 Pareto 二从 16 点缩到 9 点（D28 把 lookahead 轴收敛为 8/16/32），机时按同口径等量下调。这是粗估，误差主要来自 8 GiB × 10 epoch 与 Fluid 组的冷态成本。M2 的 runner 会用实际单点时长替换本表；压缩只允许用“共享基线”和“3 次粗扫”，五组对照的次数按 D19，其余最终结论点不允许降低次数要求。
+五组对照按 1.9 的 D19 分档（3/3/1），对照部分机时按 D32 的带宽分区结构是约 6.3 小时（`docs/9.1` §12）：rep 复用控制面，M 档只取 1000mbit 一档，L 档 1 次探点。W-TinyLFU 撤档后 Pareto 二从 16 点缩到 9 点（D28 把 lookahead 轴收敛为 8/16/32），机时按同口径等量下调。这是粗估，误差主要来自 8 GiB × 10 epoch 与 Fluid 组的冷态成本。M2 的 runner 会用实际单点时长替换本表；压缩只允许用“共享基线”，五组对照的次数按 D19，其余最终结论点不允许降低次数要求。

@@ -59,7 +59,7 @@
     }
   },
   "sampling": {
-    "reps": 7,
+    "reps": 3,
     "coarse_reps": 3,
     "upgrade_rule": "sign-change",
     "bootstrap_iters": 10000
