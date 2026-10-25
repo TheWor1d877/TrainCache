@@ -14,7 +14,11 @@ import (
 // ---------------- 测试辅助(等待一律带 deadline 轮询,不用裸 sleep) ----------------
 
 const (
-	testTimeout = 3 * time.Second        // eventually / recv 的 deadline
+	// testTimeout 是 eventually / recv 的等待上限。取 10s：本包正常跑完约 1.9s,
+	// 绝大多数时间花在 quietWindow 的负断言上;超时只在断言失败时才走到,
+	// 因此放宽上限不增加常规耗时,却能挡住"宿主负载高(CI 上并发编译/多个 agent
+	// 同时跑)时首次运行超时、复跑即过"这类假失败。
+	testTimeout = 10 * time.Second       // eventually / recv 的 deadline
 	quietWindow = 150 * time.Millisecond // 负断言观察窗
 )
 

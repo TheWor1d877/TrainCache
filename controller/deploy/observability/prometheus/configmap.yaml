@@ -1,0 +1,147 @@
+# Prometheus scrape configuration.
+#
+# Discovers the four TrainCache components by Pod label in the traincache and
+# kube-system namespaces, keeps only the named container port "metrics", and
+# builds the scrape address from the Pod IP at discovery time (never hardcoded).
+#
+# Component -> namespace / metrics port:
+#   traincache-controller-manager  traincache  metrics 9412
+#   traincache-webhook             traincache  metrics 9412
+#   traincache-agentd              traincache  metrics 9411
+#   traincache-scheduler           kube-system metrics 9412
+#
+# The scheduler keeps its project registry at /metrics/traincache (its
+# /metrics path belongs to kube-scheduler); an explicit relabel overrides the
+# path only for that component.
+#
+# Project-owned registries (as opposed to controller-runtime built-ins) are
+# scraped by a second job, traincache-custom-metrics, at /metrics/traincache.
+# agentd's custom metrics stay on /metrics and are covered by the first job,
+# so they are intentionally absent from the second one.
+#
+# Target labels are deliberately bounded: component, namespace, node. Pod
+# names, task IDs and request IDs never become target labels.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: traincache
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 30s
+    scrape_configs:
+      - job_name: traincache-components
+        scrape_interval: 15s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - traincache
+                - kube-system
+        relabel_configs:
+          # Keep only the four TrainCache server components.
+          - source_labels:
+              - __meta_kubernetes_pod_label_app_kubernetes_io_name
+            regex: traincache-controller-manager|traincache-webhook|traincache-agentd|traincache-scheduler
+            action: keep
+          # Scrape the named container port declared by each manifest.
+          - source_labels:
+              - __meta_kubernetes_pod_container_port_name
+            regex: metrics
+            action: keep
+          - source_labels:
+              - __meta_kubernetes_pod_label_app_kubernetes_io_name
+            target_label: component
+          - source_labels:
+              - __meta_kubernetes_namespace
+            target_label: namespace
+          - source_labels:
+              - __meta_kubernetes_pod_node_name
+            target_label: node
+          # instance is the Node, not the Pod IP/name, to stay bounded.
+          - source_labels:
+              - __meta_kubernetes_pod_node_name
+            target_label: instance
+          # The scheduler's independent registry lives at /metrics/traincache;
+          # its /metrics path is owned by kube-scheduler and returns 404.
+          - source_labels:
+              - __meta_kubernetes_pod_label_app_kubernetes_io_name
+            regex: traincache-scheduler
+            target_label: __metrics_path__
+            replacement: /metrics/traincache
+          # Resolve the address from discovery metadata: Pod IP + port number.
+          - source_labels:
+              - __meta_kubernetes_pod_ip
+              - __meta_kubernetes_pod_container_port_number
+            separator: ':'
+            target_label: __address__
+          # Defence in depth: never retain Pod identity or per-request labels.
+          - action: labeldrop
+            regex: pod|pod_name|task_id|request_id
+        metric_relabel_configs:
+          # The scheduler's project registry is owned by
+          # traincache-custom-metrics; drop it here so each custom series is
+          # stored under exactly one job.
+          - source_labels:
+              - component
+            regex: traincache-scheduler
+            action: drop
+          - action: labeldrop
+            regex: pod|pod_name|task_id|request_id
+      # Project-owned registries are served at /metrics/traincache by the
+      # controller-manager and the scheduler. The webhook is deliberately not
+      # kept: its current metrics server answers 404 on /metrics/traincache and
+      # registers no project families, so scraping it would only produce a down
+      # target. Add it back once the webhook exposes that handler.
+      - job_name: traincache-custom-metrics
+        scrape_interval: 15s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - traincache
+                - kube-system
+        relabel_configs:
+          # Only components with a project-owned registry at /metrics/traincache.
+          - source_labels:
+              - __meta_kubernetes_pod_label_app_kubernetes_io_name
+            regex: traincache-controller-manager|traincache-scheduler
+            action: keep
+          - source_labels:
+              - __meta_kubernetes_pod_container_port_name
+            regex: metrics
+            action: keep
+          - source_labels:
+              - __meta_kubernetes_pod_label_app_kubernetes_io_name
+            target_label: component
+          - source_labels:
+              - __meta_kubernetes_namespace
+            target_label: namespace
+          - source_labels:
+              - __meta_kubernetes_pod_node_name
+            target_label: node
+          # instance is the Node, not the Pod IP/name, to stay bounded.
+          - source_labels:
+              - __meta_kubernetes_pod_node_name
+            target_label: instance
+          # Every kept component owns its project registry at this path.
+          - target_label: __metrics_path__
+            replacement: /metrics/traincache
+          # Resolve the address from discovery metadata: Pod IP + port number.
+          - source_labels:
+              - __meta_kubernetes_pod_ip
+              - __meta_kubernetes_pod_container_port_number
+            separator: ':'
+            target_label: __address__
+          # Defence in depth: never retain Pod identity or per-request labels.
+          - action: labeldrop
+            regex: pod|pod_name|task_id|request_id
+        metric_relabel_configs:
+          - action: labeldrop
+            regex: pod|pod_name|task_id|request_id

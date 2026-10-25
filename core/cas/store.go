@@ -62,6 +62,9 @@ type Store struct {
 	// openObserver 是 Open 前置观察者（实例级；nil = 未安装）。原子指针保证
 	// SetOpenObserver 与并发 Open 无数据竞争，回调调用时不持任何锁。
 	openObserver atomic.Pointer[openObserverFunc]
+	// putObserver 是 Put 后置观察者（实例级；nil = 未安装）。SetPutObserver 与并发
+	// Put 无数据竞争；Put 原子发布成功后触发回调，传入准确 size（非 stat 估计）。
+	putObserver atomic.Pointer[putObserverFunc]
 }
 
 // New 创建（必要时初始化）dir 下的块存储（创建块目录 blocks/ 与隔离目录 quarantine/）；
@@ -167,6 +170,7 @@ func (s *Store) Put(ctx context.Context, r io.Reader) (Fingerprint, int64, error
 		return zero, 0, fmt.Errorf("cas: publish block: %w", err)
 	}
 	published = true
+	s.notifyPut(fp, n) // D58:Put 后置观察者，传入准确数据字节数（非 stat 估计）
 	return fp, n, nil
 }
 

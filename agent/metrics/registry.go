@@ -95,10 +95,6 @@ type Registry struct {
 	// ⑤ 磁盘淘汰线。
 	evictBlocks           *prometheus.CounterVec // dataset,result∈{normal,danger}
 	evictProtectedSkipped *prometheus.CounterVec // dataset,result∈{normal,danger}
-	// M4 策略相关指标(标签只放 policy)。
-	evictPolicySwitches  *prometheus.CounterVec // policy
-	evictAdmitRejections *prometheus.CounterVec // policy
-	evictFreqHalvings    *prometheus.CounterVec // policy
 	// ⑥ 延迟线(stageSwitchStall 字段见 M3,metric 名为 stage_switch_eta_seconds)。
 	requestDuration *prometheus.HistogramVec // endpoint,result∈{success,error};固定 bucket
 	// ⑦ 节点状态线(prefetchQueueDepth / prefetchCursor 见 M3 字段)。

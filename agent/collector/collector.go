@@ -79,7 +79,7 @@ type CollectorConfig struct {
 }
 
 // EvictionEntry 是淘汰候选快照条目(D31 冻结签名;M6 淘汰循环按同签名窄接口消费,不 import 本包)。
-// M4 增 Accesses 字段供 LFU/W-TinyLFU 档策略消费。
+// M4 增 Accesses 字段供 LFU 档策略消费。
 type EvictionEntry struct {
 	FP        cas.Fingerprint
 	Heat      float64
@@ -298,7 +298,7 @@ func (c *Collector) Touch(fp cas.Fingerprint, t time.Time) {
 }
 
 // ListForEviction 返回热度表全量快照(D31 冻结:调用方按得分排序,本方法不排序)。
-// M4:填充 Accesses = e.accessCount,供 LFU/W-TinyLFU 档策略消费。
+// M4:填充 Accesses = e.accessCount,供 LFU 档策略消费。
 func (c *Collector) ListForEviction() []EvictionEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()

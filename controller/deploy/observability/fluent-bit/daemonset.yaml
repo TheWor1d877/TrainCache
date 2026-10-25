@@ -1,0 +1,83 @@
+# One collector per worker node. The control-plane taint is intentionally not
+# tolerated, so the DaemonSet lands on the three kind workers only.
+#
+# Host log directories are mounted read-only; everything fluent-bit writes
+# (tail DB, buffered chunks) goes to an emptyDir capped at 512Mi.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/component: logging
+    app.kubernetes.io/part-of: traincache
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluent-bit
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluent-bit
+        app.kubernetes.io/component: logging
+        app.kubernetes.io/part-of: traincache
+    spec:
+      serviceAccountName: fluent-bit
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fluent-bit
+          image: dgl3i4ucowsgvvdwty.xuanyuan.run/fluent/fluent-bit:3.1.8
+          imagePullPolicy: IfNotPresent
+          # The image default only reads /fluent-bit/etc/fluent-bit.conf.
+          args:
+            - -c
+            - /etc/fluent-bit/fluent-bit.conf
+          env:
+            - name: CLUSTER_NAME
+              value: traincache-e2e
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: config
+              mountPath: /etc/fluent-bit
+              readOnly: true
+            - name: buffer
+              mountPath: /var/log/flb-storage
+      volumes:
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+            type: Directory
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: config
+          configMap:
+            name: fluent-bit-config
+        - name: buffer
+          emptyDir:
+            sizeLimit: 512Mi

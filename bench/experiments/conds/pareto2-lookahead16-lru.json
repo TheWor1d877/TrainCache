@@ -1,0 +1,93 @@
+{
+  "schema_version": "1",
+  "name": "pareto2-lookahead16-lru",
+  "figure": "pareto2",
+  "group": "traincache-cold",
+  "track": "C",
+  "dataset": {
+    "name": "track-b",
+    "source": "minio",
+    "endpoint": "http://minio.minio.svc.cluster.local:9000",
+    "bucket": "bench-b",
+    "bytes": 8589934592,
+    "shards": 32,
+    "shard_size_bytes": 268435456,
+    "chunk_size_bytes": 8388608,
+    "seed": 20261006
+  },
+  "trace": {
+    "file": "traces/track-c-32shard-per-epoch.json",
+    "sha256": "d2f10e8c01b97ee290ba7b8a5c65934184dbe081fe842de8cfb60ec0064a825a",
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "batch": 32,
+    "workers": 4,
+    "steps_per_epoch": 400,
+    "prefetch_factor": 2,
+    "compute_ms": 200,
+    "shuffle": "per-epoch"
+  },
+  "network": {
+    "rate_mbit": 100,
+    "delay_ms": 20,
+    "burst_k": 1250
+  },
+  "cache": {
+    "enabled": true,
+    "capacity_bytes": 2576980377,
+    "ratio": 3.3333,
+    "evict_policy": "lru",
+    "root": "/var/cache/traincache"
+  },
+  "prefetch": {
+    "lookahead": 16,
+    "window_k": 8,
+    "fanout": 1,
+    "fanout_min": 1,
+    "gate": {
+      "threshold": 0.9,
+      "gap_min": 0.1,
+      "slope_min": 0.001,
+      "t_max_s": 300,
+      "min_interval_s": 1
+    },
+    "score": {
+      "half_life": 4,
+      "cutoff": 8
+    }
+  },
+  "sampling": {
+    "reps": 7,
+    "coarse_reps": 3,
+    "upgrade_rule": "sign-change",
+    "bootstrap_iters": 10000
+  },
+  "environment": {
+    "kind_workers": 4,
+    "k8s_version": "v1.37.0",
+    "images": {
+      "agent": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.3@sha256:13f1ed3572ed85ec54fda3f01d9bb5a17dfc160e051605cb02f9afbd2e3aac04",
+      "controller": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/controller-manager:0.8.0@sha256:3ffc57b3ac2cbe7221990094a799f3e255fb67890ea64ad8d2ccca6fcf5a0514",
+      "webhook": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/webhook:0.8.0@sha256:e1f131a982471b685e03e438354e4d5eb982d21e03117fca5092bbbd38dc2403",
+      "scheduler": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0@sha256:28775802df5d410e461c8c57a86c8ac9d0b0282b0dd7efdaa9f98e92e378e5fd",
+      "training": "python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
+      "minio": "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372",
+      "juicefs": "juicedata/mount:ce-v1.3.0@sha256:9d498e18e566fab62373529cc295f33ee7716beaaac5601a7576622c464b3d03",
+      "fluid": "fluidcloudnative/fluid-webhook:v1.1.0-36f0467@sha256:a52409ab98750d8f96007d36e466ffbc1c3066e4277bf7f6c485ad528eeee981",
+      "fluid-csi": "fluidcloudnative/fluid-csi:v1.1.0-36f0467@sha256:405058c41dac7cd7220822ec63160d917e15b939352af9096634cd50085a5b46"
+    },
+    "lock_file": "locks/pareto2-lookahead16-lru.lock.json"
+  },
+  "tags": [
+    "pareto2",
+    "axis=lookahead",
+    "axis=evict_policy",
+    "lookahead16",
+    "lru",
+    "ratio3.3333",
+    "cache30pct"
+  ],
+  "notes": "M5 二维曲面:lookahead=16 × evict_policy=lru(C 轨 30% 缓存口径)。完整 9 点矩阵(3 策略 × 3 档 lookahead 8/16/32)。"
+}

@@ -76,9 +76,42 @@ TRACK_D_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
 
 # ---- tc 限速档位(扫点实验的自变量)----
 TC_RATE = "100mbit"
-TC_BURST = "1600k"
+TC_BURST = "1600k"          # 旧固定值;跨带宽档复用会让突发窗口从 128ms 缩到 13ms(D31)
 TC_LATENCY = "50ms"
 TC_DELAY = "20ms"
+
+# ---- 带宽档口径(D31:带宽是实验自变量)----
+# rate 的取值集合;COND 的 network.rate_mbit 只能取这些值。
+TC_RATE_MBITS = (100, 300, 1000)
+# 每步读量 r 的推导口径:数据集字节 ÷ (每 epoch 步数 × 每步计算耗时)。
+# S 档 2GiB/80s ≈ 26.8 MB/s、M 档 8GiB/80s ≈ 107 MB/s、L 档 32GiB/80s ≈ 429 MB/s。
+TIER_STEPS_PER_EPOCH = 400
+TIER_COMPUTE_MS = 200
+TIER_DATA_BYTES = {"S": 2 << 30, "M": 8 << 30, "L": 32 << 30}
+
+
+def tier_read_rate_bps(tier: str) -> float:
+    """每步读量 r(字节/秒):数据集字节 ÷ (steps_per_epoch × compute 秒)。"""
+    return TIER_DATA_BYTES[tier] / (TIER_STEPS_PER_EPOCH * TIER_COMPUTE_MS / 1000)
+
+
+def bw_over_r(tier: str, rate_mbit: int) -> float:
+    """链路带宽 ÷ 每步读量。<1 链路受限,>2 预取有效,[1,2] 临界(开抖动)。"""
+    return rate_mbit * 125000.0 / tier_read_rate_bps(tier)
+
+
+def jitter_enabled(tier: str, rate_mbit: int) -> bool:
+    """只有临界档(BW/r ∈ [1,2])启用 netem 抖动;抖动抬不动均值比值。"""
+    return 1.0 <= bw_over_r(tier, rate_mbit) <= 2.0
+
+
+def burst_for_rate(rate_mbit: int) -> str:
+    """burst ≈ 0.1 秒的传输量:rate_mbit × 125 KB/s × 0.1 s。
+
+    100mbit → 1250k、300mbit → 3750k、1000mbit → 12500k。
+    """
+    return f"{round(rate_mbit * 125 * 0.1)}k"
+
 
 # ---- 冷态规程与验证 ----
 COLD_VERIFY_RUNS = 2               # 过关标准:两次冷读对上

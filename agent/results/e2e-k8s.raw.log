@@ -1,7 +1,0 @@
-namespace/traincache unchanged
-daemonset.apps/traincache-agentd unchanged
-pod/traincache-train configured
-daemon set "traincache-agentd" successfully rolled out
-pod/traincache-train condition met
-pod "traincache-agentd-fwgdb" deleted from traincache namespace
-    {"time":"2026-10-15T12:41:48.514410578Z","level":"INFO","msg":"收到 ConsumeOrder","pod_uid":"59d0fcc3-e0ce-4c98-9071-0344a65e70cb","dataset":"train-data","snapshot_id":"","stage_id":"","chunks":4}

@@ -11,12 +11,34 @@ venv/
 probes/data/
 probes/.cache/
 probes/results/
+probes/results
 
 # bench 装置运行时产物(三轨数据 / sudo 密码 / 结果)
 bench/data/
 bench/.sudo-pass
 bench/results/
+bench/logs/
 bench/.venv/
+
+# 对照 run_bench.py 的 CSV 产物(实体在 ~/tcd/perf_results,repo 内为软链接)
+perf_results/
+perf_results
 
 # controller e2e 运行时产物(kind 集群导出、镜像 tar、TLS 私钥、MinIO 数据)
 controller/e2e/results/
+controller/e2e/results
+bench/data
+bench/results
+bench/logs
+bench/compare/logs/
+bench/compare/logs
+tmp_shards
+probes/data
+
+# agent e2e 日志(实体在 ~/tcd/agent/results,repo 内为软链接)
+agent/results/
+agent/results
+
+# 本地构建产物(可由源码重建:bench/scripts/trainpublish 来自 core/cmd/trainpublish)
+bench/scripts/trainpublish
+core/traincacheds

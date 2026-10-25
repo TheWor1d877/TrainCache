@@ -1,0 +1,103 @@
+# Node log collection for the observability stack.
+#
+# Chain: tail (CRI) -> kubernetes metadata -> JSON parser -> cluster constant
+#        -> Loki.
+#
+# Frozen label set (six, all low cardinality):
+#   cluster, namespace, component, level, node, stream
+# High cardinality fields such as request_id, pod, task_id and path stay in
+# the JSON body only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/component: logging
+    app.kubernetes.io/part-of: traincache
+data:
+  # Self-contained parser: the stock image's parsers.conf is not loaded, so
+  # `json` would otherwise be reported as "not found".
+  parsers.conf: |
+    [PARSER]
+        Name        traincache_json
+        Format      json
+        # time stays in the record body; loki applies its own timestamp.
+        Time_Keep   On
+
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush                      1
+        Grace                      30
+        Daemon                     Off
+        Log_Level                  info
+        Parsers_File               /etc/fluent-bit/parsers.conf
+        HTTP_Server                Off
+        Health_Check               Off
+        # Filesystem buffering: tail DB and queued chunks live in the emptyDir,
+        # never in the host filesystem.
+        storage.path               /var/log/flb-storage/
+        storage.sync               normal
+        storage.checksum           off
+        storage.backlog.mem_limit  32M
+        storage.max_chunks_up      64
+        storage.metrics            on
+
+    [INPUT]
+        Name                       tail
+        Path                       /var/log/containers/*.log
+        Tag                        kube.*
+        # CRI timestamps, stream tag and multi-line continuation.
+        multiline.parser           cri
+        Read_from_Head             false
+        Refresh_Interval           5
+        Rotate_Wait                30
+        DB                         /var/log/flb-storage/tail.db
+        DB.locking                 true
+        Buffer_Chunk_Size          1M
+        Buffer_Max_Size            4M
+        Mem_Buf_Limit              32MB
+        Skip_Long_Lines            On
+        storage.type               filesystem
+        # Disk is capped by the pod emptyDir sizeLimit (512Mi) plus the
+        # service-level max_chunks_up; tail has no per-input byte cap.
+        storage.pause_on_chunks_overlimit on
+
+    [FILTER]
+        Name                       kubernetes
+        Match                      kube.*
+        Kube_URL                   https://kubernetes.default.svc.cluster.local:443
+        Kube_CA_File               /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File            /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix            kube.var.log.containers.
+        Merge_Log                  Off
+        Keep_Log                   On
+        K8S-Logging.Parser         Off
+        K8S-Logging.Exclude        Off
+        Annotations                Off
+        Labels                     Off
+
+    [FILTER]
+        Name                       parser
+        Match                      kube.*
+        Key_Name                   log
+        Parser                     traincache_json
+        # Keep both the original JSON string (log) and the parsed fields.
+        Reserve_Data               On
+        Preserve_Key               On
+
+    [FILTER]
+        Name                       modify
+        Match                      kube.*
+        # cluster is not emitted by applications; the collector supplies it.
+        Add                        cluster ${CLUSTER_NAME}
+
+    [OUTPUT]
+        Name                       loki
+        Match                      kube.*
+        Host                       loki.observability.svc.cluster.local
+        Port                       3100
+        Labels                     cluster=$cluster,namespace=$kubernetes['namespace_name'],component=$component,level=$level,node=$kubernetes['host'],stream=$stream
+        Line_Format                json
+        Retry_Limit                5

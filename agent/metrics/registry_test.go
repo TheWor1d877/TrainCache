@@ -64,7 +64,7 @@ func TestPrometheusRegistry(t *testing.T) {
 	}
 
 	// R3/R4 新增 2 个 family(index_sweep_skipped_total / objectstore_conditional_write_supported),
-	// M4 新增 3 个策略相关 family,注册表恰含 39 个 family:本节校验 M2/M3 的 4 个
+	// 注册表恰含 37 个 family:本节校验 M2/M3 的 4 个
 	// (ordersource 格式错误 counter[D23]、prefetch 队列深度/游标 gauge 与阶段切换停滞
 	// histogram[M3]);七线 23 个(M6,含复用的这 3 个)在 TestSevenLineFamiliesRegisteredAtStartup
 	// 校验;D33 钩子帧错误、D44 读 miss 与 M9 的 8 个证据 family 也在该测试校验。
@@ -80,8 +80,8 @@ func TestPrometheusRegistry(t *testing.T) {
 		indexSweepSkippedName:                    "COUNTER",
 		objectstoreConditionalWriteSupportedName: "GAUGE",
 	}
-	if len(families) != 40 {
-		t.Fatalf("注册表应恰有 40 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个 + M4 策略 3 个 + M-debug-1 capacity_bytes 1 个),实际 %d 个", len(families))
+	if len(families) != 37 {
+		t.Fatalf("注册表应恰有 37 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个),实际 %d 个", len(families))
 	}
 	byName := make(map[string]int, len(families))
 	for i, mf := range families {

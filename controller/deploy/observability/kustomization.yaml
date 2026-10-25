@@ -1,0 +1,16 @@
+# Standalone observability stack kustomization for local kind runs.
+#
+#   kubectl apply -k controller/deploy/observability
+#
+# This root is intentionally NOT referenced by controller/deploy. It deploys a
+# single-node Loki (emptyDir, filesystem storage) and Grafana with a
+# provisioned Loki data source. Retention: 720h by default, 168h for streams
+# with level="DEBUG".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - loki
+  - grafana
+  - fluent-bit
+  - prometheus

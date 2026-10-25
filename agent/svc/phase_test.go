@@ -136,7 +136,7 @@ func TestPhaseFrozenSignatures(t *testing.T) {
 // TestPhaseOrderPrefetchChunksWindow:订单注入的 K(ConsumeOrder.PrefetchChunks)同时
 // 决定 startup 与 switch 窗口:K=3 时第 2 块不就绪、第 3 块结束窗口。
 func TestPhaseOrderPrefetchChunksWindow(t *testing.T) {
-	p := newPhaseTracker(prefetchLookahead) // 缺省 8:未注入 K 时不应在第 3 块结束
+	p := newPhaseTracker(prefetchLookahead) // 缺省 16(D21):未注入 K 时不应在第 3 块结束
 	p.setDatasetResolver(phaseResolver)
 
 	p.OnOrderWithK(phaseRef("ds", 0), 3)

@@ -18,7 +18,7 @@
 #      ⚠ 实测(probes/probe_a/tc_setup.sh 与 bench/scripts/cold_reset.sh 同因):
 #        docker restart 重建容器 netns → eth0 qdisc 随之丢失,故重启后复挂 tc 并
 #        断言(以出现 tbf 为准);否则训练会跑在无限速链路上,测量无效。
-#   ⑤ $(PY=/usr/bin/python3.12) scripts/bench_track_d.py 全 TRACK_D_EPOCHS epoch
+#   ⑤ $PY(缺省 /usr/bin/python3) scripts/bench_track_d.py 全 TRACK_D_EPOCHS epoch
 #      → TRACK_D_RESULTS_DIR
 #   ⑥ 后置:欠配等效恢复 docker update --memory=128GiB --memory-swap=128GiB
 #      (本机 docker 将 update --memory 0 视为"不变更"(零值语义),见
@@ -207,12 +207,12 @@ write_env() {
   "$PY" - "$OUT_DIR/env_track_d_up.json" "$NAME" "$SRC_CID" "$IMAGE" "$PORT" \
     "$DATA_DIR" "$HTML_SUB" "$OUT_DIR" "$MEM_LIMIT" "$CACHE_MB" "$RESTORE_MEM" \
     "$RESTORE_VERIFY" "$RATE" "$DELAY" "$TC_QDISC" "$TC_SHOW_VIA" \
-    "$DROP_CACHES_VIA" "$EPOCHS" "$SEED" "$WORKERS" "$URL0" <<'PYEOF'
+    "$DROP_CACHES_VIA" "$EPOCHS" "$SEED" "$WORKERS" "$URL0" "$PY" <<'PYEOF'
 import json, sys
 from datetime import datetime
 (path, name, cid, image, port, data_dir, html_sub, out_dir, mem_limit, cache_mb,
  restore_mem, restore_verify, rate, delay, qdisc, tc_via, drop_via, epochs,
- seed, workers, url0) = sys.argv[1:22]
+ seed, workers, url0, py) = sys.argv[1:23]
 env = {
     "track": "D", "kind": "up",
     "date": datetime.now().isoformat(timespec="seconds"),
@@ -237,7 +237,7 @@ env = {
                    "note": "sync + drop_caches + docker restart;仅跑前一次,"
                            "epoch 之间不清缓存(测量对象)"},
     "loader": {
-        "cmd": f"/usr/bin/python3.12 scripts/bench_track_d.py --epochs {epochs} "
+        "cmd": f"{py} scripts/bench_track_d.py --epochs {epochs} "
                f"--seed {seed} --workers {workers} --out-dir {out_dir}",
         "epochs": int(epochs), "seed": int(seed), "workers": int(workers),
     },

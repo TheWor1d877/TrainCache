@@ -21,12 +21,14 @@ package evictor
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,12 +50,12 @@ const (
 const heatHalfLife = 6 * time.Hour
 
 // EvictionEntry 是淘汰候选(热度侧全量快照的一条;形状冻结于 D31)。
-// M4 增 Accesses 字段供 LFU/W-TinyLFU 档策略消费。
+// M4 增 Accesses 字段供 LFU 档策略消费。
 type EvictionEntry struct {
 	FP        cas.Fingerprint // 块指纹(cas.Evict 的入参)
 	Heat      float64         // 热度 h(h ∈ [0,1],由 collector 簿记)
 	LastTouch time.Time       // 最近触摸时刻 t_touch(打开/预取写入/新 ConsumeOrder 三者最大值)
-	Accesses  int64           // 累计打开次数(collector.accessCount;LFU/W-TinyLFU 用)
+	Accesses  int64           // 累计打开次数(collector.accessCount;LFU 档用)
 }
 
 // HeatSource 是淘汰循环消费热度的窄接口(D31:与 collector 同签名,独立声明不 import,
@@ -265,6 +267,15 @@ func (e *Evictor) RunOnce(ctx context.Context) {
 	e.sweep(ctx)
 
 	entries := e.candidates(isDanger)
+	if len(entries) == 0 {
+		// collector 未绑定(heat=nil 或 ListForEviction 空)时的兜底:遍历 blocks/ 目录
+		// 按 mtime 升序删最老的块。避免预热数据进 cas 但还没跑训练 Pod 时堆超限。
+		entries = e.statBlocksByMtime()
+		if len(entries) > 0 {
+			slog.Info("evictor: heat 候选空,兜底 blocks/ 目录按 mtime 删",
+				"dataset", e.cfg.Dataset, "entries", len(entries))
+		}
+	}
 	protected := e.protectedSet()
 	var evicted, skipped int64
 	for _, ent := range entries {
@@ -370,6 +381,55 @@ func (e *Evictor) candidates(danger bool) []EvictionEntry {
 	}
 	for i, b := range ranked {
 		out[i] = entries[fpIndex[b.FP]]
+	}
+	return out
+}
+
+// statBlocksByMtime 遍历 blocks/ 目录下所有 .blk 块,按 mtime 升序返回候选(最老优先删)。
+// collector 未绑定时的兜底路径:heat 为 nil 或 ListForEviction() 返回空但整体已触发淘汰
+// (overall != idle) 时走这里。entry 仅填 FP,Heat/LastTouch/Accesses 为零值;循环里只用到 FP
+// 做 cas.Evict 和 statBlockSize 减累计,零值字段不影响淘汰判定。
+func (e *Evictor) statBlocksByMtime() []EvictionEntry {
+	if e.blocksDir == "" {
+		return nil
+	}
+	type mtimeEntry struct {
+		fp    cas.Fingerprint
+		mtime time.Time
+	}
+	var found []mtimeEntry
+	_ = filepath.WalkDir(e.blocksDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".blk") {
+			return nil
+		}
+		st, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		hexs := strings.TrimSuffix(name, ".blk")
+		if len(hexs) != 32 { // cas.Fingerprint [16]byte → 32 hex chars
+			return nil
+		}
+		b, err := hex.DecodeString(hexs)
+		if err != nil {
+			return nil
+		}
+		var fp cas.Fingerprint
+		copy(fp[:], b)
+		found = append(found, mtimeEntry{fp: fp, mtime: st.ModTime()})
+		return nil
+	})
+	if len(found) == 0 {
+		return nil
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].mtime.Before(found[j].mtime) })
+	out := make([]EvictionEntry, len(found))
+	for i, b := range found {
+		out[i] = EvictionEntry{FP: b.fp}
 	}
 	return out
 }
@@ -523,6 +583,23 @@ func (e *Evictor) OnStoreOpen(fp cas.Fingerprint) {
 		return // 已累计过
 	}
 	e.AddBytes(e.statBlockSize(fp))
+}
+
+// OnStorePut 处理 Store.Put 后置事件:对首次 Put 的块直接累计传入的准确数据字节数
+// 到字节维度(D58"只统计 Agent 自己写的块")。同一 fp 重复 Put 幂等(seenFPs 去重,
+// 与 OnStoreOpen 共享去重表:Put 先于 Open,后续 Open 自动跳过);未启用字节维度时
+// 直接 no-op。供装配层合并 observer 调用。
+func (e *Evictor) OnStorePut(fp cas.Fingerprint, size int64) {
+	if e.cacheCapacityBytes <= 0 {
+		return
+	}
+	if size <= 0 {
+		return
+	}
+	if _, loaded := e.seenFPs.LoadOrStore(fp, true); loaded {
+		return // 已累计过(可能先前通过 Open 累计,或同一 fp 重复 Put)
+	}
+	e.AddBytes(size)
 }
 
 // AddBytes 增量加字节累计(§14 D58:外部 hook 注册;cas.Open 成功后调用)。

@@ -32,7 +32,7 @@ spec:
       # The control-plane taint keeps the Agent off kind's control-plane node.
       containers:
         - name: agentd
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.0
+          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.3
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_NAME
@@ -49,6 +49,11 @@ spec:
               value: "compare-data"
             - name: TRAINCACHE_CACHE_ROOT
               value: "/var/cache/traincache"
+            # 显式容量上限(D6/Q5):缓存按这个字节数触发淘汰,不靠磁盘水位兜底。
+            # 对照实验 S/M/L 三档都用 1GiB 缓存;缺了这一项,重新 apply manifest
+            # 会让缓存失去上限、容量比口径失真。
+            - name: TRAINCACHE_CACHE_CAPACITY_BYTES
+              value: "1073741824"
             - name: TRAINCACHE_HEAT_DECAY_AGE
               value: "24h"
             - name: TRAINCACHE_HEAT_DUMP_INTERVAL

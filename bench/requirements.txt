@@ -1,0 +1,5 @@
+# bench 分析层依赖（M2 统计与 M8 出图）。训练镜像自带 torch/webdataset，不在此列。
+# 精确版本由 M2 lock.json 的 pip freeze 记录，这里只锁下限。
+numpy>=1.26
+pandas>=2.2
+matplotlib>=3.8

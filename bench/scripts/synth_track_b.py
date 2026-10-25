@@ -6,7 +6,14 @@
 - 内容 = 渐变底 + 随机几何图形 + 高斯噪声(σ 自动校准到目标体积,防过度压缩);
 - 固定种子,一键可重新生成逐字节一致的数据;
 - 报告口径:合成数据,I/O 与解码路径真实,语义内容随机。
+
+分片范围:
+- 默认生成 config.TRACK_B_N_TARS(32)份,即 M 档 8GiB;
+- L 档(32GiB)需要 128 份,多出的 96 份用 --start-shard 32 --count 96 追加生成。
+  每个分片的随机种子只与自己的序号有关(config.SEED × 1000003 + shard),
+  所以追加生成与一次生成 128 份逐字节一致;已存在的分片不会被覆盖。
 """
+import argparse
 import io
 import random
 import sys
@@ -70,23 +77,36 @@ def calibrate_sigma() -> float:
 
 
 def main():
+    ap = argparse.ArgumentParser(description="B 轨 tar 分片生成器")
+    ap.add_argument("--start-shard", type=int, default=0,
+                    help="起始分片序号(含);默认 0")
+    ap.add_argument("--count", type=int, default=None,
+                    help="生成分片数;默认 config.TRACK_B_N_TARS")
+    args = ap.parse_args()
+
     config.TRACK_B_DIR.mkdir(parents=True, exist_ok=True)
     sigma = calibrate_sigma()
     print(f"σ={sigma:.3f}(单张 ~{len(jpeg_bytes(0,0,sigma))/1024:.0f}KB)")
     t0 = time.time()
-    total = config.TRACK_B_N_TARS
-    for shard in range(total):
+    total = config.TRACK_B_N_TARS if args.count is None else args.count
+    first = args.start_shard
+    for shard in range(first, first + total):
         name = f"shard-{shard:05d}.tar"
-        with tarfile.open(config.TRACK_B_DIR / name, "w") as tf:
+        out = config.TRACK_B_DIR / name
+        if out.exists():
+            # 产物只追加不覆盖:已存在的分片跳过(重跑本脚本不会重写既有数据)
+            print(f"[skip] {name} 已存在,跳过", flush=True)
+            continue
+        with tarfile.open(out, "w") as tf:
             for idx in range(config.TRACK_B_IMGS_PER_TAR):
                 data = jpeg_bytes(shard, idx, sigma)
                 info = tarfile.TarInfo(f"shard-{shard:05d}_{idx:06d}.jpg")
                 info.size = len(data)
                 tf.addfile(info, io.BytesIO(data))
-        print(f"[{shard+1}/{total}] {name} 完成,累计 {(time.time()-t0)/60:.1f} 分钟",
+        print(f"[{shard+1}/{first+total}] {name} 完成,累计 {(time.time()-t0)/60:.1f} 分钟",
               flush=True)
     size = sum(p.stat().st_size for p in config.TRACK_B_DIR.glob("*.tar"))
-    print(f"B 轨完成:{total} 个 tar,共 {size/2**30:.2f} GiB")
+    print(f"B 轨完成:{len(list(config.TRACK_B_DIR.glob('*.tar')))} 个 tar,共 {size/2**30:.2f} GiB")
 
 
 if __name__ == "__main__":

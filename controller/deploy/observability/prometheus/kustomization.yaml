@@ -1,0 +1,12 @@
+# Standalone Prometheus for the local kind observability stack.
+#
+#   kubectl apply -f controller/deploy/observability/prometheus/
+#
+# NOT referenced by controller/deploy/observability/kustomization.yaml yet.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rbac.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml

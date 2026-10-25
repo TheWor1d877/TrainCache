@@ -116,8 +116,27 @@ clean() {
   else
     info "cluster $CLUSTER absent"
   fi
-  rm -rf "$RESULTS/data" "$RESULTS/tls" "$RESULTS/logs" "$RESULTS"/*.json "$RESULTS"/*.log "$RESULTS"/*.md 2>/dev/null || true
+  clean_artifacts
   ok "runtime artifacts removed (results/.gitignore kept)"
+}
+
+# 只清理本脚本自己写出的那几类文件，不整目录递归删。
+# 原因：results/ 迁到数据层后是软链接，`rm -rf "$RESULTS/data"` 会穿过软链接
+# 递归删掉 ~/tcd 里的实体产物，违反“数据层只追加不覆盖”的纪律；
+# 所以这里逐个文件删，目录本身（data/ tls/ logs/）一律保留。
+clean_artifacts() {
+  local f
+  # 顶层：只有本脚本 collect_artifacts / write_summary 写出的那几个文件。
+  for f in run.log publish.txt summary.md \
+           dataset.yaml warmuptask.yaml pods.yaml nodes.yaml \
+           events.txt scheduler-deploy.yaml; do
+    rm -f "$RESULTS/$f"
+  done
+  # logs/：本脚本的运行日志。Pod 名带随机后缀，只能整类清，
+  # 否则上一轮的 agent-*.log 会混进本轮的断言。
+  rm -f "$LOGS"/*.log
+  # data/ 与 tls/ 不删：分片由 dd 每轮整体覆写、证书由 openssl 每轮重新生成，
+  # 留着旧文件不影响本轮，且避免动数据层里的实体产物。
 }
 
 cluster_up() {

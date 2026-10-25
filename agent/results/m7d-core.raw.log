@@ -1,6 +1,0 @@
-# core module build/vet/test  2026-10-15T20:47:59+08:00
-ok  	traincache/core/cas	1.225s
-ok  	traincache/core/fetch	1.579s
-ok  	traincache/core/index	1.245s
-ok  	traincache/core/internal/digest	1.016s
-ok  	traincache/core/objectstore	1.015s

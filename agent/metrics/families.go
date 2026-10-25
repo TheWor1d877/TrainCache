@@ -40,10 +40,6 @@ const (
 	evictProtectedSkippedName = "traincache_evict_protected_skipped_total"
 	// capacityBytesName 是字节累计 gauge(§14 D58;source∈{disk,bytes})。
 	capacityBytesName = "traincache_cache_capacity_bytes_total"
-	// M4 策略相关指标(标签只放策略名 policy)。
-	evictPolicySwitchesName  = "traincache_evict_policy_switches_total"
-	evictAdmitRejectionsName = "traincache_evict_admit_rejections_total"
-	evictFreqHalvingsName    = "traincache_evict_freq_halvings_total"
 	// ⑥ 延迟线(stage_switch_eta_seconds 已由 M3 注册)。
 	requestDurationName = "traincache_request_duration_seconds"
 	// ⑦ 节点状态线(prefetch_queue_depth / prefetch_cursor 已由 M3 注册)。
@@ -128,20 +124,28 @@ const (
 	ResultDanger    = "danger"
 )
 
-// policy 标签词汇表(M4 淘汰策略;编译期固定;集合外忽略该次打点)。
+// policy 标签词汇表(M4 淘汰策略;编译期固定;D9 撤 W-TinyLFU 档后收缩为三档)。
 const (
-	PolicyHeat     = "heat"
-	PolicyLRU      = "lru"
-	PolicyLFU      = "lfu"
-	PolicyWTinyLFU = "wtinylfu"
+	PolicyHeat = "heat"
+	PolicyLRU  = "lru"
+	PolicyLFU  = "lfu"
 )
 
-// policyLabels 是全部合法 policy 取值(构造时逐一预置)。
+// policyLabels 是全部合法 policy 取值(编译期固定词汇表)。
 var policyLabels = [...]string{
 	PolicyHeat,
 	PolicyLRU,
 	PolicyLFU,
-	PolicyWTinyLFU,
+}
+
+// validPolicy 判断 policy ∈ {heat,lru,lfu}(编译期固定词汇表)。
+func validPolicy(policy string) bool {
+	for _, p := range policyLabels {
+		if policy == p {
+			return true
+		}
+	}
+	return false
 }
 
 // capacitySource 是 capacity_bytes gauge 的 source 标签取值(§14 D58;编译期固定)。
@@ -249,19 +253,6 @@ func (r *Registry) initSevenLine() {
 		Name: evictProtectedSkippedName,
 		Help: "受保护(cursor+lookahead)跳过淘汰的块数(result=normal|danger,取触发线;D24)",
 	}, []string{"dataset", "result"})
-	// M4 策略相关指标(标签只放 policy;heat/lru/lfu/wtinylfu)。
-	r.evictPolicySwitches = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: evictPolicySwitchesName,
-		Help: "淘汰策略切换次数(M4;policy=heat|lru|lfu|wtinylfu)",
-	}, []string{"policy"})
-	r.evictAdmitRejections = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: evictAdmitRejectionsName,
-		Help: "准入拒绝次数(M4 Admit 返回 false 的次数;policy=策略名)",
-	}, []string{"policy"})
-	r.evictFreqHalvings = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: evictFreqHalvingsName,
-		Help: "频率减半次数(M4 W-TinyLFU 每 10×capacity 访问触发;policy=策略名)",
-	}, []string{"policy"})
 	r.requestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    requestDurationName,
 		Help:    "RPC 请求耗时秒数(endpoint=RPC 方法名;result=success|error;固定 bucket {.01,.05,.1,.5,1,5,10,30}s)",
@@ -298,7 +289,6 @@ func (r *Registry) initSevenLine() {
 		r.indexRefresh, r.indexRefreshDuration, r.indexShardsLoaded,
 		r.gcSweeps, r.gcBlocksRemoved, r.gcObjectsRemoved,
 		r.evictBlocks, r.evictProtectedSkipped,
-		r.evictPolicySwitches, r.evictAdmitRejections, r.evictFreqHalvings,
 		r.requestDuration,
 		r.agentUp, r.agentDegraded, r.rescanProgress, r.quarantined, r.diskUsageRatio,
 		r.capacityBytes,
@@ -324,12 +314,6 @@ func (r *Registry) initSevenLine() {
 	preset(r.gcObjectsRemoved, ResultSuccess)
 	preset(r.evictBlocks, ResultNormal, ResultDanger)
 	preset(r.evictProtectedSkipped, ResultNormal, ResultDanger)
-	// M4 策略指标:预置全部合法 policy 取值。
-	for _, pol := range policyLabels {
-		r.evictPolicySwitches.WithLabelValues(pol)
-		r.evictAdmitRejections.WithLabelValues(pol)
-		r.evictFreqHalvings.WithLabelValues(pol)
-	}
 	r.indexRefreshDuration.WithLabelValues(otherDatasetLabel, ResultSuccess)
 	// dataset 单标签 gauge 预置 "other"。
 	r.cacheHitRatio.WithLabelValues(otherDatasetLabel, PhaseUnknown)
@@ -528,45 +512,6 @@ func (r *Registry) IncEvictProtectedSkipped(dataset, result string, n int64) {
 		return
 	}
 	r.evictProtectedSkipped.WithLabelValues(r.DatasetLabel(dataset), result).Add(float64(n))
-}
-
-// —— M4 策略相关指标 ——
-
-// IncEvictPolicySwitch 记一次淘汰策略切换:traincache_evict_policy_switches_total{policy},
-// policy∈{heat,lru,lfu,wtinylfu};集合外忽略该次打点。
-func (r *Registry) IncEvictPolicySwitch(policy string) {
-	if !validPolicy(policy) {
-		return
-	}
-	r.evictPolicySwitches.WithLabelValues(policy).Inc()
-}
-
-// IncEvictAdmitRejection 记一次准入拒绝:traincache_evict_admit_rejections_total{policy},
-// policy=当前策略名;集合外忽略。
-func (r *Registry) IncEvictAdmitRejection(policy string) {
-	if !validPolicy(policy) {
-		return
-	}
-	r.evictAdmitRejections.WithLabelValues(policy).Inc()
-}
-
-// IncEvictFreqHalving 记一次频率减半:traincache_evict_freq_halvings_total{policy},
-// policy=当前策略名(W-TinyLFU 每 10×capacity 访问触发);集合外忽略。
-func (r *Registry) IncEvictFreqHalving(policy string) {
-	if !validPolicy(policy) {
-		return
-	}
-	r.evictFreqHalvings.WithLabelValues(policy).Inc()
-}
-
-// validPolicy 判断 policy ∈ {heat,lru,lfu,wtinylfu}(M4 编译期固定词汇表)。
-func validPolicy(policy string) bool {
-	for _, p := range policyLabels {
-		if policy == p {
-			return true
-		}
-	}
-	return false
 }
 
 // —— ⑥ 延迟线 ——
@@ -893,15 +838,6 @@ func (r *Registry) EvictBlocks() *prometheus.CounterVec { return r.evictBlocks }
 
 // EvictProtectedSkipped 返回受保护跳过 counter(测试访问器)。
 func (r *Registry) EvictProtectedSkipped() *prometheus.CounterVec { return r.evictProtectedSkipped }
-
-// EvictPolicySwitches 返回策略切换 counter(测试访问器)。
-func (r *Registry) EvictPolicySwitches() *prometheus.CounterVec { return r.evictPolicySwitches }
-
-// EvictAdmitRejections 返回准入拒绝 counter(测试访问器)。
-func (r *Registry) EvictAdmitRejections() *prometheus.CounterVec { return r.evictAdmitRejections }
-
-// EvictFreqHalvings 返回频率减半 counter(测试访问器)。
-func (r *Registry) EvictFreqHalvings() *prometheus.CounterVec { return r.evictFreqHalvings }
 
 // RequestDuration 返回 RPC 耗时 histogram(测试访问器)。
 func (r *Registry) RequestDuration() *prometheus.HistogramVec { return r.requestDuration }

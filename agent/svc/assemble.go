@@ -34,14 +34,10 @@ var lookahead = prefetchLookahead
 const (
 	envEvictPolicy       = "TRAINCACHE_EVICT_POLICY"
 	envPrefetchLookahead = "TRAINCACHE_PREFETCH_LOOKAHEAD"
-	envWTinyLFUCapacity  = "TRAINCACHE_WTINYLFU_CAPACITY"
 )
 
 // defaultEvictPolicy 是默认淘汰策略名(M4:D8 heat 档行为不变)。
 const defaultEvictPolicy = "heat"
-
-// defaultWTinyLFUCapacity 是 W-TinyLFU 容量默认值(M4 D9)。
-const defaultWTinyLFUCapacity = 1024
 
 // selfOpenGuardTTL 是 Agent 自打开守卫的有效期(D49;覆盖 inotify 轮询与处理延迟)。
 const selfOpenGuardTTL = 3 * time.Second
@@ -177,7 +173,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 
 	// 淘汰循环(M6/§7.6):HeatSource = collector 快照(懒绑定适配),ProtectedSource =
 	// 预取管理器(cursor 起 lookahead 块 + P0 在途),Sweep = 已知 dataset 逐个 core GC。
-	// M4:注入 Policy(heat/lru/lfu/wtinylfu,由 TRAINCACHE_EVICT_POLICY 选择)。
+	// M4:注入 Policy(heat/lru/lfu,由 TRAINCACHE_EVICT_POLICY 选择;D9 撤 W-TinyLFU 档)。
 	ag.Evictor = evictor.New(cs, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, policy, evictor.Config{
 		BlockDir:           cfg.CacheRoot,
 		TriggerPercent:     cfg.Heat.DiskTriggerPercent,
@@ -194,16 +190,11 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		ag.selfOpen.Mark(fp)
 		ag.Evictor.OnStoreOpen(fp)
 	})
-
-	// M4:W-TinyLFU 频率减半回调 → traincache_evict_freq_halvings_total{policy="wtinylfu"}。
-	if wtlfu, ok := policy.(*evictor.WTinyLFUPolicy); ok {
-		m := ag.Metrics
-		wtlfu.SetHalveHook(func() {
-			if m != nil {
-				m.IncEvictFreqHalving(metrics.PolicyWTinyLFU)
-			}
-		})
-	}
+	// Store.Put 后置观察者:evictor.OnStorePut(字节维度累计,直接用 Put 返回的准确 size,
+	// 与 OnStoreOpen 共享 seenFPs 去重表——Put 先于 Open,后续 Open 自动跳过)。
+	cs.SetPutObserver(func(fp cas.Fingerprint, size int64) {
+		ag.Evictor.OnStorePut(fp, size)
+	})
 
 	// 发现循环由 agentd 在 signal ctx 下起 goroutine 运行(M2);handler = M2 日志行 + 预取
 	// 接线(M3);首个 ring 发现 → collector 绑定(M5,见 wire.go bindCollector)。
@@ -213,8 +204,8 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 }
 
 // newEvictPolicyFromEnv 从 TRAINCACHE_EVICT_POLICY 环境变量创建淘汰策略(M4)。
-// 可选值:heat/lru/lfu/wtinylfu,默认 heat;未知策略名返回错误(拒绝启动)。
-// W-TinyLFU 的 capacity 从 TRAINCACHE_WTINYLFU_CAPACITY 读取,默认 1024。
+// 可选值:heat/lru/lfu,默认 heat;未知策略名返回错误(拒绝启动并打印合法清单;
+// D9 撤 W-TinyLFU 档后合法清单收缩为三档)。
 func newEvictPolicyFromEnv() (evictor.Policy, error) {
 	name := envOr(envEvictPolicy, defaultEvictPolicy)
 	switch name {
@@ -224,22 +215,9 @@ func newEvictPolicyFromEnv() (evictor.Policy, error) {
 		return &evictor.LRUPolicy{}, nil
 	case "lfu":
 		return evictor.NewLFUPolicy(), nil
-	case "wtinylfu":
-		cap := envPositiveIntOrDefault(envWTinyLFUCapacity, defaultWTinyLFUCapacity)
-		return evictor.NewWTinyLFUPolicy(cap), nil
 	default:
-		return nil, fmt.Errorf("svc: TRAINCACHE_EVICT_POLICY=%q 非法(可选: heat / lru / lfu / wtinylfu)", name)
+		return nil, fmt.Errorf("svc: TRAINCACHE_EVICT_POLICY=%q 非法(可选: heat / lru / lfu)", name)
 	}
-}
-
-// envPositiveIntOrDefault 读取正整数 env,非法或未设置时回退默认值(不报错,与
-// envPositiveInt 的"非法即报错"口径区分:W-TinyLFU 容量非法时静默回退默认)。
-func envPositiveIntOrDefault(key string, def int) int {
-	n, err := envPositiveInt(key, def)
-	if err != nil {
-		return def
-	}
-	return n
 }
 
 // markSelfOpen 在 Agent 自身读取本地块前登记指纹(D49;nil 安全)。

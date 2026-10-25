@@ -1,0 +1,97 @@
+{
+  "schema_version": "1",
+  "name": "compare-d-juicefs-warm-1000",
+  "figure": "compare-d",
+  "group": "juicefs-warm",
+  "track": "D",
+  "dataset": {
+    "name": "compare-data-8m",
+    "source": "minio",
+    "endpoint": "http://minio.minio.svc.cluster.local:9000",
+    "bucket": "bench-b",
+    "bytes": 2147483648,
+    "shards": 8,
+    "shard_size_bytes": 268435456,
+    "chunk_size_bytes": 8388608,
+    "seed": 20261006
+  },
+  "trace": {
+    "file": "traces/track-compare-d-s8-per-epoch.json",
+    "sha256": "d57468ad6e2f4bc8b7230007096c4a3e4daca339b7f44e3388d6ecabde868369",
+    "seed": 20261015
+  },
+  "workload": {
+    "epochs": 3,
+    "batch": 32,
+    "workers": 4,
+    "steps_per_epoch": 400,
+    "prefetch_factor": 2,
+    "compute_ms": 200,
+    "shuffle": "per-epoch"
+  },
+  "network": {
+    "rate_mbit": 1000,
+    "delay_ms": 20,
+    "burst_k": 12500
+  },
+  "cache": {
+    "enabled": true,
+    "capacity_ratio": "S",
+    "evict_policy": "heat",
+    "capacity_bytes": 1073741824,
+    "ratio": 2.0,
+    "root": "/var/cache/traincache",
+    "warmup_seconds": 900
+  },
+  "prefetch": {
+    "lookahead": 16,
+    "window_k": 8,
+    "fanout": 2,
+    "fanout_min": 1,
+    "gate": {
+      "threshold": 0.9,
+      "gap_min": 0.1,
+      "slope_min": 0.001,
+      "t_max_s": 300,
+      "min_interval_s": 1
+    },
+    "score": {
+      "half_life": 4,
+      "cutoff": 8
+    }
+  },
+  "sampling": {
+    "reps": 3,
+    "coarse_reps": 3,
+    "upgrade_rule": "none",
+    "bootstrap_iters": 10000
+  },
+  "environment": {
+    "kind_workers": 4,
+    "k8s_version": "v1.37.0",
+    "images": {
+      "agent": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.3@sha256:13f1ed3572ed85ec54fda3f01d9bb5a17dfc160e051605cb02f9afbd2e3aac04",
+      "controller": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/controller-manager:0.8.0@sha256:3ffc57b3ac2cbe7221990094a799f3e255fb67890ea64ad8d2ccca6fcf5a0514",
+      "webhook": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/webhook:0.8.0@sha256:e1f131a982471b685e03e438354e4d5eb982d21e03117fca5092bbbd38dc2403",
+      "scheduler": "dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0@sha256:28775802df5d410e461c8c57a86c8ac9d0b0282b0dd7efdaa9f98e92e378e5fd",
+      "training": "juicedata/mount:ce-v1.3.0@sha256:9d498e18e566fab62373529cc295f33ee7716beaaac5601a7576622c464b3d03",
+      "minio": "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372",
+      "juicefs": "juicedata/mount:ce-v1.3.0@sha256:9d498e18e566fab62373529cc295f33ee7716beaaac5601a7576622c464b3d03",
+      "fluid": "fluidcloudnative/fluid-webhook:v1.1.0-36f0467@sha256:a52409ab98750d8f96007d36e466ffbc1c3066e4277bf7f6c485ad528eeee981",
+      "fluid-csi": "fluidcloudnative/fluid-csi:v1.1.0-36f0467@sha256:405058c41dac7cd7220822ec63160d917e15b939352af9096634cd50085a5b46"
+    },
+    "lock_file": "locks/compare-d-juicefs-warm-1000.lock.json"
+  },
+  "tags": [
+    "compare-d",
+    "axis=rate",
+    "tier=S",
+    "group=juicefs-warm",
+    "track=D",
+    "rate=1000",
+    "ratio2",
+    "ep3",
+    "shuffle=per-epoch"
+  ],
+  "notes": "对照实验 S 档:2 GiB 数据(8×256MiB)/1 GiB 缓存,ratio=2;带宽 1000 mbit(burst 12500k);本组对应装置组 juicefs-warm:同 juicefs-cold,但 up.sh 先 juicefs warmup 预热整棵目录(预算 900s,预热耗时单列,不计入 makespan)。档内共用同一份轨迹 traces/track-compare-d-s8-per-epoch.json(seed 20261015,per-epoch,3 epoch),消费顺序逐位一致。"
+}
