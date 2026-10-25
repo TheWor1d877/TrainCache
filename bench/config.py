@@ -18,6 +18,8 @@ TRACK_B_DIR = DATA_DIR / "track_b" / "tars"
 TRACK_C_DIR = DATA_DIR / "track_c"
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
+COMPARE_LOGS_DIR = LOGS_DIR / "compare"
+PERF_RESULTS_DIR = DATA_ROOT / "bench" / "perf_results"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"
 
 # ---- kind 集群 ----

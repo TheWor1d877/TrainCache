@@ -319,7 +319,7 @@
 
 - 本文件：`git show prereg-c1:bench/experiments/preregister.md | sha256sum`
 - `cond.schema.md`：`git show prereg-c1:bench/experiments/cond.schema.md | sha256sum`
-- COND 集（34 个）：用 `git ls-tree -r --name-only prereg-c1 bench/experiments/conds/` 取路径并按路径排序；对每个文件跑 `git show prereg-c1:<path> | sha256sum` 得到 `<hex>`；把「`<hex>  <相对仓库根的路径>`」逐行拼接（两个空格分隔，行尾换行）；对拼接后的文本再算一次 sha256。
+- COND 集（34 个）：用 `git ls-tree -r --name-only prereg-c1 bench/experiments/conds/` 取路径，按字节序排序（`LC_ALL=C sort`，与 `git ls-tree` 原序一致；受 locale 影响的普通 `sort` 会得出错误值）；对每个文件跑 `git show prereg-c1:<path> | sha256sum` 得到 `<hex>`；把「`<hex>  <相对仓库根的路径>`」逐行拼接（两个空格分隔，行尾换行）；对拼接后的文本再算一次 sha256。
 
 ### 8.1 冻结清单（第一次正式跑分前，按顺序执行）
 
