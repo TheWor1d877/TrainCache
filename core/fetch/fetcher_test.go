@@ -493,6 +493,121 @@ func TestRetryExhausted(t *testing.T) {
 	}
 }
 
+// TestFetcherMaxTasksLimit：从 Fetcher.Fetch 入口验证 MaxTasks 任务数上限语义
+// （docs/5.4 §5）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
+// （每个在途任务上报进入/离开并记录峰值并发），断言峰值恰为 2（既不超过 MaxTasks，
+// 也确实制造了并发）；放行后 5 个 key 全部落盘成功、任务额度全部归还、无死锁。
+// ctx 取消路径已由 TestCtxCancel 与 TestLimiterTaskSemaphore 覆盖，本用例不重复。
+func TestFetcherMaxTasksLimit(t *testing.T) {
+	const (
+		nKeys    = 5
+		maxTasks = 2
+		chunk    = 4 << 10 // 每个对象 4 KiB，字节额度（默认 1 GiB）不构成约束
+	)
+	ctx := context.Background()
+
+	// 每个 key 内容不同 -> 指纹不同 -> 5 次独立下载，不触发同 key 合并。
+	contents := make([][]byte, nKeys)
+	byFP := make(map[cas.Fingerprint][]byte, nKeys)
+	ms := objectstore.NewMock()
+	keys := make([]string, nKeys)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("obj/%d", i)
+		contents[i] = bytes.Repeat([]byte{byte('A' + i)}, chunk)
+		seed(t, ms, keys[i], contents[i])
+		byFP[fpOf(contents[i])] = contents[i]
+	}
+
+	var (
+		cur     atomic.Int64
+		peak    atomic.Int64
+		entered = make(chan struct{}, nKeys) // 带缓冲：上报不阻塞，取消后迟到事件可安全丢弃
+		release = make(chan struct{})        // 门控：闭合并放行全部在途 Get，后续任务随额度释放自然流过
+	)
+	store := newFnStore(func(ctx context.Context, k string, w io.Writer) error {
+		n := cur.Add(1)
+		defer cur.Add(-1)
+		updateMax(&peak, n)
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return ms.Get(ctx, k, w)
+	})
+
+	cs, casDir := newTestCAS(t)
+	// 唯一约束是 MaxTasks=2；其余维度放宽（同 host "obj"，连接额度不构成限制）。
+	f := New(store, cs, Options{MaxTasks: maxTasks, MaxConnsPerHost: 64})
+
+	start := make(chan struct{})
+	results := make(chan fetchResult, nKeys)
+	for i := 0; i < nKeys; i++ {
+		go func(i int) {
+			<-start
+			fp, err := f.Fetch(ctx, keys[i], int64(chunk))
+			results <- fetchResult{fp, err}
+		}(i)
+	}
+	close(start)
+
+	// 恰好 maxTasks 个任务进入 Get 并被门控拦下：此时其余 goroutine 只能阻塞在
+	// 任务额度上（阻塞者不可能进入 Get，故此刻 peak 亦不超 2）。等待超时即死锁/上限失效。
+	for i := 0; i < maxTasks; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d/%d tasks entered store.Get: MaxTasks 未放行足额任务或发生死锁", i, maxTasks)
+		}
+	}
+	// 两个被拦下的任务同时在途且都尚未离开，peak=2 由原子记账确定性成立。
+	if p := peak.Load(); p != maxTasks {
+		t.Fatalf("gated peak concurrent store.Get = %d, want exactly %d", p, maxTasks)
+	}
+
+	close(release) // 放行全部在途下载；剩余任务按额度逐个进入直至完成
+
+	deadline := time.After(30 * time.Second)
+	done := 0
+	for done < nKeys {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				t.Fatalf("Fetch: %v", r.err)
+			}
+			want, ok := byFP[r.fp]
+			if !ok {
+				t.Fatalf("Fetch fp = %s, want one of the %d seeded contents", r.fp, nKeys)
+			}
+			if got := readBlock(t, cs, r.fp); !bytes.Equal(got, want) {
+				t.Fatalf("block %s content mismatch", r.fp)
+			}
+			done++
+		case <-deadline:
+			t.Fatalf("only %d/%d Fetch returned before deadline: deadlock?", done, nKeys)
+		}
+	}
+
+	// 全程峰值并发恰为 2：既证明第 3 个任务在额度释放前无法进入下载，也证明测试确实制造了并发。
+	if p := peak.Load(); p != maxTasks {
+		t.Fatalf("peak concurrent store.Get = %d, want exactly %d (MaxTasks=%d)", p, maxTasks, maxTasks)
+	}
+	if got := f.lim.tasks.current(); got != 0 {
+		t.Fatalf("tasks.current() = %d, want 0（任务额度全部归还）", got)
+	}
+	if got := f.lim.bytes.inflight(); got != 0 {
+		t.Fatalf("inflight bytes after completion = %d, want 0", got)
+	}
+	blocks, err := listBlockFiles(casDir)
+	if err != nil || len(blocks) != nKeys {
+		t.Fatalf("block files = %v (err %v), want %d", blocks, err, nKeys)
+	}
+	if tmps, _ := listTmpFiles(casDir); len(tmps) != 0 {
+		t.Fatalf("residual tmp files = %v, want none", tmps)
+	}
+}
+
 // TestCtxCancel：ctx 取消可打断字节信号量等待与下载中途；退出后无信号量泄漏、
 // 无残留块/临时文件、无 goroutine 泄漏（plan.md §4）。
 func TestCtxCancel(t *testing.T) {

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """M2 实验 runner:冷态→tc→负载→采集→归档,重复采样。
 
+cond 名以 policy- 开头时转交 run_policy.py(M5 C 轨淘汰×预取),不走本文件的 D 轨负载。
+
 流程(run_once):
   1. 创建产物目录 reps_dir/<run_id>/
   2. 冷态:cold_reset.sh
@@ -142,7 +144,7 @@ def _read_jsonl_stall(run_dir: Path) -> float | None:
     """从 per_step_*.jsonl 算 stall 占比。
 
     口径:非 warmup 步的 mean(wait_s / step_s),与 bench/scripts/bench_track_d.py
-    的 stall() 同源(docs/5 §10:扫点用 mean,中位数只判形态)。
+    的 stall() 同源(docs/4 §10:扫点用 mean,中位数只判形态)。
     没有 jsonl 或没有可用步时返回 None。
     """
     vals = []
@@ -284,7 +286,7 @@ def summarize_run(run_dir: Path, cond: dict, rep: int) -> dict:
 def _attach_ci(rows: list[dict]) -> None:
     """给每行补上本 COND 的中位数与 bootstrap 95% CI。
 
-    void 轮不进统计(10.1 D14)。L 档只有 1 次采样,按预注册 1.9 只报单点值、
+    void 轮不进统计(9.1 D14)。L 档只有 1 次采样,按预注册 1.9 只报单点值、
     不报 CI,CI 列留空。
     """
     valid = [r for r in rows if r.get("void") != "true"]
@@ -436,7 +438,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="M2 实验 runner:冷态→tc→负载→采集→归档,重复采样")
     ap.add_argument("--cond", help="COND 名(conds/<name>.json)")
-    ap.add_argument("--reps", type=int, default=7, help="重复次数(默认 7)")
+    ap.add_argument("--reps", type=int, default=None,
+                    help="重复次数(policy-* 默认取 COND 的采样次数,其余默认 7)")
     ap.add_argument("--conds-dir", type=Path, default=None,
                     help="COND 目录(默认 bench/experiments/conds)")
     ap.add_argument("--selftest", action="store_true",
@@ -449,7 +452,15 @@ def main() -> None:
     if not args.cond:
         ap.error("需要 --cond(或用 --selftest 跑汇总层自检)")
 
-    run_reps(args.cond, args.reps, args.conds_dir)
+    # policy-* 属于 M5 淘汰×预取实验(C 轨),执行体是 run_policy.py。
+    # make bench 已在 Makefile 侧分流;这里兜住直接调用 run.py 的情况。
+    if args.cond.startswith("policy-"):
+        import run_policy  # noqa: PLC0415
+        run_policy.run_reps(args.cond, args.reps, args.conds_dir)
+        return
+
+    run_reps(args.cond, 7 if args.reps is None else args.reps,
+             args.conds_dir)
 
 
 # ---------------------------------------------------------------------------

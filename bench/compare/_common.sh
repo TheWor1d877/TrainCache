@@ -16,12 +16,16 @@ set -euo pipefail
 # ---- 路径锚点(以本文件所在目录为根)----
 COMPARE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT="$(cd "$COMPARE_ROOT/.." && pwd)"
-PY="${PY:-/usr/bin/python3}"
-LOG_DIR="$COMPARE_ROOT/logs"
-mkdir -p "$LOG_DIR"
+REPO="$(cd "$BENCH_ROOT/.." && pwd)"
+PY="${PY:-$REPO/.venv/bin/python}"
 
 # ---- config.py 取值(与 bench/scripts 同口径)----
 cfg() { "$PY" "$BENCH_ROOT/config.py" --sh "$1" 2>/dev/null || true; }
+
+# 日志落运行时数据层(路径口径由 bench/config.py 定义,repo 内不建日志目录)
+LOG_DIR="$(cfg COMPARE_LOGS_DIR)"
+LOG_DIR="${LOG_DIR:-$BENCH_ROOT/../../traincachedata/bench/compare/logs}"
+mkdir -p "$LOG_DIR"
 
 # ---- 共享基础设施参数(只读 config.py,不硬编码)----
 MINIO_NS="$(cfg K8S_NS_MINIO)"; MINIO_NS="${MINIO_NS:-minio}"
@@ -184,13 +188,13 @@ wait_ready() {
   done
 }
 
-# ---- 冷态规程(训练组跑前):复用 bench/scripts/cold_reset.sh 的等价动作
-# 不直接调用 cold_reset.sh(它针对 D 轨 source-d 容器);这里实现针对
-# kind 集群内缓存层(emptyDir/hostPath)的清缓存:删 Pod → 重建即可清空。
-# 对 JuiceFS/Fluid,down+up 即冷态;对 direct,无缓存层无需冷态。
+# ---- 冷态规程(训练组跑前):本函数只打印提示。down+up 重建 Pod 只能清
+# emptyDir;/var/cache/jfs、/tmp/juicefs-cache、/var/cache/traincache/* 是
+# 节点 hostPath,不随 Pod 删除消失,由 run_bench.py 的 cold_reset() 在节点上
+# 显式清理并判空。对 direct,无缓存层无需冷态。
 cold_state_note() {
   local grp="$1"
-  log_group "$grp" "冷态:本组通过 down+up 重建 Pod 清空缓存层(emptyDir)"
+  log_group "$grp" "冷态:hostPath 缓存由 run_bench.py cold_reset() 显式清理并判空;down+up 只清 emptyDir"
 }
 
 # ---- 校验 MinIO 桶可访问(所有组共享)----

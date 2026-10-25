@@ -30,7 +30,8 @@
 # 输出:最后两行固定为 VERDICT=pass|fail 与 THROUGHPUT_MBPS=<数值>(THROUGHPUT 在最后一行)。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3}"   # 与 tc_apply.sh 统一
+REPO="$(cd "$ROOT/.." && pwd)"
+PY="${PY:-$REPO/.venv/bin/python}"   # 与 tc_apply.sh 统一
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 NS_MINIO="$(CFG K8S_NS_MINIO)"

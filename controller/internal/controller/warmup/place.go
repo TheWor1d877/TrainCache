@@ -95,7 +95,7 @@ type PreheatRPC interface {
 //	pair no longer desired       -> Cancel (including Pod moves)
 //
 // Pods without a feasible node are not submitted; they are reported through
-// Placement.UnassignedPods and left to the caller's fallback (docs/8.0).
+// Placement.UnassignedPods and left to the caller's fallback (docs/7.0).
 func PlacementActions(in PlacementApplyInput) ([]PlacementAction, error) {
 	if in.Task == nil {
 		return nil, errors.New("warmup: placement task is nil")
@@ -321,7 +321,7 @@ func chunkRefsEqual(a, b []*agentpb.ChunkRef) bool {
 
 // logPlacementChange records the M6/M13/M14 log points: top-K assignment
 // changes, rounds, per-Pod warm-node counts, the adaptive fanout decisions and
-// the non-convergence fallback reason (docs/8.1 §6.5, §9.3, D39).
+// the non-convergence fallback reason (docs/7.1 §6.5, §9.3, D39).
 func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, fanoutMax, fanoutMin int32, actions []PlacementAction) {
 	assign := formatAssignment(placement.Assignment)
 	warmCounts := formatWarmNodeCounts(placement.Assignment)

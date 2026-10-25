@@ -1,6 +1,6 @@
 package webhook
 
-// M12 log assertions for docs/8.1 design.md §9.3 (Webhook 拒绝/跳过).
+// M12 log assertions for docs/7.1 design.md §9.3 (Webhook 拒绝/跳过).
 
 import (
 	"bytes"

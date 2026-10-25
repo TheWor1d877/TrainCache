@@ -1,5 +1,5 @@
 // Package gwaa implements Greedy Window Affinity Assignment (GWAA) from
-// docs/8.0 §GWAA and docs/8.1 §5.5.
+// docs/7.0 §GWAA and docs/7.1 §5.5.
 //
 // Compute is a pure function: it reads only its Input, performs no I/O, does
 // not touch Kubernetes types and emits no log records. Callers own logging and
@@ -8,7 +8,7 @@
 //
 // M14 splits placement into two steps. First each unit gets a deterministic
 // target set within [FanoutMin, Fanout], chosen from the window cache
-// distribution (docs/8.3 D39). Then claims, conflict adjudication, top-up and
+// distribution (docs/7.3 D39). Then claims, conflict adjudication, top-up and
 // out-of-target fallback run only inside that target set. Target-set ordering
 // is deterministic (c_ij descending, node name ascending); ties during
 // assignment are still broken through the injected *rand.Rand, so a fixed seed
@@ -72,12 +72,12 @@ type Input struct {
 	AllowMultiPodPerNode bool
 
 	// MaxRounds overrides the convergence limit for tests and diagnostics.
-	// Zero means len(Pods), the contract from docs/8.2 M6; larger values are
+	// Zero means len(Pods), the contract from docs/7.2 M6; larger values are
 	// clamped to len(Pods).
 	MaxRounds int
 
 	// Fanout is the upper bound on the number of preheat nodes each Pod claims
-	// (docs/8.1 §5.5). Zero means 1; the CRD rejects zero and negative values,
+	// (docs/7.1 §5.5). Zero means 1; the CRD rejects zero and negative values,
 	// but Compute still treats zero as the single-node default for callers that
 	// predate M13.
 	Fanout int32
@@ -133,7 +133,7 @@ type Output struct {
 	Decisions map[int32]PodDecision
 }
 
-// Placement is the docs/8.1 §5.5 name for Output. New code should use Output.
+// Placement is the docs/7.1 §5.5 name for Output. New code should use Output.
 type Placement = Output
 
 // unit is one placement unit: a singleton Pod or a merged affinity group.
@@ -318,7 +318,7 @@ func Compute(in Input) Output {
 					continue
 				}
 				// The yielding unit may only retreat to its next-best node
-				// (docs/8.0 conflict adjudication). A retreat with untried
+				// (docs/7.0 conflict adjudication). A retreat with untried
 				// candidates left is progress: reporting "no change" here
 				// would declare convergence while the unit is still below its target.
 				nextRank[u] = idx + 1
@@ -534,7 +534,7 @@ func memberBounds(pods []int32, fanout, fanoutMin int32) (unitMin, unitMax int32
 }
 
 // planUnit fills the deterministic target set and the claim orders from the
-// per-node readiness aggregate. It implements docs/8.1 §5.5 steps 1-9.
+// per-node readiness aggregate. It implements docs/7.1 §5.5 steps 1-9.
 //
 // target is ordered by c_ij descending and node name ascending, independent of
 // the input node order and of the RNG. pref keeps the injected RNG for equal

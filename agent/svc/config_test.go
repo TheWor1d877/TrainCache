@@ -110,14 +110,14 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("ReadStallMinWaitMS = %d, want %d(D47 默认)", cfg.ReadStallMinWaitMS, stallMinWaitMS)
 	}
 	if cfg.IndexRefreshInterval != defaultIndexRefreshInterval {
-		t.Errorf("IndexRefreshInterval = %v, want %v(7.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
+		t.Errorf("IndexRefreshInterval = %v, want %v(6.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
 	}
 	if cfg.ObjstoreProbeConditionalWrite {
-		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(7.1 §5.12)")
+		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
 	}
 }
 
-// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(7.1 §5.9/§5.12)。
+// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(6.1 §5.9/§5.12)。
 func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
 	setBaseEnv(t)
 	t.Setenv("NODE_NAME", "worker-01")

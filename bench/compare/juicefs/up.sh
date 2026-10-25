@@ -22,7 +22,7 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="juicefs"
 NS="juicefs"
-TRACE_FILE="${TRACE_FILE:-$COMPARE_ROOT/traces/default.json}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
 # 本档位消费的��片数(run_bench 按 S/M/L 档位下发;缺省取 M 档全量 32 片)。
 # 同步与预热都按这个数收窄:桶里共有 32 片,不收窄的话 S 档(只消费 8 片 = 2GiB)
 # 会把 8GiB 全同步进来,数据集口径与容量比都失真。
@@ -267,7 +267,20 @@ fi
 
 # 等待 mount Pod Ready
 kubectl -n "$NS" wait --for=condition=ready pod/jfs-mount --timeout=120s
-log_group "$GROUP" "pod/jfs-mount 就绪"
+# Pod 没有 readinessProbe,Ready 只表示容器已启动;FUSE 挂载完成以 /proc/mounts 出现 /mnt/jfs 为准。
+for i in $(seq 1 120); do
+  if kubectl -n "$NS" exec jfs-mount -- sh -c \
+       'while read -r _dev mnt _rest; do [ "$mnt" = "/mnt/jfs" ] && exit 0; done < /proc/mounts; exit 1' \
+       >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" = "120" ]; then
+    log_group "$GROUP" "等待 /mnt/jfs 挂载超时(120s)" >&2
+    exit 1
+  fi
+  sleep 1
+done
+log_group "$GROUP" "pod/jfs-mount 就绪且 /mnt/jfs 已挂载"
 
 # ---- 6.5. 预热(warm 组:juicefs warmup; 冷组:跳过)----
 # warm 判定:RUN_BENCH=1 且 env JFS_WARMUP=1;或非 RUN_BENCH 手动调用时始终预热

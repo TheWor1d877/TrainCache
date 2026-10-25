@@ -46,7 +46,7 @@ CreateContainer request is in progress: name \"...\" is reserved for
      PYTHONPATH=/tmp/jfs-pylib python3 survey/scripts/upload_minio.py
    重传 probes/data/tars 16 分片，完成：16 个对象，共 1.97 GiB，耗时 5s。
    （boto3 经 pip install --target /tmp/jfs-pylib 临时安装，未污染系统环境）
-4. apply 顺序（照 docs/4）：kubectl apply -f survey/manifests/redis.yaml →
+4. apply 顺序（照 docs/3）：kubectl apply -f survey/manifests/redis.yaml →
    jfs-secret.yaml → dataset.yaml → juicefsruntime.yaml（quota 3Gi→1Gi）。
    结果：JuiceFSRuntime jfsdemo Worker/FUSE 均 Ready，Dataset Bound，
    PVC jfsdemo Bound，CACHE CAPACITY 1.00GiB。

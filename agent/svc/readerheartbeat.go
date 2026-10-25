@@ -1,6 +1,6 @@
 package svc
 
-// readerheartbeat.go:R2 读者心跳与撤销(7.1 §5.10)。心跳间隔 = 刷新周期/2(下限
+// readerheartbeat.go:R2 读者心跳与撤销(6.1 §5.10)。心跳间隔 = 刷新周期/2(下限
 // 1s),遍历已知 dataset 取 Catalog.SnapID 重新 Declare;ctx 取消时对已知 dataset
 // best-effort Withdraw(5s 超时),声明对象供 GC 按读者确认删除。
 

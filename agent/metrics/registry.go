@@ -90,7 +90,7 @@ type Registry struct {
 	gcSweeps         *prometheus.CounterVec // dataset,result∈{success,error}
 	gcBlocksRemoved  *prometheus.CounterVec // dataset,result 固定 success
 	gcObjectsRemoved *prometheus.CounterVec // dataset,result 固定 success
-	// R3(7.1 §5.11):protected manifest 不可用导致本轮块删除跳过。
+	// R3(6.1 §5.11):protected manifest 不可用导致本轮块删除跳过。
 	indexSweepSkipped *prometheus.CounterVec // dataset,reason∈{manifest_unavailable,other}
 	// ⑤ 磁盘淘汰线。
 	evictBlocks           *prometheus.CounterVec // dataset,result∈{normal,danger}
@@ -119,7 +119,7 @@ type Registry struct {
 	consumptionAdvance   *prometheus.CounterVec   // dataset,source
 	fetchBandwidthLimit  *prometheus.GaugeVec     // dataset
 
-	// R4(7.1 §5.12):对象存储条件写探测结果(0/1,无标签)。
+	// R4(6.1 §5.12):对象存储条件写探测结果(0/1,无标签)。
 	objectstoreConditionalWriteSupported prometheus.Gauge
 
 	// mu 保护 synced:Prometheus counter 只能增,Sync 以"上次同步的绝对值"为基线做增量 Add。

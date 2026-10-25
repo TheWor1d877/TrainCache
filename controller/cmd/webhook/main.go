@@ -1,6 +1,6 @@
 // Command webhook is the TrainCache Pod mutation webhook entry point. It
 // registers the scheduling-gate mutator with a controller-runtime manager and
-// serves the manager health probes (docs/8.1 design.md §5.7).
+// serves the manager health probes (docs/7.1 design.md §5.7).
 package main
 
 import (

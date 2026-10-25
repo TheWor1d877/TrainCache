@@ -23,7 +23,7 @@
 #
 # The s3-access Node label is NEVER written by TrainCache components. This
 # script performs the labelling once in setup as an explicit simulation of the
-# cluster administrator's manual action (docs/8.0, D30). Set
+# cluster administrator's manual action (docs/7.0, D30). Set
 # SKIP_NODE_LABELS=1 and label the workers yourself to avoid it entirely.
 #
 # Exit codes: 0 all assertions passed; 1 an assertion/deployment failed;
@@ -34,7 +34,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY="$REPO_ROOT/controller/deploy"
 E2E="$SCRIPT_DIR"
-RESULTS="$E2E/results"
+# Artifacts live in the runtime data layer (sibling of the repo), not in the
+# working tree. TRAINCACHE_DATA_ROOT overrides it (CI points it inside the workspace).
+DATA_ROOT="${TRAINCACHE_DATA_ROOT:-$(cd "$REPO_ROOT/.." && pwd)/traincachedata}"
+RESULTS="$DATA_ROOT/controller/e2e/results"
 LOGS="$RESULTS/logs"
 DATA="$RESULTS/data"
 TLS="$RESULTS/tls"
@@ -120,10 +123,8 @@ clean() {
   ok "runtime artifacts removed (results/.gitignore kept)"
 }
 
-# 只清理本脚本自己写出的那几类文件，不整目录递归删。
-# 原因：results/ 迁到数据层后是软链接，`rm -rf "$RESULTS/data"` 会穿过软链接
-# 递归删掉 ~/tcd 里的实体产物，违反“数据层只追加不覆盖”的纪律；
-# 所以这里逐个文件删，目录本身（data/ tls/ logs/）一律保留。
+# 只清理本脚本自己写出的那几类文件，不整目录递归删：数据层只追加不覆盖，
+# `rm -rf "$RESULTS/data"` 会连历史轮次的产物一起删掉。目录本身保留。
 clean_artifacts() {
   local f
   # 顶层：只有本脚本 collect_artifacts / write_summary 写出的那几个文件。

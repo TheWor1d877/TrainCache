@@ -109,7 +109,7 @@ func readinessAt(task *traincachev1alpha1.WarmupTask, pod int32, column int) int
 	return row[column]
 }
 
-// nodeStopped implements the "已停止节点集合" input from docs/8.1 §7.4. A node
+// nodeStopped implements the "已停止节点集合" input from docs/7.1 §7.4. A node
 // is stopped when its initial Submit failed, every Pod's poll on it crossed the
 // consecutive-failure threshold, or every readiness fact collected on it
 // reports Failed. The in-memory counter covers the pre-assignment fan-out (the
@@ -356,7 +356,7 @@ func rateSample(history []RateSample, now time.Time) (float64, time.Time, bool) 
 
 // logGateDecision records the mandatory M7/M13 fields on every evaluation:
 // fanout, per-Pod warm-node counts, the preheat nodes that met the integer
-// threshold and the status entry count (docs/8.1 §6.5).
+// threshold and the status entry count (docs/7.1 §6.5).
 func logGateDecision(log *slog.Logger, taskKey string, evaluation gateEvaluation) {
 	n := len(evaluation.Decision.Rates)
 	required := make([]int32, n)
@@ -426,7 +426,7 @@ func gateHitNodes(evaluation gateEvaluation) string {
 	return strings.Join(hits, ",")
 }
 
-// releaseGate performs the frozen release order from docs/8.1 §7.5:
+// releaseGate performs the frozen release order from docs/7.1 §7.5:
 // scores → gates → status. A score failure returns before any gate is removed;
 // gate removal is idempotent so a partial failure can be retried next round.
 func (r *Reconciler) releaseGate(

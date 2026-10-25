@@ -1,4 +1,4 @@
-# train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 7.1 §8)。
+# train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 6.1 §8)。
 #
 # 用法(kind 本机演练;命名空间由 agentd.yaml 创建,先 apply 它):
 #   docker build -f agent/deploy/ordersrc.Dockerfile -t traincache-ordersrc:dev .

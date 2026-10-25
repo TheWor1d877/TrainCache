@@ -46,7 +46,7 @@ type ScoreEntry struct {
 }
 
 // ScoreWriter merges per-Pod scores into the per-task Node annotation
-// (docs/8.1 design.md §6.2, D27). It only touches the Node annotation whose
+// (docs/7.1 design.md §6.2, D27). It only touches the Node annotation whose
 // key is scorefmt.Key(task.Namespace, task.Name); other tasks' keys, other
 // annotation keys and all Pod entries not present in the current write are
 // preserved.

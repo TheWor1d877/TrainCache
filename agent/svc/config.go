@@ -23,7 +23,7 @@ const (
 	defaultGRPCAddr    = ":9410"
 	defaultMetricsAddr = ":9411"
 	// defaultCacheRoot 是 CAS 根目录默认值。DaemonSet 部署仍用默认值(design §8 部署要点:
-	// hostPath /var/cache/traincache 固定);TRAINCACHE_CACHE_ROOT env(7.3 D38)仅覆盖本机
+	// hostPath /var/cache/traincache 固定);TRAINCACHE_CACHE_ROOT env(6.3 D38)仅覆盖本机
 	// 进程级演练与非标准缓存根场景,未设置时回退此默认。
 	defaultCacheRoot = "/var/cache/traincache"
 	// defaultOrdersDir 是 ordersource ring 发现目录默认值(design §6.2 路径;
@@ -38,11 +38,11 @@ const (
 	// envReadStallMinWaitMS 是 read_stall 入直方图最小等待的配置项(D47/Q15;毫秒)。
 	envReadStallMinWaitMS = "TRAINCACHE_READ_STALL_MIN_WAIT_MS"
 
-	// defaultIndexRefreshInterval 是前缀感知快照跟随的默认刷新周期(7.1 §5.9)。
+	// defaultIndexRefreshInterval 是前缀感知快照跟随的默认刷新周期(6.1 §5.9)。
 	defaultIndexRefreshInterval = 5 * time.Second
 	// envIndexRefreshInterval 覆盖快照跟随刷新周期(time.ParseDuration)。
 	envIndexRefreshInterval = "TRAINCACHE_INDEX_REFRESH_INTERVAL"
-	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;7.1 §5.12)。
+	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;6.1 §5.12)。
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
 
 	// envCacheCapacityBytes 是字节维度缓存上限(M-debug-1/§14;默认 0=关闭字节淘汰,
@@ -88,7 +88,7 @@ type Config struct {
 	MetricsAddr      string    // TRAINCACHE_METRICS_ADDR,默认 :9411(D5;M1 未起服务,M6 落地)
 	Verify           string    // TRAINCACHE_VERIFY:xxh3 | xxh3+sha256,默认 xxh3
 	DatasetWhitelist []string  // TRAINCACHE_DATASET_WHITELIST,逗号分隔(§5.8 基数控制)
-	CacheRoot        string    // TRAINCACHE_CACHE_ROOT,默认 /var/cache/traincache(7.3 D38:本机演练/非标准根)
+	CacheRoot        string    // TRAINCACHE_CACHE_ROOT,默认 /var/cache/traincache(6.3 D38:本机演练/非标准根)
 	OrdersDir        string    // TRAINCACHE_ORDERS_DIR,默认 /run/traincache/orders(§6.2 ring 发现目录)
 	// 对象存储接入(D26;经 core objectstore.NewS3Store 构造,通吃 COS/OSS/S3/本地 MinIO)。
 	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT,默认 127.0.0.1:9000
@@ -100,10 +100,10 @@ type Config struct {
 	// ReadStallMinWaitMS 是 read_stall 入直方图的最小等待毫秒(D47/Q15;默认 100,
 	// TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖,需 >0)。
 	ReadStallMinWaitMS int64
-	// IndexRefreshInterval 是快照跟随刷新周期(7.1 §5.9;默认 5s,
+	// IndexRefreshInterval 是快照跟随刷新周期(6.1 §5.9;默认 5s,
 	// TRAINCACHE_INDEX_REFRESH_INTERVAL 覆盖)。
 	IndexRefreshInterval time.Duration
-	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(7.1 §5.12;默认 false,
+	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(6.1 §5.12;默认 false,
 	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
 	ObjstoreProbeConditionalWrite bool
 	// CacheCapacityBytes 是字节维度缓存上限(§14;默认 0=关闭,只走磁盘水位)。

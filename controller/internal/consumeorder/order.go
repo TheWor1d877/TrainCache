@@ -1,5 +1,5 @@
 // Package consumeorder contains the pure default consume-order split used by
-// the WarmupTask controller (docs/8.1 design.md §7.2, decisions D29).
+// the WarmupTask controller (docs/7.1 design.md §7.2, decisions D29).
 //
 // The controller never reads the removed legacy order-reference field: a WarmupTask either supplies a
 // valid explicit order for every Pod or the whole group falls back to the

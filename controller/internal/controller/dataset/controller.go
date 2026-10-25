@@ -1,6 +1,6 @@
 // Package dataset reconciles DataSet objects: spec validation, snapshot
 // resolution, frozen block layout, accessible-node discovery and status
-// conditions (docs/8.1 design.md §5.2 and §7.1).
+// conditions (docs/7.1 design.md §5.2 and §7.1).
 package dataset
 
 import (
@@ -149,7 +149,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 		if errors.Is(err, storage.ErrInvalidSnapshot) {
 			// Invalid snapshot metadata is permanent: retrying cannot fix it
-			// (docs/8.1 design.md §5.2 error semantics).
+			// (docs/7.1 design.md §5.2 error semantics).
 			log.Warn("dataset snapshot invalid",
 				"snapshot", ds.Spec.SnapshotID, "reason", reasonSnapshotInvalid, "err", err)
 			r.event(ds, corev1.EventTypeWarning, reasonSnapshotInvalid, err.Error())

@@ -8,7 +8,7 @@ CFG() { python3 "$ROOT/config.py" --sh "$1"; }
 
 RUNS="$(CFG PROBE_A_RUNS)"
 AGENT_CACHE="$(CFG AGENT_CACHE)"
-OUT_DIR="$ROOT/results/probe_a"
+OUT_DIR="$(CFG RESULTS_DIR)/probe_a"
 mkdir -p "$OUT_DIR"
 chmod 777 "$OUT_DIR"  # root 写的目录,judge 用普通用户读
 

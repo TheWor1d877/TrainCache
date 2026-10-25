@@ -17,7 +17,7 @@ const (
 
 // Value is the JSON payload stored in a per-WarmupTask Node annotation.
 //
-// The wire format is frozen by docs/8.1 design.md §6.2:
+// The wire format is frozen by docs/7.1 design.md §6.2:
 //
 //	{"v":1,"task":"default/train-1","g":12,"t":"2026-10-20T08:00:00Z","p":{"0":87}}
 //

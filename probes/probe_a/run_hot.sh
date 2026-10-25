@@ -7,7 +7,7 @@ CFG() { python3 "$ROOT/config.py" --sh "$1"; }
 
 RUNS="$(CFG PROBE_A_RUNS)"
 AGENT_CACHE="$(CFG AGENT_CACHE)"
-OUT_DIR="$ROOT/results/probe_a"
+OUT_DIR="$(CFG RESULTS_DIR)/probe_a"
 mkdir -p "$OUT_DIR"
 
 [ -n "$(ls -A "$AGENT_CACHE" 2>/dev/null)" ] || {

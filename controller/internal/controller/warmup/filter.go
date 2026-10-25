@@ -9,7 +9,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 )
 
-// FilterInput is the frozen candidate-filter contract from docs/8.1 §5.4.
+// FilterInput is the frozen candidate-filter contract from docs/7.1 §5.4.
 //
 // Accessible is DataSet.status.accessibleNodes: the resolved
 // traincache.io/s3-access=true set, optionally narrowed by

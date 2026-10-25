@@ -72,9 +72,9 @@ def tail_frac(per_step):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe-c-dir", type=Path,
-                    default=Path(__file__).resolve().parents[1] / "results" / "probe_c")
+                    default=config.RESULTS_DIR / "probe_c")
     ap.add_argument("--probe-b-dir", type=Path,
-                    default=Path(__file__).resolve().parents[1] / "results" / "probe_b")
+                    default=config.RESULTS_DIR / "probe_b")
     args = ap.parse_args()
 
     # ---------------- 冷态基准(probe_b per_step 动态计算)----------------

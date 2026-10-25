@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # observability.sh — repeatable acceptance checks for the TrainCache logging
-# and metrics chain (docs/9.2 P1) on the existing kind cluster.
+# and metrics chain (docs/8.2 P1) on the existing kind cluster.
 #
 # Usage:
 #   ./e2e/observability.sh [up|verify|down]   (default: verify)

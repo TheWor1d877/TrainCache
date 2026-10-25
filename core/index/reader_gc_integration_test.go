@@ -1,6 +1,6 @@
 package index
 
-// reader_gc_integration_test.go 是 R2/R3(design 7.1 §5.10–§5.11)的永久回归:
+// reader_gc_integration_test.go 是 R2/R3(design 6.1 §5.10–§5.11)的永久回归:
 // 用可注入时钟覆盖 GC 的三个时间窗——
 //  1. 固定保留窗口(RetainSnapshots 仅兜底):出窗快照默认可删;
 //  2. PreviousUntil 切换宽限窗:声明切到 S2 后 S1 只在宽限期内受保护;

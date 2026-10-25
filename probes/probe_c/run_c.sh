@@ -17,9 +17,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PY:-/usr/bin/python3.12}"
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
-OUT_DIR="$ROOT/results/probe_c"
+OUT_DIR="$(CFG RESULTS_DIR)/probe_c"
 mkdir -p "$OUT_DIR" 2>/dev/null || {
-  echo "results 目录权限不足: sudo chown -R $(id -un) \"$ROOT/results\""
+  echo "results 目录权限不足: sudo chown -R $(id -un) \"$OUT_DIR\""
   exit 1
 }
 

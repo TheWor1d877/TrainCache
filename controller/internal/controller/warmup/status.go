@@ -10,7 +10,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 )
 
-// requiredReady is the integer gate threshold from docs/8.1 §5.6:
+// requiredReady is the integer gate threshold from docs/7.1 §5.6:
 // floor(threshold*K) with a floor of 1 when threshold > 0, capped at K.
 // M5 persists it per Pod so M7 only compares integers.
 func requiredReady(threshold float64, k int32) int32 {
@@ -47,7 +47,7 @@ func preheatState(resp *agentpb.PreheatStatus) traincachev1alpha1.PreheatState {
 }
 
 // reportTime prefers the Agent's UpdatedAt and falls back to the injected
-// local clock when the Agent omitted it (docs/8.1 §7.3 step 4).
+// local clock when the Agent omitted it (docs/7.1 §7.3 step 4).
 func reportTime(resp *agentpb.PreheatStatus, now time.Time) *metav1.Time {
 	if ts := resp.GetUpdatedAt(); ts != nil && ts.CheckValid() == nil {
 		updated := metav1.NewTime(ts.AsTime().UTC())
@@ -58,7 +58,7 @@ func reportTime(resp *agentpb.PreheatStatus, now time.Time) *metav1.Time {
 }
 
 // normalizeFanout is the controller-side view of spec.preheatFanout: zero
-// means the single-node default, matching gwaa.Compute (docs/8.1 §5.5, D38).
+// means the single-node default, matching gwaa.Compute (docs/7.1 §5.5, D38).
 func normalizeFanout(fanout int32) int32 {
 	if fanout <= 0 {
 		return 1

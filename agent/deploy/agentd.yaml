@@ -1,4 +1,4 @@
-# agentd.yaml — TrainCache 节点常驻 Agent 的 DaemonSet 部署清单(design 7.1 §8 部署要点,逐项对应)。
+# agentd.yaml — TrainCache 节点常驻 Agent 的 DaemonSet 部署清单(design 6.1 §8 部署要点,逐项对应)。
 #
 # 用法(kind 本机演练):
 #   docker build -f agent/Dockerfile -t traincache-agentd:dev .    # GOPROXY 受限时加 build-arg

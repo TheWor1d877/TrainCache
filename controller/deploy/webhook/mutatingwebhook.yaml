@@ -1,4 +1,4 @@
-# Pod gate-injection webhook (docs/8.1 §5.7, D9).
+# Pod gate-injection webhook (docs/7.1 §5.7, D9).
 #
 # caBundle is intentionally empty in the static manifest: the operator (or
 # e2e/run.sh) injects the serving CA after creating traincache-webhook-tls.

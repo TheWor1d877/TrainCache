@@ -1,6 +1,6 @@
 package warmup
 
-// M14 adaptive fanout acceptance tests (docs/8.2 plan.md §20, docs/8.3 D39):
+// M14 adaptive fanout acceptance tests (docs/7.2 plan.md §20, docs/7.3 D39):
 // the controller passes both bounds to GWAA, then drives status, score
 // annotations, gate inputs and logs from the actual Assignment instead of the
 // fanout maximum.

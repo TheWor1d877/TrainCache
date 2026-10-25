@@ -318,11 +318,12 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
 # ---------------------------------------------------------------------------
 # 多轮执行
 # ---------------------------------------------------------------------------
-def run_reps(cond_name: str, reps: int,
+def run_reps(cond_name: str, reps: int | None = None,
              conds_dir: Path | None = None,
              selftest: bool = False) -> list[Path]:
     """跑 reps 轮。cond_name 传给 load_cond。
 
+    reps=None 时取 COND 的 sampling.reps(D18:淘汰矩阵每点 3 次)。
     selftest=True 时:reps 强制为 1,使用 mock 模式。
     返回每轮产物目录列表。
     """
@@ -334,6 +335,8 @@ def run_reps(cond_name: str, reps: int,
 
     if selftest:
         reps = 1
+    elif reps is None:
+        reps = cond["sampling"]["reps"]
 
     reps_dir = POLICY_RESULTS_DIR / cond_name
     reps_dir.mkdir(parents=True, exist_ok=True)
@@ -444,8 +447,9 @@ def main() -> None:
         description="M5 实验 runner:淘汰与预取协同实验(C 轨倾斜场景)")
     ap.add_argument("--cond", default="policy-heat",
                     help="COND 名(conds/<name>.json,默认 policy-heat)")
-    ap.add_argument("--reps", type=int, default=7,
-                    help="重复次数(默认 7;selftest 时强制为 1)")
+    ap.add_argument("--reps", type=int, default=None,
+                    help="重复次数(默认取 COND 的 sampling.reps;"
+                         "显式传入时以命令行为准;selftest 时强制为 1)")
     ap.add_argument("--conds-dir", type=Path, default=None,
                     help="COND 目录(默认 bench/experiments/conds)")
     ap.add_argument("--selftest", action="store_true",

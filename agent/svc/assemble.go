@@ -58,7 +58,7 @@ type Agent struct {
 	Collector   *collector.Collector // 采集层(M5;首个 ring 发现时绑定,之前为 nil)
 	Evictor     *evictor.Evictor     // 磁盘淘汰循环(M6/§7.6)
 	HookSock    *HookSock            // 钩子收端(M5/§5.4)
-	// ReaderRegistry 是 R2 读者登记器(7.1 §5.10):声明本节点跟随的 snapID,
+	// ReaderRegistry 是 R2 读者登记器(6.1 §5.10):声明本节点跟随的 snapID,
 	// 供 GC 按读者确认删除。装配期构造,StartBackground 起心跳。
 	ReaderRegistry *index.ReaderRegistry
 
@@ -130,12 +130,12 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	ag.phase = newPhaseTracker(lookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
 	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
-	// R1/R2(7.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
+	// R1/R2(6.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
 	// 与 core ReaderGrace 默认口径一致)。Follow/心跳由 StartBackground 注入 ctx 后启动。
 	interval := cfg.indexRefreshInterval()
 	ag.ReaderRegistry = index.NewReaderRegistry(obj, cfg.NodeName.String(), 2*interval)
 	ag.Prefetch.SetIndexFollow(interval, ag.ReaderRegistry)
-	// R4(7.1 §5.12):条件写探测(默认关闭;不支持/失败只告警,不阻止启动)。
+	// R4(6.1 §5.12):条件写探测(默认关闭;不支持/失败只告警,不阻止启动)。
 	if cfg.ObjstoreProbeConditionalWrite {
 		probeCtx, cancel := context.WithTimeout(context.Background(), conditionalWriteProbeTimeout)
 		probeErr := objectstore.ProbeConditionalWrite(probeCtx, obj)
@@ -272,7 +272,7 @@ type PrefetchManager struct {
 	// phase 是 M9/D46 阶段跟踪器(装配期注入;各 dataset 的 OnStageSwitch 回调共用)。
 	phase *phaseTracker
 
-	// refreshInterval 是 Catalog.Follow 的刷新周期与心跳周期基数(7.1 §5.9;
+	// refreshInterval 是 Catalog.Follow 的刷新周期与心跳周期基数(6.1 §5.9;
 	// 装配期注入,零值由 Catalog 自身回退默认 5s)。
 	refreshInterval time.Duration
 	// registry 是 R2 读者登记器(原子指针:装配期注入后仅供 OnSnapshotChange 回调读)。
@@ -429,13 +429,17 @@ type datasetBundle struct {
 	started   bool // 预取器调度已启动(首个 ForOrder/ForPreheat)
 	stageSeen bool // 已有 ConsumeOrder 绑定 dataset(否则 ForPreheat 以最小订单播种)
 	// followStarted 表示该 dataset 的 Catalog.Follow 后台循环已启动(m.mu 保护;
-	// 同一 dataset 只启动一次,7.1 §5.9)。
+	// 同一 dataset 只启动一次,6.1 §5.9)。
 	followStarted bool
 
 	// lastOrder 是最近一次成功安装的 ConsumeOrder(§7.6 硬保护窗口按它取 cursor 起
 	// lookahead 块;protectedFPs 在 bundle 锁下读)。
 	lastOrder ordersource.ConsumeOrder
 	hasOrder  bool
+	// followPrefixes 是当前订单的块路径前缀 hint(ForOrder 在首次索引加载前写入)。
+	// Follow 首轮 tick 可能早于 lastOrder 安装,没有 hint 时会以空前缀走
+	// RefreshManifest 并清空随后加载的映射;空订单写入非 nil 空切片显式清除。
+	followPrefixes []string
 
 	// fpGen/fpIndex 是按订单代际缓存的指纹反向索引(D49):键含 stageID、Chunk 数、
 	// 首尾 ref,订单切换即重建。索引一经安装不再原地修改(重建换新 map),锁外查询安全。
@@ -476,7 +480,7 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 			m.onSnapshotError(ds, err)
 		},
 	})
-	// R1(7.1 §5.9):Catalog 首次创建后启动一次 Follow(生命周期 ctx 未注入时由
+	// R1(6.1 §5.9):Catalog 首次创建后启动一次 Follow(生命周期 ctx 未注入时由
 	// StartBackground 对既有 bundle 补启动;followStarted 保证每 dataset 一次)。
 
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
@@ -693,7 +697,14 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 		return err
 	}
 	b := m.bundleFor(o.Dataset)
-	if err := m.measureLoadPrefixes(ctx, o.Dataset, b.catalog, orderPaths(o.Chunks)); err != nil {
+	// 订单前缀 hint 必须在首次索引加载前写入:Follow 首轮 tick 可能与本次
+	// measureLoadPrefixes 并发,读到 lastOrder 尚未安装就会走空前缀 RefreshManifest,
+	// 把刚加载的映射清空。空订单写非 nil 空切片,显式清除上一单前缀且不回退。
+	prefixes := orderPaths(o.Chunks)
+	b.mu.Lock()
+	b.followPrefixes = prefixes
+	b.mu.Unlock()
+	if err := m.measureLoadPrefixes(ctx, o.Dataset, b.catalog, prefixes); err != nil {
 		return err
 	}
 

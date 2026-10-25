@@ -1,5 +1,5 @@
 // Package nodescore holds the pure readiness/score helpers used by the warmup
-// controller (docs/8.1 design.md §7.3). Bitmap decoding is M5; the decay score
+// controller (docs/7.1 design.md §7.3). Bitmap decoding is M5; the decay score
 // implementation is M8.
 package nodescore
 

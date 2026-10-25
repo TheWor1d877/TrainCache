@@ -1,6 +1,6 @@
 # controller-manager RBAC.
 #
-# Secrets are intentionally NOT granted cluster-wide (docs/8.3 Q9). The manager
+# Secrets are intentionally NOT granted cluster-wide (docs/7.3 Q9). The manager
 # only reads the object-store credential Secret referenced by a DataSet, so a
 # namespaced Role is bound per tenant namespace. The shipped Role targets the
 # e2e tenant namespace; production installs add one RoleBinding per dataset
@@ -28,7 +28,7 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "update"]
   # Node annotations carry the per-task score written at gate release (M8,
-  # docs/8.1 §6.2). Kubernetes RBAC cannot scope update to annotations only.
+  # docs/7.1 §6.2). Kubernetes RBAC cannot scope update to annotations only.
   # Other components (webhook, scheduler) keep Nodes read-only.
   - apiGroups: [""]
     resources: ["nodes"]

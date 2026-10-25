@@ -33,7 +33,7 @@ type Catalog struct {
 	dataset string // 数据集名（CURRENT/manifest/分片对象键均以此为前缀）
 	refresh time.Duration
 
-	// 可选回调在锁外调用；nil 表示不回调（7.1 §5.9）。
+	// 可选回调在锁外调用；nil 表示不回调（6.1 §5.9）。
 	onSnapshotChange func(dataset, snapID string)
 	onSnapshotError  func(dataset string, err error)
 
@@ -339,7 +339,7 @@ func (c *Catalog) SnapID() string {
 	return st.snapID
 }
 
-// RefreshManifest 是无活跃前缀时的轻量跟随（7.1 §5.9）：读 CURRENT 并下载、校验
+// RefreshManifest 是无活跃前缀时的轻量跟随（6.1 §5.9）：读 CURRENT 并下载、校验
 // manifest（校验链同 Refresh：manifest 指纹与 snapshot_id 必须与 CURRENT 一致），
 // 不下载任何分片；成功后原子切换 snapID 与空 entries（旧映射整体作废）。
 //
@@ -381,7 +381,7 @@ func (c *Catalog) refreshManifestLocked(ctx context.Context) (string, error) {
 	return m.SnapshotID, nil
 }
 
-// Follow 是阻塞式快照跟随循环（7.1 §5.9）：每 Config.RefreshInterval 检查一次
+// Follow 是阻塞式快照跟随循环（6.1 §5.9）：每 Config.RefreshInterval 检查一次
 // CURRENT；未变则跳过本轮，变更后按 prefixes() 的返回值选择加载方式——非空调用
 // LoadPrefixes，空调用 RefreshManifest。prefixes 每轮调用，nil 按空处理。
 //
@@ -397,7 +397,7 @@ func (c *Catalog) Follow(ctx context.Context, prefixes func() []string) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// 失败保持旧映射并继续下一轮（7.1 §5.9）。
+			// 失败保持旧映射并继续下一轮（6.1 §5.9）。
 			c.notifySnapshotError(err)
 		}
 		select {

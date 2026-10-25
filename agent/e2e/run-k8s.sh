@@ -28,7 +28,9 @@ ok()   { echo "  [OK]   $*"; }
 fail() { echo "  [FAIL] $*"; FAILS=$((FAILS + 1)); }
 note() { echo "  [NOTE] $*"; }
 
-RESULTS_DIR="$REPO_ROOT/agent/results"
+# 产物落运行时数据层(repo 同级 traincachedata,与 bench/config.py 同一口径)。
+DATA_ROOT="${TRAINCACHE_DATA_ROOT:-$(cd "$REPO_ROOT/.." && pwd)/traincachedata}"
+RESULTS_DIR="$DATA_ROOT/agent/results"
 mkdir -p "$RESULTS_DIR"
 RAW_LOG="$RESULTS_DIR/e2e-k8s.raw.log"
 : >"$RAW_LOG"

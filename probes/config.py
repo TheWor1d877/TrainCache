@@ -4,15 +4,18 @@
 所有装置脚本(bash/python)从这里取参数,避免多份拷贝漂移。
 bash 侧取值:python3 config.py --sh <KEY>
 """
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"          # 合成数据(2GB,不入库,种子固定可复现)
+# 数据与产物落运行时数据层(与 bench/config.py 同一口径、同一环境变量)。
+DATA_ROOT = Path(os.environ.get("TRAINCACHE_DATA_ROOT") or (ROOT.parent.parent / "traincachedata")).resolve()
+DATA_DIR = DATA_ROOT / "probes" / "data"   # 合成数据(2GB,种子固定可复现)
 TARS_DIR = DATA_DIR / "tars"
 CACHE_DIR = ROOT / ".cache"       # 运行时缓存(Agent 缓存目录等)
 AGENT_CACHE = CACHE_DIR / "agent"  # 模拟 Agent 落盘目录(探针A 热读源)
-RESULTS_DIR = ROOT / "results"
+RESULTS_DIR = DATA_ROOT / "probes" / "results"
 
 # ---- 数据合成(探针A/B 共用同一批 tar)----
 IMG_SIZE = 512

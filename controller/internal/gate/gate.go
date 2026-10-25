@@ -1,5 +1,5 @@
 // Package gate implements the three-condition WarmupTask gate from
-// docs/8.1 design.md §5.6, §7.5 and docs/8.3 D14/D15/D26. It is a pure package:
+// docs/7.1 design.md §5.6, §7.5 and docs/7.3 D14/D15/D26. It is a pure package:
 // it reads only its Input and returns a Decision. Rate/Gap/Slope are
 // observations for logging and the marginal-gain condition; condition ① is an
 // existential quantifier over the Pod's preheat node set and compares each
@@ -96,7 +96,7 @@ type Decision struct {
 }
 
 // Evaluate applies the fixed order ③ TMax → ① all Pods ready → ②
-// insufficient marginal gain → Hold (docs/8.1 §5.6).
+// insufficient marginal gain → Hold (docs/7.1 §5.6).
 func Evaluate(in Input) Decision {
 	rates := make([]PodRate, len(in.Pods))
 	for i := range in.Pods {
@@ -125,7 +125,7 @@ func Evaluate(in Input) Decision {
 	}
 
 	// ① Every Pod must reach its integer threshold on at least one preheat
-	// node (existential quantifier, docs/8.1 §5.6, §7.5).
+	// node (existential quantifier, docs/7.1 §5.6, §7.5).
 	allReady := len(in.Pods) > 0
 	for i := range in.Pods {
 		if !podMeetsThreshold(in.Pods[i], rates[i].Required) {
@@ -170,7 +170,7 @@ func Evaluate(in Input) Decision {
 
 // RequiredReady is floor(threshold*K), raised to 1 when threshold > 0 and the
 // floor is 0, and clamped to [0,K]. Threshold 0 yields 0 regardless of K
-// (docs/8.1 §5.6, D26).
+// (docs/7.1 §5.6, D26).
 func RequiredReady(threshold float64, k int32) int32 {
 	if k <= 0 || threshold <= 0 {
 		return 0

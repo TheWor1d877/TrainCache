@@ -12,7 +12,8 @@
 # ============================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3}"
+REPO="$(cd "$ROOT/.." && pwd)"
+PY="${PY:-$REPO/.venv/bin/python}"
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 NAME="$(CFG TRACK_D_SOURCE_CONTAINER)"

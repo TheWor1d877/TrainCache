@@ -17,7 +17,7 @@ import (
 const defaultReaderGrace = 10 * time.Second
 
 // ReaderClaim 是一个读者节点对某数据集当前跟随快照的声明（一节点一数据集一对象，
-// 7.1 §5.10）。GC 依据声明保护快照：SnapID 与 PreviousSnapID 都计入 protected，
+// 6.1 §5.10）。GC 依据声明保护快照：SnapID 与 PreviousSnapID 都计入 protected，
 // UpdatedAt 超过 Config.ReaderGrace 的声明整体忽略（视为读者已死）。
 type ReaderClaim struct {
 	NodeID         string    `json:"node_id"`
@@ -28,7 +28,7 @@ type ReaderClaim struct {
 }
 
 // ReaderKey 返回节点 nodeID 在 dataset 下的声明对象键：
-// dataset/<dataset>/readers/<url.PathEscape(nodeID)>.json（7.1 §5.10）。
+// dataset/<dataset>/readers/<url.PathEscape(nodeID)>.json（6.1 §5.10）。
 // nodeID 必须经 url.PathEscape 编码，避免含 "/" 等字符破坏键布局。
 func ReaderKey(dataset, nodeID string) string {
 	return "dataset/" + dataset + "/readers/" + url.PathEscape(nodeID) + ".json"

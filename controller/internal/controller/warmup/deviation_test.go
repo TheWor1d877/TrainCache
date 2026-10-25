@@ -13,7 +13,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 )
 
-// TestReconcileDeviationRecordsActualNodeAndResubmits covers docs/8.1 §7.8:
+// TestReconcileDeviationRecordsActualNodeAndResubmits covers docs/7.1 §7.8:
 // a released Pod on a node other than its assignment writes ActualNode, emits
 // NodeDeviation and submits the same window on the actual node.
 func TestReconcileDeviationRecordsActualNodeAndResubmits(t *testing.T) {

@@ -1,19 +1,29 @@
-# 5 bench 装置说明书（手册版 v3，2026-10-25 校准）
+# bench 装置说明
 
-> 这份文档是 `bench/` 实验装置的说明书：文件是什么、命令怎么敲、一键化做到哪、出了毛病查哪行。
-> v3 相对 v2 的改动：带宽升成实验自变量（10.1 D31）、M/L 档参跑组 fluid 化（D30）、对照部分机时结构重排（D32）三处口径回写；新增 §4.2「只有 TrainCache 时怎么启动」；§3 参数总表与 §9 产物现状按磁盘代码逐条重核。
-> 两类读者：维护这套装置的人（§2、§3），和将来迭代版本的我自己（§4 起）。
-> 路径一律写相对路径 `bench/...`。`/home/howardhe/tc` 是指向项目根的符号链接，不是另一份拷贝，看到旧文档里的 tc/ 前缀就当项目根。
-> 状态图例：**✅ 已实现**｜**🔧 改造中**｜**📝 规划待建**。本文只把已实现的当现状，规划项明确标注，不混。
-> 纪律：文档是代码的声明式。以磁盘代码为准，发现对不上，当天改文档。
+## 快速开始
+
+TrainCache 出新版本、只跑自身（cold 冷缓存 + warm 预热后）、不重跑其他对照：
+
+```bash
+cd bench
+make bench-quick TIER=S RATE=1000 REPS=3
+```
+
+前置条件：`make bench-up` 已成功执行一次（该命令同时部署控制面与 agentd，前置与幂等保证见 §4.1），且当前没有运行中的 train-job。产物落 `~/tcd/bench/results/quick/<run_id>/`，含 `summary.csv`、`run.json`、`lock.json`；存在上一次 quick 产物时另出 `vs_last.md`，对比两次的启动/全程 makespan、stall 占比与字节成本。
+
+`TIER` 只能是 `S`：M/L 档的参跑组不含 `traincache-warm`，凑不齐冷热两阶段。`RATE` 取 {100, 300, 1000}，`REPS` 取 3（S 档正式值），`TAG=...` 给 run_id 加后缀。全链起停见 §5。
 
 ## 1. 装置是什么
 
-一套在单机（32 核 / 30 GiB 内存 / 4 worker kind 集群）上复刻"分布式训练存储"的实验装置，做三件事：
+一套在单机（32 核 / 30 GiB 内存 / kind 5 节点集群，其中 4 个 worker）上复刻"分布式训练存储"的实验装置，做三件事：
 
-1. **造冷热差**：tc 把源站出站路径限到指定档位（默认 100mbit/20ms，100Mbps≈12.5MB/s，读 8GB 光传输 640 秒），本地缓存命中绕开这条路，冷读慢热读快是真差不是假差。**带宽本身是实验自变量**（10.1 D31）：rate 取 {100, 300, 1000} mbit，burst 按 rate 推导，抖动只在临界档开。
-2. **造负载**：四轨合成数据（A 小文件元数据、B 8GB webdataset tar、C 倾斜访问清单、D 2GiB 连续 epoch），固定种子、逐字节可复现。
-3. **同台跑分**：TrainCache 与 direct/juicefs/fluid 五个受试者（展开是七个组态）吃同一份轨迹、同一个带宽档、同一个容量的缓存，一键起拆、一键出指标（§4.4、§9）。
+| 要做的事 | 怎么做 | 关键数字 |
+|---|---|---|
+| 造冷热差 | 用 tc 把源站出站路径限到指定带宽档；本地缓存命中就绕开这条路 | 100mbit≈12.5MB/s，读 8GiB 光传输 640 秒 |
+| 造负载 | 四轨合成数据：A 小文件元数据、B 8GiB webdataset tar、C 倾斜访问清单、D 2GiB 连续 epoch | 种子固定，逐字节可复现 |
+| 同台跑分 | TrainCache 与 direct/juicefs/fluid 四个对手（展开七个组态）吃同一份轨迹、同一个带宽档、同一份缓存容量 | §4.4、§9 |
+
+带宽是实验自变量（9.1 D31），rate 取 {100, 300, 1000} mbit，有效带宽 = min(名义 rate, 源站实测上限)。burst 按 rate 推导：100→1250k、300→3750k、1000→12500k——固定 1600k 在 1000mbit 下只剩 13ms 突发窗口。抖动只在临界档开（S@300、M@1000），由 `config.jitter_enabled(tier, rate)` 推导，不由人写死。
 
 ```text
 bench/
@@ -21,105 +31,134 @@ bench/
 ├── config.py         # 唯一参数源：python3 config.py --sh KEY 查询
 ├── scripts/          # 数据生成、负载器、tc、冷态、verify、trainpublish 二进制
 ├── k8s/              # kind 集群配置 + MinIO manifest
-├── data/             # (gitignore) 四轨数据，种子固定可再生成
-├── results/          # 归档：冷读验证、D 轨对账、扫点
 ├── compare/          # 五组对照装置（run_bench.py + 每组目录）
 └── experiments/      # 条件化实验层（COND 契约、runner、统计、出图）
 ```
 
-一句话：装置把"冷读多慢、换个策略快多少、跟对手比赢在哪"变成同一条命令能重复测量的数字。
+数据在 `~/tcd/bench/data/`，结果与日志在 `~/tcd/bench/results/`、`~/tcd/bench/logs/`、`~/tcd/bench/compare/logs/`，repo 内没有同名目录（§9）。
 
-## 2. 文件与接口（给维护者）
+概述：装置把"冷读多慢、换个策略快多少、跟对手比赢在哪"变成同一条命令能重复测量的数字。
+
+## 2. 文件与接口
 
 ### 2.1 主实验层（bench/ 根 + scripts/）
 
-| 文件 | 作用 | 接口 / 被谁调用 | 状态 |
-|------|------|-----------------|------|
-| `Makefile` | 全部入口 | `bench-up`/`bench-down`/`kind-up`/`k8s-up`/`data-up`/`upload`/`tc-up RATE= DELAY=`/`tc-down`/`bench-cold`/`bench-verify QUICK=`/`bench-data`/`bench-tc`/`track-d-data\|up\|verify\|down`/`e2e-local`/`e2e-k8s`/`bench COND= REPS=`/`bench-list` | ✅ |
-| `config.py` | 唯一参数源 | `python3 config.py --sh <KEY>`；被所有脚本读 | ✅ |
-| `scripts/synth_track_{a,b,c,d}.py` | 四轨数据生成 | 参数全在 config；幂等，已存在即跳过 | ✅ |
-| `scripts/bench_track_d.py` | D 轨负载器 + verify 判据 | `--epochs --seed --workers --out-dir`；`--selftest` 自测判据函数 `compare_epoch_medians`。⚠ 模块级 import numpy/torch/webdataset，本机解释器已缺这些依赖 → 现在连 `--selftest` 都跑不动（§7 第 20 条） | 🔧 需重建依赖 |
-| `scripts/bench_track_c.py` | C 轨双 Job 倾斜负载器 | M3/M5 用（热集循环 + 全量扫描） | ✅ |
-| `scripts/tc_apply.sh` / `tc_teardown.sh` | 挂/拆限速 | `<rate> <delay> [burst] [--target minio\|source-d] [--jitter\|--no-jitter] [--tier S\|M\|L] [--dry-run] [--self-test]`；burst 不给时按 rate 推导（`config.burst_for_rate`），`--tier` 让脚本自己判该档要不要抖动 | ✅ |
-| `scripts/cold_reset.sh` | 主实验冷态规程 | 无参；sync+drop_caches+重启 MinIO+重挂 tc。**对照层不用它**（run_bench 自带 `cold_reset()`，只清 Pod 与缓存目录、不重启 MinIO，见 §4.4） | ✅ |
-| `scripts/verify_cold.sh` | 装置可信性 | `[--quick]`；两轮冷读相对差 ≤10% 判过 | ✅ |
-| `scripts/track_d_{up,verify,down}.sh` | D 轨编排 | 零参数，`--dry-run`；up=容器+欠配+tc+10 epoch，verify=两轮×3 epoch 对账，down=拆除保留数据 | ✅ |
-| `scripts/upload_bench.py` | B 轨灌 MinIO | 无参；每次全量重传（同键覆盖+重设公开读 policy），无"存在即跳过" | ✅ |
-| `scripts/trainpublish` | 发布 TrainCache 块快照 | Go 二进制（源码 `core/cmd/trainpublish`，重编：`/usr/local/go/bin/go build`）；关键旗标 `-chunk-size`（实验取 8388608，见 §3） | ✅ |
-| `k8s/kind-config.yaml`、`k8s/minio.yaml` | 集群与源站基座 | kind 5 节点配置；MinIO 带 30Gi PVC（必须，见 §7 第 6 条） | ✅ |
+| 文件 | 作用 | 接口 |
+|------|------|------|
+| `Makefile` | 全部入口 | `bench-up`/`bench-down`/`bench-down-full`/`ctrl-up`/`ctrl-down`/`bench-status`/`bench-doctor`/`bench-quick TIER= RATE= REPS= [TAG=]`/`kind-up`/`k8s-up`/`data-up`/`upload`/`tc-up RATE= DELAY=`/`tc-down`/`bench-cold`/`bench-verify QUICK=`/`bench-data`/`bench-tc`/`selftest`/`track-d-data\|up\|verify\|down`/`e2e-local`/`e2e-k8s`/`bench COND= REPS=`/`bench-list` |
+| `config.py` | 唯一参数源 | `python3 config.py --sh <KEY>`；所有脚本都从这里取值 |
+| `scripts/synth_track_{a,b,c,d}.py` | 四轨数据生成 | 参数全在 config；幂等，已存在即跳过 |
+| `scripts/bench_track_d.py` | D 轨负载器 + verify 判据 | `--epochs --seed --workers --out-dir`；`--selftest` 自检判据函数 `compare_epoch_medians`；模块级依赖 numpy/torch/webdataset（§7 第 19 条） |
+| `scripts/bench_track_c.py` | C 轨双 Job 倾斜负载器 | 热集循环 Job + 全量扫描 Job，`--stagger-s` 控制两 Job 交错启动 |
+| `scripts/tc_apply.sh` / `tc_teardown.sh` | 挂/拆限速 | `<rate> <delay> [burst] [--target minio\|source-d] [--jitter\|--no-jitter] [--tier S\|M\|L] [--dry-run] [--self-test]`；不给 burst 时按 rate 推导（`config.burst_for_rate`），`--tier` 让脚本自己判这一档要不要抖动 |
+| `scripts/cold_reset.sh` | 主实验冷态规程 | 无参；sync + drop_caches + 重启 MinIO + 重挂 tc。对照层不用它，用 `run_bench.py` 自带的 `cold_reset()`（§4.4） |
+| `scripts/verify_cold.sh` | 装置可信性 | `[--quick]`；两轮冷读相对差 ≤10% 判过 |
+| `scripts/track_d_{up,verify,down}.sh` | D 轨编排 | 零参数，`--dry-run`；up=容器+欠配+tc+10 epoch，verify=两轮×3 epoch 对账，down=拆除但保留数据 |
+| `scripts/upload_bench.py` | B 轨灌 MinIO | 无参；每次全量重传（同键覆盖 + 重设公开读 policy），没有"存在即跳过" |
+| `scripts/trainpublish` | 发布 TrainCache 块快照 | Go 二进制，源码在 `core/cmd/trainpublish`，重编 `/usr/local/go/bin/go build`；关键旗标 `-chunk-size`，实验取 8388608（§3） |
+| `scripts/ctrl_up.sh` / `ctrl_down.sh` | 控制面起停 | up：命名空间、节点标签、`traincache-objstore`/webhook TLS 两个 Secret、caBundle、`kubectl apply -k controller/deploy`、agentd 配置、四个工作负载就绪；down：删控制面资源，保留 namespace/集群/数据，支持 `--dry-run` |
+| `k8s/kind-config.yaml`、`k8s/minio.yaml` | 集群与源站基座 | kind 5 节点配置；MinIO 带 30Gi PVC，所以 `kind delete` 后源数据仍在宿主机（§7 第 6 条） |
 
 ### 2.2 五组对照层（compare/）
 
-| 文件 | 作用 | 接口 / 说明 | 状态 |
-|------|------|-------------|------|
-| `compare/Makefile` | 对照入口 | `compare-up/down GROUP=`、`compare-all-up/down`、`trace`（生成统一轨迹）、`check`、`help` | ✅ |
-| `compare/run_bench.py` | 跑分编排器 | `--reps N --groups <组...> --tier S\|M\|L --out <csv>`；`--tier` 缺省取环境变量 `CAPACITY_RATIO`（再缺省 S）；档位决定 `N_TARS`/`reps`。7 个组名映射 4 个目录组（direct、juicefs-{cold,warm}、fluid-{cold,warm}、traincache-{cold,warm}）；`--selftest` 离线自检（不连集群，验模板可编译、字节账精确、超时分支计入统计）。**未闭合**：不按档位过滤参跑组（跑 M/L 仍会把 warm 组一起拖跑）、每 rep 仍 up/down、L 档不自动把 `EPOCHS` 降到 1（§3、§4.4） | ✅🔧 |
-| `compare/direct/` | 组 1：HTTP 直读 MinIO，零缓存 | `up.sh` 建 ns/secret/trace ConfigMap+tc；无预热 | ✅ |
-| `compare/juicefs/` | 组 2/3：JuiceFS 冷/热 | `up.sh`：Redis+mount Pod（缓存 hostPath `/var/cache/jfs`）；`JFS_WARMUP=1` 时预热在 up.sh 内完成（15 分钟硬超时，超时整轮作废）；`--cache-size` **单位是 MiB** | 🔧✅（合一改造已完成） |
-| `compare/fluid/` | 组 4/5：Fluid 冷/热 | `up.sh`：Dataset+JuiceFSRuntime+PVC；`FLUID_PREHEAT=1` 时 DataLoad 在 up.sh 内等待完成；`FLUID_CACHE_GI` 控容量 | ✅ |
-| `compare/traincache/` | 组 6/7：TrainCache 冷/热 | `up.sh`：打 `s3-access` 标签（`label_s3_nodes`）、发布快照（`publish_snapshot`，`trainpublish -chunk-size 8388608` → `dataset/compare-data-8m/`，CURRENT 已存在则跳过）、校验/补部署控制面、注入 agentd 配置（`ensure_agent_config`）、建 DataSet/WarmupTask（`TRAINCACHE_WARMUP_K`，warm=128/cold=0）、挂 tc；**sleep 占位 compare-job 已删** | ✅（控制面自装与 8MiB 口径已就位；正式跑分前仍需真发一次 `compare-data-8m` 并核对 agentd WHITELIST） |
-| 统一测量体 | **每组只有一个 train-job Pod**：measure 脚本是主容器；traincache 组走 webhook gate（Pending 等待计入 startup），其余组普通调度；`t_submit` = 创建该 Pod 之前的时刻，五组同尺 | `run_bench.py create_measure_pod()` | ✅ |
+| 文件 | 作用 | 接口 / 说明 |
+|------|------|-------------|
+| `compare/Makefile` | 对照入口 | `compare-up/down GROUP=<组态>`（七个组态名，或 `direct`/`juicefs`/`fluid`/`traincache` 别名）、`compare-all-up/down`、`trace`（生成统一轨迹）、`check`、`help` |
+| `compare/run_bench.py` | 跑分编排器 | `--reps N --groups <组...> --tier S\|M\|L --rate <档> --out <csv>`；`--tier` 缺省取环境变量 `CAPACITY_RATIO`（再缺省 S）；`--rate` 只从命令行取，S 档缺省 100mbit，M/L 档必填。档位一次决定 `N_TARS`、`EPOCHS`、每点次数、本档参跑组；越档的组态被过滤，从显式请求里挑出来时告警。7 个组名映射 4 个目录组（direct、juicefs-{cold,warm}、fluid-{cold,warm}、traincache-{cold,warm}），组名按 startswith 分流。`--selftest` 离线自检，不连集群：验模板可编译、字节账精确、超时分支计入统计、档位接线 |
+| `compare/direct/` | 组 1：HTTP 直读 MinIO，零缓存 | `up.sh` 建 namespace/secret/trace ConfigMap 并挂 tc；无预热 |
+| `compare/juicefs/` | 组 2/3：JuiceFS 冷/热 | `up.sh`：Redis + mount Pod，缓存走 hostPath `/var/cache/jfs`；`JFS_WARMUP=1` 时预热在 up.sh 内完成，15 分钟硬超时、超时整轮作废；预热前轮询 `/proc/mounts` 确认 `/mnt/jfs` 已挂载（Pod Ready 只表示容器已启动）；`--cache-size` **单位是 MiB** |
+| `compare/fluid/` | 组 4/5：Fluid 冷/热 | `up.sh`：Dataset + JuiceFSRuntime + PVC，导入 Job 成功才继续、失败立即退出；`FLUID_PREHEAT=1` 时 DataLoad 在 up.sh 内等完成；`FLUID_CACHE_GI` 控容量 |
+| `compare/traincache/` | 组 6/7：TrainCache 冷/热 | `up.sh` 四步幂等，逐步见 §4.2；warm 组 `TRAINCACHE_WARMUP_K=128`、cold 组 0 |
+| 统一测量体 | 每组只有一个 train-job Pod | measure 脚本是主容器；traincache 组走 webhook gate（Pending 等待计入 startup），其余组普通调度；`t_submit` = 创建该 Pod 之前的时刻，五组同尺（`run_bench.py create_measure_pod()`） |
 
-### 2.3 条件化实验层（experiments/）
+### 2.3 七组态资源与规模对齐
 
-| 文件 | 作用 | 状态 |
-|------|------|------|
-| `cond.py` + `cond.schema.md` | COND 契约（v1）：一个 JSON = 一个实验点；解析器校验字段全集并产出环境变量。带宽档（`network.rate_mbit` ∈ {100,300,1000}）、burst（按 rate 推导，值不符直接拒收）、档位参跑组（`CAPACITY_TIER_GROUPS`，组名不在本档集合内即拒）都已进校验器；抖动**不是** COND 字段，由 `config.jitter_enabled(tier, rate)` 推导 | ✅（`capacity_ratio`、`chunk_size_bytes`、`warmup_seconds` 三字段已进契约与校验器；占位符 digest/sha 一律拒收） |
-| `conds/*.json` | 正式 COND 集，共 34 个：`compare-d-<组态>-<rate>`（七组态 × {100,1000}，再加 direct/fluid-cold/traincache-cold 的 300 抖动格 = 17 个）、`compare-b-m-<组>-1000`（3 个）、`compare-b-l-<组>-1000`（2 个）、`policy-{heat,lru,lfu}`、`pareto2-lookahead{8,16,32}-{heat,lru,lfu}`；`policy-wtinylfu.json` 随 W-TinyLFU 撤档删除（10.1 D9） | ✅ |
-| `run.py` | 主实验 runner：冷态→搭负载→采集→归档，失败标 `void` | ✅ |
-| `run_policy.py` | M5 淘汰×预取实验执行体（注入 `TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_PREFETCH_LOOKAHEAD`） | ✅ |
-| `collect.py` | 离线汇总：makespan 两边界、三笔字节成本、分阶段命中率 → `metrics.csv`/`collect.json`；`--selftest` | ✅ |
-| `stats.py` | 中位数 + bootstrap 95% CI（10000 次重采样） | ✅ |
-| `lock.py` | 环境清单：镜像 digest、kubectl 版本、tc 档位、种子写进产物目录 | ✅ |
-| `plot.py` | 五张旗舰图统一绘制 | ✅ |
-| `preregister.md` | 预注册文件（冻结前允许追加假设；S/M/L 档位假设待写入，📝随 M6） | ✅ |
+七组态吃同一份源数据、同一个 tc 档位、同一块 1 GiB 缓存容量，差异只在缓存层实现。每组一个训练 Pod（`train-job-0`），测量体与调度体合一。
 
-一句话：三层各管一件事——主实验层管"造冷热差"，对照层管"同台跑分"，实验层管"条件可复现"。
+| 组态 | 训练 Pod 副本 | 缓存介质与路径 | 容量控制量 | 元数据 | 数据通路 | 预热 | 调度 | 资源 request / limit | 命中率口径 |
+|---|---|---|---|---|---|---|---|---|---|
+| direct | 1 | 无缓存层 | — | — | HTTP GET MinIO `shard-*.tar`，按 8 MiB 分段 `read(n)`，只累加总字节 | 无 | 普通调度 | 500m、1Gi / 2 CPU、4Gi | 每次读皆回源，`hit_rate≡0` |
+| juicefs-cold | 1 | 节点 hostPath `/var/cache/jfs` | `--cache-size 1024`（单位 MiB，=1 GiB） | Redis 7 `redis.juicefs.svc:6379` | FUSE `/mnt/jfs`（measure Pod 内自 mount，privileged） | 无，空缓存启动 | 普通调度 | 500m、1Gi / 2 CPU、6Gi | 近似：cold≈全回源 + 回源字节 |
+| juicefs-warm | 1 | 同 juicefs-cold | 同 juicefs-cold | 同 juicefs-cold | 同 juicefs-cold | up.sh 内 `juicefs warmup /mnt/jfs/` 预热整档数据集，单独计时，15 分钟超时 | 普通调度 | 500m、1Gi / 2 CPU、6Gi | 近似：warm≈全命中 |
+| fluid-cold | 1 | tieredstore HDD，节点 hostPath `/tmp/juicefs-cache` | `quota: 1Gi`（`FLUID_CACHE_GI=1`） | Redis 7 `redis.fluid.svc:6379`（独立实例） | PVC `jfs-demo` 挂 `/data` | `FLUID_PREHEAT=0`，不建 DataLoad | nodeAffinity 绑缓存 worker；JuiceFSRuntime `replicas: 1` | 500m、1Gi / 2 CPU、4Gi | 近似：cold≈全回源 + 回源字节 |
+| fluid-warm | 1 | 同 fluid-cold | 同 fluid-cold | 同 fluid-cold | 同 fluid-cold | DataLoad `jfs-load`（target=`/`）预热整档数据集，15 分钟超时 | 同 fluid-cold | 500m、1Gi / 2 CPU、4Gi | 近似：warm≈全命中 |
+| traincache-cold | 1（WarmupTask `podCount: 1`） | 节点 hostPath `/var/cache/traincache/blocks`（measure 只读挂载） | env `TRAINCACHE_CACHE_CAPACITY_BYTES=1073741824`（1 GiB） | DataSet CRD + MinIO 快照 `dataset/<name>/CURRENT` | gRPC 取块 → 本地块读；miss 等预取，超时 HTTP 回源 | k=0，不建 WarmupTask，gate 立即放行 | 普通调度 | 500m、1Gi / 2 CPU、4Gi | `traincache_fetch_bytes_total` run 窗口增量对账，回源字节计 miss |
+| traincache-warm | 1（WarmupTask `podCount: 1`） | 同 traincache-cold | 同 traincache-cold | 同 traincache-cold | 同 traincache-cold | WarmupTask `compare-task` k=128（8 MiB × 128 = 1 GiB），`preheatFanout`=4（s3-access 节点数），15 分钟超时 | `traincache-scheduler` + webhook schedulingGate | 500m、1Gi / 2 CPU、4Gi | 同 traincache-cold |
+
+命名空间：direct→`direct`；juicefs-cold/warm→`juicefs`；fluid-cold/warm→`fluid`（控制面 `fluid-system`）；traincache-cold/warm→`traincache`（控制面与负载同 ns）。两个 Redis 7 是彼此独立的实例。
+
+限额与副本以 `run_bench.py` 的 Pod 模板和 `up.sh` 为准：CPU/内存 request 500m/1Gi、limit 2 CPU/4Gi；juicefs 组在 Pod 内跑 FUSE mount，内存 limit 放宽到 6Gi。
+
+档位决定数据规模与 epoch 数：S 档 8 片 × 256 MiB = 2 GiB、3 epoch；M 档 32 × 256 MiB = 8 GiB、1 epoch；L 档 128 × 256 MiB = 32 GiB、1 epoch。S 档 compare-d 的 COND 写 `dataset.shards=8`、`shard_size_bytes=268435456`，不是 16 片 × 128 MiB。
+
+### 2.4 条件化实验层（experiments/）
+
+| 文件 | 作用 | 接口 / 说明 |
+|------|------|-------------|
+| `cond.py` + `cond.schema.md` | COND 契约 v1：一个 JSON = 一个实验点 | 校验字段全集并产出环境变量。`network.rate_mbit` ∈ {100,300,1000}；burst 按 rate 推导，值不符直接拒收；组名不在本档参跑集合（`CAPACITY_TIER_GROUPS`）内即拒收；`capacity_ratio`、`chunk_size_bytes`、`warmup_seconds` 都在契约里；抖动不是 COND 字段，由 `config.jitter_enabled(tier, rate)` 推导；占位符 digest/sha 一律拒收；`environment.images` 实际 9 键：agent、controller、scheduler、webhook、training、minio、juicefs、fluid、fluid-csi |
+| `conds/*.json` | 正式 COND 集，共 34 个 | `compare-d-<组态>-<rate>` 17 个（七组态 × {100,1000}，加 direct/fluid-cold/traincache-cold 的 @300 抖动格）、`compare-b-m-<组>-1000` 3 个、`compare-b-l-<组>-1000` 2 个、`policy-{heat,lru,lfu}` 3 个、`pareto2-lookahead{8,16,32}-{heat,lru,lfu}` 9 个 |
+| `run.py` | 主实验 runner | 冷态 → 搭负载 → 采集 → 归档；失败保留现场并标 `void` |
+| `run_policy.py` | 淘汰 × 预取实验执行体 | 注入 `TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_PREFETCH_LOOKAHEAD` |
+| `collect.py` | 离线汇总 | makespan 两边界、三笔字节成本、分阶段命中率 → `metrics.csv`/`collect.json`；`--selftest` |
+| `stats.py` | 统计 | 中位数 + bootstrap 95% CI（样本有放回重抽 10000 次，取 2.5%/97.5% 分位） |
+| `lock.py` | 环境清单 | 镜像 digest、kubectl 版本、tc 档位（rate/delay/burst）、`chunk_size_bytes`、`dataset_name`、种子，每个 run 目录落一份 `lock.json` |
+| `plot.py` | 出图 | 五张旗舰图统一绘制，负收益区域照画 |
+| `preregister.md` | 预注册文件 | 冻结前允许追加假设，冻结后只允许追加偏离说明 |
+
+概述：三层各管一件事——主实验层造冷热差，对照层做同台跑分，实验层保证每个点条件可复现。
 
 ## 3. 参数总表（哪个旋钮影响什么）
 
 | 旋钮 | 现值 | 写在哪 | 影响 |
 |------|------|--------|------|
-| `TC_RATE / TC_DELAY` | 默认 100mbit / 20ms；**正式跑分按 COND 的 `network.rate_mbit` 取 {100, 300, 1000}** | `config.py` 缺省值；`make bench-tc RATE= DELAY=`；对照层由 `TC_RATE`/`TC_DELAY` 环境变量经 up.sh 传给 tc_apply | 回源管道粗细。带宽是实验自变量（10.1 D31），不再有「对照三档不许动」的固定值；有效带宽 = min(名义 rate, MinIO 实测上限) |
-| `TC_BURST` / 抖动 | burst 按 rate 推导：100→1250k、300→3750k、1000→12500k；抖动只在 S@300 与 M@1000 开（`delay 20ms 10ms distribution normal`） | `config.burst_for_rate()` / `config.jitter_enabled(tier, rate)`；`tc_apply.sh` 的 `--tier`/`--jitter` | 突发窗口必须跟着 rate 走，固定 1600k 在 1000mbit 下只剩 13ms。**现状缺口**：四个 `compare/*/up.sh` 只传 `rate delay`，没传 `--tier`，所以对照层跑不出抖动（§7 待改） |
-| `TRACK_B_N_TARS` | 32（~264MB/个，≈8GiB） | `config.py` | 源数据规模 |
-| `CAPACITY_RATIO` / `--tier` | S（缺省） | `run_bench.py` 环境变量 / 旗标；档位参数单点定义在 `experiments/cond.py` 的 `CAPACITY_TIER_*` | 一键决定 `N_TARS`、每点次数（S=3、M=3、L=1）与本档参跑组（S 七组态、M/L 三组/两组，D30）。非法值退回 S 并打印告警 |
-| `N_TARS`（对照） | 8（≈2GiB，S 档）；M=32（8GiB）、L=128（32GiB） | `run_bench.py` 环境变量（缺省按 `CAPACITY_RATIO` 取） | 每组读的分片数；L 档的 128 片需要新增生成 24GiB 数据，只追加不覆盖 `bench-b`（Q12） |
-| `chunk-size`（实验块） | **8MiB**（生产默认 64MiB） | `trainpublish -chunk-size 8388608`，随产物归档 | 块=缓存与预取最小单位；1GiB 缓存=128 块（10.1 D20） |
-| `TRAINCACHE_CACHE_CAPACITY_BYTES` | 1GiB（`1073741824`） | traincache `up.sh` `ensure_agent_config` 注入 agentd；代码实现在 `agent/svc/config.go` | TrainCache 缓存字节上限，淘汰按它触发 |
+| `--rate / TC_DELAY` | 默认 100mbit / 20ms；正式跑分按 COND 的 `network.rate_mbit` 取 {100, 300, 1000} | 对照层由 `run_bench.py --rate` 取速率、`TC_DELAY` 取延迟，再以 `TC_RATE`/`TC_DELAY` 环境变量下发给 up.sh；`make bench-tc RATE= DELAY=` 走同一套 `tc_apply` | 回源管道粗细。有效带宽 = min(名义 rate, 源站实测上限)，上限见 §10 |
+| `TC_BURST` / 抖动 | burst 按 rate 推导（§1）；抖动只在 S@300 与 M@1000 开（`delay 20ms 10ms distribution normal`） | `config.burst_for_rate()` / `config.jitter_enabled(tier, rate)`；`tc_apply.sh` 的 `--tier`/`--jitter`；四个 `compare/*/up.sh` 都传 `--tier "$CAP_TIER"` | 突发窗口必须跟着 rate 走；开不开抖动由档位和 rate 共同决定 |
+| `TRACK_B_N_TARS` | 32（~264MB/个，≈8GiB） | `config.py` | 源数据生成规模。桶 `bench-b` 现有 128 个对象，够 L 档 32GiB 取用；追加不覆盖（9.1 Q12） |
+| `CAPACITY_RATIO` / `--tier` | S（缺省） | `run_bench.py` 环境变量 / 旗标；档位参数单点定义在 `experiments/cond.py` 的 `CAPACITY_TIER_*` | 一键决定 `N_TARS`、`EPOCHS`、每点名义次数（S=3、M=3、L=1）与本档参跑组（S 七组态、M 三组、L 两组，9.1 D30）。非法值退回 S 并打印告警 |
+| `N_TARS`（对照） | S=8（≈2GiB）、M=32（8GiB）、L=128（32GiB） | `run_bench.py` 环境变量（缺省按 `CAPACITY_RATIO` 取） | 每组读的分片数 |
+| `chunk-size`（实验块） | **8MiB**（生产默认 64MiB） | `trainpublish -chunk-size 8388608`，随产物归档 | 块是缓存与预取的最小单位；1GiB 缓存 = 128 块（9.1 D20） |
+| `TRAINCACHE_CACHE_CAPACITY_BYTES` | 1GiB（`1073741824`） | `ctrl_up.sh` 的 `ensure_agent_config`（bench-up 与 traincache `up.sh` 共用）注入 agentd；读取在 `agent/svc/config.go` | TrainCache 缓存字节上限，淘汰按它触发 |
 | `JFS_CACHE_MB` | 1024 | juicefs `up.sh` | JuiceFS 缓存上限；`--cache-size` 直接收 MiB 数值，**别再乘 1024** |
 | `FLUID_CACHE_GI` | 1 | fluid `up.sh` | Fluid 缓存配额（Gi） |
-| `TRAINCACHE_WARMUP_K` | warm=128 / cold=0（128 = 缓存容量 ÷ 块大小，代码里自动推，不再写死 16） | `run_bench.py` 环境变量 → `traincache/up.sh` → WarmupTask `podDetails[0].k` | 预热块数。**预热量 = k × chunk-size**：8MiB 块 × 128 = 1GiB = 缓存容量整档（对 M 档 8GiB 数据即「预热覆盖 1/8」，10.1 D20/D19）；换块大小按 `字节量 ÷ CHUNK_BYTES` 重算 |
-| `TRAINCACHE_PREFETCH_LOOKAHEAD` | 16（默认） | `agent/svc/assemble.go`；experiments/run_policy.py 注入 | Agent 持续预取窗口；对照三档统一 16（D21） |
-| `TRAINCACHE_PREFETCH_K` | 16（默认） | compare train-job 侧 ordersrc 消费窗口 | 训练侧消费深度，与 lookahead 是两个旋钮；对照三档统一 16（D21，与 agent 侧 `prefetchLookahead=16` 一致） |
-| `TRAINCACHE_EVICT_POLICY` | heat（默认）/lru/lfu（wtinylfu 档已撤档，10.1 D9） | env 注入，非法名拒启 | M4/M5 用；对照实验一律 heat |
-| `EPOCHS / STEPS_PER_EPOCH / BATCH / IMAGES_PER_TAR` | 3 / 400 / 32 / 1600 | `run_bench.py` 环境变量（与 `config.py` 的 D 轨口径对齐） | 对照训练形态：一个 epoch 恰好 80 秒（400 步 × 200ms 计算）按轨迹过一遍全量——每步读量 r 就是由这四个数决定的（§3 第一行的带宽分区）。**缺口**：L 档目标 `EPOCHS=1` 还没跟 `CAPACITY_RATIO` 联动，跑 L 档要显式给 |
+| `TRAINCACHE_WARMUP_K` | warm=128 / cold=0，由「缓存容量 ÷ 块大小」在代码里自动推 | `run_bench.py` 环境变量 → `traincache/up.sh` → WarmupTask `podDetails[0].k` | 预热块数。**预热量 = k × chunk-size × fanout**：8MiB × 128 = 1GiB 前缀，只覆盖数据集开头 1 GiB，不是整档（9.1 D20/D19）；JuiceFS/Fluid 的 warm 组预热整档数据集，两者不可直接比字节数。换块大小按 `字节量 ÷ CHUNK_BYTES` 重算 |
+| `TRAINCACHE_PREFETCH_LOOKAHEAD` | 16（默认） | `agent/svc/assemble.go`；`experiments/run_policy.py` 注入 | Agent 持续预取窗口；对照三档统一 16（9.1 D21） |
+| `TRAINCACHE_PREFETCH_K` | 16（默认） | compare train-job 侧 ordersrc 消费窗口 | 训练侧消费深度，与 lookahead 是两个旋钮；对照三档统一 16 |
+| `TRAINCACHE_EVICT_POLICY` | heat（默认）/ lru / lfu | env 注入，非法名拒绝启动 | 淘汰与预取实验用；对照实验一律 heat |
+| `EPOCHS / STEPS_PER_EPOCH / BATCH / IMAGES_PER_TAR` | 3 / 400 / 32 / 1600 | `run_bench.py` 环境变量（与 `config.py` 的 D 轨口径对齐）；`EPOCHS` 缺省按档位取 {S:3, M:1, L:1}，显式给出时优先 | 对照训练形态：一个 epoch = 400 步 × 200ms 计算 = 80 秒，按轨迹过一遍全量。每步读量 r 由这四个数决定 |
 | `COMPUTE_MS / READ_WORKERS / READ_QUEUE_DEPTH / READ_TIMEOUT_S` | 200 / 2 / 2 / 300 | `run_bench.py` 环境变量 → 下发进 measure 模板，不写死 | 每步计算量（决定 stall_ratio 有没有判别力，10.1 任务 6.15）与异步预取队列深度；队列只传字节数，常驻内存 O(1) |
-| `TRAINCACHE_DATASET_WHITELIST / OBJSTORE_BUCKET` | compare-data-8m / bench-b | `ensure_agent_config` 运行时 `kubectl set env` | agentd 服务哪些数据集/桶。正式口径已是 8MiB 快照 `compare-data-8m`；换 `DATASET_NAME`（如冒烟前缀）时白名单必须同步，否则 preheat 全失败（§7 第 13 条） |
-| seed | 20261015（D 轨）等 | `config.py`/COND | 数据与 shuffle 可复现的根 |
+| `TRAINCACHE_DATASET_WHITELIST / OBJSTORE_BUCKET` | compare-data-8m / bench-b | `ctrl_up.sh` 的 `ensure_agent_config` 运行时 `kubectl set env` | agentd 服务哪些数据集/桶。换 `DATASET_NAME`（如冒烟前缀）时白名单必须同步，否则 preheat 全失败（§7 第 13 条） |
+| seed | 20261015（D 轨）等 | `config.py` / COND | 数据与 shuffle 可复现的根 |
 
-一句话：调什么之前先在这张表里找到它，改表外没有的参数说明装置跑偏了。
+概述：调任何旋钮之前先在这张表里找到它；表外还有参数，说明装置跑偏了。
 
-## 4. 操作手册（给我自己：命令干了什么、进度怎么看）
+## 4. 操作规程
 
-### 4.1 从零拉起（新机器/集群重建后）
+### 4.1 从零拉起（新机器或集群重建后）
+
+`make bench-up` 一条命令拉起全链，各步幂等：
 
 ```bash
 cd bench
-make kind-up          # 建 kind 5 节点集群（镜像需已 docker 导入，见 §7）
-make k8s-up           # 装 MinIO（带 PVC）
-make data-up          # 生成四轨数据（首次约 1 小时；幂等，已存在跳过）
-make upload           # B 轨灌 MinIO + 公开读 policy（全量重传）
-make tc-up            # 挂限速 100mbit/20ms（需要 sudo，走 .sudo-pass）
-make bench-verify     # 两轮冷读对账 ≤10%，过了才配谈实验
+make bench-up
 ```
 
-查状态：`kubectl get nodes` / `kubectl -n minio get pods` / `tc -s qdisc`。
+它依次执行 `kind-up`（kind 5 节点集群，镜像需已导入，见 §7 第 1 条）、`k8s-up`（MinIO 带 PVC）、`data-up`（四轨数据，含 `track-d-data`）、`upload`（B 轨灌 MinIO）、`ctrl-up`（控制面与 agentd）、`tc-up`（默认 100mbit/20ms，需要 sudo，走 `.sudo-pass`）、`bench-verify`（两轮冷读相对差 ≤10%）。首次约 1 小时（估算值，主要花在造数），已存在的步骤自动跳过。
 
-### 4.2 只有 TrainCache 时怎么启动（不搭 juicefs/fluid）
+`ctrl-up` 的前置与保证：
 
-用途：装置自检、M4/M5 的淘汰与预取实验、traincache 组冒烟，以及「先把自家跑通」的日常迭代。
-不需要 Redis、不需要 helm、不需要 `make compare-all-up`——四个目录组里只起 `traincache` 一个。
+- 控制面镜像 manager/webhook/scheduler 0.8.0、agentd 0.8.3 必须已在 4 个 worker 的 containerd 中，`kind-up` 不预载。镜像名自带加速域名前缀（域名取 `/etc/docker/daemon.json` 的 `registry-mirrors`，去掉 `https://`）。缺失时 `ctrl_up.sh` 直接失败并打印 `docker pull` 与 `kind load docker-image ... --name traincache`，不在脚本内重试拉取。
+- webhook TLS Secret 缺失时自签生成，并把 CA 注入 MutatingWebhookConfiguration `traincache-pod-warmup` 的 caBundle。
+- 凭证 Secret `traincache-objstore` 用 `config.py` 的 MinIO 凭证创建，已存在则跳过。
+- worker 节点缺 `traincache.io/s3-access=true` 时自动补标签。
+- 幂等：`controller/deploy` 的内容哈希记在 namespace 注解 `traincache.io/deploy-hash`；哈希未变且四个工作负载都在时不执行 apply。连续两次 `make ctrl-up` 不触发滚动重启，Pod UID 不变。agentd 的 WHITELIST/BUCKET/CACHE_CAPACITY_BYTES 只在现值与期望不符时 `kubectl set env`。
+
+跑分进行中不要执行 `bench-up` 或 `ctrl-up`：首次部署或清单哈希变化时 apply 会触发一次 agentd 滚动重启，中断正在运行的任务。
+
+`make bench-status` 只读打印集群、节点、MinIO、tc qdisc、数据目录与最近产物。
+
+### 4.2 只起 TrainCache（不搭 juicefs/fluid）
+
+用途：装置自检、淘汰与预取实验、traincache 组冒烟。不需要 Redis、不需要 helm、不需要 `make compare-all-up`——四组对照装置（direct/juicefs/fluid/traincache）里只起 `traincache` 一个。
 
 ```bash
 cd bench
@@ -131,56 +170,96 @@ make -C compare compare-up GROUP=traincache  # 只起 TrainCache 组
 
 | 步 | 干什么 | 对应代码 | 出问题先查 |
 |---|---|---|---|
-| 1 | 给所有 worker 节点打 `traincache.io/s3-access=true`（本机 4 个；节点数是动态枚举的，不写死） | `label_s3_nodes` | NoAccessibleNodes（§7 第 12 条） |
-| 2 | 发布快照：`trainpublish -chunk-size 8388608` 把 `bench/data/track_b/tars/shard-*.tar` 切成 8MiB 块，上传成 `bench-b/dataset/compare-data-8m/`；`CURRENT` 已存在就跳过 | `publish_snapshot` | DataSet SnapshotNotFound（§7 第 11 条） |
-| 3 | 控制面：controller-manager / webhook / scheduler / agentd 都在则跳过，缺则 `kubectl apply -k controller/deploy` 并等 rollout | `ensure_control_plane` | 镜像不在 4 节点 containerd 里 → ImagePullBackOff（§7 第 1 条） |
-| 4 | 注入 agentd 白名单与缓存上限（`TRAINCACHE_DATASET_WHITELIST=compare-data-8m`、`TRAINCACHE_CACHE_CAPACITY_BYTES=1GiB`），建 DataSet/WarmupTask，最后挂 tc | `ensure_agent_config` | preheat 全失败（§7 第 13 条） |
+| 1 | 给所有 worker 节点打 `traincache.io/s3-access=true`（本机 4 个；节点数动态枚举，不写死） | `ctrl_up.sh` 的 `label_s3_nodes` | NoAccessibleNodes（§7 第 12 条） |
+| 2 | 发布快照：`trainpublish -chunk-size 8388608` 把 `~/tcd/bench/data/track_b/tars/shard-*.tar` 切成 8MiB 块，上传成 `bench-b/dataset/compare-data-8m/`；`CURRENT` 已存在就跳过 | `publish_snapshot` | DataSet SnapshotNotFound（§7 第 11 条） |
+| 3 | 控制面：与 `bench-up` 共用 `ctrl_up.sh`；清单哈希变化或四个工作负载缺失才 `kubectl apply -k controller/deploy`，随后等 rollout | `ctrl_up.sh` 的 `ensure_control_plane` | 镜像不在 4 节点 containerd 里 → ImagePullBackOff（§7 第 1 条） |
+| 4 | 注入 agentd 白名单与缓存上限（`TRAINCACHE_DATASET_WHITELIST=compare-data-8m`、`TRAINCACHE_CACHE_CAPACITY_BYTES=1GiB`），建 DataSet/WarmupTask，最后挂 tc | `ctrl_up.sh` 的 `ensure_agent_config` | preheat 全失败（§7 第 13 条） |
 
-单组跑一轮（cold 档 k=0，不等预热）：
+单跑一轮冒烟（cold 档 k=0，不等预热）：
 
 ```bash
+cd bench
 CAPACITY_RATIO=S DATASET_NAME=compare-data-8m \
-python3 bench/compare/run_bench.py --reps 1 --groups traincache-cold \
-        --out bench/results/compare/smoke-traincache.csv
+python3 compare/run_bench.py --reps 1 --groups traincache-cold \
+        --out compare/smoke-traincache.csv
 ```
 
-`--reps 1` 低于档位规定的 3 次，会打印一行 warn（冒烟无所谓，正式跑分按 §4.4 的次数表）；这条 warn 的合法值判定还没跟 D32 对齐，见 `bench/compare/resources.md` §7.4 第 35 条。
+`--out` 的相对路径按 `RESULTS_DIR` 展开，上面的 CSV 落在 `~/tcd/bench/results/compare/`。
 
-只有 TrainCache 时能报什么：makespan（启动/全程）、stall 序列、命中率对账、三笔字节成本、预热时长——绝对值都有；「比 Fluid 快多少」没有，缺基线不许编。冷读口径靠 `cold_reset()` 保证（四条清缓存命令都走 `sh -c`，glob 在容器内展开，由 `run_bench.py --selftest` 第 4 项断言）。
+`--reps 1` 低于 S 档规定的 3 次，会打印一行警告；冒烟无所谓，正式跑分按 §4.4 的次数表。
+
+只有 TrainCache 时能报的：makespan（启动/全程）、stall 序列、命中率对账、三笔字节成本、预热时长——绝对值都有。缺基线就不给跨对手的相对结论。冷读口径靠 `cold_reset()` 保证：四条清缓存命令都走 `sh -c`，glob 在节点容器内展开，删完再用 `ls -A` 逐个目录判空，非空或无法确认即终止本轮；`run_bench.py --selftest` 断言命令形态。
 
 ### 4.3 主实验（D 轨与淘汰/预取）
 
 ```bash
-make track-d-up                       # D 轨 10 epoch 连跑（宿主机直跑，不占集群）
-make bench COND=policy-lru REPS=7     # 跑一个实验点（N 次含冷态循环）
-make bench-list                       # 有哪些 COND
-python3 experiments/collect.py ...    # 离线汇总出 metrics.csv
-python3 experiments/plot.py           # 出图
+make -C bench track-d-up                       # D 轨 10 epoch 连跑（宿主机直跑，不占集群）
+make -C bench bench COND=policy-lru REPS=7     # 跑一个实验点（N 次含冷态循环）
+make -C bench bench-list                       # 有哪些 COND
+
+.venv/bin/pip install -r bench/requirements.txt   # 分析层依赖装进项目根 .venv
+.venv/bin/python bench/experiments/collect.py     # 离线汇总出 metrics.csv
+.venv/bin/python bench/experiments/plot.py        # 出图
 ```
 
-进度查看：`ls results/<run目录>` 逐轮增多；训练打点在 per-step jsonl，`tail -f` 即可。
+进度查看：`ls ~/tcd/bench/results/<run目录>` 逐轮增多；每步打点在 per-step jsonl，`tail -f` 即可。
 
 ### 4.4 五组对照跑分（七个组态）
 
+M7 产物是五格，一格 = 容量档位 × 带宽档：
+
+| 格 | tier | rate | 组态 | 每点次数 | 预计机时 |
+|---|---|---|---|---|---|
+| S-100 | S | 100mbit | 七组态 | 3 | 3.2 h |
+| S-300 | S | 300mbit + 抖动 | direct / fluid-cold / traincache-cold | 3 | 0.7 h |
+| S-1000 | S | 1000mbit | 七组态 | 3 | 1.6 h |
+| M-1000 | M | 1000mbit + 抖动 | direct / fluid-cold / traincache-cold | 3 | 0.7 h |
+| L-1000 | L | 1000mbit | traincache-cold / fluid-cold | 1 | 0.2 h |
+
+合计 62 run，约 6.3 h（9.1 §12.3）。
+
+一键跑五格，串行执行：
+
 ```bash
-cd bench/compare                    # 脚本在 repo 内；日志与产物经软链接落 ~/tcd
-python3 run_bench.py --groups direct --reps 1 --out ../results/compare/smoke.csv   # 先单组试跑
-
-# 正式跑分：一条命令 = 一个「档位 × 带宽档」格子（D31/D32）
-CAPACITY_RATIO=S TC_RATE=100mbit  python3 run_bench.py --reps 3 --out ../results/compare/S-100.csv
-CAPACITY_RATIO=S TC_RATE=1000mbit python3 run_bench.py --reps 3 --out ../results/compare/S-1000.csv
-# M/L 档必须显式列组：runner 还没接档位过滤，漏写 --groups 会把 warm 组一起拖跑
-CAPACITY_RATIO=M TC_RATE=1000mbit python3 run_bench.py --reps 3 \
-    --groups direct fluid-cold traincache-cold --out ../results/compare/M-1000.csv
-# L 档探点：EPOCHS=1 也没跟档位联动，要手工给
-CAPACITY_RATIO=L TC_RATE=1000mbit EPOCHS=1 python3 run_bench.py --reps 1 \
-    --groups traincache-cold fluid-cold --out ../results/compare/L-1000.csv
-
-make compare-up GROUP=juicefs-warm     # 只起某组环境（预热在 up 内完成并等待）
-make compare-down GROUP=...            # 拆该组
+cd bench
+make bench-m7           # 串行五格，约 6.3 h
+make bench-m7 FORCE=1   # 忽略已完成格，全量重跑
 ```
 
-跑中要盯的东西（每条都可核验，别信"应该快了"）：
+`flock -n /tmp/traincache-m7.lock` 保证同一时刻只有一个 M7 实例，五格不并行。某格 `summary.csv` 已存在且非 void 数据行数达到「组数 × 次数」时跳过（`agent_degraded` 与 `up_failed` 均记 void，不计入行数）；中断后重跑同一条命令，从第一个未完成的格续跑。任一格失败立即停止，已完成格产物保留。每格开始打印格名、组数与预计时长，结束打印该格 summary 路径。
+
+单格复跑时显式给出 `--rate`、`--groups` 与独立的 `--out`；`--out` 的相对路径按 `RESULTS_DIR` 展开：
+
+```bash
+cd bench/compare
+CAPACITY_RATIO=S python3 run_bench.py --tier S --rate 100mbit --reps 3 \
+  --groups direct juicefs-cold juicefs-warm fluid-cold fluid-warm traincache-cold traincache-warm \
+  --out m7/S-100/summary.csv
+CAPACITY_RATIO=S python3 run_bench.py --tier S --rate 300mbit --reps 3 \
+  --groups direct fluid-cold traincache-cold --out m7/S-300/summary.csv
+CAPACITY_RATIO=S python3 run_bench.py --tier S --rate 1000mbit --reps 3 \
+  --groups direct juicefs-cold juicefs-warm fluid-cold fluid-warm traincache-cold traincache-warm \
+  --out m7/S-1000/summary.csv
+CAPACITY_RATIO=M python3 run_bench.py --tier M --rate 1000mbit --reps 3 \
+  --groups direct fluid-cold traincache-cold --out m7/M-1000/summary.csv
+CAPACITY_RATIO=L python3 run_bench.py --tier L --rate 1000mbit --reps 1 \
+  --groups traincache-cold fluid-cold --out m7/L-1000/summary.csv
+
+make compare-up GROUP=juicefs-warm     # 只起某组环境（预热在 up 内完成并等待）
+make compare-down GROUP=juicefs-warm   # 拆该组
+```
+
+M/L 档不传 `--rate` 时 runner 直接退出，因为这两档只有 @1000；S@300 不传 `--groups` 时也退出，因为该格只允许三组。runner 不按 COND 反查组合，格子由命令行给全。
+
+每格产物落 `~/tcd/bench/results/m7/<格名>/`，含 `summary.csv` 与 `lock.json`。`summary.csv` 的 `rate` 列记本次生效的带宽档（如 `1000mbit`）；`warmup_basis` 列记预热字节口径（traincache-warm 为 `prefix_only(k*chunk*fanout)`，juicefs-warm/fluid-warm 为 `full_dataset(n_tars*shard_size)`，其余组留空）；`read_mode` 列只在 direct 组填 `http_get_read_segmented(8388608,total_bytes)`，表示按 8 MiB 分段读、只累加总字节。`lock.json` 的 `images_actual` 记本次实际使用的 training/juicefs 镜像引用（tag 级，docker 侧能取到 RepoDigest 时一并记入）；`docker_images` 保留 COND 冻结的 containerd manifest digest，两者不一致只记录、不阻止跑分；`direct_read_mode` 记 direct 组的读模式（transport/segment_bytes/counting）。
+
+`GROUP=` 接受七个组态名，冷热只切环境变量、共用同一目录。
+
+参跑组由档位自动过滤：S 档七组态，M 档 direct/fluid-cold/traincache-cold，L 档 traincache-cold/fluid-cold。每点次数取 `CAPACITY_TIER_REPS`（S=3、M=3、L=1，9.1 D32）；正式实验各格统一 3 次，不做符号翻转补测。L 档产物标 `exploratory`，不报 CI、不进正式表。
+
+rep 之间的复用规则：cold 组进门一次 `cold_reset` + `group_up`，rep 之间只清缓存（`rep_cold_reset`），收尾一次 `group_down`；warm 组每个 rep 重建，因为 WarmupTask 停在 Released，复用控制面会让「标 warm 实为冷读」。
+
+跑中要盯的东西，每条都可核验：
 
 ```bash
 kubectl get pods -A -l app=train-job -o wide     # 当前哪个组在测、落在哪个节点
@@ -191,51 +270,41 @@ kubectl -n traincache get pods -o wide | grep agentd   # 4 worker 各一且 Read
 tc -s qdisc show dev eth0                        # 确认档位真的是这一格要的值（含 burst）
 ```
 
-注意：**CSV 每组跑完重写一次**，组内中断只丢当组；日志在 `bench/compare/logs/<组>.log`（软链接指向 `~/tcd/bench/compare/logs/`）。
+CSV 每组跑完重写一次，组内中断只丢当组；日志在 `~/tcd/bench/compare/logs/<组>.log`。
 
-### 4.5 拆除
+对照层的冷态和主实验不同：`run_bench.py` 自带的 `cold_reset()` 删 Pod，再在四个 kind 节点上清 `/var/cache/jfs`、`/tmp/juicefs-cache`、`/var/cache/traincache/blocks`、`/var/cache/traincache/quarantine`，删完判空，**不重启 MinIO**，所以 tc 不会丢；hostPath 缓存不随 Pod 删除消失，必须显式清，目录不存在的组视为已空。traincache 组每个 rep 在删掉上一个测量 Pod 之后、创建新测量 Pod 之前复位 agentd：把 `traincache-agentd` 缩到 0（DaemonSet 没有 scale 子资源，代码改用不匹配的 `nodeSelector` 挂起）、等 Pod 全消失，逐节点清空 `/run/traincache/orders`、`/var/cache/traincache/blocks`、`/var/cache/traincache/quarantine` 并判空，再缩回 1，等 4 个 Pod Ready、`traincache_agent_degraded=0`、fetch 计数两次采样不增长（确认无 reader），且每个 Pod 内 `/run/traincache/agent.sock` 存在（滚动重启时旧 Pod 的 cleanup 会 unlink 共享 socket）；warm 组的复位排在 `up.sh` 预热之前，预热写入的块不被清掉，任一步失败该 rep 记 void/up_failed 并停止该组。复位避免控制面重启后 agentd 回放 `/run/traincache/orders` 下的历史 ring，也避免 `cold_reset()` 清块缓存时 agentd 仍在写、残留 `tmp-*` 让它退出。测量期间每 5s 采一次所有节点的 `traincache_agent_degraded`，测量 Pod 结束即停采样；出现 1 记 void(reason=`agent_degraded`)，产物新增 `agent_degraded_max` 列（0/1，其他组留空）。一旦手工重启 MinIO，必须重挂 tc，否则整轮跑在无限速链路上（§7 第 3 条）。
 
-```bash
-make compare-down          # 或 make compare-all-down（拆尽四组）
-make bench-down / tc-down  # 主实验拆限速；集群与数据保留
-```
+概述：M7 用 `make bench-m7` 串行跑五格，单格复跑用本节的显式命令，进度看 kubectl 实况。
 
-一句话：拉起跑验用 4.1，只跑自家按 4.2，日常实验按轨选 4.3/4.4，进度永远用 kubectl 实况说话。
+## 5. 一键入口
 
-## 5. 一键化规程（目标形态，状态标注）
+`bench-*` 目标在 `bench/` 下执行；`compare-*` 目标在 `bench/compare/` 下执行。
 
-| 动作 | 命令 | 干什么 | 状态 |
-|------|------|--------|------|
-| 体检 | `make bench-doctor` | 一次跑完 §5.1 清单，输出逐项绿/红 | 📝 待建 |
-| 冷态 | `make bench-cold` | 主实验用：drop_caches + 重启 MinIO + 重挂 tc。对照层不用它——`run_bench.py` 自带 `cold_reset()`，只删 Pod + 清三个缓存目录，**不重启 MinIO**（所以 tc 不会丢；一旦手工重启 MinIO，必须重挂 tc，否则整轮跑在无限速链路上） | ✅ |
-| 开始 | `make bench COND=` / `run_bench.py` | 见 §4 | ✅ |
-| 清场 | `make compare-all-down` + cold_reset | 组间零残留 | ✅ |
-| 出指标 | `collect.py`（主）/ `--out` CSV（对照） | 统一四指标 + 档位 + 预热时长列 | ✅（tier/预热列 📝随 M6） |
-| 出图 | `python3 experiments/plot.py` | 五张图，负收益区域照画 | ✅ |
-| 存档 | `make bench-save` | 镜像 docker save + MinIO 对象清单快照 + CRD/配置 dump + 产物打包 | 📝 待建 |
-| 恢复 | `make bench-restore` | 从存档反向重建（kind 对时钟回拨等很脆，见 §7 第 8 条，恢复能力是刚需） | 📝 待建 |
+| 动作 | 命令 | 说明 |
+|------|------|------|
+| 全链拉起 | `make bench-up` | kind → k8s → 四轨数据 → 上传 → 控制面与 agentd → tc → 冷读验证，全幂等 |
+| 只起/校验控制面 | `make ctrl-up` | 同上表 §4.1 的 `ctrl-up`；清单未变时不 apply，不滚动重启 |
+| 只停控制面 | `make ctrl-down` | 只删控制面与 Secret，保留集群与数据；`bench-down-full` 先拆 tc 再走这一步 |
+| 全拆 | `make bench-down-full` | 先拆 tc，再删控制面 Deployment/DS/CRD/Secret；kind 集群、namespace 与 `~/tcd` 数据保留 |
+| 新版本自跑 | `make bench-quick TIER=S RATE=1000 REPS=3 [TAG=...]` | 只跑 `traincache-cold` + `traincache-warm`，产物见 §9.1 |
+| 查看状态 | `make bench-status` | 只读：集群、节点、MinIO、tc qdisc、数据目录、最近产物 |
+| 体检 | `make bench-doctor` | 只读逐项 PASS/FAIL/WARN；有 FAIL 时退出 1 |
+| 冷态 | `make bench-cold` | drop_caches + 重启 MinIO + 重挂 tc；对照层用 `run_bench.py` 的 `cold_reset()` |
+| 冷读验证 | `make bench-verify` | 两轮冷读相对差 ≤10%；快检加 `QUICK=--quick`，`QUICK` 原样传给脚本 |
+| 拆限速 | `make bench-down` | 只拆 tc，集群与数据保留；只拆限速不打印收尾提示用 `make tc-down` |
+| 起对照组 | `make compare-up GROUP=<组态>` | 七个组态名任选，冷热只切环境变量；全起用 `make compare-all-up` |
+| 拆对照组 | `make compare-down GROUP=<组态>` | 不带 `GROUP` 等价 `compare-all-down`，拆尽四组 |
 
-### 5.1 doctor 检查清单（待建脚本的验收单）
+单点实验与出图见 §4.3。
 
-1. kind 集群 5 节点 Ready；`kubectl version` 与镜像匹配（§7 第 9 条）。
-2. 训练镜像 `python:3.12-alpine`、控制面镜像（REGISTRY=dgl3i4ucowsgvvdwty.xuanyuan.run TAG=0.8.0）已在 4 节点 containerd 里。
-3. MinIO 桶 `bench-b`：32 个 `shard-*.tar` 在位、可读；`compare-data/`（旧 64MiB 快照）与 `compare-data-8m/`（新）在位。
-4. agentd DaemonSet 4/4 Ready，`TRAINCACHE_CACHE_CAPACITY_BYTES` 已注入，`traincache_agent_degraded` 指标为 0。
-5. 4 个 worker 均有 `traincache.io/s3-access=true` 标签。
-6. tc qdisc 在位且档位 = COND 声明值。
-7. `df` 磁盘余量 ≥ 实验预算（L 档全量口径约需 100GiB，预算上限 200GiB，10.1 Q11）。
-8. `/var/cache/traincache/blocks`、`/var/cache/jfs`、`/runtime-mnt` 三个缓存目录已按规程清空（或声明本轮不清）。
+## 6. 每组冒烟判据
 
-一句话：凡是"手动记得的下一步"，都要变成 doctor/save/restore 的脚本行。
-
-## 6. 每组独立 smoke（M6 验收执行体）
-
-接口定义（📝 待建）：`make compare-smoke GROUP=<组名>`，内部四步：起该组 → 低负载一轮（`N_TARS=2 EPOCHS=1 STEPS_PER_EPOCH=4`）→ 判定 → 拆该组清缓存。任何装置改动后，先跑受影响组的 smoke 再谈正式实验。
+冒烟 = 起该组 → 低负载一轮 → 判定 → 拆该组清缓存。低负载口径是 `N_TARS=2 EPOCHS=1 STEPS_PER_EPOCH=4`。任何装置改动后，先跑受影响组的冒烟再谈正式实验。
 
 | 组 | 通过判据 |
 |----|----------|
 | direct | train-job Running 到完成；四指标 CSV 行齐全；stall>0（限速生效） |
-| juicefs-cold | 同上 + 缓存目录 `--cache-size` 生效（跑前 `du /var/cache/jfs` = 0） |
+| juicefs-cold | 同上 + 缓存目录 `--cache-size` 生效（跑前四条缓存路径均为空，`cold_reset()` 判空通过） |
 | juicefs-warm | up.sh 内 warmup 完成才创建 train-job；`du` 缓存非 0；startup 不含 warmup 时间 |
 | fluid-cold / fluid-warm | PVC 挂载成功；warm 组 DataLoad 完成事件晚于 up、早于 t_submit |
 | traincache-cold | k=0：WarmupTask 不创建，gate 立即放行，train-job 正常跑完 |
@@ -243,117 +312,102 @@ make bench-down / tc-down  # 主实验拆限速；集群与数据保留
 
 全部组共判：`kubectl get events` 无 ImagePullBackOff/CrashLoop；产物含 run ID 并能关联 COND。
 
-一句话：smoke 是装置的体温计——低负载、快出结果、只回答"这组还能不能用"。
+概述：冒烟是装置的体温计——低负载、快出结果、只回答"这组还能不能用"。
 
 ## 7. 故障速查表（现象 → 根因 → 处置；都是真实踩过的，勿回退）
 
 | # | 现象 | 根因 | 处置 |
 |---|------|------|------|
-| 1 | 训练 Pod ImagePullBackOff | 离线环境拉不到 docker hub；k8s/containerd 不读 daemon.json 的镜像加速 | 镜像 `image:` 必须写加速域名全称；或 docker 拉好 `kind load image-archive` 导入；训练镜像用 `python:3.12-alpine`（slim 拉不到） |
+| 1 | 训练 Pod ImagePullBackOff | 离线环境拉不到 docker hub；k8s/containerd 不读 daemon.json 的镜像加速 | 镜像 `image:` 必须写加速域名全称；或 docker 拉好后 `kind load image-archive` 导入；训练镜像用 `python:3.12-alpine`（slim 拉不到） |
 | 2 | 宿主机访问 MinIO NodePort 不通 | kind 不映射 nodePort 到宿主机 | 走节点 InternalIP（`http://172.19.0.x:30090`），upload 脚本已自动探测 |
-| 3 | 冷读结果忽快忽慢 | MinIO/源站重启后 tc qdisc 与匿名读 policy 都丢 | 冷态规程自动重挂；不复挂 = 跑在无限速链路，该轮作废 |
-| 4 | crictl 找不到 MinIO netns | 节点残留 NotReady 僵尸 sandbox（worker2 实测有一条） | `crictl pods --state Ready --name <pod> -q` 过滤，tc_apply 已改 |
-| 5 | VM 重启后 fluid mount "not formatted" + redis format FATAL | redis 无 AOF，元数据没了；MinIO 前缀非空拒绝重新 format | 不是代码 bug：`kubectl delete ns fluid` 后重 up（down.sh 会清派生前缀）；kubeadm 证书过期先 `kubeadm certs renew all` |
-| 6 | 全 API 401、Service 不通 | 宿主机时钟回拨，SA token nbf 在未来 | 重启 Deployment 重签；坏透就 `kind delete cluster && make bench-up`（数据在宿主机，重传 8 秒） |
-| 7 | fluid-cold 等组跑出裸 Pod/NameError | 组名精确匹配漏改（7 组名 vs 4 目录） | run_bench 已改 startswith 分流；改组名时全局搜 `== "fluid"` 这类精确比较 |
-| 8 | juicefs 缓存 1GiB 限制从不生效 | `--cache-size` 单位是 **MiB**，装置曾注释成 KiB 配了 1048576（=1TiB） | 配 1024；见 §3；历史 juicefs 结果因此作废过一轮 |
-| 9 | warmup 了但测量组读不到缓存 | `warm.sh` 暖的是 jfs-mount 的 emptyDir，测量 Pod 用另一个 emptyDir | 缓存改 hostPath `/var/cache/jfs`；预热挪进 up.sh（D23/D24） |
-| 10 | measure 的 startup 712 秒异常 | Pod 内 warmup 耗时被计进 t_submit→首步 | 预热外移 group_up 后特判 `TRAINCACHE_JOB_CREATED_AT="0"` 已删 |
-| 11 | DataSet SnapshotNotFound | 快照没发布过（CURRENT 缺失） | up.sh `publish_snapshot` 调 trainpublish；8MiB 块要发布到 `compare-data-8m`（Q12） |
-| 12 | NoAccessibleNodes | worker 缺 s3-access 标签 | `label_s3_nodes` 自动打；重建集群后要重跑 |
-| 13 | preheat 全失败 | agentd WHITELIST/BUCKET 与实际数据集/桶不匹配 | `ensure_agent_config` 运行时 `kubectl set env`；换快照名记得同步改（§3） |
-| 14 | shard 数量算错、读一半没数据 | 按 128MB 假设算 count，实际 ~264MB | 从对象 stat 读实际大小 |
+| 3 | 冷读结果忽快忽慢 | MinIO/源站重启后 tc qdisc 与匿名读 policy 都丢 | 冷态规程自动重挂；不复挂 = 跑在无限速链路上，该轮作废 |
+| 4 | crictl 找不到 MinIO netns | 节点残留 NotReady 僵尸 sandbox（worker2 实测有一条） | `crictl pods --state Ready --name <pod> -q` 过滤，`tc_apply` 已改 |
+| 5 | VM 重启后 fluid mount "not formatted" + redis format FATAL | redis 无 AOF，元数据没了；MinIO 前缀非空，拒绝重新 format | 不是代码 bug：`kubectl delete ns fluid` 后重 up（down.sh 会清派生前缀）；kubeadm 证书过期先 `kubeadm certs renew all` |
+| 6 | 全 API 401、Service 不通 | 宿主机时钟回拨，SA token 的 nbf 在未来 | 重启 Deployment 重签；坏透就 `cd bench && kind delete cluster && make bench-up`（数据在宿主机，重传 8 秒） |
+| 7 | fluid-cold 等组跑出裸 Pod / NameError | 组名精确匹配漏改（7 组名 vs 4 目录） | `run_bench` 已改 startswith 分流；改组名时全局搜 `== "fluid"` 这类精确比较 |
+| 8 | juicefs 缓存 1GiB 限制从不生效 | `--cache-size` 单位是 **MiB**，装置曾注释成 KiB、配了 1048576（=1TiB） | 配 1024；见 §3；历史 juicefs 结果因此作废过一轮 |
+| 9 | warmup 了但测量组读不到缓存 | `warm.sh` 暖的是 jfs-mount 的 emptyDir，测量 Pod 用的是另一个 emptyDir | 缓存改 hostPath `/var/cache/jfs`；预热挪进 up.sh（9.1 D23/D24） |
+| 10 | measure 的 startup 712 秒异常 | Pod 内 warmup 耗时被计进 t_submit→首步 | 预热外移到 group_up，并删掉 `TRAINCACHE_JOB_CREATED_AT="0"` 特判 |
+| 11 | DataSet SnapshotNotFound | 快照没发布过（`CURRENT` 缺失） | up.sh 的 `publish_snapshot` 调 trainpublish；8MiB 块发布到 `compare-data-8m`（9.1 Q12） |
+| 12 | NoAccessibleNodes | worker 缺 s3-access 标签 | `ctrl_up.sh` 的 `label_s3_nodes` 自动打；重建集群后要重跑 |
+| 13 | preheat 全失败 | agentd 的 WHITELIST/BUCKET 与实际数据集/桶不匹配 | `ctrl_up.sh` 的 `ensure_agent_config` 运行时 `kubectl set env`；换快照名要同步改（§3） |
+| 14 | shard 数量算错、读一半没数据 | 按 128MB 假设算 count，实际约 264MB | 从对象 stat 读实际大小 |
 | 15 | pkill 把 shell 自己杀了（exit 143） | `pkill -f 'kubectl'` 匹配到自己的命令行 | 用 `pgrep -f 'run_bench\.py'` 精确找人再杀 |
-| 16 | drop_caches/tc 需要 root 卡住 | sudo 交互不可用 | `bench/.sudo-pass`（gitignore、600 权限）；文档不展开内容 |
-| 17 | python 依赖炸（boto3 找不到） | 系统 python3 是 3.14，`bench/.venv` 的 site-packages 是 3.12，且 `.venv/bin/python` 链到系统 3.14 已不可执行 | 装置统一 `/usr/bin/python3`（`bench/Makefile`、`bench/compare/Makefile` 的 `PY`），boto3 1.43.x 经 PYTHONPATH 指 `bench/.venv/lib/python3.12/site-packages`；本机没有 `/usr/bin/python3.12`，别照抄旧文档写它 |
-| 18 | `docker update --memory 0` 没恢复 | 本机 docker 把 0 当"不变更" | 恢复用 128GiB 等效大值，记录在 env json `restore_caveat` |
-| 19 | D 轨 env 留痕里的 `loader.cmd` 不可复现 | `track_d_up.sh` L240 把解释器硬写成 `/usr/bin/python3.12`，实际跑的是 `$PY=/usr/bin/python3`（L33、L329） | 留痕是失真值，复现按 `$PY scripts/bench_track_d.py`；接线修复待办见 `bench/compare/resources.md` §7.4 第 34 条 |
-| 20 | D 轨（`make track-d-up`）当前跑不起来 | `bench_track_d.py` 要 numpy/torch/webdataset，探针期装在 python3.12 的用户级 site-packages（docs/3 §环境要点）；本机已没有 3.12，`~/.local/lib/python3.12` 也没了 | 重启 D 轨前先重建解释器+依赖（3.12 或 3.14 都行，装完把 `track_d_up.sh` L240 的硬编码一并改成 `$PY`）。对照层 `run_bench.py` 只用标准库，不受影响 |
+| 16 | drop_caches / tc 需要 root 卡住 | sudo 交互不可用 | `bench/.sudo-pass`（gitignore、600 权限）；文档不展开内容 |
+| 17 | python 依赖找不到（boto3/numpy 等） | 直接调系统 `python3` 时没有加载项目根 `.venv` 的 site-packages | 统一用 Makefile 入口（`PY`/`PYTHONPATH` 已在其中设定）；分析层依赖按 `bench/requirements.txt` 装入项目根 `.venv`，上传所需的 boto3 由 `make upload` 安装 |
+| 18 | `docker update --memory 0` 没恢复 | 本机 docker 把 0 当"不变更" | 恢复用 128GiB 等效大值，记录在 env json 的 `restore_caveat` |
+| 19 | D 轨（`make -C bench track-d-up`）跑不起来 | `bench_track_d.py` 要 numpy/torch/webdataset；`bench/requirements.txt` 只锁 numpy | 装齐三项：numpy 按 requirements，torch/webdataset 用用户级安装或训练镜像；脚本统一用 `$PY`（缺省 `/usr/bin/python3`），代码里已无硬编码解释器 |
 
-一句话：这张表是装置的全部病史，动环境之前先来对一遍。
+概述：这张表是装置的全部病史，动环境之前先来对一遍。
 
 ## 8. 禁改清单（清理磁盘、重置实验时一律不动）
 
-1. MinIO `bench-b/shard-*.tar`——五组共同源数据（32 个 ~8GiB），删了等于重造数据。
-2. 旧 `bench-b/compare-data/`（64MiB 块快照）——保留供历史产物复现（10.1 Q12）。
+1. MinIO `bench-b/shard-*.tar`——五组共同源数据，删了等于重造数据。
+2. 旧 `bench-b/compare-data/`（64MiB 块快照）——保留供历史产物复现（9.1 Q12）。
 3. kind 集群本体与 MinIO PVC——清理脚本不许 `kind delete`。
-4. `bench/data`、`probes/data`、`tmp_shards`——repo 内这三个路径是**软链接**，实体在 `~/tcd/`（见 §9.0）。四轨数据种子可再生成但重生成很贵，探针 tar 与 shard 是实测原料，一律不许删。动软链只许 `rm -f 路径`：不带尾斜杠、绝不加 `-r`——`rm -rf bench/data/` 会穿过软链把 14G 数据删干净。
-5. `results/`、`perf_results/` 已归档产物——只追加不覆盖不删。新产物按 §9.0 落 `~/tcd/`，repo 内 `bench/` 路径只存脚本与清单。
-6. `bench/.sudo-pass` 内容——任何文档、日志、回复里不出现。
+4. `~/tcd/bench/data/`、`~/tcd/probes/data/`——四轨数据与探针 tar 的实体（§9），一律不许删。四轨数据种子可再生成，但重生成很贵。
+5. `~/tcd/bench/results/`、`~/tcd/bench/perf_results/` 的已归档产物——只追加，不覆盖，不删。
+6. `bench/.sudo-pass` 内容——任何文档、日志、回复里都不出现。
+7. `bench-down-full` 只删控制面资源，不执行 `kind delete`（第 3 条），不碰 `~/tcd`（第 4 条）；namespace `traincache` 与工作负载 ConfigMap 保留。
 
-## 9. 产物目录规范（一键出指标/出图的读取约定）
+概述：这七条被破坏的代价是重造数据或泄漏凭证，比省下的磁盘贵得多。
 
-### 9.0 数据与产物的物理落点（硬性）
+## 9. 数据与产物的物理落点（硬性）
 
-一句话：**数据与产物一律实体落在 `~/tcd/`，repo 内只存脚本与清单，原位留同名软链接指回去。**
-
-目录分三层。IDE 与 Qoder 的工作根只允许指到「代码层」，不能指到容器层。
+数据与产物一律实体落在 `~/tcd/`（＝`~/Project/TrainCache/traincachedata`），repo 内只存脚本与清单。`bench/config.py` 的 `DATA_ROOT` 直接指向数据层，repo 内没有同名的数据、结果、日志目录。目录分三层，IDE 与 Qoder 的工作根只允许指到代码层，不能指到容器层：
 
 | 层 | 路径 | 装什么 | 实测规模 |
 |---|---|---|---|
 | 容器层 | `~/Project/TrainCache/` | 空壳，只用来隔出上下两层 | — |
 | 代码层（repo） | `~/Project/TrainCache/traincache/`＝`~/tc` | Go/Python 源码、脚本、清单、docs、`.git` | 14,770 条 / 200M |
-| 数据层 | `~/Project/TrainCache/traincachedata/`＝`~/tcd` | 四轨数据、探针 tar、shard 产物、运行结果 | 1,000,211 条 / 24G |
+| 数据层 | `~/Project/TrainCache/traincachedata/`＝`~/tcd` | 四轨数据、探针 tar、运行结果 | 1,000,211 条 / 24G |
 
-repo 内的软链接一览（新增数据按同样规矩办：数据层建同名目录 → repo 内 `ln -s` 相对路径）：
+数据层按 repo 模块一一对应：
 
-| repo 路径 | 指向（相对） | 实体大小 |
-|---|---|---|
-| `bench/data` | `../../traincachedata/bench/data` | 1,000,157 条 / 14G |
-| `probes/data` | `../../traincachedata/probes/data` | 18 条 / 2.0G |
-| `tmp_shards` | `../traincachedata/tmp_shards` | 32 个 tar / 7.9G |
-| `perf_results`（repo 根） | `../traincachedata/perf_results` | summary.csv、figures/、rerun.log |
-| `bench/results` | `../../traincachedata/results` | 主实验与对照产物树（`run_bench.py` 的默认 `--out` 就在这里） |
-| `bench/logs` | `../../traincachedata/bench/logs` | 主实验脚本日志 |
-| `bench/compare/logs` | `../../../traincachedata/bench/compare/logs` | 四个目录组的 up/down 日志（`_common.sh` 的 `LOG_DIR`） |
+| 数据层路径 | 装什么 |
+|---|---|
+| `~/tcd/bench/data/` | 四轨数据：A 小文件、B tar 分片、C 清单、D shard |
+| `~/tcd/bench/results/` | 主实验与对照产物树，`run_bench.py` 的 `--out` 相对路径以它为根 |
+| `~/tcd/bench/results/quick/<run_id>/` | `bench-quick` 产物 |
+| `~/tcd/bench/logs/` | 主实验脚本日志 |
+| `~/tcd/bench/compare/logs/` | 四个目录组的 up/down 与跑分日志 |
+| `~/tcd/bench/perf_results/` | `summary.csv`、`figures/`、`rerun.log` |
+| `~/tcd/probes/data/` | 探针数据与 tar |
 
-为什么要这么切：inotify 配额是按 UID 算的（本机 `max_user_watches=524288`），IDE 的文件监听跟着工作根走。数据留在 repo 内时，百万级文件把整个 UID 的 watch 预算吃光，任何程序调 `inotify_add_watch` 都返回 `No space left on device`——连截图工具改配置都失败，报的却是「无法捕获屏幕」。搬走之后实测整个 UID 只用 10,154 条（1.9%），`max_user_watches` 一个没改。
+为什么把数据移出 repo：inotify 配额按 UID 计算（本机 `max_user_watches=524288`），IDE 的文件监听跟着工作根走。百万级数据文件留在 repo 内会把整个 UID 的 watch 预算吃光，之后任何程序调 `inotify_add_watch` 都返回 `No space left on device`。搬到数据层后实测整个 UID 只用 10,154 条（1.9%），配额未改。
 
-两个事实要说准，别记错：
-
-1. 软链接**会被**监听器跟随，数据层 113 个目录里 108 个仍在 watch 集合内。省下预算的是「百万个文件不再逐个加 watch」，实测数据文件被监听数 0/1,000,098。
-2. 因此别指望 `~/tcd` 完全不被扫，它只是从百万级降到百级。
-
-`.gitignore` 的坑：软链接是 git 的对象类型 `120000`（文件），带尾斜杠的目录型模式匹配不到它。所以每个数据路径要写两行——`probes/data/` 之外还得有 `probes/data`，否则 7.9G 的 `tmp_shards` 会以 `??` 出现在 `git status` 里，一次 `git add -A` 就进库。
-
-`venv/`、`bench/.venv/` **不搬**：它们是环境不是数据，`pip`/`uv` 的 `pyvenv.cfg` 与 IDE 解释器配置记的是绝对路径，搬出去只会让项目变复杂。监听成本实测可忽略——两个环境各贡献 1,121 个目录，合计占当前预算的零头。
+`.venv/` 不搬：它是环境不是数据，`pip`/`uv` 的 `pyvenv.cfg` 与 IDE 解释器配置记的是绝对路径。监听成本可忽略。
 
 ### 9.1 产物结构
 
 ```text
-~/tcd/                          # 软链接，实际落 ~/Project/TrainCache/traincachedata
-├── results/                    # repo 内 bench/results 是指向它的软链接
+~/tcd/bench/
+├── results/
 │   ├── cold-verify.txt              # 装置可信性
 │   ├── track_d/                     # D 轨：epochs_meta.json、per_step jsonl、verify_*.json、sweep_*/
-│   ├── policy/                      # M4/M5 淘汰实验运行目录
-│   ├── <COND 运行目录>/              # 主实验：run.json + metrics.csv + collect.json + env.lock
-│   └── compare/                     # 对照产物（现状只有 smoke/summary.csv）
-│       └── <tier S|M|L>/<组>/<repNN>/   # 📝 目标形态，runner 尚未实现
-│           ├── run.json             # t_submit/t_first_step/t_last_step、per-step、预热时长
-│           ├── metrics.csv          # 四指标 + tier + 预热时长列
-│           ├── env.lock             # 镜像 digest、tc 档位、seed、chunk-size、cache 配置
-│           └── status               # ok | void | exploratory（L 档探点标这个）
-├── perf_results/               # repo 根 perf_results 是软链接：summary.csv、figures/、rerun.log
-└── bench/compare/logs/         # 四个目录组的 up/down 日志（repo 内 bench/compare/logs 是软链接）
+│   ├── policy/                      # 淘汰实验运行目录
+│   ├── quick/<run_id>/              # bench-quick：summary.csv、run.json、lock.json、vs_last.md
+│   ├── <COND 运行目录>/              # 主实验：run.json + metrics.csv + collect.json + lock.json
+│   └── compare/                     # 对照产物：run_bench.py 的 --out CSV（一张扁表）
+├── logs/                            # 主实验脚本日志
+├── compare/logs/                    # 四个目录组的 up/down 与跑分日志
+└── perf_results/                    # summary.csv、figures/、rerun.log
 ```
 
-现状对账（2026-10-25 实地核过）：`run_bench.py` **只写一个扁平 CSV**（`--out`，缺省落 `bench/results/compare/summary.csv`），上面那棵 `<tier>/<组>/<repNN>/` 目录树、`env.lock`、`status` 文件都还没实现——档位与带宽档靠文件名表达（`S-100.csv`、`M-1000.csv`）。repo 内另有几棵历史产物树体量太小不动：`probes/results/` 2.6M/45 条、`controller/e2e/results/` 17M/60 条。今后新产物按本节约定直接写 `~/tcd/`。
+主实验每个 run 目录里，`run.json` 存 t_submit / 首末步 / per-step / 预热时长，`lock.json` 存镜像 digest 与 tc 档位，`metrics.csv` 存四个指标。对照 CSV 每行要能回答「哪一档、哪个组、第几次、哪个 COND」，档位与带宽档同时写进文件名（`S-100.csv`、`M-1000.csv`）。`void` 轮不进汇总（9.1 D14），`exploratory` 不进正式表。对照 CSV 的列定义以 `run_bench.py` 的 `write_csv()` 为准，主实验以 `collect.py`/`stats.py` 为准。
 
-约定：每行数据能回答「哪一档、哪个组、第几次、哪个 COND」四件事；`void` 轮不进汇总（10.1 D14）；`exploratory` 不进正式表。`--out` CSV 与 summary.csv 的列以 §2.3 collect/stats 实现为准。
+概述：产物结构是脚本、图、复跑三方共同的读取约定，路径与命名先定下来才有人读。
 
-一句话：产物结构先冻结，脚本才有的读、图才有的画、别人才能复跑。
+## 10. 实测基准（引用时连采法一起带）
 
-## 10. 不可再生的实测基准（引用时注意出处）
+- **100mbit/20ms 档冷读**：8GiB 两轮对账 710s / 710s，相对差 0.0%（理论传输 640s），产物 `~/tcd/bench/results/cold-verify.txt`。只有这一档有冷读对账记录；@300 与 @1000 跨档比较前先各跑一遍 `make bench-verify`，710s 不外推到别的档位。
+- **源站吞吐上限 C ≈ 674 MB/s**（9 次取中位数，区间 629~755，约 5.4 Gbit/s）。采法：与 train-job 同路径，worker 节点上的临时 Pod 经 `nodeIP:30090` 读 `mc cat bench-b/shard-*.tar`，全程无 tc。C 远高于 125MB/s，所以 @1000 档独立存在，带宽三档 {100, 300, 1000} 全部保留。
+- **指标灵敏度（D 轨两档扫点，各 1 epoch）**：吞吐 12.4→32.8MB/s、p90 wait 1.23→0.013s、mean stall 28.5%→10.5%，而 median stall 8.53%→8.38% 几乎不动——prefetch 把它吸收了。扫点看 mean/p90/吞吐，中位数只用来判形态（`~/tcd/bench/results/track_d/sweep_100m|300m/`）。
+- **D 轨 verify 主判据**：epoch 级 `median_stall` ≤10%。20 步窗口的均值被重尾毛刺主导（相邻 epoch 逐点相对差实测 37%~56%），所以窗口曲线只作 `report_only`。终验两轮相对差 1.6% / 0.5%。
+- **stall_ratio 口径**：measure 脚本用 `COMPUTE_MS=200ms` 控制计算量，读与计算并行（模拟异步 DataLoader：读到数据的同时在算上一步）。预取正常时 wait_s≈0 → stall_ratio≈0；预取失效时 wait_s 占满 step_s → stall_ratio≈1。串行"读完整片再算"的版本里读比算慢两个数量级，stall_ratio 恒≈1，没有判别力。
+- **traincache 组命中率口径**：用 agent `traincache_fetch_bytes_total` 的 run 窗口增量对账，回源字节计入 miss 侧，`hit_rate = (总读字节 − 回源字节) / 总读字节`。"磁盘上读到就算 hit"会虚高——agent 运行期会悄悄回源补块，测量体看不见。JuiceFS/Fluid 仍按 warm≈全命中、cold≈全回源近似（9.1 D25）。测量 Pod 经 hostPath `/run/tc-hook/agent.sock`（节点 `/run/traincache/agent.sock`）向 agent 上报读路径：缺块时发 `read_miss`（reason=`absent`）触发 P0 补块，读块成功后发 `advance` 推进消费游标；帧里的 path/chunk 必须与当前订单一致，发送失败静默忽略，不影响读数与字节账。
+- **对照冷读清缓存口径**：四条清理命令（JFS hostPath、Fluid tieredstore `/tmp/juicefs-cache`、traincache blocks、traincache quarantine）统一走 `sh -c`，让 glob 在节点容器内展开。`docker exec <node> rm -rf <path>/*` 不带 shell，通配符不展开，`rm` 收到字面路径、不存在又带 `-f`，会静默返回 0。删完逐个目录 `ls -A` 判空，有残留或 `docker exec` 无法执行就终止本轮，不带着上一轮缓存起跑。
+- **测量体计时与内存**：计时用 `time.perf_counter()`，wall clock 会被 NTP 校正拽出离群步，只保留跨进程对齐用的纪元时间戳。预读队列只传字节数，常驻内存 O(1)，实际持有的字节数由计数 `logical_resident_bytes` 跟踪、峰值进产物 `peak_resident_bytes` 列。hits/misses 自增加锁，多 reader 线程并发读改写会丢计数。读队列超时那一步的等待整段计入 wait_s，并把该轮标 `void`（reason=`read_queue_timeout`），不静默出数。
+- **`kindest/node:v1.28.15` 标签名不副实**：该标签实际指向 v1.37 镜像，版本以 `kubectl get nodes` 实测为准。
 
-- **默认档 100mbit/20ms**：冷读 8GiB 两轮对账 710s/710s、相对差 0.0%（理论传输 640s，`results/cold-verify.txt`）。
-- **只有 100mbit 这一档有实测基准**：D31 把带宽升成自变量后，@300 与 @1000 两档既没有冷读对账、也没有 MinIO 吞吐上限实测。正式跑分的第一格必须是 10.1 任务 7.7 的前置探针（无 tc 状态下测源站上限 C），再按 `make bench-verify` 逐档重验冷读 ≤10%，然后才谈跨档比较。100mbit 的 710s 不能外推到别的档位。
-- **指标灵敏度（D 轨两档扫点，各 1 epoch）**：吞吐 12.4→32.8MB/s、p90 wait 1.23→0.013s、mean stall 28.5%→10.5%，而 **median stall 8.53%→8.38% 几乎不动**（prefetch 吸收了）。结论：扫点用 mean/p90/吞吐，中位数只判形态（`results/track_d/sweep_100m|300m/`）。
-- **stall_ratio 改造（2026-10-24）**：旧版 measure 脚本是串行"读 256MB → matmul"，stall_ratio = wait_s/step_s 恒≈1（读比算慢两个数量级）。改造后用 COMPUTE_MS 参数（200ms）控制计算量，并将读与计算并行（模拟异步 DataLoader：读到数据的同时在算上一步），stall_ratio 现在有判别力——预取好时 wait_s≈0 → stall_ratio≈0，预取失效时 wait_s 占满 step_s → stall_ratio≈1。**所有旧对照 run_bench.py 产物的 stall_ratio 作废**，需按改造后口径重跑。
-- **命中率对账（2026-10-24）**：旧版 traincache 组的 hit_rate 是"磁盘上读到就算 hit"——agent 运行期悄悄回源补块，测量体并不知道，全部记成 hit 导致 hit_rate 虚高。改造后用 agent `traincache_fetch_bytes_total` 的 run 窗口增量做对账，回源字节单独计入 miss 侧；hit_rate = (总读字节 - 回源字节) / 总读字节。JuiceFS/Fluid 仍按 warm≈全命中 / cold≈全回源的模型近似（见 10.1 D25）。
-- **对照冷读口径修复（2026-10-24）**：`cold_reset` 清 traincache 块缓存的两条命令原写成 `docker exec <node> rm -rf /var/cache/traincache/blocks/*`——docker exec 不带 shell，通配符不展开，`rm` 收到的是字面路径，路径不存在又带 `-f`，静默返回 0。**块缓存从来没被清过，traincache-cold 实际带着上一轮缓存起跑**，五组对照的冷读口径不成立。现在四条清理命令（JFS hostPath、Fluid tieredstore、traincache blocks、traincache quarantine）统一走 `sh -c`，在节点容器内展开 glob。修复前的 traincache 冷读轮次一律作废，需重跑。
-- **测量体计时与内存修复（2026-10-24）**：预读队列原本存整片 bytes，常驻内存约 (队列深度+读线程+1)×256MiB ≈1.25GiB，逼近训练 Pod 的 1GiB memory request；现改成队列只传字节数，常驻内存 O(1)，真实加载器会持有的字节数改用纯计数 `logical_resident_bytes` 跟踪（峰值见产物 `peak_resident_bytes` 列），字节账逐字节不变。计时从 `time.time()` 换成 `time.perf_counter()`（wall clock 会被 NTP 校正拽出离群步），只保留跨进程对齐用的纪元时间戳。hits/misses 的自增加锁（多 reader 线程并发读改写会丢计数）。读队列超时那一步原先被 `continue` 跳过，step_total 分母偏小 → stall_ratio 偏乐观；现在整段等待计入 wait_s，并把该轮标 `void`（reason=`read_queue_timeout`），不静默出数。
-- **D 轨 verify 判据降级史**：20 步窗口均值被重尾毛刺主导（相邻 epoch 逐点相对差实测 37%~56%），主判据降为 epoch 级 `median_stall` ≤10%；窗口曲线标 `report_only`。首轮 FAIL（max_rel_diff 0.593）→降级后 PASS→终验 PASS（1.6%/0.5%）。
-- **kindest/node:v1.28.15 标签实指 v1.37 镜像**：版本以 `kubectl get nodes` 实测为准。
-- **遗留矛盾**：Makefile 注释 B 轨生成"约 25 分钟"vs 旧文档"~50 分钟"，待实测统一。
-
-一句话：这些数字是装置的地基，换环境后必须重测，不许直接引用。
+概述：这些数字是装置的地基，换环境后必须重测，不许直接引用。

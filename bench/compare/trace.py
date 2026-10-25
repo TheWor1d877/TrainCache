@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """对照组统一请求轨迹生成器(M6 任务 6.6)。
 
-五组对照(direct / juicefs-cold / juicefs-warm / fluid / traincache)读同一份
-trace.json,保证消费顺序(分片顺序、seed、每步样本数)逐位一致,否则 makespan
-与 stall 不可比。
+同一 track+档位的七个组态(direct / juicefs-cold / juicefs-warm / fluid-cold /
+fluid-warm / traincache-cold / traincache-warm)共用一份 trace.json,保证消费顺序
+(分片顺序、seed、每步样本数)逐位一致,否则 makespan 与 stall 不可比。
 
 轨迹语义与 bench/scripts/bench_track_d.py 的 epoch_perm()/stage_of() 逐字对齐
 (预注册 §4.1,cond.schema.md §2.4):
@@ -12,7 +12,7 @@ trace.json,保证消费顺序(分片顺序、seed、每步样本数)逐位一致
   * curriculum:全局置换 P=Random(seed).permutation(n),stage 取嵌套前缀
                P[:ceil(n*fraction)],stage 内顺序固定;stage 归属按 equal-thirds。
 
-口径(10.1 §8 任务 6.12/6.13,与 run_bench.py 和 D 轨统一,2026-10-24 定稿):
+口径(9.1 §8 任务 6.12/6.13,与 run_bench.py 和 D 轨统一,2026-10-24 定稿):
   * 数据量: 2GiB 级、8MiB 块(D20)、steps_per_epoch=400、batch=32;
   * B 轨 MinIO 分片 ~256MiB/份、images_per_tar=1600 → 每 epoch 恰 400×32/1600=8
     次整片读取,即 S 档(n_tars=8)每 epoch 恰好一轮全量消费;
@@ -39,7 +39,8 @@ trace.json,保证消费顺序(分片顺序、seed、每步样本数)逐位一致
 用法:
   python3 bench/compare/trace.py --n-tars 8 --seed 20261015 \
       --shuffle per-epoch --epochs 3 --batch 32 --steps-per-epoch 400 \
-      --images-per-tar 1600 --out bench/compare/traces/default.json
+      --images-per-tar 1600 \
+      --out bench/experiments/traces/track-compare-d-s8-per-epoch.json
   # M 档:--n-tars 32;L 档:--n-tars 128(其余参数不变)
   python3 bench/compare/trace.py --selftest
 
@@ -252,7 +253,7 @@ def selftest() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="对照组统一请求轨迹生成器(五组读同一份 trace.json)")
+        description="对照组统一请求轨迹生成器(同一 track+档位的七组态共用一份 trace.json)")
     ap.add_argument("--n-tars", type=int, default=8,
                     help="分片总数(默认 8=S 档 2GiB;M 档 32、L 档 128,6.13/D19)")
     ap.add_argument("--seed", type=int, default=20261015, help="轨迹种子(默认 20261015)")

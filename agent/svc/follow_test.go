@@ -1,6 +1,6 @@
 package svc
 
-// follow_test.go:R1(7.1 §5.9)快照跟随接线测试:周期内切换、失败保持旧映射并计
+// follow_test.go:R1(6.1 §5.9)快照跟随接线测试:周期内切换、失败保持旧映射并计
 // error、同一 dataset 只启动一个 Follow;R4 条件写探测与 R3 跳过指标。
 
 import (

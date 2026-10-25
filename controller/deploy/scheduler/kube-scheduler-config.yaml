@@ -1,5 +1,5 @@
 # KubeSchedulerConfiguration (v1) enabling TrainCacheScore on the score
-# extension point (docs/8.0 Scheduler, docs/8.1 §5.8, Q2(a)).
+# extension point (docs/7.0 Scheduler, docs/7.1 §5.8, Q2(a)).
 #
 # The profile name is traincache-scheduler so this scheduler can run beside the
 # stock kube-scheduler: training Pods opt in with spec.schedulerName. The

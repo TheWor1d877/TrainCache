@@ -1,6 +1,6 @@
 package scheduler
 
-// M12 log assertions for docs/8.1 design.md §9.3 (Scheduler 打分).
+// M12 log assertions for docs/7.1 design.md §9.3 (Scheduler 打分).
 
 import (
 	"bytes"

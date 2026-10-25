@@ -186,7 +186,7 @@ type readinessFact struct {
 // pollReadiness polls every submitted (pod,node) pair, updates the P×N
 // readiness table, the per-Pod assigned-node facts and rateHistory. It never
 // returns an error: RPC failures degrade individual pairs and must not stop
-// the other polls (docs/8.1 §7.3). The returned facts are this round's
+// the other polls (docs/7.1 §7.3). The returned facts are this round's
 // in-memory observations; applyAssignment uses them to refresh the per-Pod
 // details after GWAA has (re)assigned nodes.
 func (r *Reconciler) pollReadiness(

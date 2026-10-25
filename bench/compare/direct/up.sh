@@ -18,7 +18,7 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="direct"
 NS="direct"
-TRACE_FILE="${TRACE_FILE:-$COMPARE_ROOT/traces/default.json}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
 
 group_header "$GROUP"
 check_minio "$GROUP"
@@ -36,7 +36,7 @@ else
   log_group "$GROUP" "secret/minio-cred 已创建(来源:环境变量)"
 fi
 
-# ---- 3. trace ConfigMap(五组读同一份)----
+# ---- 3. trace ConfigMap(七组态共用一份)----
 if [ ! -f "$TRACE_FILE" ]; then
   log_group "$GROUP" "生成默认 trace.json → $TRACE_FILE"
   "$PY" "$COMPARE_ROOT/trace.py" --out "$TRACE_FILE"

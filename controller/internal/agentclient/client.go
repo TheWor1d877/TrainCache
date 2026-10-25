@@ -16,7 +16,7 @@ import (
 )
 
 // Error classes separate retryable transport failures from protocol errors
-// (docs/8.1 §5.9). Callers retry ErrAgentUnavailable with backoff and surface
+// (docs/7.1 §5.9). Callers retry ErrAgentUnavailable with backoff and surface
 // ErrPermanent as a status condition.
 var (
 	ErrAgentUnavailable = errors.New("agentclient: agent unavailable")
@@ -26,7 +26,7 @@ var (
 // DefaultRPCTimeout is the per-call timeout from CONTROLLER_AGENT_TIMEOUT.
 const DefaultRPCTimeout = 5 * time.Second
 
-// Pool is the frozen Agent client contract from docs/8.1 §5.9. Progress reuses
+// Pool is the frozen Agent client contract from docs/7.1 §5.9. Progress reuses
 // GetPreheatStatus; polling itself belongs to M5.
 type Pool interface {
 	Submit(ctx context.Context, node string, req *agentpb.SubmitPreheatRequest) error

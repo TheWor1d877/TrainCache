@@ -100,7 +100,7 @@ def load_mem(path: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", type=Path,
-                    default=Path(__file__).resolve().parents[1] / "results" / "probe_c")
+                    default=config.RESULTS_DIR / "probe_c")
     ap.add_argument("--tag", default="track_d_w4",
                     help="结果文件前缀(track_d_w4 → track_d_w4.json / mem_track_d_w4.jsonl)")
     args = ap.parse_args()

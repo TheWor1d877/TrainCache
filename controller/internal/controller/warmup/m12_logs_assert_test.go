@@ -1,6 +1,6 @@
 package warmup
 
-// M12 log assertions for docs/8.1 design.md §9.3. These tests drive the
+// M12 log assertions for docs/7.1 design.md §9.3. These tests drive the
 // production code paths and assert the structured JSON records (message +
 // required fields), so renaming a message or dropping a field fails here.
 

@@ -1,7 +1,7 @@
 // Package logging 提供日志字段脱敏，供 controller 与 agent 共用。
 //
 // 本包只依赖标准库，不依赖 core 其他包；core 其他包也不依赖本包。
-// 脱敏契约见 6.1 design §5.6 与 6.3 decisions D32。
+// 脱敏契约见 5.1 design §5.6 与 5.3 decisions D32。
 package logging
 
 import (

@@ -1,6 +1,6 @@
 // Package webhook implements the TrainCache Pod mutating admission handler.
 // It injects the scheduling gate and WarmupTask binding annotations defined by
-// docs/8.1 design.md §5.7/§6.3 (D8-D10). It never rejects a Pod.
+// docs/7.1 design.md §5.7/§6.3 (D8-D10). It never rejects a Pod.
 package webhook
 
 import (

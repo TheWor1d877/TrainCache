@@ -3,7 +3,7 @@
 #
 # 挂点依据(现勘/探针实证,勿回退):必须挂"出站方"容器 netns 内 eth0 的 egress;
 # docker0 桥主设备与宿主机 veth 的 host 侧 egress 均被实证否决(见
-# probes/probe_a/tc_setup.sh 顶部记录与 docs/5 §5)。
+# probes/probe_a/tc_setup.sh 顶部记录与 docs/4 §5)。
 #
 # 用法:tc_apply.sh <rate> <delay> [burst] [--target minio|source-d]
 #        [--jitter|--no-jitter] [--tier S|M|L] [--dry-run] [--self-test] [--help]
@@ -36,7 +36,8 @@
 # 镜像取本机已有的 TC_IMAGE,与第一步探针实测形态一致)。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3}"   # 与 Makefile/探针先例统一(config.py 仅标准库,无第三方依赖)
+REPO="$(cd "$ROOT/.." && pwd)"
+PY="${PY:-$REPO/.venv/bin/python}"   # 与 Makefile/探针先例统一(config.py 仅标准库,无第三方依赖)
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 JITTER_STDDEV="10ms"   # netem 抖动标准差固定 10ms(D31:抖动只在 BW/r∈[1,2] 的临界档启用)

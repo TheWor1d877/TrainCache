@@ -2,7 +2,7 @@
 #
 # Prerequisites maintained by the cluster operator (never by TrainCache):
 #   * Nodes that may host training Pods must carry the MANUAL label
-#     traincache.io/s3-access=true (docs/8.0, D30). No component writes it.
+#     traincache.io/s3-access=true (docs/7.0, D30). No component writes it.
 #   * The credential Secret traincache-objstore exists in this namespace
 #     (keys accessKey / secretKey). e2e/run.sh creates it from the MinIO root
 #     credentials.

@@ -1,6 +1,6 @@
 // Package storage assembles object stores from Secrets and validates published
 // snapshots. It is a thin read-only adapter over core/objectstore and
-// core/index (docs/8.1 design.md §5.10, decisions D22).
+// core/index (docs/7.1 design.md §5.10, decisions D22).
 package storage
 
 import (

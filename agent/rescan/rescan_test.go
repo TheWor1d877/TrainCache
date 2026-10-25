@@ -1,6 +1,6 @@
 package rescan
 
-// 本文件是 rescan 的白盒/集成测试(7.2 §5 任务 4 场景):契约路径用真实 core 组合
+// 本文件是 rescan 的白盒/集成测试(6.2 §5 任务 4 场景):契约路径用真实 core 组合
 // (objectstore.Mock + cas.Store + fetch.Fetcher + index.Catalog)验证;坏块注入 = 写块后
 // 翻转块文件数据区字节(cas.Open 报 ErrCorrupt);抽样与"全量阶段中间态"经非导出钩子
 // (pickSample)与可门控注入的 catalogFor 观测,断言不依赖 goroutine 调度顺序;等待一律

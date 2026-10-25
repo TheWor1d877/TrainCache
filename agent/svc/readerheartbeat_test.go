@@ -1,6 +1,6 @@
 package svc
 
-// readerheartbeat_test.go:R2(7.1 §5.10)读者心跳测试:心跳写出 claim;ctx 取消
+// readerheartbeat_test.go:R2(6.1 §5.10)读者心跳测试:心跳写出 claim;ctx 取消
 // 写出 Withdraw claim(空 SnapID + PreviousSnapID);心跳间隔下限。
 
 import (

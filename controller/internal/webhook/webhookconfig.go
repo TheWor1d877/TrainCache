@@ -13,7 +13,7 @@ const WebhookName = "pods.traincache.io"
 // NewMutatingWebhookConfiguration builds the MutatingWebhookConfiguration
 // paired with PodMutator. Deployment manifests render the returned object;
 // keeping it here makes the objectSelector/failurePolicy contract testable
-// without a manifest file (docs/8.1 §5.7, D9).
+// without a manifest file (docs/7.1 §5.7, D9).
 func NewMutatingWebhookConfiguration(name, namespace, serviceName string, caBundle []byte) *admissionregistrationv1.MutatingWebhookConfiguration {
 	ignore := admissionregistrationv1.Ignore
 	none := admissionregistrationv1.SideEffectClassNone

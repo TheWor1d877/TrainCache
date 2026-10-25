@@ -40,7 +40,9 @@ ORDERS_DIR="$(mktemp -d /tmp/tc-e2e-orders.XXXXXX)"
 LOG_FILE="$(mktemp /tmp/tc-e2e-agentd.XXXXXX.log)"
 AGENTD_PID=""
 
-RESULTS_DIR="$REPO_ROOT/agent/results"
+# 产物落运行时数据层(repo 同级 traincachedata,与 bench/config.py 同一口径)。
+DATA_ROOT="${TRAINCACHE_DATA_ROOT:-$(cd "$REPO_ROOT/.." && pwd)/traincachedata}"
+RESULTS_DIR="$DATA_ROOT/agent/results"
 mkdir -p "$RESULTS_DIR"
 RAW_LOG="$RESULTS_DIR/e2e-local.raw.log"
 
@@ -162,7 +164,7 @@ if [[ $MC_RC -ne 0 ]]; then fail "curl /metrics 失败 rc=$MC_RC"; else
   for f in "${FAMILIES[@]}"; do
     grep -q "^# HELP $f " <<<"$METRICS_OUT" || { MISS=$((MISS+1)); fail "缺 family $f"; }
   done
-  [[ $MISS -eq 0 ]] && ok "七线 23 个代表 family 全部出现(全量 25 见 agent/results)"
+  [[ $MISS -eq 0 ]] && ok "七线 23 个代表 family 全部出现(全量 25 见 $RESULTS_DIR)"
   TOTAL="$(grep -c '^# HELP traincache_' <<<"$METRICS_OUT")"
   ok "traincache_* family 总数=$TOTAL"
   grep -qE 'traincache_cache_hits_total\{[^}]*dataset=' <<<"$METRICS_OUT" \

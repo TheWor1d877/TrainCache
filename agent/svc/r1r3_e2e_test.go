@@ -1,6 +1,6 @@
 package svc
 
-// r1r3_e2e_test.go 是 R1/R2/R4(design 7.1 §5.9–§5.12)的永久回归:
+// r1r3_e2e_test.go 是 R1/R2/R4(design 6.1 §5.9–§5.12)的永久回归:
 //  - R1:CURRENT 更新后 Catalog 在刷新周期内切到新快照并加载映射;刷新失败保持
 //        旧映射且累加 index_refresh_total{result="error"};同一 dataset 只启动一个 Follow。
 //  - R2:周期心跳写出当前 snapID 的 claim;生命周期 ctx 取消后写出 Withdraw claim。

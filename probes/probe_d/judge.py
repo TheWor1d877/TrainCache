@@ -21,7 +21,10 @@ import time
 from pathlib import Path
 
 PROBE_DIR = Path(__file__).resolve().parent
-OUT_DIR = PROBE_DIR.parent / "results" / "probe_d"
+sys.path.insert(0, str(PROBE_DIR.parent))
+import config  # noqa: E402
+
+OUT_DIR = config.RESULTS_DIR / "probe_d"
 SCRIPTS = ["verify_wds.py", "verify_torch.py", "reconstruct.py"]
 POINT_ORDER = ["1_shard_order", "2_shard_permutation", "3_sample_shuffle",
                "4_shardshuffle_seed_channel", "5_random_sampler",

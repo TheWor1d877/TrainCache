@@ -1,6 +1,6 @@
 package svc
 
-// follow.go:R1 前缀感知快照跟随、R2 读者声明的装配侧接线(7.1 §5.9/§5.10)。
+// follow.go:R1 前缀感知快照跟随、R2 读者声明的装配侧接线(6.1 §5.9/§5.10)。
 // 冻结语义:每个 dataset 一个 Catalog.Follow(周期 = Config.IndexRefreshInterval),
 // prefixes 取该 dataset 最近订单的路径;快照切换经 OnSnapshotChange 立即声明,
 // 单轮失败经 OnSnapshotError 计错误并保持旧映射(由 core 保证)。
@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	// snapshotDeclareTimeout 是 OnSnapshotChange 触发 Declare 的上限(7.1 §5.10)。
+	// snapshotDeclareTimeout 是 OnSnapshotChange 触发 Declare 的上限(6.1 §5.10)。
 	snapshotDeclareTimeout = 5 * time.Second
-	// snapshotWithdrawTimeout 是进程退出时 Withdraw 的上限(7.1 §5.10)。
+	// snapshotWithdrawTimeout 是进程退出时 Withdraw 的上限(6.1 §5.10)。
 	snapshotWithdrawTimeout = 5 * time.Second
-	// conditionalWriteProbeTimeout 是装配期条件写探测上限(7.1 §5.12)。
+	// conditionalWriteProbeTimeout 是装配期条件写探测上限(6.1 §5.12)。
 	conditionalWriteProbeTimeout = 5 * time.Second
 	// heartbeatMinInterval 是读者心跳间隔下限(IndexRefreshInterval/2 至少 1s)。
 	heartbeatMinInterval = time.Second
@@ -65,11 +65,16 @@ func (m *PrefetchManager) startFollowLocked(b *datasetBundle) {
 	}()
 }
 
-// orderPrefixes 返回该 dataset 最近订单的路径前缀(去重、首次出现序);无订单返回空
-// 切片(Follow 据此走 RefreshManifest 轻量跟随)。b.mu 保护 lastOrder 的读写。
+// orderPrefixes 返回该 dataset 当前订单的路径前缀(去重、首次出现序);无订单返回空
+// 切片(Follow 据此走 RefreshManifest 轻量跟随)。ForOrder 写入的 followPrefixes 优先
+// 于 lastOrder(首轮 tick 早于 lastOrder 安装);未写入 hint 时回退 lastOrder。
+// b.mu 保护两者,临界区只做读取。
 func (b *datasetBundle) orderPrefixes() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.followPrefixes != nil {
+		return b.followPrefixes
+	}
 	if !b.hasOrder || len(b.lastOrder.Chunks) == 0 {
 		return []string{}
 	}

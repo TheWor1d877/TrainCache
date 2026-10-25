@@ -3,8 +3,9 @@
 # traincache 组 up:复用 TrainCache 装置(DataSet + WarmupTask + 训练 Job,M6 任务 6.5)。
 #
 # 复用现有装置:
-#   * 控制面(controller-manager/webhook/scheduler/agent DaemonSet)已由
-#     bench-up 部署在 traincache 命名空间;本脚本只校验其就绪,缺失时补部署。
+#   * 控制面(controller-manager/webhook/scheduler/agent DaemonSet)由
+#     scripts/ctrl_up.sh 部署,bench-up 与 traincache/up.sh 共用同一实现;
+#     重复执行不滚动重启。
 #   * 工作负载(DataSet/WarmupTask/Job)创建在 traincache 命名空间,
 #     复用 controller/e2e/manifests 的 CR 结构,数据指向共享 MinIO bucket。
 #
@@ -24,7 +25,7 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="traincache"
 NS="traincache"
-TRACE_FILE="${TRACE_FILE:-$COMPARE_ROOT/traces/default.json}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
 # DataSet/快照名(冒烟或并行实验可指向独立前缀,如 compare-data-smoke;
 # 默认 compare-data-8m——8MiB 块快照,D20/6.13/Q12;旧 64MiB 快照 compare-data
 # 只留作历史产物复现,正式实验不再引用。快照发布本身是后续动作)
@@ -44,7 +45,7 @@ CHUNK_BYTES="${CHUNK_BYTES:-8388608}"
 N_TARS="${N_TARS:-$(cfg TRACK_B_N_TARS)}"   # 分片取自 track_b(256MiB/份),不是 D 轨 128MiB 份
 N_TARS="${N_TARS:-32}"                        # M 档全量(8GiB);run_bench 按档位覆盖
 # WarmupTask 预热块数:启动窗口口径=预热 1GiB 字节(=1GiB 缓存容量整档;
-# 对 M 档 8GiB 数据即"预热至多覆盖 1/8"的 10.0/D19 口径,与旧 64MiB×16 块同字节量)。
+# 对 M 档 8GiB 数据即"预热至多覆盖 1/8"的 9.0/D19 口径,与旧 64MiB×16 块同字节量)。
 # 块大小 8MiB 后 k = 1GiB / 8MiB = 128;块大小改档时按 字节量/CHUNK_BYTES 重算。
 # 0 = 不预热(冷启动)。可用 TRAINCACHE_WARMUP_K 覆盖。
 WARMUP_K="${TRAINCACHE_WARMUP_K:-128}"
@@ -55,34 +56,12 @@ TRACK_B_DIR="${TRACK_B_DIR:-$BENCH_ROOT/data/track_b/tars}"
 
 # trainpublish 二进制(缺失时从源码构建)
 TRAINPUBLISH_BIN="${TRAINPUBLISH_BIN:-$BENCH_ROOT/scripts/trainpublish}"
-TRAINCACHE_REPO="${TRAINCACHE_REPO:-$BENCH_ROOT/../Project/TrainCache}"
+TRAINCACHE_REPO="${TRAINCACHE_REPO:-$(cd "$COMPARE_ROOT/../.." && pwd)}"
 
 group_header "$GROUP"
 check_minio "$GROUP"
 
-# ---- 0. 节点 s3-access 标签(DataSet Ready 前置条件)----
-label_s3_nodes() {
-  local workers n
-  workers="$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name 2>/dev/null || true)"
-  if [ -z "$workers" ]; then
-    log_group "$GROUP" "WARNING: 无 worker 节点,无法打 s3-access 标签" >&2
-    return 0
-  fi
-  for n in $workers; do
-    local cur
-    cur="$(kubectl get "$n" -o jsonpath='{.metadata.labels.traincache\.io/s3-access}' 2>/dev/null || true)"
-    if [ "$cur" = "true" ]; then
-      continue
-    fi
-    kubectl label "$n" traincache.io/s3-access=true --overwrite >/dev/null
-  done
-  local cnt
-  cnt="$(kubectl get nodes -l traincache.io/s3-access=true --no-headers 2>/dev/null | wc -l)"
-  log_group "$GROUP" "s3-access 标签: $cnt 个 worker 节点"
-}
-label_s3_nodes
-
-# ---- 0.5. 发布数据快照(trainpublish 读本地 tar 切块上传,生成 dataset/$DATASET/CURRENT;
+# ---- 0. 发布数据快照(trainpublish 读本地 tar 切块上传,生成 dataset/$DATASET/CURRENT;
 #            正式口径快照 compare-data-8m 的发布为后续动作,MinIO 中暂不存在)----
 publish_snapshot() {
   local minio_pod
@@ -136,92 +115,13 @@ publish_snapshot() {
 }
 publish_snapshot
 
-# ---- 1. 命名空间(控制面与工作负载同 ns)----
-ensure_ns "$NS" "$GROUP"
+# ---- 1. 控制面与 agentd(与 bench-up 共用 ctrl_up.sh)----
+# 命名空间、节点标签、两个 Secret、webhook TLS+caBundle、apply -k 与 agentd
+# 配置都在 ctrl_up.sh 内完成;清单未变时不 apply。
+export DATASET MINIO_BUCKET
+bash "$BENCH_ROOT/scripts/ctrl_up.sh"
 
-# ---- 2. 校验/部署控制面 ----
-ensure_control_plane() {
-  local ok=1
-  for deploy in traincache-controller-manager traincache-webhook; do
-    if ! kubectl -n "$NS" get deployment "$deploy" >/dev/null 2>&1; then
-      ok=0
-    fi
-  done
-  if ! kubectl -n kube-system get deployment traincache-scheduler >/dev/null 2>&1; then
-    ok=0
-  fi
-  if ! kubectl -n "$NS" get daemonset traincache-agentd >/dev/null 2>&1; then
-    ok=0
-  fi
-  if [ "$ok" = 1 ]; then
-    log_group "$GROUP" "TrainCache 控制面已就绪(controller/webhook/scheduler/agent)"
-    return 0
-  fi
-  log_group "$GROUP" "控制面缺失,执行 kubectl apply -k controller/deploy"
-  # 部署前需确保 webhook TLS secret 存在;若缺失则生成自签证书
-  if ! kubectl -n "$NS" get secret traincache-webhook-tls >/dev/null 2>&1; then
-    log_group "$GROUP" "生成 webhook TLS 自签证书"
-    local tmp; tmp="$(mktemp -d)"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-      -keyout "$tmp/ca.key" -out "$tmp/ca.crt" \
-      -subj "/CN=traincache-ca" >/dev/null 2>&1
-    openssl req -newkey rsa:2048 -nodes -keyout "$tmp/tls.key" -out "$tmp/tls.csr" \
-      -subj "/CN=traincache-webhook.$NS.svc" >/dev/null 2>&1
-    printf 'subjectAltName=DNS:traincache-webhook.%s.svc,DNS:traincache-webhook.%s.svc.cluster.local\n' \
-      "$NS" "$NS" > "$tmp/san.ext"
-    openssl x509 -req -in "$tmp/tls.csr" -CA "$tmp/ca.crt" -CAkey "$tmp/ca.key" \
-      -CAcreateserial -out "$tmp/tls.crt" -days 365 -extfile "$tmp/san.ext" >/dev/null 2>&1
-    kubectl -n "$NS" create secret tls traincache-webhook-tls \
-      --cert="$tmp/tls.crt" --key="$tmp/tls.key" --dry-run=client -o yaml \
-      | kubectl apply -f - >/dev/null
-    # 注入 CA bundle 到 MutatingWebhookConfiguration
-    local ca_b64; ca_b64="$(base64 -w0 "$tmp/ca.crt")"
-    kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
-      -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$ca_b64\"}]" \
-      >/dev/null 2>&1 || true
-    rm -rf "$tmp"
-  fi
-  kubectl apply -k "$BENCH_ROOT/../controller/deploy" >/dev/null
-  log_group "$GROUP" "控制面已 apply,等待就绪"
-  kubectl -n "$NS" rollout status deployment/traincache-controller-manager --timeout=180s
-  kubectl -n "$NS" rollout status deployment/traincache-webhook --timeout=180s
-  kubectl -n kube-system rollout status deployment/traincache-scheduler --timeout=180s
-  kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s
-  log_group "$GROUP" "TrainCache 控制面就绪"
-}
-ensure_control_plane
-
-# ---- 2.5. 校验 agentd 配置(WHITELIST + BUCKET 需与本环境一致)----
-ensure_agent_config() {
-  local cur_wl cur_bucket cur_cap need_patch=0
-  cur_wl="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_DATASET_WHITELIST")].value}' 2>/dev/null || true)"
-  cur_bucket="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_OBJSTORE_BUCKET")].value}' 2>/dev/null || true)"
-  cur_cap="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_CACHE_CAPACITY_BYTES")].value}' 2>/dev/null || true)"
-  if [ "$cur_wl" != "$DATASET" ] || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_cap" != "1073741824" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=1073741824(1GiB)"
-    kubectl -n "$NS" set env daemonset/traincache-agentd \
-      TRAINCACHE_DATASET_WHITELIST="$DATASET" \
-      TRAINCACHE_OBJSTORE_BUCKET="$MINIO_BUCKET" \
-      TRAINCACHE_CACHE_CAPACITY_BYTES=1073741824 >/dev/null
-    kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null
-    log_group "$GROUP" "agentd 配置已修正并滚动更新完成"
-  else
-    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=1073741824)"
-  fi
-}
-ensure_agent_config
-
-# ---- 3. 对象存储凭证 Secret ----
-if resource_exists secret traincache-objstore -n "$NS"; then
-  log_group "$GROUP" "secret/traincache-objstore 已存在,跳过"
-else
-  kubectl -n "$NS" create secret generic traincache-objstore \
-    --from-literal=accessKey="$MINIO_ACCESS_KEY" \
-    --from-literal=secretKey="$MINIO_SECRET_KEY"
-  log_group "$GROUP" "secret/traincache-objstore 已创建"
-fi
-
-# ---- 4. trace ConfigMap ----
+# ---- 2. trace ConfigMap ----
 if [ ! -f "$TRACE_FILE" ]; then
   log_group "$GROUP" "生成默认 trace.json → $TRACE_FILE"
   "$PY" "$COMPARE_ROOT/trace.py" --out "$TRACE_FILE"
@@ -233,7 +133,7 @@ else
   log_group "$GROUP" "configmap/trace 已创建"
 fi
 
-# ---- 4.5 ordersrc.py ConfigMap(训练 Pod 用于写消费顺序 ring)----
+# ---- 3. ordersrc.py ConfigMap(训练 Pod 用于写消费顺序 ring)----
 ORDERSRC_SRC="$BENCH_ROOT/../agent/ordersrc/ordersrc.py"
 if resource_exists configmap traincache-ordersrc -n "$NS"; then
   log_group "$GROUP" "configmap/traincache-ordersrc 已存在,跳过"
@@ -245,7 +145,7 @@ else
   log_group "$GROUP" "WARNING: $ORDERSRC_SRC 不存在,ordersrc ConfigMap 未创建" >&2
 fi
 
-# ---- 5. DataSet CR ----
+# ---- 4. DataSet CR ----
 # 生成 shards 列表:按实际文件大小计算 chunk 数(与 trainpublish 发布的快照一致)
 SHARDS_YAML=""
 for i in $(seq 0 $(( N_TARS - 1 ))); do
@@ -297,7 +197,7 @@ for i in $(seq 1 90); do
   sleep 2
 done
 
-# ---- 6. WarmupTask CR(先删后建,不可原地更新)----
+# ---- 5. WarmupTask CR(先删后建,不可原地更新)----
 # 预热不限速:先拆上一轮可能残留的 tc,预热完成后、计时开始前再挂回(step 7)
 bash "$BENCH_ROOT/scripts/tc_teardown.sh" >/dev/null 2>&1 || true
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
@@ -385,7 +285,7 @@ EOF
   done
 fi
 
-# ---- 7. tc 档位(挂到 MinIO Pod egress)----
+# ---- 6. tc 档位(挂到 MinIO Pod egress)----
 log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
 bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
 

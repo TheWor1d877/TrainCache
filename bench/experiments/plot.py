@@ -14,10 +14,13 @@ metrics.csv,产出预注册(preregister.md)定义的五张旗舰图:
   startup_makespan / total_makespan / stall_ratio / hit_rate
 
 用法:
-  python3 bench/experiments/plot.py --summary bench/results/compare/summary.csv \\
-      --out-dir bench/results/figures
+  python3 bench/experiments/plot.py
+      # 零参:自动扫描 RESULTS_DIR 下所有含 summary.csv 的目录
+      # (run.py 把每个 COND 写到 results/<COND>/,这里能直接读到)
+  python3 bench/experiments/plot.py --summary <数据层>/bench/results/compare/summary.csv \\
+      --metrics-dir <目录> --out-dir <数据层>/bench/results/figures
 
-三个默认路径按脚本自身位置解析到数据层(results 是相对软链接),与当前工作目录无关。
+默认输出目录按 bench/config.py 的 DATA_ROOT 解析到运行时数据层,与当前工作目录无关。
 """
 import argparse
 import csv
@@ -98,6 +101,18 @@ def read_metrics_dir(root: Path) -> list[dict]:
                 r["_source"] = str(p)
                 rows.append(r)
     return rows
+
+
+def discover_result_dirs(root: Path) -> list[Path]:
+    """返回 root 下所有直接含 summary.csv 的目录(按路径排序)。
+
+    run.py 的产物落 results/<COND>/summary.csv,run_bench.py 的产物落
+    results/compare/summary.csv,quick 产物落 results/quick/<run_id>/summary.csv;
+    三者都在这里被扫到。
+    """
+    if not root.is_dir():
+        return []
+    return sorted({p.parent for p in root.rglob("summary.csv")})
 
 
 def mean_ci(vals: list[float]):
@@ -487,12 +502,10 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="M8 旗舰绘图")
-    ap.add_argument("--summary", type=Path,
-                    default=RESULTS_DIR / "compare" / "summary.csv",
-                    help="五组对照 summary.csv(缺省取数据层 results/compare/summary.csv)")
-    ap.add_argument("--metrics-dir", type=Path,
-                    default=RESULTS_DIR / "experiments",
-                    help="experiments 产物目录(含 metrics.csv;缺省取数据层 results/experiments)")
+    ap.add_argument("--summary", type=Path, default=None,
+                    help="五组对照 summary.csv;零参时自动扫描 RESULTS_DIR")
+    ap.add_argument("--metrics-dir", type=Path, default=None,
+                    help="experiments 产物目录(含 metrics.csv);零参时自动扫描 RESULTS_DIR")
     ap.add_argument("--out-dir", type=Path,
                     default=RESULTS_DIR / "figures",
                     help="图片输出目录(缺省取数据层 results/figures)")
@@ -500,18 +513,50 @@ def main():
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 零参:扫描 results/ 下所有含 summary.csv 的目录。只给其中一个旗标时,
+    # 另一个仍按旧缺省(compare/summary.csv 或 results/experiments),保持兼容。
+    auto = args.summary is None and args.metrics_dir is None
+    if auto:
+        result_dirs = discover_result_dirs(RESULTS_DIR)
+        summary_paths = [d / "summary.csv" for d in result_dirs]
+        metrics_dirs = result_dirs
+        print(f"[auto] {RESULTS_DIR} 下发现 {len(summary_paths)} 个含 summary.csv 的目录")
+    else:
+        summary_paths = ([args.summary] if args.summary is not None
+                         else [RESULTS_DIR / "compare" / "summary.csv"])
+        metrics_dirs = ([args.metrics_dir] if args.metrics_dir is not None
+                        else [RESULTS_DIR / "experiments"])
+
     # 五组对照
-    if args.summary.is_file():
-        print(f"[compare] 读取 {args.summary}")
-        rows = read_summary(args.summary)
+    compare_rows = []
+    for path in summary_paths:
+        if not path.is_file():
+            print(f"[compare] {path} 不存在,跳过")
+            continue
+        # quick 是跑分速览,不是对照样本;混进来会让 traincache 两态重复计权。
+        if auto and "quick" in path.parts:
+            print(f"[compare] 跳过 quick 产物 {path.parent}")
+            continue
+        print(f"[compare] 读取 {path}")
+        rows = read_summary(path)
         valid = [r for r in rows if r.get("void", "").lower() != "true"]
         print(f"  共 {len(rows)} 条,有效 {len(valid)} 条")
-        plot_compare_all(rows, args.out_dir)
+        compare_rows.extend(rows)
+    if compare_rows:
+        plot_compare_all(compare_rows, args.out_dir)
     else:
-        print(f"[compare] {args.summary} 不存在,跳过五组对照图")
+        print("[compare] 没有可读的 summary.csv,跳过五组对照图")
 
-    # 旗舰图(数据来自 experiments 目录)
-    metrics = read_metrics_dir(args.metrics_dir)
+    # 旗舰图(数据来自各结果目录下的 metrics.csv)
+    metrics = []
+    seen_sources = set()
+    for directory in metrics_dirs:
+        for row in read_metrics_dir(directory):
+            source = row.get("_source")
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
+            metrics.append(row)
     print(f"[experiments] 读取 {len(metrics)} 条 metrics")
     plot_fig1(metrics, args.out_dir)
     plot_fig2(metrics, args.out_dir)

@@ -1,6 +1,6 @@
 package svc
 
-// 本文件覆盖 8.x M3 Agent 增量(7.1 附录 A / 8.1 §12.1):
+// 本文件覆盖 8.x M3 Agent 增量(7.1 附录 A / 7.1 §12.1):
 // generation 单调与陈旧拒绝、Update 全量替换与位序、Cancel 幂等与重建、
 // GetPreheatStatus 新字段、seq 单调、位图形状校验、ReportBlocks 仍 Unimplemented。
 // 等待一律有界轮询(waitTaskState),不依赖裸 sleep 做时序断言。

@@ -15,7 +15,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// Writer 是写入方 + 分片构建任务 + 提交方（docs/7 步骤 2–5）。
+// Writer 是写入方 + 分片构建任务 + 提交方（docs/5.0 步骤 2–5）。
 type Writer struct {
 	store objectstore.Store
 	cs    *cas.Store

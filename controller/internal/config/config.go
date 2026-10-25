@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Environment variable names. See docs/8.1 design.md §8.
+// Environment variable names. See docs/7.1 design.md §8.
 const (
 	EnvMetricsAddr       = "CONTROLLER_METRICS_ADDR"
 	EnvHealthAddr        = "CONTROLLER_HEALTH_ADDR"

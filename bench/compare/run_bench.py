@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M7 五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
 
-五组各跑 N 次（次数按 10.1 D19/D32 分档：S=3（@100 与 @1000 各 3 次，符号翻转格补到 5）
+七组态各跑 N 次（次数按 9.1 D19/D32 分档：S=3（@100 与 @1000 各 3 次）
 / M=3 / L=1 探点，--reps 可显式覆盖；GROUPS 是五个受试者展开的七个组态），
 收集 makespan / stall / 命中率 / 预热时长 / 三笔字节成本，汇总到 summary.csv。
 
@@ -26,7 +26,7 @@
 6.12 统一轨迹：
   measure 主循环真正按 trace.json 消费（分片顺序、shuffle seed、每步样本数），
   不再用线性序 (epoch*steps+step)%n_tars。trace 由本脚本调 trace.py 的
-  build_trace() 现场生成（五组同一份、逐字节一致），与 measure.py 一起装进
+  build_trace() 现场生成（同一 track+档位的七组态共用、逐字节一致），与 measure.py 一起装进
   train-job Pod 的 script ConfigMap（/scripts/trace.json），轨迹 sha256 随
   产物归档。规模统一到 D 轨口径：S 档 2GiB 数据（8 分片 × 256MiB、每分片
   1600 样本、batch 32 → 每 epoch 恰好 400 步、一遍全量）。
@@ -34,7 +34,7 @@
 6.15 stall_ratio 改造（2026-10-24）：
   旧版 measure 是串行"读整片 tar → matmul"，读比算慢两个数量级，
   stall_ratio = wait_s/step_s 恒≈0.98，没有判别力——旧串行版本产物的
-  stall_ratio 一律作废（docs/10.1 §8/6.15、docs/5 §10），需按本口径重跑。
+  stall_ratio 一律作废（docs/9.1 §8/6.15、docs/4 §10），需按本口径重跑。
   新版用 COMPUTE_MS=200ms 控制每步算力，读与计算并行（后台 reader 线程
   模拟 DataLoader 异步预取，把接下来若干分片读进内存队列，主循环从队头
   取数据 + 做固定算力）：预取有效（热缓存/预取跟上）→ stall_ratio 趋 0；
@@ -55,8 +55,8 @@
   summary 产物补三笔字节成本列：启动预热×fanout、持续预取、切换重预取（D5）。
 
 流程（每组每轮）：
-  1. cold_reset（删 Pod + 清节点 hostPath 缓存：traincache 块缓存、
-     JuiceFS /var/cache/jfs、Fluid worker 缓存目录）
+  1. cold_reset（删 Pod + 在节点上清 hostPath 缓存：traincache 块缓存、
+     JuiceFS /var/cache/jfs、Fluid /tmp/juicefs-cache，删后判空）
   2. up.sh 搭建基础设施 + 预热（同步等完成 + 15min 超时，超时整轮作废）
   3. run_bench.py 创建 train-job Pod（t_submit = 创建前时刻；traincache 组
      创建前抓 fetch 计数器基线，运行期定时采样，结束后做窗口增量对账）
@@ -75,34 +75,38 @@ D30/D32 接线（2026-10-25）：
   · epochs 随档位联动（S=3、M/L=1），与 conds/compare-*.json 的 workload.epochs 对齐。
   · Fluid 该组每轮都作废 → 落回同冷热档 JuiceFS 顶位，产物标 baseline_substituted。
   · status 列三态：ok / void（D14：void 不进汇总）/ exploratory（D19：L 档 1 次探点）。
-  · D31 带宽格由 runner 现推并打印（rate/burst/抖动/BW÷r），并显式下发 TC_RATE、
-    TC_DELAY、CAPACITY_RATIO 给 up.sh，shell 侧据此挂 tc（临界格才开 netem 抖动）。
+  · D31 带宽格由 runner 现推并打印（rate/burst/抖动/BW÷r）；rate 只从 `--rate`
+    取，再以 TC_RATE 环境变量连同 TC_DELAY、CAPACITY_RATIO 下发给 up.sh，
+    shell 侧据此挂 tc（临界格才开 netem 抖动）。
 
 用法：
-  python3 bench/compare/run_bench.py --out bench/results/compare/summary.csv
+  python3 bench/compare/run_bench.py --out compare/summary.csv
+  # --out 相对路径按 bench/config.py 的 RESULTS_DIR(~/tcd/bench/results)展开,
+  # 不落到 repo 的当前工作目录;绝对路径原样使用。
   python3 bench/compare/run_bench.py --tier M --dry-run        # 开跑前核对计划
-  TC_RATE=300mbit python3 bench/compare/run_bench.py --tier S  # S@300 临界格（带抖动）
-  CAPACITY_RATIO=M python3 bench/compare/run_bench.py          # M 档（3 组态 × 3 次）
+  python3 bench/compare/run_bench.py --tier S --rate 300mbit   # S@300 临界格（带抖动）
+  python3 bench/compare/run_bench.py --tier S --rate 1000mbit  # S@1000 档
+  CAPACITY_RATIO=M python3 bench/compare/run_bench.py --rate 1000mbit  # M 档（3 组态 × 3 次）
 
 环境变量（唯一口径集中在本文件顶部，模板/产物不各处写死）：
   CAPACITY_RATIO=S|M|L   容量档位（D19/D32：S=2GiB数据/1GiB缓存×3（@100 与
-                         @1000 各 3 次，符号翻转格补到 5）、
+                         @1000 各 3 次）、
                          M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点）
   N_TARS                 分片数（缺省按档位：S=8、M=32、L=128；
-                         S 档 8×256MiB≈2GiB，docs/5 §3 对照口径）
+                         S 档 8×256MiB≈2GiB，docs/4 §3 对照口径）
   EPOCHS/STEPS_PER_EPOCH/BATCH/IMAGES_PER_TAR/SEED/SHUFFLE
                          统一轨迹参数（默认 3/400/32/1600/20261015/per-epoch，
                          与 bench/config.py D 轨语义对齐：一个 epoch 把全量
                          数据按轨迹顺序恰好过一遍）
-  CHUNK_SIZE             实验块大小，默认 8388608（8MiB，10.1 D20；
+  CHUNK_SIZE             实验块大小，默认 8388608（8MiB，9.1 D20；
                          生产默认 64MiB 不变）
-  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（10.1 Q12；
+  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（9.1 Q12；
                          MinIO 内该快照由 trainpublish -chunk-size 8388608
                          发布属后续动作，本脚本只按新名引用）
   TRAINCACHE_CACHE_CAPACITY_BYTES  统一缓存容量，默认 1GiB
   TRAINCACHE_WARMUP_K    warm 组预热块数；缺省 = 缓存容量/块大小
                          （1GiB/8MiB=128；旧 64MiB 块时代为 16，D20 连带重标度）
-  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/5 §3；D21 对照三档统一 16）。
+  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4 §3；D21 对照三档统一 16）。
                          agent 侧 lookahead 三档统一 16 块（D21）：8MiB 下
                          窗口 16×8MiB=128MiB≈缓存 1/8，无退化，不需重标度。
   COMPUTE_MS/READ_WORKERS/READ_QUEUE_DEPTH/READ_TIMEOUT_S
@@ -122,6 +126,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,6 +134,7 @@ from pathlib import Path
 COMPARE_ROOT = Path(__file__).resolve().parent
 BENCH_ROOT = COMPARE_ROOT.parent
 SCRIPTS_DIR = BENCH_ROOT / "scripts"
+CONDS_DIR = BENCH_ROOT / "experiments" / "conds"
 # 6.12：复用对照层 trace 生成器；6.16：复用实验层 collect.py 的 Prometheus 查询
 sys.path.insert(0, str(COMPARE_ROOT))
 sys.path.insert(0, str(BENCH_ROOT / "experiments"))
@@ -142,6 +148,8 @@ from cond import (CAPACITY_TIER_EPOCHS, CAPACITY_TIER_GROUPS,  # noqa: E402
 import config as bench_config  # noqa: E402
 
 GROUPS = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm", "traincache-cold", "traincache-warm"]
+# D31：@300 只有 S 档一个格子，只允许三组（与 M 档参跑组相同）
+S300_GROUPS = ("direct", "fluid-cold", "traincache-cold")
 
 GROUP_NS = {
     "direct": "direct",
@@ -179,15 +187,15 @@ MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "bench-b")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "traincache")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "traincache-probe")
 
-# ---- 容量档位（10.1 D19/D32：S=2GiB数据/1GiB缓存×3、M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点；
-#      S 档符号翻转格由补测流程加到 5，见 cond.CAPACITY_TIER_REPS_ALLOWED）
+# ---- 容量档位（9.1 D19/D32：S=2GiB数据/1GiB缓存×3、M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点；
+#      正式实验各格统一 3 次，L 档 1 次探点）
 # 取值口径由 bench/experiments/cond.py 的 CAPACITY_TIER_* 常量单点定义 ----
 TIER_PRESETS = {
     t: {"n_tars": CAPACITY_TIER_N_TARS[t], "reps": CAPACITY_TIER_REPS[t],
         "epochs": CAPACITY_TIER_EPOCHS[t], "dataset_bytes": tier_dataset_bytes(t)}
     for t in ("S", "M", "L")
 }
-# L 档 1 次低于 3 次硬纪律：产物标 exploratory，不进正式表（D19/10.0，单点取 cond.py）
+# L 档 1 次低于 3 次硬纪律：产物标 exploratory，不进正式表（D19/9.0，单点取 cond.py）
 TIER_EXPLORATORY = set(EXPLORATORY_TIERS)
 TIER = os.environ.get("CAPACITY_RATIO", "S").strip().upper() or "S"
 if TIER not in TIER_PRESETS:
@@ -214,6 +222,8 @@ SHARD_SIZE_MB = int(os.environ.get("SHARD_SIZE_MB", "256"))
 
 # ---- 块大小与缓存容量（6.13/D20：实验块 8MiB，生产 64MiB 不变）----
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "8388608"))
+# 分段读粒度：测量脚本按此长度 read()，只累加长度、不保留字节。
+READ_SEGMENT_BYTES = 8 << 20
 CACHE_BYTES = int(os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES", str(1 << 30)))
 # warm 组预热块数：k = 缓存容量 / 块大小（8MiB → 128；旧 64MiB 时代为 16）
 WARMUP_K = int(os.environ.get("TRAINCACHE_WARMUP_K",
@@ -223,9 +233,10 @@ WARMUP_K = int(os.environ.get("TRAINCACHE_WARMUP_K",
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 
 # ---- D31：带宽档（rate 是实验自变量，取 {100,300,1000} mbit）----
-# runner 把有效值显式下发给 up.sh，日志与产物里看到的就是实际挂到链路上的档位；
-# burst 与抖动不写死，由 config.burst_for_rate / config.jitter_enabled 现推。
-TC_RATE_EFF = os.environ.get("TC_RATE", bench_config.TC_RATE)
+# 速率只从命令行 --rate 取：S 档缺省 100mbit，M/L 档必填。main() 解析后赋值，
+# 再以 TC_RATE 环境变量下发给 up.sh；burst 与抖动不写死，由
+# config.burst_for_rate / config.jitter_enabled 现推。
+TC_RATE_EFF = None
 TC_DELAY_EFF = os.environ.get("TC_DELAY", bench_config.TC_DELAY)
 
 # ---- 6.15 异步预取参数（经 Pod env 下发给 measure 脚本，模板不写死）----
@@ -240,7 +251,11 @@ FETCH_SAMPLE_S = int(os.environ.get("FETCH_SAMPLE_S", "15"))
 SWITCH_WINDOW_S = float(os.environ.get("COMPARE_SWITCH_WINDOW_S", "60"))
 AGENT_NS = "traincache"
 AGENT_LABEL = "app=traincache-agentd"
-AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/9.4：TRAINCACHE_METRICS_ADDR=":9411"）
+AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/8.4：TRAINCACHE_METRICS_ADDR=":9411"）
+AGENT_DEGRADED_SAMPLE_S = 5  # 测量期间降级采样间隔
+AGENTD_HIDE_TIMEOUT_S = 120  # 缩到 0 后等 Pod 全消失
+AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
+AGENTD_CLEAN_TIMEOUT_S = 60  # 等 degraded=0 且 fetch 计数停增
 
 POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
 
@@ -252,6 +267,12 @@ BASIS_JFS_WARM = "approx_warm_all_hit(D25近似:warmup后读≈全命中)"
 BASIS_JFS_COLD = "approx_cold_all_refetch(D25近似:冷读≈全回源)"
 BASIS_FLUID_WARM = "approx_warm_all_hit(D25近似:DataLoad后读≈全命中)"
 BASIS_FLUID_COLD = "approx_cold_all_refetch(D25近似:冷读≈全回源)"
+
+# 预热量口径：traincache 只预热缓存容量大小的前缀，JuiceFS/Fluid 预热整档数据集。
+WARMUP_BASIS_PREFIX = "prefix_only(k*chunk*fanout)"
+WARMUP_BASIS_FULL = "full_dataset(n_tars*shard_size)"
+# direct 组读法：HTTP GET 分段 read(n)，只累加总字节。
+READ_MODE_DIRECT = f"http_get_read_segmented({READ_SEGMENT_BYTES},total_bytes)"
 
 
 def run_cmd(cmd, env=None, timeout=300):
@@ -274,6 +295,15 @@ KIND_WORKER_NODES = [n for n in os.environ.get(
 ).split(",") if n]
 
 
+# 冷态要清的节点缓存目录：juicefs / fluid / traincache 各自的 hostPath。
+_CACHE_DIRS = [
+    "/var/cache/jfs",                    # juicefs 组 hostPath 缓存
+    "/tmp/juicefs-cache",                # fluid 组 JuiceFSRuntime tieredstore
+    "/var/cache/traincache/blocks",      # traincache 块缓存
+    "/var/cache/traincache/quarantine",  # traincache 隔离块
+]
+
+
 def _node_cache_reset_cmds(node):
     """返回在某个节点容器内清缓存的命令列表（四条，一条清一个缓存目录）。
 
@@ -281,14 +311,18 @@ def _node_cache_reset_cmds(node):
     字面路径 "/var/cache/traincache/blocks/*"，该路径不存在 + rm -f 静默返回 0
     ——缓存实际没被清掉，traincache-cold 会带着上一轮缓存起跑，冷读口径不成立。
     """
-    cache_dirs = [
-        "/var/cache/jfs",                    # juicefs 组 hostPath 缓存
-        "/tmp/juicefs-cache",                # fluid 组 JuiceFSRuntime tieredstore
-        "/var/cache/traincache/blocks",      # traincache 块缓存
-        "/var/cache/traincache/quarantine",  # traincache 隔离块
-    ]
     return [["docker", "exec", node, "sh", "-c", "rm -rf " + d + "/*"]
-            for d in cache_dirs]
+            for d in _CACHE_DIRS]
+
+
+def _node_cache_check_cmd(node):
+    """返回在节点容器内检查四个缓存目录为空的命令（目录不存在视为空）。
+
+    `ls -A` 含隐藏文件；有输出即表示仍有残留，冷读口径不成立。
+    """
+    script = ("for d in " + " ".join(_CACHE_DIRS) +
+              '; do [ -d "$d" ] && ls -A "$d"; done')
+    return ["docker", "exec", node, "sh", "-c", script]
 
 
 def _clear_node_caches(tag):
@@ -308,6 +342,17 @@ def _clear_node_caches(tag):
                 # 清缓存失败必须看得见：块缓存没清 = 冷读口径不成立
                 print(f"[{tag}] WARNING: 节点 {node} 清缓存失败(rc={rc}): "
                       f"{' '.join(cmd)} {err[:200]}", flush=True)
+        # 清后判空：hostPath 不随 Pod 删除消失，有残留就终止本轮。
+        check = _node_cache_check_cmd(node)
+        rc, out, err = run_cmd(check, timeout=30)
+        if rc != 0:
+            raise SystemExit(
+                f"[{tag}] 节点 {node} 缓存检查失败(rc={rc}): {err[:200]}，"
+                f"无法确认冷态，退出")
+        leftover = out.strip()
+        if leftover:
+            raise SystemExit(
+                f"[{tag}] 节点 {node} 缓存未清空，仍有残留: {leftover[:300]}，退出")
 
 
 def cold_reset():
@@ -320,7 +365,209 @@ def cold_reset():
 
 
 # ---------------------------------------------------------------------------
-# 6.12 统一轨迹：现场生成、校验、算 sha256（五组读同一份）
+# traincache 组逐 rep 的 agentd 复位
+# ---------------------------------------------------------------------------
+# 订单 ring 与块缓存都在节点 hostPath 上：控制面重启后 agentd 会回放
+# /run/traincache/orders 下所有残留 ring（每轮训练的 ring 不清理），按旧订单预取；
+# cold_reset 清块缓存时 agentd 还在写，残留 tmp-* 会让它退出。所以每个 rep 先把
+# agentd 停到 0（无写入），清空订单与块缓存，再拉起并自检干净。
+_AGENTD_STATE_DIRS = [
+    "/run/traincache/orders",
+    "/var/cache/traincache/blocks",
+    "/var/cache/traincache/quarantine",
+]
+_AGENTD_PAUSE_KEY = "traincache.io/bench-paused"
+_AGENTD_SCALE_UNSUPPORTED = False
+_AGENTD_PAUSE_NOTE_PRINTED = False
+
+
+def _agentd_pod_names():
+    """当前 agentd Pod 名列表；kubectl 失败返回 None。"""
+    rc, out, _ = kubectl(["get", "pods", "-l", AGENT_LABEL,
+                          "-o", "jsonpath={.items[*].metadata.name}"],
+                         namespace=AGENT_NS, timeout=30)
+    if rc != 0:
+        return None
+    return out.split()
+
+
+def _agentd_pod_ready():
+    """(Pod 总数, Ready 数)；kubectl 失败返回 None。"""
+    rc, out, _ = kubectl(["get", "pods", "-l", AGENT_LABEL, "-o", "json"],
+                         namespace=AGENT_NS, timeout=30)
+    if rc != 0:
+        return None
+    try:
+        items = json.loads(out).get("items", [])
+    except ValueError:
+        return None
+    ready = 0
+    for pod in items:
+        conds = pod.get("status", {}).get("conditions", []) or []
+        if any(c.get("type") == "Ready" and c.get("status") == "True" for c in conds):
+            ready += 1
+    return len(items), ready
+
+
+def _agentd_set_active(active):
+    """把 agentd 拉到 active 个副本（0=停写，1=恢复）。
+
+    DaemonSet 没有 scale 子资源，`kubectl scale ds` 会失败；首次失败后改用
+    不匹配的 nodeSelector 挂起模板（恢复时只摘掉这个键），等效缩到 0/1。
+    """
+    global _AGENTD_SCALE_UNSUPPORTED, _AGENTD_PAUSE_NOTE_PRINTED
+    if not _AGENTD_SCALE_UNSUPPORTED:
+        rc, _out, _err = kubectl(
+            ["scale", "ds/traincache-agentd", f"--replicas={1 if active else 0}"],
+            namespace=AGENT_NS, timeout=60)
+        if rc == 0:
+            return
+        _AGENTD_SCALE_UNSUPPORTED = True
+        if not _AGENTD_PAUSE_NOTE_PRINTED:
+            _AGENTD_PAUSE_NOTE_PRINTED = True
+            print("[agent_reset] DaemonSet 不支持 kubectl scale，改用 nodeSelector 挂起",
+                  flush=True)
+    value = None if active else "true"
+    patch = json.dumps({"spec": {"template": {"spec": {
+        "nodeSelector": {_AGENTD_PAUSE_KEY: value}}}}})
+    rc, _out, err = kubectl(["patch", "ds/traincache-agentd", "--type=merge",
+                             "-p", patch], namespace=AGENT_NS, timeout=60)
+    if rc != 0:
+        raise SystemExit(f"[agent_reset] 无法{'恢复' if active else '挂起'} agentd"
+                         f"(rc={rc}): {err[:300]}")
+
+
+def _wait_agentd_hidden(timeout=AGENTD_HIDE_TIMEOUT_S):
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        pods = _agentd_pod_names()
+        if pods is not None and not pods:
+            return
+        time.sleep(2)
+    raise SystemExit(f"[agent_reset] agentd 缩到 0 后 {timeout}s 内仍有 Pod 未消失，退出")
+
+
+def _wait_agentd_ready(expected, timeout=AGENTD_READY_TIMEOUT_S):
+    start = time.monotonic()
+    last = None
+    while time.monotonic() - start < timeout:
+        state = _agentd_pod_ready()
+        if state is not None:
+            last = state
+            if state[0] >= expected and state[1] >= expected:
+                return
+        time.sleep(2)
+    raise SystemExit(f"[agent_reset] agentd 恢复后 {timeout}s 内未达到 {expected} 个 Ready"
+                     f"（当前 {last}），退出")
+
+
+def _agent_state_reset_cmd(node):
+    """清节点上 agentd 的订单 ring 与块/隔离目录内容（保留目录本身）。"""
+    script = ("for d in " + " ".join(_AGENTD_STATE_DIRS) +
+              '; do [ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; done; true')
+    return ["docker", "exec", node, "sh", "-c", script]
+
+
+def _agent_state_check_cmd(node):
+    """判空三个目录（目录不存在视为空）。"""
+    script = ("for d in " + " ".join(_AGENTD_STATE_DIRS) +
+              '; do [ -d "$d" ] && ls -A "$d"; done; true')
+    return ["docker", "exec", node, "sh", "-c", script]
+
+
+def _clear_agent_node_state(tag):
+    """逐节点清订单 ring 与 traincache 块缓存，清后判空；每个节点最多试 3 次。"""
+    for node in KIND_WORKER_NODES:
+        for attempt in range(3):
+            rc, _out, err = run_cmd(_agent_state_reset_cmd(node), timeout=30)
+            if rc != 0:
+                print(f"[{tag}] WARNING: 节点 {node} 清 agent 状态失败(rc={rc}): "
+                      f"{err[:200]}", flush=True)
+            rc, out, err = run_cmd(_agent_state_check_cmd(node), timeout=30)
+            if rc == 0 and not out.strip():
+                break
+            if attempt < 2:
+                time.sleep(1)
+        else:
+            detail = out.strip() if rc == 0 else err[:200]
+            raise SystemExit(f"[{tag}] 节点 {node} 的订单/块缓存未能清空"
+                             f"（rc={rc}）: {detail[:300]}，退出")
+
+
+def _wait_agentd_clean(expected, timeout=AGENTD_CLEAN_TIMEOUT_S):
+    """确认 degraded=0 且没有 reader：fetch 计数两次采样不增长。"""
+    start = time.monotonic()
+    snap = None
+    while time.monotonic() - start < timeout:
+        snap = agent_degraded_snapshot()
+        if snap is not None and snap["pods"] >= expected and snap["max"] == 0:
+            break
+        snap = None
+        time.sleep(2)
+    if snap is None:
+        raise SystemExit(f"[agent_reset] agentd 恢复后 {timeout}s 内未确认 "
+                         f"degraded=0（需 {expected} 个 Pod），退出")
+    first = fetch_snapshot_via_kubectl()
+    time.sleep(2)
+    second = fetch_snapshot_via_kubectl()
+    if first is None or second is None:
+        raise SystemExit("[agent_reset] 无法采样 fetch 计数，不能确认无 reader，退出")
+    after = agent_degraded_snapshot()
+    if after is None or after["max"] != 0:
+        raise SystemExit("[agent_reset] 复位后 agentd 再次降级，退出")
+    if second["total"] > first["total"]:
+        raise SystemExit(f"[agent_reset] 复位后 fetch 计数仍在增长"
+                         f"（{first['total']}→{second['total']}），存在 reader，退出")
+
+
+def _assert_agentd_sockets(expected):
+    """每个 agentd Pod 内必须能看到 hook socket；滚动重启的旧 Pod 会 unlink 它。"""
+    pods = _agentd_pod_names()
+    if pods is None or len(pods) < expected:
+        raise SystemExit(f"[agent_reset] agentd Pod 数不足（{pods}），无法检查 hook socket，退出")
+    missing = []
+    for pod in pods:
+        rc, _out, _err = kubectl(
+            ["exec", pod, "--", "test", "-S", "/run/traincache/agent.sock"],
+            namespace=AGENT_NS, timeout=20)
+        if rc != 0:
+            missing.append(pod)
+    if missing:
+        raise SystemExit(f"[agent_reset] 以下 agentd Pod 缺少 "
+                         f"/run/traincache/agent.sock: {', '.join(missing)}，退出")
+
+
+def reset_traincache_agent():
+    """traincache 组每 rep 开跑前复位 agentd（只对 traincache 组调用）。
+
+    顺序：停到 0 → 等 Pod 全消失 → 清订单 ring 与块/隔离目录并判空 →
+    恢复 1 → 等 4 个 Pod Ready → 等 degraded=0 且 fetch 计数不增长 →
+    校验每个 Pod 的 hook socket 存在。
+    任一步失败抛 SystemExit，让该 rep 记 void/up_failed，不带着残余状态继续跑。
+    """
+    expected = len(KIND_WORKER_NODES)
+    print(f"[agent_reset] 复位 traincache agentd（{expected} 个节点）...", flush=True)
+    _agentd_set_active(False)
+    try:
+        _wait_agentd_hidden()
+        _clear_agent_node_state("agent_reset")
+    except BaseException:
+        # 失败也必须把 agentd 拉回可用态，否则挂起状态会留到后续格。
+        try:
+            _agentd_set_active(True)
+        except Exception as exc:
+            print(f"[agent_reset] WARNING: 失败后恢复 agentd 也失败: {exc}", flush=True)
+        raise
+    _agentd_set_active(True)
+    _wait_agentd_ready(expected)
+    _wait_agentd_clean(expected)
+    _assert_agentd_sockets(expected)
+    print("[agent_reset] agentd 复位完成：degraded=0，fetch 计数停增，hook socket 就绪",
+          flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 6.12 统一轨迹：现场生成、校验、算 sha256（七组态按 track+档位共用一份）
 # ---------------------------------------------------------------------------
 def build_run_trace():
     """按 run_bench 的规模参数生成 trace dict（trace.py build_trace 唯一入口）。"""
@@ -358,7 +605,7 @@ def group_up(group):
         env["FLUID_CACHE_GI"] = str(max(1, CACHE_BYTES >> 30))
         env["FLUID_PREHEAT"] = "1" if group == "fluid-warm" else "0"
     if group.startswith("juicefs"):
-        env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/5 §3)
+        env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/4 §3)
         # juicefs-warm:up.sh 里自动做 juicefs warmup;juicefs-cold:跳过
         env["JFS_WARMUP"] = "1" if group == "juicefs-warm" else "0"
     if group.startswith("traincache"):
@@ -410,7 +657,7 @@ batch = ''' + str(BATCH) + r'''
 images_per_tar = ''' + str(IMAGES_PER_TAR) + r'''
 group = os.environ.get("TRAINCACHE_GROUP", "direct")
 
-# ---- 6.12 统一轨迹消费（五组读同一份 trace.json，runner 现场生成并挂载）----
+# ---- 6.12 统一轨迹消费（七组态共用一份 trace.json，runner 现场生成并挂载）----
 TRACE_PATH = os.environ.get("TRAINCACHE_TRACE_PATH", "/scripts/trace.json")
 _trace = json.loads(Path(TRACE_PATH).read_text())
 if (_trace["n_tars"] != n_tars or _trace["epochs"] != epochs
@@ -464,7 +711,7 @@ read_errors = 0
 measure_void = False
 
 # 分段读粒度：读出来的字节只累加长度、不留在内存里（避免整片 256MiB 常驻）。
-READ_SEGMENT_BYTES = 8 << 20
+READ_SEGMENT_BYTES = ''' + str(READ_SEGMENT_BYTES) + r'''
 
 
 def read_file_bytes(path):
@@ -578,7 +825,7 @@ def read_shard(shard):
 '''
     elif group.startswith("traincache"):
         return r'''
-import urllib.parse, subprocess
+import urllib.parse, subprocess, socket
 CACHE_ROOT = "/var/cache/traincache/blocks"
 ORDERS_DIR = "/run/traincache/orders"
 POD_UID = os.environ.get("POD_UID", "unknown-pod")
@@ -589,8 +836,30 @@ CHUNK_SIZE = int(os.environ.get("TRAINCACHE_CHUNK_SIZE", "8388608"))
 # assemble.go 的 prefetchLookahead=16 三处对齐）。这里只是 env 缺失时的兜底，
 # 正式跑分由 Pod env 下发（run_bench.py create_measure_pod）。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
+# agentd hook：Unix datagram，行分隔 JSON；测量 Pod 经 hostPath 挂载节点
+# /run/traincache 到 /run/tc-hook。发送失败静默忽略，不影响读数与字节账。
+HOOK_SOCK = os.environ.get("TRAINCACHE_HOOK_SOCK", "/run/tc-hook/agent.sock")
 _chunk_map = None
 _order_written = False
+
+def _hook_send(frame):
+    """best-effort 上报一帧；每次新建 socket，多读线程并发安全。"""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            s.sendto((json.dumps(frame, separators=(",", ":")) + "\n").encode(),
+                     HOOK_SOCK)
+        finally:
+            s.close()
+    except OSError:
+        pass
+
+def _hook_advance(name, chunk_idx):
+    _hook_send({"type": "advance", "path": name, "chunk": int(chunk_idx)})
+
+def _hook_read_miss(name, chunk_idx):
+    _hook_send({"type": "read_miss", "path": name, "chunk": int(chunk_idx),
+                "reason": "absent"})
 
 # Heartbeat:每 10s 重写当前 epoch 的订单(内容相同,ordersource 按字节去重不推送,
 # 但 write_seq 推进避免 collector 因 ring 停滞 30s 降级到 inotify 兜底)。
@@ -654,7 +923,7 @@ def read_shard(shard):
     """traincache 读取路径：逐块读本地缓存，缺块等待 agentd 预取，超时兜底回源。
     返回本片字节数（累加各块长度，不把整片拼起来留在内存里）。
     注意：hits/misses 只是块级诊断(block_hit_rate_diag 列)——"块在磁盘存在即
-    hit"口径会虚高(agent 运行期悄悄回源补块)，2026-10-24 已作废(10.1 6.16/D25)；
+    hit"口径会虚高(agent 运行期悄悄回源补块)，2026-10-24 已作废(9.1 6.16/D25)；
     正式命中率由 runner 侧用 traincache_fetch_bytes_total run 窗口增量对账。"""
     global hits, misses
     name = "shard-" + str(shard).zfill(5) + ".tar"
@@ -668,8 +937,10 @@ def read_shard(shard):
         if os.path.exists(blk):
             nbytes += read_file_bytes(blk)
             n_hits += 1
+            _hook_advance(name, chunk_idx)
         else:
-            # 未命中:等待 agentd 持续预取(轮询,最多等 180s)
+            # 未命中:先报 agent 触发 P0 demand 补块,再等持续预取(轮询,最多等 180s)
+            _hook_read_miss(name, chunk_idx)
             waited = 0.0
             while not os.path.exists(blk) and waited < 180:
                 time.sleep(0.5)
@@ -677,6 +948,7 @@ def read_shard(shard):
             if os.path.exists(blk):
                 nbytes += read_file_bytes(blk)
                 n_hits += 1
+                _hook_advance(name, chunk_idx)
             else:
                 # 超时 fallback:HTTP 回源(agentd 预取未跟上)
                 url = endpoint + "/" + bucket + "/" + name
@@ -684,6 +956,7 @@ def read_shard(shard):
                 end = start + size - 1
                 nbytes += len(http_get(url, start, end))
                 n_misses += 1
+                _hook_advance(name, chunk_idx)
     with counter_lock:
         hits += n_hits
         misses += n_misses
@@ -705,7 +978,7 @@ READ_TIMEOUT_S = float(os.environ.get("READ_TIMEOUT_S", "300"))   # 队头等待
 # 真实加载器会持有的字节数(≈(深度+线程数+1)×分片大小)改用纯计数
 # logical_resident_bytes 跟踪（不真持有 bytes），峰值见 RESULT 的
 # peak_resident_bytes。旧串行版产物的 stall_ratio 口径作废
-# （docs/10.1 §8 6.15、docs/5 §10）
+# （docs/9.1 §8 6.15、docs/4 §10）
 #
 # 口径:wait_s = 主循环从队列取"已读好分片"的阻塞等待(真 stall);
 #       work_s = 固定算力耗时(与后台读并行发生,不计入 stall);step_s = wait_s + work_s。
@@ -896,7 +1169,7 @@ def create_measure_pod(group, run_id, trace_json):
 
     t_submit 在 kubectl apply 前取 time.time()，统一下发为
     TRAINCACHE_JOB_CREATED_AT，不再有 juicefs-warm 特判（任务清单 #6）。
-    trace.json 与 measure.py 装进同一个 ConfigMap（6.12：五组读同一份）。
+    trace.json 与 measure.py 装进同一个 ConfigMap（6.12：七组态共用一份）。
     """
     ns = GROUP_NS[group]
     # Pod 名字固定:traincache 组 WarmupTask targetRef.Name=train-job-0
@@ -938,7 +1211,7 @@ def create_measure_pod(group, run_id, trace_json):
     # ---- juicefs 组:Pod 内自己 mount JuiceFS,hostPath 共享预热缓存 ----
     if group in ("juicefs-cold", "juicefs-warm"):
         redis_url = f"redis://redis.{ns}.svc.cluster.local:6379/0"
-        cache_size = str(CACHE_BYTES >> 20)  # MiB;--cache-size 单位是 MiB(docs/5 §3)
+        cache_size = str(CACHE_BYTES >> 20)  # MiB;--cache-size 单位是 MiB(docs/4 §3)
         image = JUICEFS_IMAGE
         cmd = ["/bin/sh", "-c"]
         # 任务清单 #7:删掉 measure Pod 内的 juicefs warmup 行,预热已由 up.sh 在外部完成
@@ -972,6 +1245,11 @@ def create_measure_pod(group, run_id, trace_json):
         volumes.append({"name": "orders-dir",
                         "hostPath": {"path": "/run/traincache/orders",
                                      "type": "DirectoryOrCreate"}})
+        # 读路径直接向 agentd 的 Unix datagram socket 上报 advance/read_miss
+        vol_mounts.append({"name": "hook-dir", "mountPath": "/run/tc-hook"})
+        volumes.append({"name": "hook-dir",
+                        "hostPath": {"path": "/run/traincache",
+                                     "type": "DirectoryOrCreate"}})
         vol_mounts.append({"name": "ordersrc", "mountPath": "/app/ordersrc.py",
                            "subPath": "ordersrc.py"})
         volumes.append({"name": "ordersrc",
@@ -1001,7 +1279,7 @@ def create_measure_pod(group, run_id, trace_json):
         "command": cmd,
         "volumeMounts": vol_mounts,
         # 队列只传字节数 → 预读常驻内存 O(1)；4Gi limit 是给 JuiceFS mount /
-        # 本地块缓存留的余量 (train-job Pod CPU/内存限额也记录进产物口径,见 resources.md 任务)
+        # 本地块缓存留的余量 (资源与限额口径见 docs/4 §2.3)
         "resources": {"requests": {"cpu": "500m", "memory": "1Gi"},
                       "limits": {"cpu": "2", "memory": "4Gi"}},
     }
@@ -1013,6 +1291,9 @@ def create_measure_pod(group, run_id, trace_json):
         # 6.13:实验块大小 8MiB 经 env 下发给回源区间计算
         container["env"].append({"name": "TRAINCACHE_CHUNK_SIZE", "value": str(CHUNK_SIZE)})
         container["env"].append({"name": "TRAINCACHE_PREFETCH_K", "value": str(PREFETCH_K)})
+        # 测量体经 hostPath 访问 agentd hook socket（/run/tc-hook/agent.sock）
+        container["env"].append({"name": "TRAINCACHE_HOOK_SOCK",
+                                 "value": "/run/tc-hook/agent.sock"})
     if group in ("juicefs-cold", "juicefs-warm"):
         container["securityContext"] = {"privileged": True}
         # JuiceFS mount + 读缓存需要较大内存
@@ -1083,23 +1364,34 @@ _FETCH_LINE_RE = re.compile(
     r'^traincache_fetch_bytes_total\{[^}]*reason="([^"]*)"[^}]*\}\s+([0-9eE+.\-]+)')
 
 
-def fetch_snapshot_via_kubectl():
-    """kubectl --raw 直接抓各节点 agentd :9411/metrics，按 reason 汇总回源字节。"""
+def _agent_metrics_texts():
+    """kubectl --raw 抓所有 agentd Pod 的 :9411/metrics 原文。
+
+    返回 [(pod, text)]；一个都抓不到返回 None。fetch 对账与降级采样共用。
+    """
     rc, out, _ = kubectl(["get", "pods", "-l", AGENT_LABEL,
                           "-o", "jsonpath={.items[*].metadata.name}"],
                          namespace=AGENT_NS, timeout=30)
     if rc != 0 or not out.strip():
         return None
-    by_reason = {}
-    total = 0.0
-    ok_any = False
+    texts = []
     for pod in out.split():
         rc, txt, _ = run_cmd(["kubectl", "get", "--raw",
                               f"/api/v1/namespaces/{AGENT_NS}/pods/{pod}:{AGENT_METRICS_PORT}/proxy/metrics"],
                              timeout=20)
-        if rc != 0 or not txt:
-            continue
-        ok_any = True
+        if rc == 0 and txt:
+            texts.append((pod, txt))
+    return texts or None
+
+
+def fetch_snapshot_via_kubectl():
+    """kubectl --raw 直接抓各节点 agentd :9411/metrics，按 reason 汇总回源字节。"""
+    texts = _agent_metrics_texts()
+    if texts is None:
+        return None
+    by_reason = {}
+    total = 0.0
+    for _pod, txt in texts:
         for line in txt.splitlines():
             m = _FETCH_LINE_RE.match(line)
             if not m:
@@ -1111,9 +1403,40 @@ def fetch_snapshot_via_kubectl():
             reason = m.group(1) or "other"
             by_reason[reason] = by_reason.get(reason, 0.0) + v
             total += v
-    if not ok_any:
-        return None
     return {"ts": time.time(), "total": total, "by_reason": by_reason}
+
+
+_DEGRADED_LINE_RE = re.compile(
+    r'^traincache_agent_degraded(?:\{[^}]*\})?\s+([0-9eE+.\-]+)')
+
+
+def agent_degraded_snapshot():
+    """所有 agentd 的 traincache_agent_degraded 最大值与 fetch 总字节。
+
+    返回 {"ts","max","pods","fetch_total"}；任一 Pod 抓不到指标或没有该行
+    返回 None（此时无法断言未降级）。
+    """
+    texts = _agent_metrics_texts()
+    if texts is None:
+        return None
+    max_v = 0
+    fetch_total = 0.0
+    for _pod, txt in texts:
+        deg = None
+        for line in txt.splitlines():
+            m = _DEGRADED_LINE_RE.match(line)
+            if m:
+                deg = float(m.group(1))
+                break
+        if deg is None:
+            return None
+        max_v = max(max_v, int(deg))
+        for line in txt.splitlines():
+            m = _FETCH_LINE_RE.match(line)
+            if m:
+                fetch_total += float(m.group(2))
+    return {"ts": time.time(), "max": max_v, "pods": len(texts),
+            "fetch_total": fetch_total}
 
 
 def fetch_snapshot_via_prometheus():
@@ -1225,13 +1548,18 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
         fanout = s3_fanout_count()
         metrics["startup_warmup_bytes"] = WARMUP_K * CHUNK_SIZE * fanout
         metrics["warmup_fanout"] = fanout
+        metrics["warmup_basis"] = WARMUP_BASIS_PREFIX
     elif group in ("juicefs-warm", "fluid-warm"):
         # D25 近似：warmup/DataLoad 把整份数据集拉进节点缓存，计 1 份
         metrics["startup_warmup_bytes"] = N_TARS * SHARD_SIZE_MB * (1 << 20)
         metrics["warmup_fanout"] = 1
+        metrics["warmup_basis"] = WARMUP_BASIS_FULL
     else:
         metrics["startup_warmup_bytes"] = 0
         metrics["warmup_fanout"] = 0
+        metrics["warmup_basis"] = ""
+    # direct 组直读 MinIO 的分段读法；其余组不走 HTTP 直读，留空。
+    metrics["read_mode"] = READ_MODE_DIRECT if group == "direct" else ""
 
     if group.startswith("traincache"):
         # ---- traincache 组：fetch 字节 run 窗口增量对账（D25 补注）----
@@ -1389,9 +1717,34 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         if reuse:
             if rep:
                 rep_cold_reset(group)
+            if is_tc:
+                # 控制面跨 rep 复用，也必须逐 rep 复位 agentd
+                try:
+                    reset_traincache_agent()
+                except (SystemExit, Exception) as exc:
+                    print(f"[run] {group} rep={rep} agentd 复位失败，本轮记 "
+                          f"up_failed，停止该组：{exc}", flush=True)
+                    results.append({"group": group, "rep": rep, "void": True,
+                                    "reason": "up_failed",
+                                    "warmup_seconds": group_warmup,
+                                    "trace_sha256": trace_sha})
+                    break
             warmup_seconds = group_warmup
         else:
             cold_reset()
+            if is_tc:
+                # 必须在 up.sh 预热之前复位：复位会清块缓存，放在预热之后会把
+                # warm 组刚写入的块清掉。
+                try:
+                    reset_traincache_agent()
+                except (SystemExit, Exception) as exc:
+                    print(f"[run] {group} rep={rep} agentd 复位失败，本轮记 "
+                          f"up_failed，停止该组：{exc}", flush=True)
+                    results.append({"group": group, "rep": rep, "void": True,
+                                    "reason": "up_failed", "warmup_seconds": 0.0,
+                                    "trace_sha256": trace_sha})
+                    group_down(group)
+                    break
             up_ok, warmup_seconds = group_up(group)
             if not up_ok:
                 results.append({"group": group, "rep": rep, "void": True,
@@ -1419,9 +1772,33 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
             if snap is not None:
                 samples.append(snap)
 
+        # 测量期间每 5s 采一次 degraded；测量 Pod 一结束就停，避免训练结束
+        # 30s 后 sidecar 退出导致的必然降级被误判进本轮。
+        degraded = {"max": 0, "samples": 0}
+        stop_degraded = threading.Event()
+        degraded_thread = None
+        if is_tc:
+            def _degraded_loop():
+                while not stop_degraded.wait(AGENT_DEGRADED_SAMPLE_S):
+                    snap = agent_degraded_snapshot()
+                    if stop_degraded.is_set():
+                        break
+                    if snap is not None:
+                        degraded["samples"] += 1
+                        degraded["max"] = max(degraded["max"], snap["max"])
+            degraded_thread = threading.Thread(target=_degraded_loop, daemon=True)
+            degraded_thread.start()
+
         success, logs = wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT,
                                           on_tick=_sample if is_tc else None,
                                           tick_s=FETCH_SAMPLE_S)
+        stop_degraded.set()
+        if degraded_thread is not None:
+            degraded_thread.join(timeout=1)
+        degraded_value = degraded["max"] if is_tc and degraded["samples"] else ""
+        if is_tc and not degraded["samples"]:
+            print(f"[run] {group} rep={rep} WARNING: 测量期间未采到 agentd 指标，"
+                  f"agent_degraded_max 留空", flush=True)
         if not success:
             print(f"[run] {group} rep={rep} Pod 失败/超时")
             # 调试:打印 pod 状态与事件
@@ -1434,7 +1811,8 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
             print(f"[debug] logs:\n{logs[:1500]}")
             results.append({"group": group, "rep": rep, "void": True,
                             "reason": "pod_failed", "warmup_seconds": warmup_seconds,
-                            "trace_sha256": trace_sha})
+                            "trace_sha256": trace_sha,
+                            "agent_degraded_max": degraded_value})
             if not reuse:
                 group_down(group)
             continue
@@ -1444,12 +1822,14 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
             print(f"[run] {group} rep={rep} 无法解析结果")
             results.append({"group": group, "rep": rep, "void": True,
                             "reason": "parse_failed", "warmup_seconds": warmup_seconds,
-                            "trace_sha256": trace_sha})
+                            "trace_sha256": trace_sha,
+                            "agent_degraded_max": degraded_value})
         else:
             metrics["group"] = group
             metrics["rep"] = rep
             metrics["warmup_seconds"] = warmup_seconds
             metrics["trace_sha256"] = trace_sha
+            metrics["agent_degraded_max"] = degraded_value
             metrics["hit_rate_diag"] = metrics["hit_rate"]
             # 测量体自报不可信（读队列超时/读失败）→ 这轮作废，
             # 不进结论（否则 stall_ratio/字节账会被带偏）。
@@ -1462,6 +1842,13 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                       f" errors={metrics.get('read_errors')})，本轮作废", flush=True)
             else:
                 metrics["void"] = False
+            # 测量期间出现降级：功能打折（消费推进换 inotify 信号源），
+            # 本轮不参与组间对比；已有更具体的作废原因时保留原原因。
+            if is_tc and degraded_value == 1 and not metrics.get("void"):
+                metrics["void"] = True
+                metrics["reason"] = "agent_degraded"
+                print(f"[run] {group} rep={rep} agentd 测量期间降级"
+                      f"(agent_degraded_max=1)，本轮作废", flush=True)
             final_snap = fetch_snapshot() if is_tc else None
             metrics = reconcile_metrics(group, metrics, base_snap, samples,
                                         final_snap, parse_epoch_boundaries(logs))
@@ -1476,28 +1863,103 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
     return stamp_rows(results, group, substitute_for)
 
 
+def resolve_out_path(raw):
+    """把 --out 落到数据层：相对路径按 bench/config.py 的 RESULTS_DIR 展开。
+
+    产物一律实体写 ~/tcd/bench/results/，不在 repo 内 mkdir；绝对路径原样使用。
+    """
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = bench_config.RESULTS_DIR / p
+    return p.resolve()
+
+
+def rate_label(rate_str):
+    """把速率串归一到 `<n>mbit`，summary 的 rate 列只写这个形态。"""
+    m = re.search(r"\d+", str(rate_str or ""))
+    return f"{m.group()}mbit" if m else str(rate_str or "")
+
+
+def _cond_name_for_cell(tier, groups, rate_mbit):
+    """按档位/带宽/组态找对应的 compare COND，用于取冻结镜像 digest。"""
+    track = "d" if tier == "S" else "b"
+    for g in groups:
+        name = f"compare-{track}-{tier.lower()}-{g}-{rate_mbit}"
+        if (CONDS_DIR / f"{name}.json").is_file():
+            return name
+    for p in sorted(CONDS_DIR.glob("compare-*.json")):
+        try:
+            cond = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (cond.get("network") or {}).get("rate_mbit") == rate_mbit and \
+                (cond.get("cache") or {}).get("capacity_ratio") == tier:
+            return p.stem
+    return None
+
+
+def _actual_image(ref):
+    """实际使用的镜像引用；能取到 docker RepoDigest 时附上（tag 级为底线）。"""
+    import lock as lock_mod  # noqa: PLC0415
+
+    digest = lock_mod._docker_image_digest(ref)
+    return {"ref": ref, "digest": digest,
+            "digest_source": "docker_repo_digest" if digest else None}
+
+
+def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
+    """每格写 lock.json：COND 冻结 digest + 本次实际镜像，不一致不阻止跑分。"""
+    import lock as lock_mod  # noqa: PLC0415
+
+    cond_name = _cond_name_for_cell(tier, groups, rate_mbit)
+    if cond_name:
+        os.environ["TRAINCACHE_COND"] = cond_name
+    else:
+        os.environ.pop("TRAINCACHE_COND", None)
+    data = lock_mod.snapshot()
+    data["cell"] = {"tier": tier, "rate": rate_label(rate_str),
+                    "groups": list(groups)}
+    data["images_actual"] = {
+        "training": _actual_image(TRAIN_IMAGE),
+        "juicefs": _actual_image(JUICEFS_IMAGE),
+    }
+    # direct 组读法：供服务端限流口径复核（分段 read(n)，按总字节计）。
+    data["direct_read_mode"] = {
+        "transport": "http",
+        "segment_bytes": READ_SEGMENT_BYTES,
+        "counting": "total_bytes",
+    }
+    path = out_path.parent / "lock.json"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+    print(f"[lock] 写入 {path}（COND={cond_name or '未匹配'}，"
+          f"实际镜像 {TRAIN_IMAGE} / {JUICEFS_IMAGE}）")
+
+
 def write_csv(path, results):
-    # 列：四指标 + warmup_seconds(任务#8) + tier/trace_sha256(6.12/6.13)
+    # 列：四指标 + warmup_seconds(任务#8) + tier/rate/trace_sha256(6.12/6.13/D31)
     #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
     #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
-    fieldnames = ["group", "tier", "rep", "status", "void", "reason",
+    fieldnames = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "baseline_substituted",
                   "warmup_seconds",
                   "startup_makespan", "total_makespan",
                   "stall_ratio", "hit_rate", "hit_rate_basis",
-                  "total_read_bytes",
-                  "startup_warmup_bytes", "warmup_fanout",
+                  "total_read_bytes", "read_mode",
+                  "startup_warmup_bytes", "warmup_fanout", "warmup_basis",
                   "sustained_prefetch_bytes", "switch_reprefetch_bytes",
                   "fetch_bytes_run", "block_hit_rate_diag",
                   "queue_timeouts", "read_errors", "peak_resident_bytes",
                   "trace_sha256", "chunk_size_bytes", "cache_bytes",
-                  "compute_ms", "read_workers", "read_queue_depth"]
+                  "compute_ms", "read_workers", "read_queue_depth",
+                  "agent_degraded_max"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in results:
             row = {k: r.get(k, "") for k in fieldnames}
             row["tier"] = row.get("tier") or TIER
+            row["rate"] = row.get("rate") or rate_label(TC_RATE_EFF)
             row["status"] = row.get("status") or row_status(
                 row["tier"], bool(r.get("void")))
             row["baseline_substituted"] = r.get("baseline_substituted") or ""
@@ -1518,7 +1980,8 @@ def selftest():
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
       3. 字节账精确：换一个假的 read_shard（返回已知字节数）离线跑一遍主循环，
          total_read_bytes 必须 == reads × 每片字节数，且命中计数不丢；
-      4. 节点缓存清理命令都走 sh -c（glob 必须在节点容器内展开，否则静默失败）；
+      4. 节点缓存清理命令都走 sh -c（glob 必须在节点容器内展开，否则静默失败），
+         清后判空命令形态正确；
       5. 读队列超时那一步计入统计且本轮标 void（stall_ratio 分母不被跳步带小）；
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
          档位 epochs 联动、带宽格的 burst/抖动推导、Fluid 全废才顶位。
@@ -1632,7 +2095,12 @@ def selftest():
             raise AssertionError(f"节点清理命令没走 sh -c: {cmd}")
         if not cmd[5].startswith("rm -rf ") or not cmd[5].endswith("/*"):
             raise AssertionError(f"节点清理命令形态不对: {cmd}")
-    print("[selftest] 4) 节点缓存清理命令全部走 sh -c（glob 在容器内展开）")
+    check = _node_cache_check_cmd("dummy-node")
+    if check[:5] != ["docker", "exec", "dummy-node", "sh", "-c"]:
+        raise AssertionError(f"节点判空命令没走 sh -c: {check}")
+    if "ls -A" not in check[5] or "[ -d " not in check[5]:
+        raise AssertionError(f"节点判空命令形态不对: {check}")
+    print("[selftest] 4) 节点缓存清理命令全部走 sh -c（glob 在容器内展开），清后判空命令形态正确")
 
     # ---- 5) 读队列超时：这一步要计入统计 + 本轮标 void ----
     # 旧版是 continue 跳过这一步 → step_total 分母偏小 → stall_ratio 偏乐观；
@@ -1699,9 +2167,11 @@ def selftest():
 def main():
     parser = argparse.ArgumentParser(description="M7 五组对照跑分")
     parser.add_argument("--reps", type=int, default=None,
-                        help="每点采样次数；缺省按档位取 D19/D32 值（S=3/M=3/L=1，S 档符号翻转格可补到 5）")
+                        help="每点采样次数；缺省按档位取 D19/D32 值（S=3/M=3/L=1）")
     parser.add_argument("--tier", choices=("S", "M", "L"), default=TIER,
                         help="容量档位(默认取 CAPACITY_RATIO 环境变量,缺省 S)")
+    parser.add_argument("--rate", type=str, default=None,
+                        help="带宽档（如 300mbit）；S 档缺省 100mbit，M/L 档必填")
     parser.add_argument("--groups", nargs="+", default=None,
                         help="要跑的组态；缺省按档位取（D30：S=七组态，M=direct/fluid-cold/"
                              "traincache-cold，L=traincache-cold/fluid-cold）。"
@@ -1720,6 +2190,17 @@ def main():
         return
 
     tier = args.tier
+    # 速率只从 --rate 取：S 档缺省 100mbit；M/L 只有 @1000 格，不传会落到
+    # 预注册外的档位，直接退出。
+    global TC_RATE_EFF
+    if args.rate is not None:
+        TC_RATE_EFF = args.rate
+    elif tier == "S":
+        TC_RATE_EFF = bench_config.TC_RATE
+    else:
+        raise SystemExit(
+            f"[cfg] {tier} 档只有 @1000 格，必须显式传 --rate"
+            f"（如 --rate 1000mbit），退出")
     apply_tier(tier)                      # D32：档位联动 n_tars / epochs
     tier_reps = TIER_PRESETS[tier]["reps"]
     allowed_reps = CAPACITY_TIER_REPS_ALLOWED[tier]
@@ -1732,8 +2213,8 @@ def main():
                   f"{sorted(allowed_reps)}（规定值 {tier_reps}）内；"
                   f"这轮产物只能当冒烟，不进正式表")
         elif reps != tier_reps:
-            print(f"[note] --reps={reps} 是 {tier} 档的补测合法值"
-                  f"（下限 {tier_reps}，D32 符号翻转格补到 5）")
+            print(f"[note] --reps={reps} 是 {tier} 档的合法值"
+                  f"（规定值 {tier_reps}，D32）")
 
     picked, dropped = select_groups(tier, args.groups)
     if dropped:
@@ -1742,8 +2223,17 @@ def main():
         raise SystemExit(f"[cfg] {tier} 档没有可跑组态（请求 {args.groups}），退出")
 
     rate_mbit, burst_eff, jitter_eff = tc_cell(tier, TC_RATE_EFF)
+    if tier == "S" and rate_mbit == 300:
+        if args.groups is None:
+            raise SystemExit(
+                "[cfg] S@300 只允许 direct/fluid-cold/traincache-cold 三组，"
+                "必须显式传 --groups，退出")
+        extra = [g for g in args.groups if g not in S300_GROUPS]
+        if extra:
+            raise SystemExit(
+                f"[cfg] S@300 不接受组态 {extra}，只允许 {list(S300_GROUPS)}，退出")
     if rate_mbit not in bench_config.TC_RATE_MBITS:
-        print(f"[warn] TC_RATE={TC_RATE_EFF} 不在 D31 带宽轴 "
+        print(f"[warn] --rate={TC_RATE_EFF} 不在 D31 带宽轴 "
               f"{list(bench_config.TC_RATE_MBITS)} 内，这轮不是正式实验点")
 
     trace = build_run_trace()
@@ -1773,8 +2263,9 @@ def main():
         print(f"[dry-run] 未连集群、未起 Pod，产物 {args.out} 未写入")
         return
 
-    out_path = Path(args.out)
+    out_path = resolve_out_path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_cell_lock(out_path, tier, picked, rate_mbit, TC_RATE_EFF)
 
     all_results = []
     for group in picked:

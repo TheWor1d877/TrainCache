@@ -1,6 +1,6 @@
 package warmup
 
-// M13 fanout acceptance tests (docs/8.2 plan.md §19, docs/8.3 D38):
+// M13 fanout acceptance tests (docs/7.2 plan.md §19, docs/7.3 D38):
 // per-Pod top-K placement, pair-level RPC diff, P x K status, existential
 // gate, P x K score annotation, landing deviation and fanout=1 regression.
 

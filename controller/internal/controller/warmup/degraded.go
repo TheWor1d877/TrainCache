@@ -1,6 +1,6 @@
 // Package warmup contains the WarmupTask control-plane logic. This file owns
 // the M9 Pod association contract shared with the mutating webhook and the
-// GateInjectionDegraded condition (docs/8.1 design.md §5.7, docs/8.3 D8-D10).
+// GateInjectionDegraded condition (docs/7.1 design.md §5.7, docs/7.3 D8-D10).
 package warmup
 
 import (
@@ -28,8 +28,8 @@ import (
 	"traincache/controller/internal/metrics"
 )
 
-// Pod association and injection keys frozen by docs/8.1 §5.7/§6.3 and
-// docs/8.3 D8-D10.
+// Pod association and injection keys frozen by docs/7.1 §5.7/§6.3 and
+// docs/7.3 D8-D10.
 const (
 	WarmupEnabledLabel      = "traincache.io/warmup"
 	WarmupEnabledValue      = "enabled"
@@ -57,7 +57,7 @@ func TaskKey(task *traincachev1alpha1.WarmupTask) string {
 	return task.Namespace + "/" + task.Name
 }
 
-// TaskReady implements the "Ready" filter from docs/8.1 §5.7. A task that
+// TaskReady implements the "Ready" filter from docs/7.1 §5.7. A task that
 // already exposes a Ready condition uses it; otherwise terminal phases
 // (Released/Failed/Degraded) are treated as not ready and every other phase
 // (including a freshly created task with empty status) is ready.
@@ -216,7 +216,7 @@ func BindPodIndex(task *traincachev1alpha1.WarmupTask, index int32) (traincachev
 // ApplyInjection adds the scheduling gate and the two Pod annotations. It is
 // idempotent: an already-present gate is not appended twice and matching
 // annotations are left untouched. It does not touch nodeAffinity, resources or
-// containers (docs/8.1 §5.7) and returns whether anything changed.
+// containers (docs/7.1 §5.7) and returns whether anything changed.
 func ApplyInjection(pod *corev1.Pod, task *traincachev1alpha1.WarmupTask, index int32, gateName string) bool {
 	if pod == nil || task == nil {
 		return false
@@ -298,7 +298,7 @@ func MarkGateInjectionDegraded(ctx context.Context, c client.Client, logger *slo
 
 // DegradedReconciler watches selected Pods and records
 // GateInjectionDegraded on the matching WarmupTask when the webhook did not
-// inject the task annotation (docs/8.1 §5.7 and §7.9).
+// inject the task annotation (docs/7.1 §5.7 and §7.9).
 //
 // Wiring note: controller-manager registers this reconciler once the warmup
 // manager owns Pod watches; SetupWithManager is provided for that caller.

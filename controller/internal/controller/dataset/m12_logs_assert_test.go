@@ -1,6 +1,6 @@
 package dataset
 
-// M12 log assertions for docs/8.1 design.md §9.3/§9.4. The tests assert
+// M12 log assertions for docs/7.1 design.md §9.3/§9.4. The tests assert
 // structured JSON output from the real reconcile path, including the rule
 // that Secret credential values never reach the log stream.
 

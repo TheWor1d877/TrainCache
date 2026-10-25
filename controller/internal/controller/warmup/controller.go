@@ -1,6 +1,6 @@
 // Package warmup implements the WarmupTask reconcile loop for M4: candidate
 // filtering, consume-order resolution, window expansion and preheat submission
-// (docs/8.1 design.md §5.3, §5.4, §7.2). Polling, readiness tables, GWAA,
+// (docs/7.1 design.md §5.3, §5.4, §7.2). Polling, readiness tables, GWAA,
 // gating and scoring belong to M5-M8 and are intentionally absent.
 package warmup
 
@@ -36,7 +36,7 @@ import (
 
 // Condition types written by the M4 reconciler. Negative-named conditions use
 // ConditionFalse to mean "the problem is present"; they are removed on success,
-// mirroring the DataSet controller (docs/8.1 §5.2/§7.2).
+// mirroring the DataSet controller (docs/7.1 §5.2/§7.2).
 const (
 	ConditionDataSetNotReady   = "DataSetNotReady"
 	ConditionInvalidSpec       = "InvalidSpec"
@@ -63,7 +63,7 @@ const (
 const EventConsumeOrderDefaulted = "ConsumeOrderDefaulted"
 
 // Retry sentinels request controller-runtime backoff because Node/Pod/DataSet
-// state may change (docs/8.1 §7.9).
+// state may change (docs/7.1 §7.9).
 var (
 	ErrDataSetNotReady   = errors.New("warmup: DataSet is not ready")
 	ErrNoCandidates      = errors.New("warmup: no candidate nodes")
@@ -101,13 +101,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&traincachev1alpha1.WarmupTask{}).
 		// M11: released Pods are watched so a spec.nodeName change can be
-		// compared with the GWAA assignment (docs/8.1 §7.8).
+		// compared with the GWAA assignment (docs/7.1 §7.8).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToTasks)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
 
-// Reconcile implements docs/8.1 §7.2 steps 1-6 for M4.
+// Reconcile implements docs/7.1 §7.2 steps 1-6 for M4.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	start := r.now()
 	// Registered before the first Get so every return path, including
@@ -168,7 +168,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		log.Info("warmup reconcile finished", fields...)
 	}()
 
-	// M11 fallback (docs/8.1 §7.8): a released Pod may land on a Node other
+	// M11 fallback (docs/7.1 §7.8): a released Pod may land on a Node other
 	// than its GWAA assignment. This must run for terminal tasks too, so it
 	// stays before the isTerminal short-circuit.
 	r.reconcileDeviation(ctx, log, task)

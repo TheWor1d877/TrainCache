@@ -77,7 +77,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// R1/R2(7.1 §5.9/§5.10):前缀感知快照跟随 + 读者声明心跳;随 signal ctx 退出,
+	// R1/R2(6.1 §5.9/§5.10):前缀感知快照跟随 + 读者声明心跳;随 signal ctx 退出,
 	// 退出时对已知 dataset 撤销 claim。
 	ag.StartBackground(ctx)
 

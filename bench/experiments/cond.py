@@ -79,7 +79,7 @@ DATASET_SOURCES = {"minio", "local-nginx"}
 VALID_RATES = set(config.TC_RATE_MBITS)
 CURRICULUM_FRACTIONS_FROZEN = [1.0, 2.0 / 3.0, 1.0 / 3.0]
 
-# ---- 容量档位 S/M/L(docs/10.1 任务 0.6/6.13,D19;与 cache.ratio/capacity_bytes 同一口径)----
+# ---- 容量档位 S/M/L(docs/9.1 任务 0.6/6.13,D19;与 cache.ratio/capacity_bytes 同一口径)----
 # 对照实验缓存固定 1GiB;数据量 = N_TARS × SHARD_SIZE_MB(256MiB,即 config.TRACK_B_TAR_BYTES)。
 # M 档 N_TARS 即 config.TRACK_B_N_TARS(32);S/L 为其 1/4 与 4 倍。
 COMPARE_CACHE_BYTES = 1 << 30  # 1GiB,三档共用
@@ -87,7 +87,7 @@ COMPARE_SHARD_SIZE_BYTES = config.TRACK_B_TAR_BYTES  # 256MiB
 VALID_CAPACITY_RATIOS = {"S", "M", "L"}
 # 数据集规模枚举(D19 三档):S=2GiB / M=8GiB / L=32GiB
 VALID_DATASET_BYTES = {2 << 30, 8 << 30, 32 << 30}
-# epoch 档位枚举(10.1 M3):1 / 3 / 10
+# epoch 档位枚举(9.1 M3):1 / 3 / 10
 VALID_EPOCHS = {1, 3, 10}
 CAPACITY_TIER_RATIO = {"S": 2.0, "M": 8.0, "L": 32.0}   # 数据/缓存容量比(D19)
 CAPACITY_TIER_N_TARS = {
@@ -96,9 +96,8 @@ CAPACITY_TIER_N_TARS = {
     "L": config.TRACK_B_N_TARS * 4,    # 128 × 256MiB = 32GiB(分片需新增生成)
 }
 CAPACITY_TIER_REPS = {"S": 3, "M": 3, "L": 1}             # D32:每档名义次数(runner 默认)
-# 每档允许的采样次数(D32):S 档 3 次是下限,runner 可把符号翻转格补到 5;
-# M 档固定 3 次;L 档固定 1 次(探点)。
-CAPACITY_TIER_REPS_ALLOWED = {"S": {3, 5}, "M": {3}, "L": {1}}
+# 每档正式实验的采样次数(D32):S=3/M=3/L=1,不做符号翻转补测。
+CAPACITY_TIER_REPS_ALLOWED = {"S": {3}, "M": {3}, "L": {1}}
 # D30:各档参跑组。组态名自带冷热,traincache-cold / traincache-warm 是两个独立组态。
 CAPACITY_TIER_GROUPS = {
     "S": {"direct", "juicefs-cold", "juicefs-warm",
@@ -107,7 +106,7 @@ CAPACITY_TIER_GROUPS = {
     "L": {"traincache-cold", "fluid-cold"},
 }
 EXPLORATORY_TIERS = {"L"}  # L 档 1 次,低于 3 次硬纪律:标 exploratory,不进正式表
-# 10.1 D32/§12:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
+# 9.1 D32/§12:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
 # (3 个连续 epoch),M/L 档跑 B 轨符号探点(1 个 epoch)。显式 EPOCHS 环境变量
 # 优先;COND 的 workload.epochs 仍按 figure 校验,两者不一致由 COND 校验器拒收。
 CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
@@ -275,7 +274,7 @@ def validate_cond(cond: dict) -> list[str]:
             v = _require(wl, k, "$.workload", errors)
             if v is not None and (not isinstance(v, int) or v <= 0):
                 errors.append(f"$.workload.{k} 必须是 >0 的整数")
-        # epoch 档位枚举(10.1 M3):1 / 3 / 10,不在枚举内的实验点直接拒收
+        # epoch 档位枚举(9.1 M3):1 / 3 / 10,不在枚举内的实验点直接拒收
         ep = wl.get("epochs")
         if isinstance(ep, int) and ep not in VALID_EPOCHS:
             errors.append(
@@ -455,20 +454,20 @@ def validate_cond(cond: dict) -> list[str]:
 
     # ---- sampling ----
     samp = _require(cond, "sampling", "$", errors)
-    # 容量档位(D19/D32)接管 compare-* 的采样次数:S=3(可补到 5)/M=3/L=1
+    # 容量档位(D19/D32)接管 compare-* 的采样次数:S=3/M=3/L=1
     tier = cache.get("capacity_ratio") if isinstance(cache, dict) else None
     tier_has_reps = tier in CAPACITY_TIER_REPS
     if isinstance(samp, dict):
         _check_unknown(samp, ALLOWED_SAMPLING, "$.sampling", errors)
         reps = _require(samp, "reps", "$.sampling", errors)
-        # 规则 8:pareto*/policy 固定 7;compare-* 带 capacity_ratio 时按档位(D32),
-        # 不带 capacity_ratio 时沿用 7(旧口径);fig1/fig2/fig3 是 3 或 7
-        if figure in {"pareto1", "pareto2", "policy"}:
+        # 规则 8:pareto1/pareto2 固定 7;policy 与 fig1/fig2/fig3 固定 3;
+        # compare-* 带 capacity_ratio 时按档位(D32),不带时固定 3
+        if figure in {"pareto1", "pareto2"}:
             allowed_reps = {7}
         elif figure in {"compare-d", "compare-b"}:
-            allowed_reps = CAPACITY_TIER_REPS_ALLOWED[tier] if tier_has_reps else {7}
+            allowed_reps = CAPACITY_TIER_REPS_ALLOWED[tier] if tier_has_reps else {3}
         else:
-            allowed_reps = {3, 7}
+            allowed_reps = {3}
         if reps is not None and reps not in allowed_reps:
             tier_hint = f",capacity_ratio={tier!r}" if tier_has_reps else ""
             errors.append(
@@ -688,10 +687,11 @@ def selftest() -> None:
     tier_bad2["sampling"]["reps"] = 2
     errs7 = validate_cond(tier_bad2)
     assert any("reps" in e for e in errs7), errs7
-    # S 档 runner 可把符号翻转格补到 5,5 仍然合法
-    tier_ok5 = json.loads(json.dumps(tier_ok))
-    tier_ok5["sampling"]["reps"] = 5
-    assert not validate_cond(tier_ok5), validate_cond(tier_ok5)
+    # S 档允许集合只含 3,5 应被拒
+    tier_bad5 = json.loads(json.dumps(tier_ok))
+    tier_bad5["sampling"]["reps"] = 5
+    errs_bad5 = validate_cond(tier_bad5)
+    assert any("reps" in e for e in errs_bad5), errs_bad5
 
     # 非法 tier 值 → 报错
     tier_bad3 = json.loads(json.dumps(tier_ok))

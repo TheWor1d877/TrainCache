@@ -11,7 +11,7 @@ import (
 )
 
 // m12ControllerInventory is the reviewable family/label inventory for the
-// controller-owned registry (docs/8.1 design.md §9.5). Any family or label
+// controller-owned registry (docs/7.1 design.md §9.5). Any family or label
 // change must update this map and m12AllowedLabelValues in the same change.
 var m12ControllerInventory = map[string][]string{
 	"traincache_controller_reconcile_total":            {"controller", "result"},

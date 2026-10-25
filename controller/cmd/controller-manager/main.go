@@ -65,7 +65,7 @@ func run(ctx context.Context) error {
 	logStartup(log, cfg)
 
 	// Independent registry owned by the control plane. The reconcilers emit
-	// into it and managerOptions exposes it at metricsPath (docs/8.1 §9.5).
+	// into it and managerOptions exposes it at metricsPath (docs/7.1 §9.5).
 	registry := metrics.New()
 	log.Info("metrics registry initialized",
 		"addr", cfg.MetricsAddr,
@@ -135,7 +135,7 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 
 	// M9 wiring: watch Pods selected by traincache.io/warmup=enabled and
 	// record GateInjectionDegraded when the webhook did not inject the task
-	// annotation (docs/8.1 §5.7, §7.9).
+	// annotation (docs/7.1 §5.7, §7.9).
 	degradedReconciler := &warmupcontroller.DegradedReconciler{
 		Client:   mgr.GetClient(),
 		Log:      log.With("controller", "warmup-degraded"),

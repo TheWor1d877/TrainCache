@@ -9,7 +9,7 @@ import (
 )
 
 // ValidateSpec returns human-readable reasons why spec is invalid. An empty
-// result means the spec passed every check in docs/8.1 design.md §5.2 and the
+// result means the spec passed every check in docs/7.1 design.md §5.2 and the
 // configured chunk limit.
 func ValidateSpec(spec traincachev1alpha1.DataSetSpec, maxChunks int64) []string {
 	var reasons []string

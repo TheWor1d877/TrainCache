@@ -32,12 +32,12 @@ import (
 // Config 是 index 包的全局配置（默认值见 DefaultConfig；design.md §8 配置项表）。
 type Config struct {
 	ChunkSize          int64         // 块切分粒度，默认 64 MiB（decisions D4）
-	MaxEntriesPerShard int           // 分片条目上限，默认 100_000（doc/7 硬约束）
+	MaxEntriesPerShard int           // 分片条目上限，默认 100_000（doc/5.0 硬约束）
 	CommitMaxAttempts  int           // 条件提交冲突重试上限，默认 5
 	RetainSnapshots    int           // GC 保留窗口，默认 3（CURRENT + 2，decisions D14）
 	RefreshInterval    time.Duration // Catalog 后台刷新周期，默认 5 s
 	// ReaderGrace 是读者 claim 的有效期：UpdatedAt 超过该时长的 claim 整体忽略
-	// （视为读者已死）。零值/负值回退为 2*RefreshInterval（默认 10 s，7.1 §5.11）。
+	// （视为读者已死）。零值/负值回退为 2*RefreshInterval（默认 10 s，6.1 §5.11）。
 	ReaderGrace time.Duration
 	// OnSnapshotChange 在每次成功原子切换后、锁外调用；参数为数据集名与新 snapID。
 	// nil 表示不回调；实现不得阻塞，回调 panic 不得向调用方传播。
@@ -46,14 +46,14 @@ type Config struct {
 	// nil 表示不回调；实现不得阻塞，回调 panic 不得向调用方传播。
 	OnSnapshotError func(dataset string, err error)
 	// OnSweepSkip 在 GC 因需要保护的快照 manifest 不可用而跳过本轮块删除时调用，
-	// 参数为数据集名与原因（如 "manifest_unavailable"）。nil 表示不回调（7.1 §5.11）。
+	// 参数为数据集名与原因（如 "manifest_unavailable"）。nil 表示不回调（6.1 §5.11）。
 	OnSweepSkip func(dataset, reason string)
 }
 
 // 默认值（design.md §8）。
 const (
 	defaultChunkSize          int64 = 64 << 20 // 64 MiB
-	defaultMaxEntriesPerShard       = 100_000  // doc/7 硬约束
+	defaultMaxEntriesPerShard       = 100_000  // doc/5.0 硬约束
 	defaultCommitMaxAttempts        = 5
 	defaultRetainSnapshots          = 3
 	defaultRefreshInterval          = 5 * time.Second

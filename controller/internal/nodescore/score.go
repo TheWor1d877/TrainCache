@@ -1,5 +1,5 @@
-// This file computes the global decay readiness score from docs/8.0
-// "就绪度得分逻辑" and docs/8.1 design.md §7.6.
+// This file computes the global decay readiness score from docs/7.0
+// "就绪度得分逻辑" and docs/7.1 design.md §7.6.
 package nodescore
 
 import "math"

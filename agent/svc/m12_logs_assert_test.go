@@ -1,6 +1,6 @@
 package svc
 
-// M12 log assertions for docs/10.1 plan §4.2. These tests drive the
+// M12 log assertions for docs/9.1 plan §4.2. These tests drive the
 // production code paths (preheat lifecycle + evictor round + agentd startup)
 // and assert the structured JSON records (message + required fields), so
 // renaming a message or dropping a field fails here.
@@ -110,11 +110,11 @@ func m12PreheatCfg() Config {
 // m12ValidSubmitReq 返回通过全部校验的 SubmitPreheat 请求。
 func m12ValidSubmitReq(gen uint64) *agentpb.SubmitPreheatRequest {
 	return &agentpb.SubmitPreheatRequest{
-		TaskId:      "task-m12",
-		Node:        "worker-01",
-		Dataset:     testDataset,
-		Prefixes:    []string{""},
-		Generation:  gen,
+		TaskId:     "task-m12",
+		Node:       "worker-01",
+		Dataset:    testDataset,
+		Prefixes:   []string{""},
+		Generation: gen,
 	}
 }
 
@@ -413,10 +413,10 @@ func (f *m12FakeHeat) ListForEviction() []evictor.EvictionEntry {
 
 // m12EvictFixture 是 evictor 测试最小 fixture。
 type m12EvictFixture struct {
-	cs     *cas.Store
-	heat   *m12FakeHeat
-	usage  *m12FakeUsage
-	ev     *evictor.Evictor
+	cs    *cas.Store
+	heat  *m12FakeHeat
+	usage *m12FakeUsage
+	ev    *evictor.Evictor
 }
 
 func newM12EvictFixture(t *testing.T, usageValues ...float64) *m12EvictFixture {
@@ -666,6 +666,24 @@ func TestM12HookSockReadyAndFrameErrors(t *testing.T) {
 	}
 	if recType["type"] != "totally-unknown" {
 		t.Errorf("unknown-type log type = %v, want totally-unknown", recType["type"])
+	}
+
+	// 8d. 读帧失败(收端退出):读循环遇到非 ErrClosed 的读错误时打 Warn,带
+	// path 与 err 字段。用读超时制造该错误,不依赖对端关闭。
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		t.Fatal("HookSock conn 未建立")
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("设置读超时: %v", err)
+	}
+	recFail := m12WaitForLogTS(t, buf, "hooksock: 读帧失败,收端退出", hookTestTimeout)
+	m12RequireLevel(t, recFail, "WARN")
+	m12RequireFields(t, recFail, "path", "err")
+	if recFail["path"] != path {
+		t.Errorf("read-failure log path = %v, want %s", recFail["path"], path)
 	}
 }
 

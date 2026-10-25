@@ -64,7 +64,7 @@ func (f *Fetcher) MaxInflightBytes() int64 { return f.opts.MaxInflightBytes }
 // 相同 key 的并发 Fetch 合并为一次实际下载（in-flight map，等待者共享结果）；
 // 等待者的 ctx 取消只影响等待者自身，不取消实际下载。
 // 返回块指纹。命中检查是调用方职责：先经 index.Catalog.Lookup 取指纹、cas.Open
-// 验存在，未命中才调用本方法（对应 docs/7 "缓存命中就不触及数据源"）。
+// 验存在，未命中才调用本方法（对应 docs/2 "缓存命中就不触及数据源"）。
 func (f *Fetcher) Fetch(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
 	var zero cas.Fingerprint
 

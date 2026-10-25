@@ -65,7 +65,7 @@ func histogramSamples(t *testing.T, reg *metrics.Registry, name string, kv ...st
 
 // TestIndexLineMetricsOnOrderRefresh(综合验收 ②):ForOrder 的 LoadPrefixes 打点——
 // 成功:index_refresh_total{dataset,success} +1、index_refresh_duration_seconds 样本 +1、
-// index_shards_loaded 置真实分片数(6.3 D30:Catalog.ShardsLoaded;夹具单块数据集 manifest
+// index_shards_loaded 置真实分片数(5.3 D30:Catalog.ShardsLoaded;夹具单块数据集 manifest
 // 恰 1 片);失败(无 CURRENT 的 dataset,LoadPrefixes 报错):{error} +1 且不上报耗时(避免
 // 失败以 success 混入直方图),index_shards_loaded 保持前值(失败不更新该 gauge)。
 // dataset 标签经白名单归并为 "other"(装置无白名单)。

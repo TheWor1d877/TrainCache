@@ -13,7 +13,7 @@ import (
 // probeKeyPrefix 是探测临时键前缀；探测结束会尽力删除该对象。
 const probeKeyPrefix = "traincache-probe/conditional-write-"
 
-// ProbeConditionalWrite 探测 Store 后端是否真正执行条件写（design.md 7.1 §5.12）：
+// ProbeConditionalWrite 探测 Store 后端是否真正执行条件写（design.md 6.1 §5.12）：
 // 写入一个临时键，再用故意不匹配的 ETag 调用 PutIfMatch。
 //
 //   - 返回 ErrConflict：后端支持条件写，返回 nil；

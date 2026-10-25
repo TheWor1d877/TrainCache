@@ -2,7 +2,7 @@ package svc
 
 // wire.go:M4/M5/M6 组件与装配层的接线胶水(collector 懒绑定、钩子三型 handler、淘汰
 // HeatSource/ProtectedSource 适配、GC Sweep 闭包、rescan 指标适配、读时坏块修复)。
-// 冻结:各子模块导出签名与语义不变(7.3 D28~D37),全部语义映射集中在本文件与 assemble.go。
+// 冻结:各子模块导出签名与语义不变(6.3 D28~D37),全部语义映射集中在本文件与 assemble.go。
 
 import (
 	"context"
@@ -371,7 +371,7 @@ func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err e
 	return blocks, objects, firstErr
 }
 
-// onSweepSkip 是 Collector 的跳过回调(7.1 §5.11):protected 快照 manifest 缺失/
+// onSweepSkip 是 Collector 的跳过回调(6.1 §5.11):protected 快照 manifest 缺失/
 // 损坏时计 index_sweep_skipped_total{dataset,reason} 并告警;core 继续删除其他可删
 // 快照对象,不整体停摆。
 func (a *Agent) onSweepSkip(dataset, reason string) {

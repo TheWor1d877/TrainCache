@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// Deprecated symbols from docs/8.2 plan.md task 12.6. They must not appear in
+// Deprecated symbols from docs/7.2 plan.md task 12.6. They must not appear in
 // controller/ or agent/ source. Comments and absence-assertion tests may still
 // mention them by name; the scanners below therefore inspect parsed Go
 // identifiers (and comment-stripped proto text) rather than raw lines.

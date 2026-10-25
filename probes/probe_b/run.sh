@@ -5,10 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CFG() { python3 "$ROOT/config.py" --sh "$1"; }
 
-OUT_DIR="$ROOT/results/probe_b"
+OUT_DIR="$(CFG RESULTS_DIR)/probe_b"
 mkdir -p "$OUT_DIR" 2>/dev/null || {
   echo "results 目录权限不足(之前用 root 跑过冷读会留下 root 属主):"
-  echo "  sudo chown -R $(id -un) \"$ROOT/results\""
+  echo "  sudo chown -R $(id -un) \"$OUT_DIR\""
   exit 1
 }
 

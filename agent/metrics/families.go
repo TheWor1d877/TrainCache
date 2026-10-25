@@ -61,12 +61,12 @@ const (
 	prefetchLeadBlocksName       = "traincache_prefetch_lead_blocks"
 	consumptionAdvanceName       = "traincache_consumption_advance_total"
 	fetchBandwidthLimitBytesName = "traincache_fetch_bandwidth_limit_bytes"
-	// R3/R4(7.1 §5.11/§5.12)。
+	// R3/R4(6.1 §5.11/§5.12)。
 	indexSweepSkippedName                    = "traincache_index_sweep_skipped_total"
 	objectstoreConditionalWriteSupportedName = "traincache_objectstore_conditional_write_supported"
 )
 
-// GC 跳过原因词汇表(7.1 §5.11:protected 快照 manifest 缺失/损坏;集合外归一 other)。
+// GC 跳过原因词汇表(6.1 §5.11:protected 快照 manifest 缺失/损坏;集合外归一 other)。
 const (
 	ReasonManifestUnavailable = "manifest_unavailable"
 	sweepReasonOther          = "other"
@@ -445,7 +445,7 @@ func (r *Registry) SetIndexShardsLoaded(dataset string, n int64) {
 }
 
 // IncIndexSweepSkipped 记一次 GC 跳过块删除:traincache_index_sweep_skipped_total
-// {dataset,reason}(7.1 §5.11;reason 集合外归一 other,dataset 走白名单归并)。
+// {dataset,reason}(6.1 §5.11;reason 集合外归一 other,dataset 走白名单归并)。
 func (r *Registry) IncIndexSweepSkipped(dataset, reason string) {
 	if reason != ReasonManifestUnavailable {
 		reason = sweepReasonOther
@@ -454,7 +454,7 @@ func (r *Registry) IncIndexSweepSkipped(dataset, reason string) {
 }
 
 // SetObjectstoreConditionalWriteSupported 设置条件写探测结果 gauge(1=支持,0=不支持/
-// 探测失败;7.1 §5.12,无标签)。
+// 探测失败;6.1 §5.12,无标签)。
 func (r *Registry) SetObjectstoreConditionalWriteSupported(supported bool) {
 	v := 0.0
 	if supported {
@@ -642,11 +642,11 @@ func (r *Registry) initHooksAndEvidence() {
 	}, []string{"dataset"})
 	r.indexSweepSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: indexSweepSkippedName,
-		Help: "GC 因 protected 快照 manifest 不可用跳过块删除的次数(dataset,reason;7.1 §5.11)",
+		Help: "GC 因 protected 快照 manifest 不可用跳过块删除的次数(dataset,reason;6.1 §5.11)",
 	}, []string{"dataset", "reason"})
 	r.objectstoreConditionalWriteSupported = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: objectstoreConditionalWriteSupportedName,
-		Help: "对象存储条件写探测结果(1=支持,0=不支持/探测失败;7.1 §5.12)",
+		Help: "对象存储条件写探测结果(1=支持,0=不支持/探测失败;6.1 §5.12)",
 	})
 
 	r.reg.MustRegister(

@@ -1,5 +1,5 @@
 // Package metrics owns the control plane's independent Prometheus registry and
-// the bounded-label metric families frozen by docs/8.1 design.md §9.5.
+// the bounded-label metric families frozen by docs/7.1 design.md §9.5.
 //
 // The controller must not share the process-global default registry. New
 // builds the registry owned by the controller-manager (controller families)

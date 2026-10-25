@@ -29,7 +29,8 @@
 # ============================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3}"
+REPO="$(cd "$ROOT/.." && pwd)"
+PY="${PY:-$REPO/.venv/bin/python}"
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 NAME="$(CFG TRACK_D_SOURCE_CONTAINER)"
@@ -324,13 +325,13 @@ scripts_dir, d1, d2, out_path, tol, window, ts, qdisc, tc_via = sys.argv[1:10]
 sys.path.insert(0, scripts_dir)
 import bench_track_d as bt
 
-# repo 根(scripts 的上两级);轮次目录记 repo 相对路径(bench/results/...),
-# 不做 resolve()——resolve 会把 bench/results 软链接展开成数据层物理绝对路径,
-# 产物里记的就不是可移植路径。
-REPO_ROOT = str(Path(scripts_dir).parent.parent)
+# 轮次目录记数据层相对路径(产物与机器无关);数据层口径取自 bench/config.py。
+sys.path.insert(0, str(Path(scripts_dir).parent))
+import config as bench_config
+DATA_ROOT = str(bench_config.DATA_ROOT)
 
-def repo_rel(p):
-    rp = os.path.relpath(os.path.abspath(p), REPO_ROOT)
+def data_rel(p):
+    rp = os.path.relpath(os.path.abspath(p), DATA_ROOT)
     return rp if not rp.startswith(os.pardir) else os.path.abspath(p)
 
 def load_round(d):
@@ -418,8 +419,8 @@ out = {
     "metric": ("epoch 级聚合(判据):median_stall = 每步 wait_s/step_s 的中位数,"
                "epoch0 前 warmup 步不计;两轮 per-epoch median_stall 逐 epoch "
                "相对差与全轮 median_stall 相对差均 ≤ tol 判\"对上\""),
-    "round_dirs": [repo_rel(d1), repo_rel(d2)],
-    "per_step": [repo_rel(f1), repo_rel(f2)],
+    "round_dirs": [data_rel(d1), data_rel(d2)],
+    "per_step": [data_rel(f1), data_rel(f2)],
     "epoch_medians": {
         "per_epoch": per_epoch_rows,
         "max_rel_diff": res["max_rel_diff"],

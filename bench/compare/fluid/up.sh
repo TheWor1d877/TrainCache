@@ -21,7 +21,7 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="fluid"
 NS="fluid"
-TRACE_FILE="${TRACE_FILE:-$COMPARE_ROOT/traces/default.json}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
 # 本档位消费的分片数(run_bench 按 S/M/L 档位下发;缺省取 M 档全量 32 片)。
 # 同步按这个数收窄:桶里共有 32 片,不收窄的话 S 档(只消费 8 片 = 2GiB)会把 8GiB
 # 全同步进来,数据集口径与容量比都失真,DataLoad 预热也要多搬 4 倍字节。
@@ -229,7 +229,24 @@ EOF
 kubectl -n "$NS" delete job jfs-fluid-import --ignore-not-found 2>/dev/null || true
 echo "$FLUID_IMPORT_YAML" | kubectl apply -f -
 log_group "$GROUP" "job/jfs-fluid-import 已创建(从 MinIO 同步 shard 到 Fluid JuiceFS)"
-kubectl -n "$NS" wait --for=condition=complete job/jfs-fluid-import --timeout=1800s
+# Job 失败时 condition=complete 永远不成立,wait 会空等满 1800s;轮询 succeeded/failed,失败立即退出。
+for i in $(seq 1 360); do
+  S=$(kubectl -n "$NS" get job jfs-fluid-import -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
+  F=$(kubectl -n "$NS" get job jfs-fluid-import -o jsonpath='{.status.failed}' 2>/dev/null || true)
+  if [ "$S" = "1" ]; then
+    break
+  fi
+  if [ -n "$F" ] && [ "$F" != "0" ]; then
+    kubectl -n "$NS" logs job/jfs-fluid-import --tail=10 >&2 || true
+    log_group "$GROUP" "job/jfs-fluid-import 失败(failed=$F)" >&2
+    exit 1
+  fi
+  if [ "$i" = "360" ]; then
+    log_group "$GROUP" "job/jfs-fluid-import 超时(1800s)" >&2
+    exit 1
+  fi
+  sleep 5
+done
 log_group "$GROUP" "Fluid JuiceFS 数据导入完成"
 
 # ---- 7. DataLoad(预热,仅 FLUID_PREHEAT=1 时执行)----

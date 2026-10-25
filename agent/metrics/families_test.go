@@ -88,7 +88,7 @@ var sevenLineFamilies = map[string][]string{
 	prefetchLeadBlocksName:       {"dataset"},
 	consumptionAdvanceName:       {"dataset", "source"},
 	fetchBandwidthLimitBytesName: {"dataset"},
-	// R3/R4(7.1 §5.11/§5.12)。
+	// R3/R4(6.1 §5.11/§5.12)。
 	indexSweepSkippedName:                    {"dataset", "reason"},
 	objectstoreConditionalWriteSupportedName: nil,
 }

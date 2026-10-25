@@ -16,7 +16,7 @@ import (
 )
 
 // EventNodeDeviation is recorded on the WarmupTask when a released Pod lands
-// on a Node other than its GWAA assignment (docs/8.1 §7.8).
+// on a Node other than its GWAA assignment (docs/7.1 §7.8).
 const EventNodeDeviation = "NodeDeviation"
 
 // mapPodToTasks enqueues every WarmupTask whose TargetRef selects the Pod.
@@ -45,7 +45,7 @@ func (r *Reconciler) mapPodToTasks(ctx context.Context, obj client.Object) []rec
 	return requests
 }
 
-// reconcileDeviation implements the fallback from docs/8.1 §7.8. For every
+// reconcileDeviation implements the fallback from docs/7.1 §7.8. For every
 // released Pod whose spec.nodeName differs from its GWAA assignment it writes
 // PodNodeReadiness.ActualNode, emits a NodeDeviation event and submits the
 // same startup window on the actual Node at P0. The original assignment is
@@ -91,7 +91,7 @@ func (r *Reconciler) reconcileDeviation(ctx context.Context, log *slog.Logger, t
 			continue
 		}
 		// Landing inside the Pod's warm-node set is not a deviation: only
-		// backfill ActualNode on every entry (docs/8.1 §7.8).
+		// backfill ActualNode on every entry (docs/7.1 §7.8).
 		if containsString(nodes, actual) {
 			setActualNode(task, index, actual)
 			continue
@@ -140,7 +140,7 @@ func containsString(values []string, target string) bool {
 
 // setActualNode writes actual to every PodNodeReadiness entry of the Pod and
 // reports whether the value changed. All entries of one Pod must agree
-// (docs/8.1 §6.1).
+// (docs/7.1 §6.1).
 func setActualNode(task *traincachev1alpha1.WarmupTask, pod int32, actual string) bool {
 	changed := false
 	for i := range task.Status.PodNodeReadiness {

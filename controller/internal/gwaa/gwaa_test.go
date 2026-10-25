@@ -782,7 +782,7 @@ func TestValidate(t *testing.T) {
 }
 
 // TestComputeAdaptiveTargetFanoutFromDistribution pins the M14 target-count
-// examples from docs/8.3 D39.
+// examples from docs/7.3 D39.
 func TestComputeAdaptiveTargetFanoutFromDistribution(t *testing.T) {
 	five := []string{"n0", "n1", "n2", "n3", "n4"}
 	three := []string{"n0", "n1", "n2"}

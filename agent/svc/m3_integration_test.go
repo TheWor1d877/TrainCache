@@ -1,6 +1,6 @@
 package svc
 
-// 本文件是 M3 阶段 D 的 svc 集成测试(7.0 验收 1/5/8/9;docs/7.2 plan.md §5 任务 5):
+// 本文件是 M3 阶段 D 的 svc 集成测试(7.0 验收 1/5/8/9;docs/6.2 plan.md §5 任务 5):
 // 在 svc 装配层把真实 core 组合(objectstore.Mock 的计数/门闩包装 + 临时 CAS +
 // fetch.Fetcher + index.Writer/Catalog)与 svc 组件(OrderDiscovery/HandleOrder/
 // PrefetchManager/PreheatTasks/Server)端到端串起来,覆盖:

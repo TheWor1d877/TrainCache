@@ -17,7 +17,7 @@ import (
 // output; production always writes to stderr like agentd.
 var output io.Writer = os.Stderr
 
-// logSchemaVersion is the public log field schema version (docs/9.1 §3.1).
+// logSchemaVersion is the public log field schema version (docs/8.1 §3.1).
 // It only increases; never change the meaning of an existing value.
 const logSchemaVersion = 1
 

@@ -18,7 +18,7 @@
 #      ⚠ 实测(probes/probe_a/tc_setup.sh 与 bench/scripts/cold_reset.sh 同因):
 #        docker restart 重建容器 netns → eth0 qdisc 随之丢失,故重启后复挂 tc 并
 #        断言(以出现 tbf 为准);否则训练会跑在无限速链路上,测量无效。
-#   ⑤ $PY(缺省 /usr/bin/python3) scripts/bench_track_d.py 全 TRACK_D_EPOCHS epoch
+#   ⑤ $PY(缺省 <repo>/.venv/bin/python) scripts/bench_track_d.py 全 TRACK_D_EPOCHS epoch
 #      → TRACK_D_RESULTS_DIR
 #   ⑥ 后置:欠配等效恢复 docker update --memory=128GiB --memory-swap=128GiB
 #      (本机 docker 将 update --memory 0 视为"不变更"(零值语义),见
@@ -30,7 +30,8 @@
 # ============================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PY:-/usr/bin/python3}"
+REPO="$(cd "$ROOT/.." && pwd)"
+PY="${PY:-$REPO/.venv/bin/python}"
 CFG() { "$PY" "$ROOT/config.py" --sh "$1"; }
 
 NAME="$(CFG TRACK_D_SOURCE_CONTAINER)"

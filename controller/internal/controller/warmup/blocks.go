@@ -18,7 +18,7 @@ const (
 )
 
 // errInvalidSpec marks permanent spec problems. The controller turns it into
-// Condition InvalidSpec=False and does not retry (docs/8.1 §7.2).
+// Condition InvalidSpec=False and does not retry (docs/7.1 §7.2).
 var errInvalidSpec = errors.New("warmup: invalid spec")
 
 // ValidateTask checks the PodDetail mapping and the Q11 Pod limit. The DataSet
@@ -164,7 +164,7 @@ func WindowChunks(order []int32, k, cutoff int32, layout []traincachev1alpha1.Bl
 
 // PodWindows expands every Pod's request window. The returned slice is indexed
 // by PodDetail.Index and preserves request order, which is also the bitmap bit
-// order used by polling (docs/8.1 §5.9).
+// order used by polling (docs/7.1 §5.9).
 func PodWindows(task *traincachev1alpha1.WarmupTask, layout []traincachev1alpha1.BlockLayout, orders [][]int32) ([][]*agentpb.ChunkRef, error) {
 	windows := make([][]*agentpb.ChunkRef, len(orders))
 	for index := range orders {
@@ -181,7 +181,7 @@ func PodWindows(task *traincachev1alpha1.WarmupTask, layout []traincachev1alpha1
 	return windows, nil
 }
 
-// TaskID is the idempotency key from docs/8.1 §5.9 / D12.
+// TaskID is the idempotency key from docs/7.1 §5.9 / D12.
 func TaskID(task *traincachev1alpha1.WarmupTask, podIndex int32) string {
 	if task == nil {
 		return ""
