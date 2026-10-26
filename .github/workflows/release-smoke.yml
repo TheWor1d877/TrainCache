@@ -1,0 +1,53 @@
+name: release-smoke
+
+# 发版后手动跑：下载 Release 里的 install.yaml，在临时 kind 里装机。
+# 验证镜像能拉、四个组件能起、CRD 能建。不替代 e2e。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已发布的 tag，如 v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: install release ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: controller/go.mod
+
+      - name: install kind
+        run: go install sigs.k8s.io/kind@v0.33.0
+
+      - name: download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p .release
+          gh release download "$TAG" --pattern install.yaml --pattern SHA256SUMS --dir .release
+          (cd .release && grep ' install.yaml$' SHA256SUMS | sha256sum -c -)
+
+      - name: run smoke
+        env:
+          TAG: ${{ inputs.tag }}
+          NODE_IMAGE: docker.io/kindest/node:v1.37.0
+          TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
+        run: ./hack/release-smoke.sh .release/install.yaml "$TAG"
+
+      - name: upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-smoke-diagnostics
+          path: .traincachedata/hack/release-smoke/
+          if-no-files-found: ignore
