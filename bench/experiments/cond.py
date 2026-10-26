@@ -324,8 +324,8 @@ def validate_cond(cond: dict) -> list[str]:
                 errors.append(
                     f"$.network.burst_k 必须为 {expect_burst}"
                     f"(rate_mbit={rate} 的推导值,收到 {burst})")
-        # 抖动不是 COND 字段:由 config.jitter_enabled(tier, rate) 从档位与 rate 推导,
-        # COND 里不出现该字段,避免出现互相矛盾的两个真相。
+        # netem 形态不在 COND 里:固定 delay 由 tc_apply.sh 从 TC_DELAY 取,
+        # COND 只带 rate/delay/burst,避免出现互相矛盾的两个真相。
 
     # ---- cache ----
     cache = _require(cond, "cache", "$", errors)

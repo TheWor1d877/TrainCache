@@ -1,4 +1,4 @@
-# docs 待办
+# docs 待办(小版本更新)
 
 口径：docs 正文只写当前状态与契约，不写“未实现/待补”；所有缺口统一登记在本文件。
 
@@ -6,6 +6,9 @@
 
 | 出处 | 事项 | 不做的后果 |
 |------|------|------------|
+| `docs/RELEASE-CONSTRAINTS.md` §4；`.github/workflows/e2e.yml` | 改镜像名与 registry 后未跑 e2e：kind 集群未重建，四个镜像未重编，只做了 `bash -n` | e2e 清单与脚本的前缀改动没有经过真实集群验证，发版前“必过”项处于未知状态 |
+| `agent/cmd/traincache/main.go`；`docs/CLI 接口.md` §2 | `prefetch --chunks` 必填但不进请求：只做非空校验，实际按 `--path` 整个前缀预热 | 用户按块预热的请求变成整前缀预热，流量与缓存占用被放大，且 CLI 不回显这一差异 |
+| `release.yml`、`release-smoke.yml`；`docs/RELEASE-CONSTRAINTS.md` §4 | release-smoke 未跑：需要先有 `v0.1.0` tag 与 GHCR 发布物 | 推镜像、digest 渲染、Release 资产与装机链路从未端到端执行，首次发版才暴露问题 |
 | 5.3 D32；8.1 §3 | 脱敏生产调用点接线：controller/agent 落日志前调 `Redact`/`RedactURL`；Agent 补哨兵 Secret 负向断言 | 凭证可能随错误信息或 URL 进日志与 Loki；当前生产路径零调用，只有定义与单测 |
 
 ## B. 上生产前必做
@@ -49,9 +52,9 @@
 | 6.1 §5.12；6.2 task 4；`bench/k8s/minio.yaml` | 固定 MinIO 镜像做一次拉取验证 | 离线或受限网络首次 `bench up` 才暴露镜像不可拉 |
 
 
-# 附加
+# 附加(大版本更新)
 
-结论
+## 降级策略问题
 
 根本缺陷不是某个 if 写错，而是把三件生命周期完全不同的事折叠成了一个 bool：
 
@@ -73,7 +76,6 @@ v0.1.0 实际是什么样
 - 文档偏差：docs/6.1 design.md 294 说「socket 缺席转降级」、554-556 说「不再依赖 OrderSource、改用 inotify 驱动」，实现都不是这样。验收 10 只断言 gauge，所以偏差一直没暴露。
 
 五个根本缺陷
-
 1. 概念折叠。liveness、availability、correctness 的恢复条件不同，却共用一个 bool。读服务本来不依赖订单，却被这个 bool 间接影响；订单通道坏了，读服务却继续静默服务。
 2. 触发没有身份和生命周期。30 秒停滞无法区分「训练结束」「Pod 重建」「sidecar 重启」「节点抖动」。Reader 没有终态、没有 lease、没有回收，导致「全部训练结束」和「全部 sidecar 挂了」看起来一样。
 3. 兜底不是兜底。inotify 是另一条弱化路径，不是主路径的恢复。它只能做统计，不能恢复预取；门控条件还是 open_report 静默而不是 ring 健康，方向反了——生产有钩子时它不启用，bench 没钩子时它全程启用。
@@ -110,4 +112,32 @@ E. 止血项（不等 v0.1.1）
 
 这个定位决定了 v0.1.1 是「语义修正」还是「状态机重构」。我倾向按「提示」定，因为训练循环本身不依赖订单，且 stall_ratio 已经把预取失效暴露出来了；但这是你的模型，先定这个再动文档和代码。
 
-M7 不受影响，仍在跑 traincache-warm；21:26 检查点会停 M7 并开始补跑。
+
+
+## 其他问题 
+1. fetch 限流无优先级、无带宽预留（最严重）
+   位置：core/fetch/limiter.go，prefetch 队列在 core/fetch 的调度侧。
+   现象：prefetch 任务 8 个并发，需求读（P0 demand）与预取共用同一个 MaxInflightBytes=1GiB 的在途额度；预取把唯一 MinIO 出口占满时，需求读只能排队。
+   数据（cold 探针）：首片 252MiB 串行块读耗 76.6s，独占 12.5MB/s 应约 21s；启动 80.0s 里 96% 是这段首片读；整轮取数 2.12GB 中 1.96GB（92%）归因 reason=prefetch。
+   建议：有未完成的 P0 需求块时压低 prefetch 并发（如 8→2），或按字节比例给需求读保底带宽（如 50%）。预期首片 76.6s→约 21s，启动 80s→约 25s，优于 direct 的 36.9s。
+
+2. gate tMax 硬编码 5m，与带宽档位无关
+   位置：bench/compare/traincache/up.sh 的 GATE_TMAX。
+   现象：预热字节 = K(128) × 8MiB × fanout(4) = 4GiB；100 mbit 单出口需约 344s，超过默认 300s，S-100 warm 三次进 Degraded。目前靠 TRAINCACHE_GATE_TMAX=7m 人工绕过。
+   建议：默认值由「档位带宽 × fanout × K × chunk」推导，脚本自动算，不写死。
+
+3. 全局衰减就绪度参数自相矛盾
+   位置：up.sh 的 score.cutoff: 8 与 WARMUP_K=128；算法在 core/nodescore 的 Compute。
+   现象：w(i) 在 i ≥ C 时为 0，C=8 意味着只统计前 8 块；衰减式 0.5^((i-K)/H) 的指数部分恒为负、段为空。所谓“全局衰减就绪度”实际退化成“前 8 块就绪度”。
+   影响：只影响调度偏好（权重 10），不影响 gate 放行，所以没影响本轮数据有效性，但语义错了。
+   建议：C ≥ K（如 144），并在 CRD 校验里约束或告警。
+
+4. check_images 单次探测会误报
+   位置：bench/compare/_common.sh 的 check_images。
+   现象：镜像刚导入、containerd 元数据未完全同步时会报 traincache-worker 缺 controller-manager，up 直接失败；手工 crictl images -q 随即正常。cold 探针第一次 up_failed 就是这里。
+   建议：重试 3 次、间隔 2s；或改判 ImagePullBackOff 事件而不是查 crictl。
+
+5. 驱动脚本把作废行当成功
+   位置：bench/ 下 M7 驱动脚本（现临时版已修，未沉淀）。
+   现象：只看 run_bench 退出码，up_failed 行仍算 OK，导致连续作废行计入“已有行”，挡住重跑。
+   建议：run_bench 输出含 void 行时返回非零；去重只认有效行。时脚本里。

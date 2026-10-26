@@ -41,12 +41,11 @@ MINIO_NODEPORT="${MINIO_NODEPORT:-30090}"
 
 # ---- tc 档位(从 COND 或环境变量取,七个组态共用同一档位)----
 # D31:rate 是实验自变量 {100,300,1000}mbit;burst 跟着 rate 走(≈0.1 秒传输量,
-# config.burst_for_rate),抖动只在临界格开(config.jitter_enabled(档位, rate))。
-# 真正挂链路的是 tc_apply.sh(它自己推 burst、自己判抖动),这里算出来是为了
+# config.burst_for_rate);netem 只挂固定 delay,不加随机时延。
+# 真正挂链路的是 tc_apply.sh(它自己推 burst),这里算出来是为了
 # 日志与产物里的数值等于实际挂上的数值——旧写法固定打印 1600k 是失真值。
 TC_RATE="${TC_RATE:-$(cfg TC_RATE)}"; TC_RATE="${TC_RATE:-100mbit}"
 TC_DELAY="${TC_DELAY:-$(cfg TC_DELAY)}"; TC_DELAY="${TC_DELAY:-20ms}"
-CAP_TIER="${CAP_TIER:-${CAPACITY_RATIO:-S}}"; CAP_TIER="$(printf '%s' "$CAP_TIER" | tr '[:lower:]' '[:upper:]')"
 RATE_NUM="$(printf '%s' "$TC_RATE" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
 
 burst_for_rate() {   # 与 tc_apply.sh 同一口径:config.burst_for_rate(rate_mbit)
@@ -54,13 +53,7 @@ burst_for_rate() {   # 与 tc_apply.sh 同一口径:config.burst_for_rate(rate_m
   "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.burst_for_rate(float(sys.argv[2])))' \
     "$BENCH_ROOT" "$RATE_NUM" 2>/dev/null || true
 }
-jitter_for_tier() {  # 与 tc_apply.sh 同一口径:config.jitter_enabled(tier, rate_mbit)
-  [ -n "$RATE_NUM" ] || return 0
-  "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print("on" if config.jitter_enabled(sys.argv[2], float(sys.argv[3])) else "off")' \
-    "$BENCH_ROOT" "$CAP_TIER" "$RATE_NUM" 2>/dev/null || true
-}
 TC_BURST="${TC_BURST:-$(burst_for_rate)}"; TC_BURST="${TC_BURST:-$(cfg TC_BURST)}"; TC_BURST="${TC_BURST:-1600k}"
-TC_JITTER="$(jitter_for_tier)"; TC_JITTER="${TC_JITTER:-off}"
 
 # ---- 镜像(允许环境变量覆盖,默认取 survey 实测版本)----
 JUICEFS_IMAGE="${JUICEFS_IMAGE:-juicedata/mount:ce-v1.3.0}"
@@ -156,6 +149,43 @@ resource_exists() {
   kubectl get "$@" >/dev/null 2>&1
 }
 
+# ---- 资源是否"活着"(存在且没在删除中)----
+# resource_exists 对带 deletionTimestamp 的对象同样返回真。Fluid 的 Runtime 由
+# Dataset 异步级联删,`delete dataset --wait` 回来时 Runtime 常常还在删除中,
+# 用 resource_exists 当"已存在,跳过"的判据会把一具即将消失的尸体当现成资源。
+resource_live() {
+  # resource_live <kind> <name> [-n <ns>]
+  resource_exists "$@" || return 1
+  local dt
+  dt="$(kubectl get "$@" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+  [ -z "$dt" ]
+}
+
+# ---- 等级联删除彻底消失(删除屏障)----
+# wait_absent <group> <kind> <name> [-n <ns>] [--timeout <s>]
+wait_absent() {
+  local grp="$1" kind="$2" name="$3"; shift 3
+  local ns="" timeout=180
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -n) ns="$2"; shift 2 ;;
+      --timeout) timeout="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  local args=("$kind" "$name")
+  [ -n "$ns" ] && args+=(-n "$ns")
+  local start; start="$(date +%s)"
+  while resource_exists "${args[@]}"; do
+    if [ "$(($(date +%s) - start))" -ge "$timeout" ]; then
+      log_group "$grp" "等待 $kind/$name 删除完成超时(${timeout}s,对象仍在,卡在级联 GC)" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  log_group "$grp" "$kind/$name 已彻底删除(等 $(( $(date +%s) - start ))s)"
+}
+
 # ---- 等待资源就绪(轮询 jsonpath)----
 # wait_ready <group> <kind> <name> [-n <ns>] <jsonpath> <expected> <timeout_s>
 wait_ready() {
@@ -244,6 +274,6 @@ group_header() {
   echo "============================================================"
   log_group "$grp" "===== 对照组: $grp ====="
   log_group "$grp" "MinIO: ns=$MINIO_NS bucket=$MINIO_BUCKET endpoint=$MINIO_ENDPOINT"
-  log_group "$grp" "tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
+  log_group "$grp" "tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST(netem 固定 delay)"
   echo "============================================================"
 }

@@ -32,12 +32,11 @@ TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-
 DATASET="${DATASET:-compare-data-8m}"
 
 # TrainCache 控制面镜像(允许环境变量覆盖)
-REGISTRY="${REGISTRY:-dgl3i4ucowsgvvdwty.xuanyuan.run}"
-TAG="${TAG:-0.8.0}"
-IMG_MANAGER="${IMG_MANAGER:-$REGISTRY/traincache/controller-manager:$TAG}"
-IMG_WEBHOOK="${IMG_WEBHOOK:-$REGISTRY/traincache/webhook:$TAG}"
-IMG_SCHEDULER="${IMG_SCHEDULER:-$REGISTRY/traincache/kube-scheduler:$TAG}"
-IMG_AGENT="${IMG_AGENT:-$REGISTRY/traincache/traincache-agentd:$TAG}"
+TAG="${TAG:-dev}"
+IMG_MANAGER="${IMG_MANAGER:-ghcr.io/thewor1d877/traincache/controller-manager:$TAG}"
+IMG_WEBHOOK="${IMG_WEBHOOK:-ghcr.io/thewor1d877/traincache/webhook:$TAG}"
+IMG_SCHEDULER="${IMG_SCHEDULER:-ghcr.io/thewor1d877/traincache/kube-scheduler:$TAG}"
+IMG_AGENT="${IMG_AGENT:-ghcr.io/thewor1d877/traincache/traincache-agentd:$TAG}"
 
 # DataSet 参数
 # 实验块大小 8MiB(D20/6.13;生产默认 64MiB 不动;环境变量 CHUNK_BYTES 可覆盖)
@@ -200,11 +199,14 @@ done
 # ---- 5. tc 档位(先挂限速,再预热)----
 # 预热与测量都从 MinIO egress 取数,与 juicefs/fluid 两组同口径:预热在档位带宽之内
 # 进行。之前这里先拆 tc 让预热跑满速,会让 traincache-warm 的启动收益虚高。
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST(netem 固定 delay)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 6. WarmupTask CR(先删后建,不可原地更新)----
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
+# gate 绝对超时。默认 5m;S 档 100mbit 的 warm 格用 7m
+# (单一 MinIO 出站 100mbit × fanout 4,4GiB 预热约需 344s)。
+GATE_TMAX="${TRAINCACHE_GATE_TMAX:-5m}"
 WARM_SECONDS=0
 kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2>/dev/null || true
 
@@ -249,7 +251,7 @@ spec:
     threshold: 0.9
     gapMin: 0.1
     slopeMin: 0.001
-    tMax: 5m
+    tMax: $GATE_TMAX
     minInterval: 1s
   score:
     halfLife: 4

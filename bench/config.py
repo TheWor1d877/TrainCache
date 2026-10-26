@@ -104,13 +104,8 @@ def tier_read_rate_bps(tier: str) -> float:
 
 
 def bw_over_r(tier: str, rate_mbit: int) -> float:
-    """链路带宽 ÷ 每步读量。<1 链路受限,>2 预取有效,[1,2] 临界(开抖动)。"""
+    """链路带宽 ÷ 每步读量。<1 链路受限,>2 计算主导,[1,2] 临界。"""
     return rate_mbit * 125000.0 / tier_read_rate_bps(tier)
-
-
-def jitter_enabled(tier: str, rate_mbit: int) -> bool:
-    """只有临界档(BW/r ∈ [1,2])启用 netem 抖动;抖动抬不动均值比值。"""
-    return 1.0 <= bw_over_r(tier, rate_mbit) <= 2.0
 
 
 def burst_for_rate(rate_mbit: int) -> str:

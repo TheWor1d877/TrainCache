@@ -337,8 +337,8 @@ echo "[MOUNT_NODE] $MOUNT_NODE"
 
 # ---- 6.5. tc 档位(先挂限速,再预热)----
 # 预热与测量都从 MinIO egress 取数,顺序反了会把 warmup_seconds 记成满速搬运的成本。
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST(netem 固定 delay)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 6.7. 预热(warm 组:juicefs warmup; 冷组:跳过)----
 # warm 判定:RUN_BENCH=1 且 env JFS_WARMUP=1;或非 RUN_BENCH 手动调用时始终预热

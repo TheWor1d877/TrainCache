@@ -32,7 +32,7 @@ spec:
       # The control-plane taint keeps the Agent off kind's control-plane node.
       containers:
         - name: agentd
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/traincache-agentd:0.8.3
+          image: ghcr.io/thewor1d877/traincache/traincache-agentd:dev
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_NAME

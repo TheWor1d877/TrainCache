@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: grafana
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/grafana/grafana:12.4.13
+          image: grafana/grafana:12.4.13
           imagePullPolicy: IfNotPresent
           env:
             - name: GF_PATHS_DATA

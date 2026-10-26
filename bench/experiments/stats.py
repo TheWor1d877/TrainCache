@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M2 统计:中位数 + bootstrap 95% CI。
+"""M2 统计:平均数 + bootstrap 95% CI。
 
 只依赖 numpy;数值列自动识别(尝试 float 转换)。
 """
@@ -23,18 +23,18 @@ NUMERIC_METRIC_HINTS = (
 )
 
 
-def median(values: list[float]) -> float:
-    """返回中位数。空列表返回 0.0。"""
+def mean(values: list[float]) -> float:
+    """返回平均数。空列表返回 0.0。"""
     if not values:
         return 0.0
-    return float(np.median(np.asarray(values, dtype=float)))
+    return float(np.mean(np.asarray(values, dtype=float)))
 
 
 def bootstrap_ci(values: list[float], iters: int = 10000, alpha: float = 0.05,
                  seed: int | None = None) -> tuple[float, float]:
     """返回 (low, high) 置信区间。
 
-    对 values 有放回采样 iters 次,每次算中位数,取 alpha/2 和 1-alpha/2 分位数。
+    对 values 有放回采样 iters 次,每次算平均数,取 alpha/2 和 1-alpha/2 分位数。
     values 长度 < 2 时返回 (values[0], values[0])。
     """
     arr = np.asarray(values, dtype=float)
@@ -46,9 +46,9 @@ def bootstrap_ci(values: list[float], iters: int = 10000, alpha: float = 0.05,
     # 有放回采样:iters × n 的索引矩阵
     idx = rng.integers(0, n, size=(iters, n))
     samples = arr[idx]
-    medians = np.median(samples, axis=1)
-    low = float(np.percentile(medians, 100 * alpha / 2))
-    high = float(np.percentile(medians, 100 * (1 - alpha / 2)))
+    means = np.mean(samples, axis=1)
+    low = float(np.percentile(means, 100 * alpha / 2))
+    high = float(np.percentile(means, 100 * (1 - alpha / 2)))
     return (low, high)
 
 
@@ -68,8 +68,8 @@ def summarize_runs(runs: list[dict]) -> dict:
     """聚合多个 run 的指标。
 
     runs 是 collect.py 输出的 metrics.csv 行(dict)。对每个数值指标列算
-    median + bootstrap CI。void=True 的 run 不参与统计。
-    返回 {metric: {'median': x, 'ci_low': y, 'ci_high': z}}。
+    mean + bootstrap CI。void=True 的 run 不参与统计。
+    返回 {metric: {'mean': x, 'ci_low': y, 'ci_high': z}}。
     """
     # 过滤 void run
     valid = []
@@ -103,10 +103,10 @@ def summarize_runs(runs: list[dict]) -> dict:
         if not vals:
             continue
         # 至少要有 2 个非空值才算有意义的统计(否则 CI 退化为单点)
-        med = median(vals)
+        avg = mean(vals)
         ci_low, ci_high = bootstrap_ci(vals)
         summary[col] = {
-            "median": med,
+            "mean": avg,
             "ci_low": ci_low,
             "ci_high": ci_high,
             "n": len(vals),
@@ -115,25 +115,25 @@ def summarize_runs(runs: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# selftest:构造已知分布验证 median 与 bootstrap CI
+# selftest:构造已知分布验证 mean 与 bootstrap CI
 # ---------------------------------------------------------------------------
 def selftest() -> None:
-    # median
-    assert median([]) == 0.0
-    assert median([5.0]) == 5.0
-    assert median([1.0, 2.0, 3.0]) == 2.0
-    assert median([1.0, 2.0, 3.0, 4.0]) == 2.5
+    # mean
+    assert mean([]) == 0.0
+    assert mean([5.0]) == 5.0
+    assert mean([1.0, 2.0, 3.0]) == 2.0
+    assert mean([1.0, 2.0, 3.0, 4.0]) == 2.5
 
     # bootstrap_ci 单点退化
     lo, hi = bootstrap_ci([42.0])
     assert lo == 42.0 and hi == 42.0, (lo, hi)
 
-    # 大样本对称分布:CI 应包含真实中位数
+    # 大样本对称分布:CI 应包含真实平均数
     rng = np.random.default_rng(42)
     data = list(rng.normal(loc=100.0, scale=10.0, size=500))
-    med = median(data)
+    avg = mean(data)
     lo, hi = bootstrap_ci(data, iters=10000, seed=123)
-    assert lo <= med <= hi, (lo, med, hi)
+    assert lo <= avg <= hi, (lo, avg, hi)
     # CI 宽度应合理(窄于数据极差)
     assert hi - lo < (max(data) - min(data)), (lo, hi, max(data) - min(data))
 
@@ -155,7 +155,7 @@ def selftest() -> None:
     s = summarize_runs(runs)
     assert "startup_makespan_s" in s
     assert s["startup_makespan_s"]["n"] == 3  # void 被排除
-    assert s["startup_makespan_s"]["median"] == 11.0
+    assert s["startup_makespan_s"]["mean"] == 11.0
     assert s["full_makespan_s"]["n"] == 3
     # 字符串列不应进入统计
     assert "run_id" not in s

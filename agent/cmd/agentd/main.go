@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -25,20 +24,14 @@ import (
 // metricsShutdownTimeout 是 /metrics 服务优雅停止的上限(与 gRPC GracefulStop 并发执行)。
 const metricsShutdownTimeout = 3 * time.Second
 
-// buildVersion 取 Go 构建信息中的主模块版本;代理模块未注入 ldflags 版本,
-// 构建信息为空时回退 "dev"。
-func buildVersion() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
-		return bi.Main.Version
-	}
-	return "dev"
-}
+// version is replaced at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	// 结构化 JSON 日志(slog;Q6 结案:高基数维度 path/fp/task_id 走行级日志)。
 	// component/version 由 logging.New 注入并设为默认 logger;P0 级别固定 info,
 	// 动态级别属于 P1。
-	logging.New("agentd", buildVersion(), "info")
+	logging.New("agentd", version, "info")
 
 	cfg, err := svc.Load()
 	if err != nil {
@@ -102,7 +95,7 @@ func main() {
 
 	slog.Info("traincache-agentd 启动",
 		"component", "agentd",
-		"version", buildVersion(),
+		"version", version,
 		"node", ag.Cfg.NodeName.String(),
 		"grpc_addr", cfg.GRPCAddr,
 		"metrics_addr", cfg.MetricsAddr,

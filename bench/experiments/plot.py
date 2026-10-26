@@ -6,7 +6,7 @@ metrics.csv,产出预注册(docs/9.2 §0~§8)定义的五张旗舰图:
 
   fig1  启动阶段盈亏曲面(带宽 × 缓存比 × fanout → 启动 makespan 改善%)
   fig2  全程 makespan 盈亏曲面(带宽 × 数据集 × epoch → 全程 makespan 差值)
-  fig3  阶段切换 stall 回落曲线(epoch × shuffle → 回落时间中位数)
+  fig3  阶段切换 stall 回落曲线(epoch × shuffle → 回落时间平均数)
   pareto1  启动收益 vs 重复预热字节(fanout 1/2/3)
   pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat/lru/lfu)
 
@@ -157,16 +157,16 @@ def plot_group_bar(rows: list[dict], metric: str, ylabel: str, title: str,
     # 只画有有效样本的组:group_summary 会为 GROUP_ORDER 里的每个组都留一条记录,
     # 没有样本的组画出来是 0 高度的柱子,会被误读成「该组耗时为 0」。
     groups = [g for g in GROUP_ORDER if summ[g][3] > 0]
-    medians = [summ[g][0] for g in groups]
+    means = [summ[g][0] for g in groups]
     ci_low = [summ[g][1] for g in groups]
     ci_high = [summ[g][2] for g in groups]
     ns = [summ[g][3] for g in groups]
-    errs_low = [m - lo for m, lo in zip(medians, ci_low)]
-    errs_high = [hi - m for m, hi in zip(medians, ci_high)]
+    errs_low = [m - lo for m, lo in zip(means, ci_low)]
+    errs_high = [hi - m for m, hi in zip(means, ci_high)]
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     x = np.arange(len(groups))
-    bars = ax.bar(x, medians, yerr=[errs_low, errs_high], capsize=4,
+    bars = ax.bar(x, means, yerr=[errs_low, errs_high], capsize=4,
                   color=[GROUP_COLORS[g] for g in groups], edgecolor="white",
                   linewidth=0.8, width=0.6)
     ax.set_xticks(x)
@@ -226,7 +226,7 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
         print("  fig1: 无数据,跳过")
         return
 
-    # 按 (fanout, rate, ratio) 分组取 startup_makespan_s 中位数
+    # 按 (fanout, rate, ratio) 分组取 startup_makespan_s 平均数
     grid = {}
     for r in fig1_rows:
         try:
@@ -273,7 +273,7 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
 # 图二:全程 makespan 盈亏曲面
 # ---------------------------------------------------------------------------
 def plot_fig2(metrics: list[dict], out_dir: Path):
-    """全程 makespan 差值 = TrainCache 中位数 - Fluid 中位数(负=更快)。
+    """全程 makespan 差值 = TrainCache 平均数 - Fluid 平均数(负=更快)。
 
     X=带宽, Y=epoch 数, Z=差值(s)。数据集 2GiB/8GiB 分两个子图。
     """
@@ -335,7 +335,7 @@ def plot_fig2(metrics: list[dict], out_dir: Path):
 # 图三:阶段切换 stall 回落曲线
 # ---------------------------------------------------------------------------
 def plot_fig3(metrics: list[dict], out_dir: Path):
-    """回落时间中位数(epoch × shuffle)。三组 shuffle 三条线。"""
+    """回落时间平均数(epoch × shuffle)。三组 shuffle 三条线。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     epochs = [1, 3, 10]
     shuffles = ["fixed", "per-epoch", "curriculum"]

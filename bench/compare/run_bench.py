@@ -77,16 +77,16 @@ D30/D32 接线（2026-10-25）：
   · epochs 随档位联动（S=3、M/L=1），与 conds/compare-*.json 的 workload.epochs 对齐。
   · Fluid 该组每轮都作废 → 落回同冷热档 JuiceFS 顶位，产物标 baseline_substituted。
   · status 列三态：ok / void（D14：void 不进汇总）/ exploratory（D19：L 档 1 次探点）。
-  · D31 带宽格由 runner 现推并打印（rate/burst/抖动/BW÷r）；rate 只从 `--rate`
-    取，再以 TC_RATE 环境变量连同 TC_DELAY、CAPACITY_RATIO 下发给 up.sh，
-    shell 侧据此挂 tc（临界格才开 netem 抖动）。
+  · D31 带宽格由 runner 现推并打印（rate/burst/BW÷r）；rate 只从 `--rate`
+    取，再以 TC_RATE 环境变量连同 TC_DELAY 下发给 up.sh，
+    shell 侧据此挂 tc（netem 只有固定 delay）。
 
 用法：
   python3 bench/compare/run_bench.py --out compare/summary.csv
   # --out 相对路径按 bench/config.py 的 RESULTS_DIR(~/tcd/bench/results)展开,
   # 不落到 repo 的当前工作目录;绝对路径原样使用。
   python3 bench/compare/run_bench.py --tier M --dry-run        # 开跑前核对计划
-  python3 bench/compare/run_bench.py --tier S --rate 300mbit   # S@300 临界格（带抖动）
+  python3 bench/compare/run_bench.py --tier S --rate 300mbit   # S@300 档（BW/r=1.40）
   python3 bench/compare/run_bench.py --tier S --rate 1000mbit  # S@1000 档
   CAPACITY_RATIO=M python3 bench/compare/run_bench.py --rate 1000mbit  # M 档（3 组态 × 3 次）
 
@@ -146,7 +146,7 @@ from cond import (CAPACITY_TIER_EPOCHS, CAPACITY_TIER_GROUPS,  # noqa: E402
                   CAPACITY_TIER_N_TARS, CAPACITY_TIER_REPS,
                   CAPACITY_TIER_REPS_ALLOWED, EXPLORATORY_TIERS,
                   tier_dataset_bytes)
-# D31：带宽档的 burst/抖动推导口径也取自 bench/config.py，shell 与 runner 同一套数
+# D31：带宽档的 burst 推导口径也取自 bench/config.py，shell 与 runner 同一套数
 import config as bench_config  # noqa: E402
 
 GROUPS = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm", "traincache-cold", "traincache-warm"]
@@ -236,8 +236,8 @@ PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 
 # ---- D31：带宽档（rate 是实验自变量，取 {100,300,1000} mbit）----
 # 速率只从命令行 --rate 取：S 档缺省 100mbit，M/L 档必填。main() 解析后赋值，
-# 再以 TC_RATE 环境变量下发给 up.sh；burst 与抖动不写死，由
-# config.burst_for_rate / config.jitter_enabled 现推。
+# 再以 TC_RATE 环境变量下发给 up.sh；burst 不写死，由
+# config.burst_for_rate 现推。
 TC_RATE_EFF = None
 TC_DELAY_EFF = os.environ.get("TC_DELAY", bench_config.TC_DELAY)
 
@@ -327,8 +327,43 @@ def _node_cache_check_cmd(node):
     return ["docker", "exec", node, "sh", "-c", script]
 
 
+def _drop_host_page_caches(tag):
+    """冷态第二层：丢宿主机页缓存（口径同 D 轨 `track_d_up.sh` 的 ④）。
+
+    清缓存目录只清了**磁盘**那一层：kind 节点上 Fluid/JuiceFS 的挂载进程跨 rep
+    存活，内核里那批 FUSE 文件的干净页不会因为 `rm -rf` 缓存目录而失效，下一 rep
+    的首批读直接命中页缓存、**根本不过 tc 限速链路**——实测 S-1000 fluid-cold 因此
+    蹦出 1.31/1.36s，比同格 direct 的 5.76s 还快，冷读口径不成立。
+    两条通道：sudo -S(bench/.sudo-pass) 优先，特权 docker 回退；都不通就退出，
+    宁可不跑也不出"看着是冷读其实是页缓存"的行。
+    """
+    sync_then = "sync; echo 3 > /proc/sys/vm/drop_caches"
+    pass_file = BENCH_ROOT / ".sudo-pass"
+    if pass_file.exists():
+        try:
+            with pass_file.open() as fh:
+                proc = subprocess.run(["timeout", "20", "sudo", "-S", "-p", "",
+                                       "sh", "-c", sync_then],
+                                      stdin=fh, capture_output=True, text=True,
+                                      timeout=30, check=False)
+            if proc.returncode == 0:
+                print(f"[{tag}] 页缓存已丢弃(via sudo -S)", flush=True)
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    image = os.environ.get("TC_IMAGE", "kindest/node:v1.28.15")
+    rc, _out, err = run_cmd(["docker", "run", "--rm", "--privileged",
+                             "--entrypoint", "/bin/sh", image, "-c", sync_then],
+                            timeout=90)
+    if rc == 0:
+        print(f"[{tag}] 页缓存已丢弃(via privileged-docker {image})", flush=True)
+        return
+    raise SystemExit(f"[{tag}] drop_caches 失败(sudo -S 与特权 docker 均不可用): "
+                     f"{err[:200]}，冷读口径无法保证，退出")
+
+
 def _clear_node_caches(tag):
-    """清四个组在 kind 节点上的缓存目录（hostPath，不在 Pod 里）。
+    """清四个组在 kind 节点上的缓存目录（hostPath，不在 Pod 里），并丢宿主机页缓存。
 
     JuiceFS 组的缓存是 K8s 节点 hostPath /var/cache/jfs（见 create_measure_pod 的
     hostPath 挂载）；Fluid 组的 JuiceFSRuntime tieredstore 仍落在节点上的
@@ -355,6 +390,7 @@ def _clear_node_caches(tag):
         if leftover:
             raise SystemExit(
                 f"[{tag}] 节点 {node} 缓存未清空，仍有残留: {leftover[:300]}，退出")
+    _drop_host_page_caches(tag)
 
 
 def cold_reset():
@@ -601,9 +637,8 @@ def group_up(group):
     print(f"[up] {group}...")
     env = os.environ.copy()
     env["N_TARS"] = str(N_TARS)
-    # D30/D31：把档位与带宽档显式下发给 up.sh —— up.sh 用 CAPACITY_RATIO 组
-    # tc_apply 的 --tier（只有临界格开 netem 抖动），burst 由 tc_apply 按 rate
-    # 推导，两侧不再各处写死。
+    # D30/D31：把档位与带宽档显式下发给 up.sh —— burst 由 tc_apply 按 rate 推导，
+    # netem 只有固定 delay 一种形态，两侧不再各处写死。
     env["CAPACITY_RATIO"] = TIER
     env["TC_RATE"] = TC_RATE_EFF
     env["TC_DELAY"] = TC_DELAY_EFF
@@ -1644,17 +1679,17 @@ def measure_void_reason(metrics):
 # D30/D32 接线：档位联动、按档位过滤、rep 复用控制面、status 列、Fluid 替补
 # ---------------------------------------------------------------------------
 def tc_cell(tier, rate_str=None):
-    """把 D31 的带宽格落到具体参数：(rate_mbit, burst, 是否抖动)。
+    """把 D31 的带宽格落到具体参数：(rate_mbit, burst)。
 
-    burst 与抖动都从 config 现推（burst_for_rate / jitter_enabled），
-    shell 侧与 runner 侧同一套数，不再各处写死 1600k。
+    burst 从 config 现推（burst_for_rate），shell 侧与 runner 侧同一套数，
+    不再各处写死 1600k。netem 只有固定时延，没有抖动开关。
     """
     rate_str = rate_str or TC_RATE_EFF
     m = re.search(r"\d+", rate_str)
     if not m:
-        return None, bench_config.TC_BURST, False
+        return None, bench_config.TC_BURST
     r = int(m.group())
-    return r, bench_config.burst_for_rate(r), bench_config.jitter_enabled(tier, r)
+    return r, bench_config.burst_for_rate(r)
 
 
 def apply_tier(tier):
@@ -2011,7 +2046,7 @@ def selftest():
          清后判空命令形态正确；
       5. 读队列超时那一步计入统计且本轮标 void（stall_ratio 分母不被跳步带小）；
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
-         档位 epochs 联动、带宽格的 burst/抖动推导、Fluid 全废才顶位。
+         档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -2168,14 +2203,14 @@ def selftest():
     if TIER_PRESETS["S"]["epochs"] != 3 or TIER_PRESETS["M"]["epochs"] != 1 \
             or TIER_PRESETS["L"]["epochs"] != 1:
         raise AssertionError("自测：档位 epochs 联动不对（S=3/M=1/L=1）")
-    cells = {("S", 300): True, ("M", 1000): True, ("S", 100): False,
-             ("S", 1000): False, ("M", 100): False, ("L", 1000): False}
-    for (t, r), want_jit in cells.items():
-        got_r, got_burst, got_jit = tc_cell(t, f"{r}mbit")
-        if got_r != r or got_jit != want_jit or \
-                got_burst != bench_config.burst_for_rate(r):
-            raise AssertionError(f"自测：D31 格子推导不对 {t}@{r} → "
-                                 f"burst={got_burst} jitter={got_jit}")
+    for t in ("S", "M", "L"):
+        for r in (100, 300, 1000):
+            got_r, got_burst = tc_cell(t, f"{r}mbit")
+            if got_r != r or got_burst != bench_config.burst_for_rate(r):
+                raise AssertionError(f"自测：D31 格子推导不对 {t}@{r} → "
+                                     f"burst={got_burst}")
+    if hasattr(bench_config, "jitter_enabled"):
+        raise AssertionError("自测：config.jitter_enabled 应已撤除（抖动轴不在协议里）")
     all_void = [{"void": True}, {"void": True}]
     if not needs_substitution(all_void) or needs_substitution([{"void": True},
                                                               {"void": False}]) \
@@ -2187,7 +2222,7 @@ def selftest():
         raise AssertionError("自测：替补标记没落到行上")
     print(f"[selftest] 6) D30/D32 接线：M 档跑 {m_pick}（L 档剔除 {l_drop}）；"
           f"status ok/void/exploratory 三态、S/M/L epochs 3/1/1、"
-          f"抖动格 S@300+M@1000、替补全废判据均自洽")
+          f"三档 burst 推导、抖动轴已撤、替补全废判据均自洽")
     print("run_bench selftest: PASS")
 
 
@@ -2249,7 +2284,7 @@ def main():
     if not picked:
         raise SystemExit(f"[cfg] {tier} 档没有可跑组态（请求 {args.groups}），退出")
 
-    rate_mbit, burst_eff, jitter_eff = tc_cell(tier, TC_RATE_EFF)
+    rate_mbit, burst_eff = tc_cell(tier, TC_RATE_EFF)
     if tier == "S" and rate_mbit == 300:
         if args.groups is None:
             raise SystemExit(
@@ -2274,9 +2309,9 @@ def main():
           f"prefetch_k={PREFETCH_K} compute_ms={COMPUTE_MS} workers={READ_WORKERS} "
           f"depth={READ_QUEUE_DEPTH} dataset={DATASET_NAME}")
     print(f"[cfg] D31 带宽格: rate={TC_RATE_EFF} delay={TC_DELAY_EFF} "
-          f"burst={burst_eff} 抖动={'on' if jitter_eff else 'off'}"
+          f"burst={burst_eff} netem=固定 delay "
           f"(BW/r={bench_config.bw_over_r(tier, rate_mbit):.2f}，"
-          f"临界区 [1,2] 才开)")
+          f"<1 链路受限、>2 计算主导)")
     print(f"[cfg] D32 核对: {tier} 档每点 {tier_reps} 次"
           f"（合法 {sorted(allowed_reps)}），本轮 reps={reps}；"
           f"参跑组态={picked}；trace sha256={trace_sha}")

@@ -49,8 +49,8 @@ else
 fi
 
 # ---- 4. tc 档位(挂到 MinIO Pod egress,与其他组共用)----
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST(netem 固定 delay)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 5. 训练 Pod:直读 MinIO ----
 # 训练容器用 python:3.12-slim,内嵌脚本:

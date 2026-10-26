@@ -25,7 +25,7 @@ spec:
       priorityClassName: system-cluster-critical
       containers:
         - name: manager
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/controller-manager:0.8.0
+          image: ghcr.io/thewor1d877/traincache/controller-manager:dev
           imagePullPolicy: IfNotPresent
           env:
             - name: CONTROLLER_METRICS_ADDR

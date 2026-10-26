@@ -3,8 +3,8 @@
 #
 # Build/load the image first (see Dockerfile):
 #   docker build -f deploy/scheduler/Dockerfile \
-#     -t dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0 .
-#   kind load docker-image ...:0.8.0 --name <cluster>
+#     -t <registry>/traincache/kube-scheduler:dev .
+#   kind load docker-image ...:dev --name <cluster>
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -121,7 +121,7 @@ spec:
       containers:
         - name: kube-scheduler
           # Registry mirror domain from /etc/docker/daemon.json; never :latest.
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0
+          image: ghcr.io/thewor1d877/traincache/kube-scheduler:dev
           imagePullPolicy: IfNotPresent
           args:
             - --config=/etc/kubernetes/traincache-scheduler.yaml

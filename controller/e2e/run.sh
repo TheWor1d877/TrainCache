@@ -12,7 +12,8 @@
 #   assert  re-run the assertions against the current cluster
 #
 # Environment overrides:
-#   CLUSTER=traincache-e2e  REGISTRY=<mirror>  TAG=0.8.0  FORCE_BUILD=1
+#   CLUSTER=traincache-e2e  FORCE_BUILD=1
+#   NODE_IMAGE=<kind 节点镜像，默认 kindest/node:v1.37.0>
 #   SKIP_BUILD=1            (reuse images without a freshness check; may test
 #                            stale code, never the default)
 #   SKIP_NODE_LABELS=1      (skip the simulated admin labelling step)
@@ -43,17 +44,18 @@ DATA="$RESULTS/data"
 TLS="$RESULTS/tls"
 
 CLUSTER="${CLUSTER:-traincache-e2e}"
-REGISTRY="${REGISTRY:-dgl3i4ucowsgvvdwty.xuanyuan.run}"
-TAG="${TAG:-0.8.0}"
-NODE_IMAGE="${NODE_IMAGE:-$REGISTRY/kindest/node:v1.37.0}"
-IMG_MANAGER="$REGISTRY/traincache/controller-manager:$TAG"
-IMG_WEBHOOK="$REGISTRY/traincache/webhook:$TAG"
-IMG_SCHEDULER="$REGISTRY/traincache/kube-scheduler:$TAG"
-IMG_AGENT="$REGISTRY/traincache/traincache-agentd:$TAG"
-# Third-party fixtures are preloaded too: kind's containerd does not use the
-# host docker registry mirror and cannot always reach the mirror domain.
-IMG_MINIO="$REGISTRY/pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
-IMG_BUSYBOX="$REGISTRY/library/busybox:1.36.1"
+# Image tag is always dev: controller/deploy kustomization pins the same tag,
+# so building with a different one would deploy a reference nothing built.
+TAG="dev"
+NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.37.0}"
+IMG_MANAGER="ghcr.io/thewor1d877/traincache/controller-manager:$TAG"
+IMG_WEBHOOK="ghcr.io/thewor1d877/traincache/webhook:$TAG"
+IMG_SCHEDULER="ghcr.io/thewor1d877/traincache/kube-scheduler:$TAG"
+IMG_AGENT="ghcr.io/thewor1d877/traincache/traincache-agentd:$TAG"
+# Third-party fixtures are preloaded too: kind's containerd does not read the
+# host docker daemon mirror, so they are pulled on the host and loaded.
+IMG_MINIO="pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
+IMG_BUSYBOX="busybox:1.36.1"
 
 NS=traincache
 TENANT=traincache-e2e
@@ -190,7 +192,9 @@ build_image() {
   fi
   local log="$LOGS/build-$name.log"
   info "building $name -> $image (log: $log)"
-  if ! docker build -f "$dockerfile" -t "$image" "$context" >"$log" 2>&1; then
+  if ! docker build -f "$dockerfile" \
+      --build-arg VERSION="$TAG" \
+      -t "$image" "$context" >"$log" 2>&1; then
     fail "build $name"
     tail -20 "$log"
     return 1
@@ -243,7 +247,7 @@ build_images() {
   local img
   for img in "$IMG_MINIO" "$IMG_BUSYBOX"; do
     if ! docker image inspect "$img" >/dev/null 2>&1; then
-      info "pulling $img on the host (docker uses the registry mirror)"
+      info "pulling $img on the host"
       docker pull "$img" >"$LOGS/pull-$(basename "${img%%:*}").log" 2>&1 \
         || { fail "pull $img"; return 1; }
     fi

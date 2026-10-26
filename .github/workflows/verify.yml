@@ -2,7 +2,9 @@ name: verify
 
 on:
   push:
+    branches: [dev, main]
   pull_request:
+    branches: [dev, main]
   workflow_dispatch:
 
 jobs:
@@ -22,29 +24,25 @@ jobs:
       - name: verify ${{ matrix.module }}
         run: make verify-${{ matrix.module }}
 
-  # kind e2e 需要 docker、kind 与可拉取的镜像。耗时较长，仅在手动触发时运行。
-  e2e:
-    name: kind e2e
-    if: github.event_name == 'workflow_dispatch'
+  render:
+    name: kustomize render
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: azure/setup-kubectl@v4
         with:
-          go-version-file: controller/go.mod
-          cache-dependency-path: '**/go.sum'
-      - name: install kind
-        run: go install sigs.k8s.io/kind@v0.33.0
-      - name: run e2e
-        env:
-          # 产物落 workspace 内,才能被 upload-artifact 收集
-          TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
-        run: make e2e
-      - name: upload results
-        if: always()
-        uses: actions/upload-artifact@v4
+          version: v1.34.1
+      - name: render controller/deploy
+        run: kubectl kustomize controller/deploy >/dev/null
+
+  # 只拦 PR dev→main：版本引用与文档链接必须在合并前干净。
+  metadata:
+    name: release metadata
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: e2e-results
-          path: .traincachedata/controller/e2e/results/
-          if-no-files-found: ignore
+          fetch-depth: 0   # 版本检查要读 HEAD 上的 tag
+      - name: check versions and doc refs
+        run: make verify-metadata

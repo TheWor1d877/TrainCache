@@ -26,7 +26,7 @@ spec:
       priorityClassName: system-cluster-critical
       containers:
         - name: webhook
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/webhook:0.8.0
+          image: ghcr.io/thewor1d877/traincache/webhook:dev
           imagePullPolicy: IfNotPresent
           env:
             - name: CONTROLLER_WEBHOOK_ADDR

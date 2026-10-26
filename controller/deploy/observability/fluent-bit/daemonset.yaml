@@ -33,7 +33,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: fluent-bit
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/fluent/fluent-bit:3.1.8
+          image: fluent/fluent-bit:3.1.8
           imagePullPolicy: IfNotPresent
           # The image default only reads /fluent-bit/etc/fluent-bit.conf.
           args:

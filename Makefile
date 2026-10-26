@@ -1,6 +1,8 @@
-# TrainCache 验证入口。CI 只跑 verify；e2e 需要 docker + kind，按需本地执行。
+# TrainCache 验证入口。CI 跑 verify；PR 到 main 另跑 verify-metadata；
+# e2e 需要 docker + kind，按标签或手动触发。
 
-.PHONY: verify verify-controller verify-core verify-agent e2e
+.PHONY: verify verify-controller verify-core verify-agent verify-metadata e2e \
+	release-install release-smoke
 
 verify: verify-controller verify-core verify-agent
 
@@ -11,14 +13,31 @@ verify-controller:
 		controller agent --include="*.go" --include="*.proto"
 
 verify-core:
-	cd core && go build ./... && go test ./... -race -count=1
+	cd core && go build ./... && go vet ./... && go test ./... -race -count=1
+	cd core && test -z "$$(gofmt -l .)"
 
 verify-agent:
-	cd agent && go build ./... && go test ./... -race -count=1
+	cd agent && go build ./... && go vet ./... && go test ./... -race -count=1
+	cd agent && test -z "$$(gofmt -l .)"
+
+# 版本引用与文档引用的静态检查，不需要 Go 工具链。
+verify-metadata:
+	./hack/verify-release-metadata.sh
+	./hack/verify-doc-refs.sh
 
 # 端到端：脚本自行创建/清理 kind 集群，源码比镜像新会自动重建。
 e2e:
 	cd controller && ./e2e/run.sh
+
+# 发布清单：把四个镜像换成 digest 后渲染 install.yaml。
+# 用法: make release-install VERSION=v0.1.0 D_MANAGER=sha256:... (四个 digest 都要给)
+release-install:
+	./hack/render-install.sh $(VERSION) $(D_MANAGER) $(D_WEBHOOK) $(D_SCHEDULER) $(D_AGENT)
+
+# 发布后冒烟：在临时 kind 里装已经发布的 install.yaml。
+# 用法: make release-smoke TAG=v0.1.0 INSTALL=install.yaml
+release-smoke:
+	./hack/release-smoke.sh "$(INSTALL)" "$(TAG)"
 
 # ---- bench 装置入口转发 ----
 # 编排全部在 bench/Makefile；这里只转发,便于在仓库根直接执行 make bench-*。

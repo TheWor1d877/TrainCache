@@ -230,10 +230,10 @@ root = Path(sys.argv[3])
 sys.path.insert(0, str(root / "experiments"))
 try:
     import stats  # noqa: E402
-    median = stats.median
+    mean = stats.mean
 except Exception:  # noqa: BLE001  numpy 缺失时退回标准库,numpy 由 doctor 另行体检
     import statistics
-    median = statistics.median
+    mean = statistics.mean
 
 
 def read_rows(path):
@@ -268,13 +268,13 @@ def aggregate(rows, group):
     for metric in ("startup_makespan", "total_makespan", "stall_ratio"):
         vals = [num(r, metric) for r in picked]
         vals = [v for v in vals if v is not None]
-        out[metric] = float(median(vals)) if vals else None
+        out[metric] = float(mean(vals)) if vals else None
     costs = []
     for row in picked:
         parts = [num(row, key) for key in BYTE_COLS]
         if any(v is not None for v in parts):
             costs.append(sum(v or 0.0 for v in parts))
-    out["byte_cost"] = float(median(costs)) if costs else None
+    out["byte_cost"] = float(mean(costs)) if costs else None
     return out
 
 
@@ -319,7 +319,7 @@ if rate_cur and rate_prev and (rate_cur, tier_cur) != (rate_prev, tier_prev):
                  f"本次 {tier_cur}@{rate_cur}),差值仅作参考")
 lines.extend([
     "",
-    "指标取各 rep 的中位数,void 轮剔除。",
+    "指标取各 rep 的平均数,void 轮剔除。",
     "字节成本 = startup_warmup_bytes + sustained_prefetch_bytes + switch_reprefetch_bytes。",
     "",
     "| 组 | 指标 | 上次 | 本次 | 差值 | 变化 |",

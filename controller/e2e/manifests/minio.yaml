@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+          image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
           imagePullPolicy: IfNotPresent
           args: ["server", "/data", "--console-address", ":9001"]
           env:

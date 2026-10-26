@@ -14,6 +14,18 @@ resources:
   - webhook
   - agent
   - scheduler
+# Dev builds tag every image `dev`. Release builds rewrite these four entries
+# with `kustomize edit set image <name>=ghcr.io/thewor1d877/traincache/<comp>@sha256:<digest>`,
+# so no tag or digest is ever hand-edited in the per-component manifests.
+images:
+  - name: ghcr.io/thewor1d877/traincache/controller-manager
+    newTag: dev
+  - name: ghcr.io/thewor1d877/traincache/webhook
+    newTag: dev
+  - name: ghcr.io/thewor1d877/traincache/kube-scheduler
+    newTag: dev
+  - name: ghcr.io/thewor1d877/traincache/traincache-agentd
+    newTag: dev
 # Kubernetes 1.37 rejects CRD schemas containing uniqueItems ("runtime
 # complexity becomes quadratic"); older API server versions accepted it. The
 # generated CRD (controller/config/crd/bases, from the +kubebuilder marker on

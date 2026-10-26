@@ -5,16 +5,11 @@
 # go.work, so build from the repo root (or a staged copy of it):
 #
 #   docker build -f controller/deploy/scheduler/Dockerfile \
-#     -t dgl3i4ucowsgvvdwty.xuanyuan.run/traincache/kube-scheduler:0.8.0 .
-#
-# Every image is pinned to the registry mirror from /etc/docker/daemon.json;
-# k8s/containerd does not read that file, so the full domain is spelled out.
-ARG REGISTRY=dgl3i4ucowsgvvdwty.xuanyuan.run
-
-FROM ${REGISTRY}/library/golang:1.26-bookworm AS build
+#     -t ghcr.io/thewor1d877/traincache/kube-scheduler:dev .
+FROM golang:1.26-bookworm AS build
 
 ARG GOPROXY=https://goproxy.cn,direct
-ARG VERSION=0.8.0
+ARG VERSION=dev
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local \
@@ -33,7 +28,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/kube-scheduler ./cmd/scheduler
 
-FROM ${REGISTRY}/library/debian:bookworm-slim
+FROM debian:bookworm-slim
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/kube-scheduler /usr/local/bin/kube-scheduler

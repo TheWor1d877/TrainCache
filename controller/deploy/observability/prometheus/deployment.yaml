@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: prometheus
-          image: dgl3i4ucowsgvvdwty.xuanyuan.run/prom/prometheus:v3.5.5
+          image: prom/prometheus:v3.5.5
           imagePullPolicy: IfNotPresent
           args:
             - --config.file=/etc/prometheus/prometheus.yml

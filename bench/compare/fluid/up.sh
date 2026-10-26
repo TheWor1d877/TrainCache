@@ -114,6 +114,22 @@ else
   log_group "$GROUP" "configmap/trace 已创建"
 fi
 
+# ---- 3.5 级联删除屏障 ----
+# down.sh 的 `delete dataset --wait` 只保证 Dataset 自己消失,JuiceFSRuntime 是
+# Fluid 事后异步级联删的;上一轮 up 超时退出时同理(它没跑 down)。不在这儿等齐,
+# 下面两句就会看到"runtime 已存在,跳过",随后那具尸体被 GC 掉,Dataset 没有
+# Runtime 陪葬 → phase 永远 NotBound。实测形态:撞线那轮 420s 一动不动,
+# 下一轮因为尸体已清干净,10s 就 Bound——所以这不是慢,是竞态。
+# 只等"存在但正在删除"的对象;活的 Dataset/Bound Runtime 要原样复用。
+if resource_exists dataset jfs-demo -n "$NS" && ! resource_live dataset jfs-demo -n "$NS"; then
+  log_group "$GROUP" "dataset/jfs-demo 正在删除中,等级联 GC 收尸"
+  wait_absent "$GROUP" dataset jfs-demo -n "$NS" --timeout 180 || exit 1
+fi
+if resource_exists juicefsruntime jfs-demo -n "$NS" && ! resource_live juicefsruntime jfs-demo -n "$NS"; then
+  log_group "$GROUP" "juicefsruntime/jfs-demo 正在删除中,等级联 GC 收尸"
+  wait_absent "$GROUP" juicefsruntime jfs-demo -n "$NS" --timeout 180 || exit 1
+fi
+
 # ---- 4. Dataset ----
 DATASET_YAML=$(cat <<EOF
 apiVersion: data.fluid.io/v1alpha1
@@ -175,18 +191,29 @@ else
 fi
 
 # ---- 6. 等待 Dataset Bound ----
-log_group "$GROUP" "等待 dataset/jfs-demo 进入 Bound 状态"
-for i in $(seq 1 60); do
+# 正常 10~60 秒(Runtime 起来 + 对 MinIO 做 format)。上限给到 420s 只是保险:
+# 真卡住时靠下面的现场快照定位,而不是靠加大等待把竞态掩盖过去。
+FLUID_BOUND_TIMEOUT=420  # 硬编码 7 分钟
+log_group "$GROUP" "等待 dataset/jfs-demo 进入 Bound 状态(超时 ${FLUID_BOUND_TIMEOUT}s)"
+T0_BOUND=$(date +%s)
+PHASE=""
+while true; do
   PHASE=$(kubectl get dataset jfs-demo -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
   if [ "$PHASE" = "Bound" ]; then
-    log_group "$GROUP" "dataset/jfs-demo 已 Bound"
+    log_group "$GROUP" "dataset/jfs-demo 已 Bound(等待 $(( $(date +%s) - T0_BOUND ))s)"
     break
   fi
-  if [ "$i" = "60" ]; then
-    log_group "$GROUP" "等待 Dataset Bound 超时(当前 phase=$PHASE)" >&2
+  T_NOW=$(date +%s)
+  if [ $(( T_NOW - T0_BOUND )) -ge "$FLUID_BOUND_TIMEOUT" ]; then
+    log_group "$GROUP" "等待 Dataset Bound 超时(>${FLUID_BOUND_TIMEOUT}s,当前 phase=$PHASE)" >&2
+    # 现场快照:没 Bound 一定是 Runtime 侧的事,把判据一次抓全,别让人回头翻集群
+    log_group "$GROUP" "现场:runtime=$(kubectl get juicefsruntime jfs-demo -n "$NS" \
+      -o jsonpath='{.status.masterPhase}/{.status.workerPhase}/{.status.fusePhase}' 2>/dev/null \
+      || echo '不存在')" >&2
+    kubectl get pods -n "$NS" -o wide 2>/dev/null | grep -E 'jfs-demo|NAME' >&2 || true
     exit 1
   fi
-  sleep 2
+  sleep 10
 done
 
 # ---- 6.5. 数据导入:从 MinIO bench-b/shard-*.tar 同步到 Fluid JuiceFS(幂等)----
@@ -251,8 +278,8 @@ log_group "$GROUP" "Fluid JuiceFS 数据导入完成"
 
 # ---- 7. tc 档位(先挂限速,再预热)----
 # DataLoad 与测量都从 MinIO egress 取数,顺序反了会把预热时长记成满速搬运的成本。
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST(netem 固定 delay)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 8. DataLoad(预热,仅 FLUID_PREHEAT=1 时执行)----
 FLUID_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置

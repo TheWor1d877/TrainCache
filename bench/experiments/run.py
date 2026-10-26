@@ -51,11 +51,11 @@ SUMMARY_FIELDS = [
     "cond", "rep", "group", "tier", "exploratory", "void", "reason",
     "warmup_seconds",
     "startup_makespan", "total_makespan", "stall_ratio", "hit_rate",
-    "startup_makespan_median", "startup_makespan_ci_low",
+    "startup_makespan_mean", "startup_makespan_ci_low",
     "startup_makespan_ci_high",
-    "total_makespan_median", "total_makespan_ci_low", "total_makespan_ci_high",
-    "stall_ratio_median", "stall_ratio_ci_low", "stall_ratio_ci_high",
-    "hit_rate_median", "hit_rate_ci_low", "hit_rate_ci_high",
+    "total_makespan_mean", "total_makespan_ci_low", "total_makespan_ci_high",
+    "stall_ratio_mean", "stall_ratio_ci_low", "stall_ratio_ci_high",
+    "hit_rate_mean", "hit_rate_ci_low", "hit_rate_ci_high",
     "startup_warmup_bytes", "warmup_fanout",
     "sustained_prefetch_bytes", "switch_reprefetch_bytes",
     "recovery_time_s", "recovery_censored", "recovery_insufficient_baseline",
@@ -213,8 +213,8 @@ def _measured_warmup_seconds(run_dir: Path, row: dict) -> float:
 def _recovery_stats(run_dir: Path) -> tuple[float | None, int, int]:
     """阶段切换回落统计(Q9 判据,生产者是 recovery.py)。
 
-    返回 (回落时间中位数, 删失事件数, 基线不足事件数)。
-    回落时间按「切换时刻→回落点」的实测 step_s 累加,取本轮所有成功回落事件的中位数;
+    返回 (回落时间平均数, 删失事件数, 基线不足事件数)。
+    回落时间按「切换时刻→回落点」的实测 step_s 累加,取本轮所有成功回落事件的平均数;
     删失(到 epoch 末未回落)与基线不足(缺 20 步基线)单独计数,后者不进图三。
     产物缺 per_step_*.jsonl 或切换事件时返回 (None, 0, 0),不报错——不是每轮都有切换。
     """
@@ -232,8 +232,8 @@ def _recovery_stats(run_dir: Path) -> tuple[float | None, int, int]:
     censored = sum(1 for e in events if e.get("status") == "censored")
     insufficient = sum(1 for e in events
                        if e.get("status") == "insufficient_baseline")
-    med = stats_mod.median(times) if times else None
-    return (round(float(med), 6) if med is not None else None,
+    avg = stats_mod.mean(times) if times else None
+    return (round(float(avg), 6) if avg is not None else None,
             censored, insufficient)
 
 
@@ -284,7 +284,7 @@ def summarize_run(run_dir: Path, cond: dict, rep: int) -> dict:
 
 
 def _attach_ci(rows: list[dict]) -> None:
-    """给每行补上本 COND 的中位数与 bootstrap 95% CI。
+    """给每行补上本 COND 的平均数与 bootstrap 95% CI。
 
     void 轮不进统计(9.1 D14)。L 档只有 1 次采样,按预注册 1.9 只报单点值、
     不报 CI,CI 列留空。
@@ -293,14 +293,14 @@ def _attach_ci(rows: list[dict]) -> None:
     exploratory = bool(valid) and all(r.get("exploratory") == "true" for r in valid)
     for metric in SUMMARY_METRICS:
         vals = [r[metric] for r in valid if r.get(metric) is not None]
-        median = ci_low = ci_high = None
+        avg = ci_low = ci_high = None
         if vals and not exploratory:
-            median = round(stats_mod.median(vals), 6)
+            avg = round(stats_mod.mean(vals), 6)
             low, high = stats_mod.bootstrap_ci(
                 vals, iters=BOOTSTRAP_ITERS, seed=CI_SEED)
             ci_low, ci_high = round(low, 6), round(high, 6)
         for r in rows:
-            r[f"{metric}_median"] = "" if median is None else median
+            r[f"{metric}_mean"] = "" if avg is None else avg
             r[f"{metric}_ci_low"] = "" if ci_low is None else ci_low
             r[f"{metric}_ci_high"] = "" if ci_high is None else ci_high
 
@@ -566,8 +566,8 @@ def selftest() -> None:
         assert rows[2]["void"] == "true" and rows[2]["reason"], rows[2]
 
         _attach_ci(rows)
-        # void 轮不进统计:中位数只由前两轮算 → (10+12)/2 = 11
-        assert rows[0]["startup_makespan_median"] == 11.0, rows[0]
+        # void 轮不进统计:平均数只由前两轮算 → (10+12)/2 = 11
+        assert rows[0]["startup_makespan_mean"] == 11.0, rows[0]
         assert rows[0]["startup_makespan_ci_low"] <= 11.0 <= \
             rows[0]["startup_makespan_ci_high"], rows[0]
         # 固定种子 → 两次算出的 CI 相同
