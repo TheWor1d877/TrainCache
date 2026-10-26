@@ -1,0 +1,81 @@
+{
+  "schema_version": "1",
+  "name": "fig1-d-bw100-ratio2-fan2",
+  "figure": "fig1",
+  "group": "traincache-cold",
+  "track": "D",
+  "dataset": {
+    "name": "track-d",
+    "source": "local-nginx",
+    "endpoint": "http://127.0.0.1:9100",
+    "bytes": 2147483648,
+    "shards": 16,
+    "shard_size_bytes": 134217728,
+    "chunk_size_bytes": 8388608,
+    "seed": 20261015
+  },
+  "trace": {
+    "file": "traces/track-d-16shard-per-epoch.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "seed": 20261015
+  },
+  "workload": {
+    "epochs": 1,
+    "batch": 32,
+    "workers": 4,
+    "steps_per_epoch": 400,
+    "prefetch_factor": 2,
+    "compute_ms": 200,
+    "shuffle": "fixed"
+  },
+  "network": {
+    "rate_mbit": 100,
+    "delay_ms": 20,
+    "burst_k": 1250
+  },
+  "cache": {
+    "enabled": true,
+    "capacity_bytes": 1073741824,
+    "ratio": 2.0,
+    "evict_policy": "heat",
+    "root": "/var/cache/traincache"
+  },
+  "prefetch": {
+    "lookahead": 8,
+    "window_k": 8,
+    "fanout": 2,
+    "fanout_min": 1,
+    "gate": {
+      "threshold": 0.9,
+      "gap_min": 0.1,
+      "slope_min": 0.001,
+      "t_max_s": 300,
+      "min_interval_s": 1
+    },
+    "score": {
+      "half_life": 4,
+      "cutoff": 8
+    }
+  },
+  "sampling": {
+    "reps": 3,
+    "coarse_reps": 3,
+    "upgrade_rule": "sign-change",
+    "bootstrap_iters": 10000
+  },
+  "environment": {
+    "kind_workers": 4,
+    "k8s_version": "v1.31.0",
+    "images": {
+      "agent": "traincache-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "controller": "traincache-controller@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "training": "traincache-train@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "minio": "minio/minio@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "juicefs": "juicefs/juicefs@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "fluid": "fluidcloudnative/fluid@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "lock_file": "locks/fig1-d-bw100-ratio2-fan2.lock.json"
+  },
+  "tags": ["fig1", "axis=fanout", "bw100", "ratio2", "fan2"],
+  "notes": "示例值；实际 sha256 与镜像 digest 由 runner 在跑分前填充。"
+}

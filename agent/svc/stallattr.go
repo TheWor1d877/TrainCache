@@ -177,7 +177,7 @@ func (a *Agent) handleReadStall(ref ordersource.ChunkRef, waitMS int64, ts time.
 	if !record {
 		return
 	}
-	dataset, _, _ := a.resolveRef(ref)
+	dataset, _ := a.resolveDataset(ref)
 	phase := metrics.PhaseUnknown
 	if a.phase != nil {
 		phase = a.phase.Current(dataset)

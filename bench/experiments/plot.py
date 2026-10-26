@@ -2,7 +2,7 @@
 """M8 旗舰绘图脚本。
 
 读取 bench/results/compare/summary.csv 与 bench/results/experiments/ 下的
-metrics.csv,产出预注册(preregister.md)定义的五张旗舰图:
+metrics.csv,产出预注册(docs/9.2 §0~§8)定义的五张旗舰图:
 
   fig1  启动阶段盈亏曲面(带宽 × 缓存比 × fanout → 启动 makespan 改善%)
   fig2  全程 makespan 盈亏曲面(带宽 × 数据集 × epoch → 全程 makespan 差值)

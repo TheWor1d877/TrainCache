@@ -74,7 +74,7 @@ func TestHookReadMissEndToEndDemandBackfill(t *testing.T) {
 	// 模拟订单已到达:加载该 dataset 索引映射;此后 resolveRef/Lookup 可用。
 	env.loadPrefixMapping(t, m8ReadMissDataset, []string{""})
 
-	entry, found, err := env.fx.pm.bundleFor(m8ReadMissDataset).catalog.Lookup(
+	entry, found, err := env.fx.pm.bundleFor(m8ReadMissDataset, nil).catalog.Lookup(
 		context.Background(), ref.path, ref.chunk)
 	if err != nil || !found {
 		t.Fatalf("索引查询 %s#%d: found=%v err=%v", ref.path, ref.chunk, found, err)

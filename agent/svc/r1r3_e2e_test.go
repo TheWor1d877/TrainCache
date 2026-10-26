@@ -45,7 +45,7 @@ func TestR1R2E2E_FollowDeclareHeartbeatWithdraw(t *testing.T) {
 	defer cancel()
 
 	snap1 := commitFollowEntries(t, ag, ds, "a.tar")
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	installTestOrder(b, ds, "a.tar")
 	ag.StartBackground(ctx)
 
@@ -105,7 +105,7 @@ func TestR1R2E2E_FollowFailureKeepsOldMapping(t *testing.T) {
 	defer cancel()
 
 	snap1 := commitFollowEntries(t, ag, ds, "a.tar")
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	installTestOrder(b, ds, "a.tar")
 	ag.StartBackground(ctx)
 	waitFor(t, "初始映射加载", func() bool {
@@ -139,10 +139,10 @@ func TestR1R2E2E_FollowOncePerDataset(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	ag.StartBackground(ctx)
 	ag.StartBackground(ctx)
-	if again := ag.Prefetch.bundleFor(ds); again != b {
+	if again := ag.Prefetch.bundleFor(ds, nil); again != b {
 		t.Fatal("bundleFor 应返回同一 bundle")
 	}
 

@@ -1,6 +1,6 @@
 ## 层1 k8s control plane
 #### 资源预热
-定义两种新资源: DataSet与Preheat Job的CRD
+定义两种新资源: DataSet与WarmupTask的CRD
 一个Controller(reconcile)负责对比资源与期望状态,进行调谐这些CRD资源
 
 manifest(用来声明资源或者软件包的元数据)引用子集与消费顺序hint,明确需要预热哪些块以及他们的顺序是什么

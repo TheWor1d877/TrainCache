@@ -391,7 +391,7 @@ func TestHandleOrderWiresPrefetch(t *testing.T) {
 		t.Errorf("日志行应含 pod_uid,实际日志 = %q", buf.String())
 	}
 
-	b := fx.pm.bundleFor(testDataset)
+	b := fx.pm.bundleFor(testDataset, nil)
 	b.mu.Lock()
 	started, stageSeen := b.started, b.stageSeen
 	b.mu.Unlock()

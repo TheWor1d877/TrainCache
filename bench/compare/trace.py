@@ -6,7 +6,7 @@ fluid-warm / traincache-cold / traincache-warm)共用一份 trace.json,保证消
 (分片顺序、seed、每步样本数)逐位一致,否则 makespan 与 stall 不可比。
 
 轨迹语义与 bench/scripts/bench_track_d.py 的 epoch_perm()/stage_of() 逐字对齐
-(预注册 §4.1,cond.schema.md §2.4):
+(docs/9.2 §4.1、§C2.4):
   * fixed:     所有 epoch 用同一个 seed 生成的分片置换;
   * per-epoch: 每个 epoch 用 seed+epoch 生成置换(默认);
   * curriculum:全局置换 P=Random(seed).permutation(n),stage 取嵌套前缀

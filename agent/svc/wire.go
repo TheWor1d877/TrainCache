@@ -154,6 +154,8 @@ func chunkRefIn(chunks []ordersource.ChunkRef, chunk int64) (ordersource.ChunkRe
 // resolveRef 解析一个块引用所属的 dataset 与指纹(§5.4 接线口径):先按 collector 所绑
 // ring 的 CurrentOrder().Dataset 查索引;失败(未绑定/无订单/未命中)再按已知 dataset
 // (bundle 集合)逐个查;都未命中 → ok=false(调用方丢弃或跳过)。
+// 指纹只能来自索引条目,要求命中的调用方(open/advance、本地探测)适用本口径;
+// demand 补块只需 dataset 归属,走 resolveDataset,不受索引未命中影响(D60)。
 func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fingerprint, ok bool) {
 	if r, _ := a.boundRing(); r != nil {
 		if o, has := r.CurrentOrder(); has && o.Dataset != "" {
@@ -168,6 +170,22 @@ func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fin
 		}
 	}
 	return "", cas.Fingerprint{}, false
+}
+
+// resolveDataset 解析块引用的 dataset 归属,不要求路径索引命中(§5.4/D60):
+// 先取所绑 ring 的 CurrentOrder().Dataset,再回退已知 bundle 集合的第一个;
+// 两者都没有 → ok=false(调用方丢弃帧)。D25 键由 (dataset, path, chunk) 直接构造,
+// demand 补块不依赖索引。
+func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok bool) {
+	if r, _ := a.boundRing(); r != nil {
+		if o, has := r.CurrentOrder(); has && o.Dataset != "" {
+			return o.Dataset, true
+		}
+	}
+	if names := a.Prefetch.bundleNames(); len(names) > 0 {
+		return names[0], true
+	}
+	return "", false
 }
 
 // hookHandlers 组装钩子三型 handler(帧型见 hooksock.go;读循环单 goroutine 顺序回调):
@@ -311,7 +329,7 @@ func (a *Agent) repairCorrupt(ctx context.Context, dataset string, cat *index.Ca
 // catalogFor 是 rescan 的按 dataset 取索引入口(D35):与预取管理器共用同一 bundle
 // (§7.3 同一 dataset 一个 Catalog),故重扫描顺带把对象存储可见 dataset 注册进 bundle 表。
 func (a *Agent) catalogFor(_ context.Context, dataset string) (*index.Catalog, error) {
-	return a.Prefetch.bundleFor(dataset).catalog, nil
+	return a.Prefetch.bundleFor(dataset, nil).catalog, nil
 }
 
 // —— 淘汰循环接线(M6/§7.6)——

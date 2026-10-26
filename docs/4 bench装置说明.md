@@ -54,7 +54,7 @@ bench/
 | `scripts/cold_reset.sh` | 主实验冷态规程 | 无参；sync + drop_caches + 重启 MinIO + 重挂 tc。对照层不用它，用 `run_bench.py` 自带的 `cold_reset()`（§4.4） |
 | `scripts/verify_cold.sh` | 装置可信性 | `[--quick]`；两轮冷读相对差 ≤10% 判过 |
 | `scripts/track_d_{up,verify,down}.sh` | D 轨编排 | 零参数，`--dry-run`；up=容器+欠配+tc+10 epoch，verify=两轮×3 epoch 对账，down=拆除但保留数据 |
-| `scripts/upload_bench.py` | B 轨灌 MinIO | 无参；每次全量重传（同键覆盖 + 重设公开读 policy），没有"存在即跳过" |
+| `scripts/upload_bench.py` | B 轨灌 MinIO | 无参；只追加不覆盖（Q12）：桶里已有的 `shard-*.tar` 跳过，`UPLOAD_FORCE=1` 才重传；每次运行重设公开读 policy |
 | `scripts/trainpublish` | 发布 TrainCache 块快照 | Go 二进制，源码在 `core/cmd/trainpublish`，重编 `/usr/local/go/bin/go build`；关键旗标 `-chunk-size`，实验取 8388608（§3） |
 | `scripts/ctrl_up.sh` / `ctrl_down.sh` | 控制面起停 | up：命名空间、节点标签、`traincache-objstore`/webhook TLS 两个 Secret、caBundle、`kubectl apply -k controller/deploy`、agentd 配置、四个工作负载就绪；down：删控制面资源，保留 namespace/集群/数据，支持 `--dry-run` |
 | `k8s/kind-config.yaml`、`k8s/minio.yaml` | 集群与源站基座 | kind 5 节点配置；MinIO 带 30Gi PVC，所以 `kind delete` 后源数据仍在宿主机（§7 第 6 条） |
@@ -95,7 +95,7 @@ bench/
 
 | 文件 | 作用 | 接口 / 说明 |
 |------|------|-------------|
-| `cond.py` + `cond.schema.md` | COND 契约 v1：一个 JSON = 一个实验点 | 校验字段全集并产出环境变量。`network.rate_mbit` ∈ {100,300,1000}；burst 按 rate 推导，值不符直接拒收；组名不在本档参跑集合（`CAPACITY_TIER_GROUPS`）内即拒收；`capacity_ratio`、`chunk_size_bytes`、`warmup_seconds` 都在契约里；抖动不是 COND 字段，由 `config.jitter_enabled(tier, rate)` 推导；占位符 digest/sha 一律拒收；`environment.images` 实际 9 键：agent、controller、scheduler、webhook、training、minio、juicefs、fluid、fluid-csi |
+| `cond.py` + `docs/9.2 实验协议.md` §C | COND 契约 v1：一个 JSON = 一个实验点 | 校验字段全集并产出环境变量。`network.rate_mbit` ∈ {100,300,1000}；burst 按 rate 推导，值不符直接拒收；组名不在本档参跑集合（`CAPACITY_TIER_GROUPS`）内即拒收；`capacity_ratio`、`chunk_size_bytes`、`warmup_seconds` 都在契约里；抖动不是 COND 字段，由 `config.jitter_enabled(tier, rate)` 推导；占位符 digest/sha 一律拒收；`environment.images` 实际 9 键：agent、controller、scheduler、webhook、training、minio、juicefs、fluid、fluid-csi |
 | `conds/*.json` | 正式 COND 集，共 34 个 | `compare-d-<组态>-<rate>` 17 个（七组态 × {100,1000}，加 direct/fluid-cold/traincache-cold 的 @300 抖动格）、`compare-b-m-<组>-1000` 3 个、`compare-b-l-<组>-1000` 2 个、`policy-{heat,lru,lfu}` 3 个、`pareto2-lookahead{8,16,32}-{heat,lru,lfu}` 9 个 |
 | `run.py` | 主实验 runner | 冷态 → 搭负载 → 采集 → 归档；失败保留现场并标 `void` |
 | `run_policy.py` | 淘汰 × 预取实验执行体 | 注入 `TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_PREFETCH_LOOKAHEAD` |
@@ -103,7 +103,7 @@ bench/
 | `stats.py` | 统计 | 中位数 + bootstrap 95% CI（样本有放回重抽 10000 次，取 2.5%/97.5% 分位） |
 | `lock.py` | 环境清单 | 镜像 digest、kubectl 版本、tc 档位（rate/delay/burst）、`chunk_size_bytes`、`dataset_name`、种子，每个 run 目录落一份 `lock.json` |
 | `plot.py` | 出图 | 五张旗舰图统一绘制，负收益区域照画 |
-| `preregister.md` | 预注册文件 | 冻结前允许追加假设，冻结后只允许追加偏离说明 |
+| `docs/9.2 实验协议.md` §0~§8 | 预注册协议 | 冻结前定稿假设、档位与判据；冻结后只允许往 §7 追加偏离说明 |
 
 概述：三层各管一件事——主实验层造冷热差，对照层做同台跑分，实验层保证每个点条件可复现。
 
@@ -272,7 +272,7 @@ tc -s qdisc show dev eth0                        # 确认档位真的是这一�
 
 CSV 每组跑完重写一次，组内中断只丢当组；日志在 `~/tcd/bench/compare/logs/<组>.log`。
 
-对照层的冷态和主实验不同：`run_bench.py` 自带的 `cold_reset()` 删 Pod，再在四个 kind 节点上清 `/var/cache/jfs`、`/tmp/juicefs-cache`、`/var/cache/traincache/blocks`、`/var/cache/traincache/quarantine`，删完判空，**不重启 MinIO**，所以 tc 不会丢；hostPath 缓存不随 Pod 删除消失，必须显式清，目录不存在的组视为已空。traincache 组每个 rep 在删掉上一个测量 Pod 之后、创建新测量 Pod 之前复位 agentd：把 `traincache-agentd` 缩到 0（DaemonSet 没有 scale 子资源，代码改用不匹配的 `nodeSelector` 挂起）、等 Pod 全消失，逐节点清空 `/run/traincache/orders`、`/var/cache/traincache/blocks`、`/var/cache/traincache/quarantine` 并判空，再缩回 1，等 4 个 Pod Ready、`traincache_agent_degraded=0`、fetch 计数两次采样不增长（确认无 reader），且每个 Pod 内 `/run/traincache/agent.sock` 存在（滚动重启时旧 Pod 的 cleanup 会 unlink 共享 socket）；warm 组的复位排在 `up.sh` 预热之前，预热写入的块不被清掉，任一步失败该 rep 记 void/up_failed 并停止该组。复位避免控制面重启后 agentd 回放 `/run/traincache/orders` 下的历史 ring，也避免 `cold_reset()` 清块缓存时 agentd 仍在写、残留 `tmp-*` 让它退出。测量期间每 5s 采一次所有节点的 `traincache_agent_degraded`，测量 Pod 结束即停采样；出现 1 记 void(reason=`agent_degraded`)，产物新增 `agent_degraded_max` 列（0/1，其他组留空）。一旦手工重启 MinIO，必须重挂 tc，否则整轮跑在无限速链路上（§7 第 3 条）。
+对照层的冷态和主实验不同：`run_bench.py` 自带的 `cold_reset()` 只删训练 Pod（`app=train-job`；agentd、Redis、CSI 等基础设施保留），再在四个 kind 节点上清 `/var/cache/jfs`、`/tmp/juicefs-cache`、`/var/cache/traincache/blocks`、`/var/cache/traincache/quarantine`，删完判空，**不重启 MinIO**，所以 tc 不会丢；hostPath 缓存不随 Pod 删除消失，必须显式清，目录不存在的组视为已空。traincache 组每个 rep 在删掉上一个测量 Pod 之后、创建新测量 Pod 之前复位 agentd：把 `traincache-agentd` 缩到 0（DaemonSet 没有 scale 子资源，代码改用不匹配的 `nodeSelector` 挂起）、等 Pod 全消失，逐节点清空 `/run/traincache/orders`、`/var/cache/traincache/blocks`、`/var/cache/traincache/quarantine` 并判空，再缩回 1，等 4 个 Pod Ready、`traincache_agent_degraded=0`、fetch 计数两次采样不增长（确认无 reader），且每个 Pod 内 `/run/traincache/agent.sock` 存在（滚动重启时旧 Pod 的 cleanup 会 unlink 共享 socket）；warm 组的复位排在 `up.sh` 预热之前，预热写入的块不被清掉，任一步失败该 rep 记 void/up_failed 并停止该组。复位避免控制面重启后 agentd 回放 `/run/traincache/orders` 下的历史 ring，也避免 `cold_reset()` 清块缓存时 agentd 仍在写、残留 `tmp-*` 让它退出。测量期间每 5s 采一次所有节点的 `traincache_agent_degraded`，测量 Pod 结束即停采样；出现 1 记 void(reason=`agent_degraded`)，产物新增 `agent_degraded_max` 列（0/1，其他组留空）。一旦手工重启 MinIO，必须重挂 tc，否则整轮跑在无限速链路上（§7 第 3 条）。
 
 概述：M7 用 `make bench-m7` 串行跑五格，单格复跑用本节的显式命令，进度看 kubectl 实况。
 
@@ -322,7 +322,7 @@ CSV 每组跑完重写一次，组内中断只丢当组；日志在 `~/tcd/bench
 | 2 | 宿主机访问 MinIO NodePort 不通 | kind 不映射 nodePort 到宿主机 | 走节点 InternalIP（`http://172.19.0.x:30090`），upload 脚本已自动探测 |
 | 3 | 冷读结果忽快忽慢 | MinIO/源站重启后 tc qdisc 与匿名读 policy 都丢 | 冷态规程自动重挂；不复挂 = 跑在无限速链路上，该轮作废 |
 | 4 | crictl 找不到 MinIO netns | 节点残留 NotReady 僵尸 sandbox（worker2 实测有一条） | `crictl pods --state Ready --name <pod> -q` 过滤，`tc_apply` 已改 |
-| 5 | VM 重启后 fluid mount "not formatted" + redis format FATAL | redis 无 AOF，元数据没了；MinIO 前缀非空，拒绝重新 format | 不是代码 bug：`kubectl delete ns fluid` 后重 up（down.sh 会清派生前缀）；kubeadm 证书过期先 `kubeadm certs renew all` |
+| 5 | VM 重启后 mount "not formatted"、format 报 storage is not empty | 两组的 redis 都无持久化：重启把 JuiceFS 元数据带走，MinIO 里的卷对象前缀还在，CE format 拒绝 | juicefs 组 up.sh 自愈：format 失败且报 not empty → `clean_orphan_volume` 只清 `$JFS_VOL/` 前缀，再重 format。不用 `--force`：块键按 inode+chunk 命名，新元数据会读到上一轮的陈旧块。fluid 组仍手工 `kubectl delete ns fluid` 后重 up（down.sh 会清派生前缀）；kubeadm 证书过期先 `kubeadm certs renew all` |
 | 6 | 全 API 401、Service 不通 | 宿主机时钟回拨，SA token 的 nbf 在未来 | 重启 Deployment 重签；坏透就 `cd bench && kind delete cluster && make bench-up`（数据在宿主机，重传 8 秒） |
 | 7 | fluid-cold 等组跑出裸 Pod / NameError | 组名精确匹配漏改（7 组名 vs 4 目录） | `run_bench` 已改 startswith 分流；改组名时全局搜 `== "fluid"` 这类精确比较 |
 | 8 | juicefs 缓存 1GiB 限制从不生效 | `--cache-size` 单位是 **MiB**，装置曾注释成 KiB、配了 1048576（=1TiB） | 配 1024；见 §3；历史 juicefs 结果因此作废过一轮 |
@@ -333,6 +333,8 @@ CSV 每组跑完重写一次，组内中断只丢当组；日志在 `~/tcd/bench
 | 13 | preheat 全失败 | agentd 的 WHITELIST/BUCKET 与实际数据集/桶不匹配 | `ctrl_up.sh` 的 `ensure_agent_config` 运行时 `kubectl set env`；换快照名要同步改（§3） |
 | 14 | shard 数量算错、读一半没数据 | 按 128MB 假设算 count，实际约 264MB | 从对象 stat 读实际大小 |
 | 15 | pkill 把 shell 自己杀了（exit 143） | `pkill -f 'kubectl'` 匹配到自己的命令行 | 用 `pgrep -f 'run_bench\.py'` 精确找人再杀 |
+| 16 | juicefs-warm 与 juicefs-cold 读数几乎相同 | `juicefs warmup` 暖的是 jfs-mount 所在节点的 hostPath `/var/cache/jfs`；测量 Pod 没有共置约束，落到别台节点就是空缓存起跑，warm 退化成 cold | up.sh 回传 `[MOUNT_NODE]`，`run_bench` 给 juicefs 两组的测量 Pod 加 `kubernetes.io/hostname` nodeSelector（cold 同节点，warm/cold 差值才是同一台节点的比较）；回传缺失直接判 `up_failed` |
+| 17 | `warmup_seconds` 同组内差出量级（2s vs 177s） | up.sh 把 `tc_apply` 排在预热之后：节点重启后 qdisc 已丢，这一档第一次预热走满速，之后各 rep 才被自己挂上的 tc 限住 | juicefs/fluid 的 `tc_apply` 已挪到预热之前——预热与测量走同一条限速链路，`warmup_seconds` 才是本档口径的搬运成本 |
 | 16 | drop_caches / tc 需要 root 卡住 | sudo 交互不可用 | `bench/.sudo-pass`（gitignore、600 权限）；文档不展开内容 |
 | 17 | python 依赖找不到（boto3/numpy 等） | 直接调系统 `python3` 时没有加载项目根 `.venv` 的 site-packages | 统一用 Makefile 入口（`PY`/`PYTHONPATH` 已在其中设定）；分析层依赖按 `bench/requirements.txt` 装入项目根 `.venv`，上传所需的 boto3 由 `make upload` 安装 |
 | 18 | `docker update --memory 0` 没恢复 | 本机 docker 把 0 当"不变更" | 恢复用 128GiB 等效大值，记录在 env json 的 `restore_caveat` |

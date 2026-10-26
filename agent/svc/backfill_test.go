@@ -1,8 +1,9 @@
 package svc
 
 // backfill_test.go:D44 读 miss 异步补块(M8)——缺失 → EnqueueP0、坏块 →
-// Quarantine+RepairOne、本地命中零下载、映射缺失不 panic、read_miss 指标计数。
-// 装置经 assembleWith(objectstore.Mock, 临时目录)构造;等待一律带 deadline 轮询。
+// Quarantine+RepairOne、本地命中零下载、映射缺失不 panic、空映射 demand 照常回源(D60)、
+// read_miss 指标计数。装置经 assembleWith(objectstore.Mock, 临时目录)构造;
+// 等待一律带 deadline 轮询。
 
 import (
 	"context"
@@ -83,7 +84,7 @@ func newBackfillAgent(t *testing.T) (*Agent, Config, *backfillStore) {
 // preloadBackfillMapping 加载 dataset 的索引映射(模拟订单已到达后 resolveRef 可解析)。
 func preloadBackfillMapping(t *testing.T, ag *Agent, dataset string) {
 	t.Helper()
-	if err := ag.Prefetch.bundleFor(dataset).catalog.Refresh(context.Background()); err != nil {
+	if err := ag.Prefetch.bundleFor(dataset, nil).catalog.Refresh(context.Background()); err != nil {
 		t.Fatalf("加载索引映射: %v", err)
 	}
 }
@@ -235,6 +236,39 @@ func TestBackfillHitNoDownload(t *testing.T) {
 		t.Errorf("命中块应可打开: %v", err)
 	} else {
 		_ = br.Close()
+	}
+}
+
+// TestBackfillEmptyMappingStillEnqueuesDemand:dataset 已知(bundle 存在)但索引映射
+// 为空(Follow 首轮空前缀清空 / 从未 LoadPrefixes)→ demand 仍按 D25 键入 P0 回源,
+// 不得因 Lookup 未命中丢帧(D60 故障场景)。
+func TestBackfillEmptyMappingStillEnqueuesDemand(t *testing.T) {
+	ag, _, store := newBackfillAgent(t)
+	fps := commitWiringBlocks(t, ag, wiringDataset,
+		wiringBlock{path: "emptymap-000.tar", content: "emptymap-content", source: true})
+	fp := fps["emptymap-000.tar#0"]
+	ref := ordersource.ChunkRef{Path: "emptymap-000.tar"}
+	if err := ag.CS.Evict(fp); err != nil {
+		t.Fatalf("Evict: %v", err)
+	}
+
+	// 只注册 bundle,不加载映射——归属可解,条目必未命中。
+	ag.Prefetch.bundleFor(wiringDataset, nil)
+
+	ag.handleReadMiss(ref, "absent")
+	waitFor(t, "空映射下 demand 补块回本地", func() bool {
+		br, err := ag.CS.Open(fp)
+		if err != nil {
+			return false
+		}
+		_ = br.Close()
+		return true
+	})
+	if n := store.blockDownloads(wiringDataset); n != 1 {
+		t.Errorf("空映射补块下载次数 = %d, want 1", n)
+	}
+	if got := fetchRequestsCount(t, ag.Metrics, wiringDataset, metrics.ResultSuccess, metrics.FetchReasonDemand); got != 1 {
+		t.Errorf("fetch_requests{success,demand} = %v, want 1", got)
 	}
 }
 

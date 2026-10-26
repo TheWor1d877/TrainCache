@@ -147,10 +147,10 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		}
 	}
 	ag.Prefetch.phase = ag.phase
-	// 块/事件 → dataset 归属:按各 dataset Catalog 解析(与钩子 resolveRef 同口径)。
+	// 块/事件 → dataset 归属:按 ring 订单/已知 bundle 解析,不要求索引命中(与
+	// demand 同口径,钩子 resolveDataset;D60)。
 	ag.phase.setDatasetResolver(func(ref ordersource.ChunkRef) (string, bool) {
-		ds, _, ok := ag.resolveRef(ref)
-		return ds, ok
+		return ag.resolveDataset(ref)
 	})
 	// M9/D47 归因依赖:本地存在性 + 预取 pending/当前窗口(桩返回 false,逻辑由 M9 填写)。
 	ag.stall = newStallAttributorWithThreshold(ag.stallLocalExists, ag.stallInflight,
@@ -464,8 +464,11 @@ func orderGeneration(o ordersource.ConsumeOrder) fpIndexGen {
 	return g
 }
 
-// bundleFor 取/建 dataset 的 bundle(惰性:首个入口触发构造)。
-func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
+// bundleFor 取/建 dataset 的 bundle(惰性:首个入口触发构造)。initialPrefixes 非 nil
+// 时随构造装入 followPrefixes——首次构造即携带订单前缀 hint,先于 Follow 启动
+// (Follow 首轮检查不等定时器,D60);既有 bundle 忽略本参数,其前缀由
+// orderPrefixes 跟随 followPrefixes/lastOrder 演进。无订单入口传 nil。
+func (m *PrefetchManager) bundleFor(dataset string, initialPrefixes []string) *datasetBundle {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if b, ok := m.bundles[dataset]; ok {
@@ -480,9 +483,6 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 			m.onSnapshotError(ds, err)
 		},
 	})
-	// R1(6.1 §5.9):Catalog 首次创建后启动一次 Follow(生命周期 ctx 未注入时由
-	// StartBackground 对既有 bundle 补启动;followStarted 保证每 dataset 一次)。
-
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
 		Lookahead:     lookahead,
 		SelfOpenGuard: m.selfOpen, // D49:本地命中/读回/ETA 探测打开前 Mark
@@ -506,7 +506,13 @@ func (m *PrefetchManager) bundleFor(dataset string) *datasetBundle {
 		},
 	})
 	b := &datasetBundle{dataset: dataset, catalog: cat, prefetcher: pf}
+	if initialPrefixes != nil {
+		b.followPrefixes = initialPrefixes // 发布前装入,无并发读者
+	}
 	m.bundles[dataset] = b
+	// R1(6.1 §5.9/D60):hint 在 b 发布前装入(创建与 m.mu 同段持有,Follow 的
+	// prefixesFn 用 b.mu,无并发窗口);生命周期 ctx 未注入时 startFollowLocked
+	// 空转,由 StartBackground 对既有 bundle 补启动。
 	m.startFollowLocked(b)
 	return b
 }
@@ -533,7 +539,7 @@ func (m *PrefetchManager) bundleNames() []string {
 
 // lookupRef 在指定 dataset 的 Catalog 中查块(内存查询;映射未加载 → ErrNoCurrent / false)。
 func (m *PrefetchManager) lookupRef(dataset string, ref ordersource.ChunkRef) (index.Entry, bool, error) {
-	return m.bundleFor(dataset).catalog.Lookup(context.Background(), ref.Path, ref.Chunk)
+	return m.bundleFor(dataset, nil).catalog.Lookup(context.Background(), ref.Path, ref.Chunk)
 }
 
 // lookupFingerprint 按指纹反查当前订单中的候选块引用(D49;inotify OPEN 兜底用)。
@@ -576,7 +582,7 @@ func (b *datasetBundle) lookupFingerprint(ctx context.Context, fp cas.Fingerprin
 // inotify 兜底反查)转给对应 dataset 的预取器(§5.2),直接透传底层"是否真正推进"
 // (重复/落后事件返回 false 且无副作用;ref 不在当前订单内或尚无阶段同样 false)。
 func (m *PrefetchManager) OnConsumeSideAdvance(ctx context.Context, dataset string, ref prefetch.ChunkRef) bool {
-	return m.bundleFor(dataset).prefetcher.OnConsumeSideAdvance(ctx, ref)
+	return m.bundleFor(dataset, nil).prefetcher.OnConsumeSideAdvance(ctx, ref)
 }
 
 // ProtectedFPs 返回硬保护集合快照(§7.6;evictor.ProtectedSource,任何情况不淘汰):
@@ -686,24 +692,21 @@ func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 	return out
 }
 
-// ForOrder 是订单入口(发现转发 goroutine 内串行调用;ctx = 发现循环 ctx):取/建 bundle →
-// 只加载订单 chunks 涉及的前缀分片(LoadPrefixes,不整包下载;经 measureLoadPrefixes 打
-// 索引线指标)→ 首个订单启动调度(Start;之后订单只走 OnStageSwitch)→ OnStageSwitch 安装
-// 新阶段(旧阶段降级/在途/ETA 均在预取器内部处理,svc 只记日志)→ 新订单 t_touch 刷新
-// (§7.6 任务 4;仅订单成功安装后)。返回索引加载或阶段切换错误(调用方记日志、不中断发现
-// 循环)。
+// ForOrder 是订单入口(发现转发 goroutine 内串行调用;ctx = 发现循环 ctx):取/建 bundle
+// (订单前缀 hint 随构造装入,先于 Follow 首轮检查,D60)→ 只加载订单 chunks 涉及的前缀
+// 分片(LoadPrefixes,不整包下载;经 measureLoadPrefixes 打索引线指标)→ 首个订单启动
+// 调度(Start;之后订单只走 OnStageSwitch)→ OnStageSwitch 安装新阶段(旧阶段降级/在途/
+// ETA 均在预取器内部处理,svc 只记日志)→ 新订单 t_touch 刷新(§7.6 任务 4;仅订单成功
+// 安装后)。返回索引加载或阶段切换错误(调用方记日志、不中断发现循环)。
 func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o ordersource.ConsumeOrder) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	b := m.bundleFor(o.Dataset)
-	// 订单前缀 hint 必须在首次索引加载前写入:Follow 首轮 tick 可能与本次
-	// measureLoadPrefixes 并发,读到 lastOrder 尚未安装就会走空前缀 RefreshManifest,
-	// 把刚加载的映射清空。空订单写非 nil 空切片,显式清除上一单前缀且不回退。
+	// 订单前缀 hint 必须在首次索引加载前写入:Follow 启动即执行首轮检查,读到空前缀
+	// 就会走 RefreshManifest 清空映射(D60;bundle 内 hint 装入先于 Follow 启动)。
+	// 空订单写非 nil 空切片,显式清除上一单前缀且不回退。
 	prefixes := orderPaths(o.Chunks)
-	b.mu.Lock()
-	b.followPrefixes = prefixes
-	b.mu.Unlock()
+	b := m.bundleFor(o.Dataset, prefixes)
 	if err := m.measureLoadPrefixes(ctx, o.Dataset, b.catalog, prefixes); err != nil {
 		return err
 	}
@@ -761,7 +764,7 @@ func (m *PrefetchManager) ForPreheat(ctx context.Context, dataset string, refs [
 	if len(refs) == 0 {
 		return nil
 	}
-	b := m.bundleFor(dataset)
+	b := m.bundleFor(dataset, nil)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.stageSeen {
@@ -785,7 +788,7 @@ func (m *PrefetchManager) ForPreheat(ctx context.Context, dataset string, refs [
 // ForListSnapshot 返回 dataset 当前快照的条目(ListSnapshot 查询入口):取/建 bundle
 // (不加载前缀映射、不启动预取);Catalog.List 自身只下载相关分片(D29)。
 func (m *PrefetchManager) ForListSnapshot(ctx context.Context, dataset, prefix string) ([]index.Entry, error) {
-	return m.bundleFor(dataset).catalog.List(ctx, prefix)
+	return m.bundleFor(dataset, nil).catalog.List(ctx, prefix)
 }
 
 // orderPaths 取订单 chunks 的 path 去重列表(首次出现序;LoadPrefixes 的输入)。

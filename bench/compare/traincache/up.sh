@@ -197,9 +197,13 @@ for i in $(seq 1 90); do
   sleep 2
 done
 
-# ---- 5. WarmupTask CR(先删后建,不可原地更新)----
-# 预热不限速:先拆上一轮可能残留的 tc,预热完成后、计时开始前再挂回(step 7)
-bash "$BENCH_ROOT/scripts/tc_teardown.sh" >/dev/null 2>&1 || true
+# ---- 5. tc 档位(先挂限速,再预热)----
+# 预热与测量都从 MinIO egress 取数,与 juicefs/fluid 两组同口径:预热在档位带宽之内
+# 进行。之前这里先拆 tc 让预热跑满速,会让 traincache-warm 的启动收益虚高。
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+
+# ---- 6. WarmupTask CR(先删后建,不可原地更新)----
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
 WARM_SECONDS=0
 kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2>/dev/null || true
@@ -284,10 +288,6 @@ EOF
     sleep 10
   done
 fi
-
-# ---- 6. tc 档位(挂到 MinIO Pod egress)----
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
 
 log_group "$GROUP" "up 完成:DataSet Ready,WarmupTask 已 Released,预热时长=${WARM_SECONDS}s"
 echo "等待 train-job-0 被 webhook gate 放行: kubectl -n $NS get pod train-job-0 -w"

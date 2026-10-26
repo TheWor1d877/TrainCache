@@ -53,7 +53,7 @@ func TestCommitSelfOpenRegisteredAndFiltered(t *testing.T) {
 	// 订单：[自开块, 训练块]；索引映射在两次提交之后加载。
 	fx.preloadMapping(t, testDataset)
 	chunks := []ordersource.ChunkRef{selfRef, trainRef}
-	b := fx.pm.bundleFor(testDataset)
+	b := fx.pm.bundleFor(testDataset, nil)
 	// 关闭调度启动（避免后台预取打开块污染信号），只保留阶段/订单状态。
 	b.mu.Lock()
 	b.started = true

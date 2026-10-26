@@ -2,8 +2,10 @@ package svc
 
 // backfill.go:读 miss 异步 demand(按需补块;D44)。
 //
-// D44 契约:svc 收到 read_miss 后 resolveRef → Catalog.Lookup → cas.Open:
-//   - 缺失(ErrNotFound/索引无条目)→ demand:以最高优先级 P0 入队(reason=demand);
+// D44 契约:svc 收到 read_miss 后解析 dataset 归属(不要求索引命中,D60)→
+// Catalog.Lookup → cas.Open:
+//   - 缺失(ErrNotFound/索引无条目/索引查询失败)→ demand:以最高优先级 P0 入队(reason=demand),
+//     按 D25 键直接回源,不依赖索引;
 //   - 损坏(ErrCorrupt)→ repair:Quarantine + RepairOne;
 //   - demand 与 prefetch 共用同一 Fetcher / single-flight 域;best-effort,不保证本次读前补齐。
 //
@@ -36,23 +38,18 @@ func (a *Agent) backfill(ref ordersource.ChunkRef) {
 		slog.Warn("backfill: 装配缺失,跳过补块", "path", ref.Path, "chunk", ref.Chunk)
 		return
 	}
-	dataset, _, ok := a.resolveRef(ref)
+	dataset, ok := a.resolveDataset(ref)
 	if !ok {
-		// 映射缺失(无 ring/无订单/dataset 未知):无法定位块归属,记日志返回。
-		slog.Warn("backfill: 块引用无法解析 dataset,跳过补块", "path", ref.Path, "chunk", ref.Chunk)
+		// 无 ring 订单且无已知 bundle:数据集归属都定不出来,D25 键无从拼接,记日志返回。
+		slog.Warn("backfill: 块引用无已知 dataset 归属,跳过补块", "path", ref.Path, "chunk", ref.Chunk)
 		return
 	}
 
 	ctx := context.Background()
-	b := a.Prefetch.bundleFor(dataset)
+	b := a.Prefetch.bundleFor(dataset, nil)
 	entry, found, err := b.catalog.Lookup(ctx, ref.Path, ref.Chunk)
-	if err != nil {
-		slog.Warn("backfill: 索引查询失败,跳过补块",
-			"dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err)
-		return
-	}
-	if !found {
-		// 索引无此条目(含映射未加载):按缺失处理,由 P0 路径直接构造 D25 键回源。
+	if err != nil || !found {
+		// 索引未命中/查询失败(含映射未加载):按缺失处理,P0 键由 D25 直接构造,不依赖索引(D60)。
 		a.enqueueBackfillP0(dataset, ref)
 		return
 	}
@@ -95,7 +92,7 @@ func (a *Agent) repairBackfillCorrupt(ctx context.Context, dataset string, fp ca
 // 回源 reason=demand)。
 // 与 ForPreheat 同口径:未绑定 dataset 时以 dataset-only 最小订单播种,调度未启动则启动。
 func (a *Agent) enqueueBackfillP0(dataset string, ref ordersource.ChunkRef) {
-	b := a.Prefetch.bundleFor(dataset)
+	b := a.Prefetch.bundleFor(dataset, nil)
 	ctx := context.Background()
 
 	b.mu.Lock()

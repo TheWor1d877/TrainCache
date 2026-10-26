@@ -249,7 +249,12 @@ for i in $(seq 1 360); do
 done
 log_group "$GROUP" "Fluid JuiceFS 数据导入完成"
 
-# ---- 7. DataLoad(预热,仅 FLUID_PREHEAT=1 时执行)----
+# ---- 7. tc 档位(先挂限速,再预热)----
+# DataLoad 与测量都从 MinIO egress 取数,顺序反了会把预热时长记成满速搬运的成本。
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+
+# ---- 8. DataLoad(预热,仅 FLUID_PREHEAT=1 时执行)----
 FLUID_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
 if [ "$FLUID_PREHEAT" = "1" ]; then
 DATALOAD_YAML=$(cat <<EOF
@@ -298,10 +303,6 @@ done
 else
   log_group "$GROUP" "FLUID_PREHEAT=0,跳过 DataLoad 预热(冷启动)"
 fi
-
-# ---- 8. tc 档位(挂到 MinIO Pod egress)----
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
 
 log_group "$GROUP" "up 完成:Fluid Dataset+Runtime+DataLoad 已部署,cache=${FLUID_CACHE_GI}Gi"
 echo "等待 DataLoad 完成: kubectl -n $NS get dataload jfs-load -w"

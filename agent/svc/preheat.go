@@ -722,7 +722,7 @@ func (t *PreheatTasks) resolveRefs(ctx context.Context, dataset string, prefixes
 	if t.pm == nil {
 		return nil, nil, errors.New("预取管理器未装配") // 防御:Submit 已在解析前拦截
 	}
-	cat := t.pm.bundleFor(dataset).catalog
+	cat := t.pm.bundleFor(dataset, nil).catalog
 
 	var (
 		listed    []prefetch.ChunkRef

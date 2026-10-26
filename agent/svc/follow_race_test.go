@@ -123,7 +123,7 @@ func TestForOrderFirstIndexLoadNotClearedByFollow(t *testing.T) {
 		t.Fatalf("Commit(%s): %v", ds, err)
 	}
 
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	store.armed.Store(true)
 	ag.StartBackground(ctx)
 

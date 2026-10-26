@@ -95,7 +95,7 @@ func newSvcFixtureWithStore(t *testing.T, store objectstore.Store) *svcFixture {
 // 预热本身不切换映射,未预加载时 P0 块一律走下载,预加载后本地命中块零下载)。
 func (fx *svcFixture) preloadMapping(t *testing.T, dataset string) {
 	t.Helper()
-	if err := fx.pm.bundleFor(dataset).catalog.LoadPrefixes(context.Background(), []string{""}); err != nil {
+	if err := fx.pm.bundleFor(dataset, nil).catalog.LoadPrefixes(context.Background(), []string{""}); err != nil {
 		t.Fatalf("预加载索引映射: %v", err)
 	}
 }

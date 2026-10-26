@@ -342,20 +342,23 @@ func (c *Catalog) SnapID() string {
 // RefreshManifest 是无活跃前缀时的轻量跟随（6.1 §5.9）：读 CURRENT 并下载、校验
 // manifest（校验链同 Refresh：manifest 指纹与 snapshot_id 必须与 CURRENT 一致），
 // 不下载任何分片；成功后原子切换 snapID 与空 entries（旧映射整体作废）。
+// 防线（D60）：CURRENT 的 snapID 与现有快照一致且现有 entries 非空时为空操作——
+// 不切换、不清空、不触发 OnSnapshotChange（无前缀线索不得拆掉同快照已加载的映射）。
 //
 // 前置条件：与 Refresh/LoadPrefixes 互斥使用，由 Catalog 内部 mu 串行化。
 // 错误语义：ctx 已取消返回 ctx.Err()；CURRENT 不存在返回 ErrNoCurrent；manifest
 // 缺失/损坏、指纹不符或 snapshot_id 不符返回相应包装错误（指纹不符为
 // ErrInvalidShard）。任何失败都不切换、不清空，旧映射保持可用。
-// 成功后、锁外调用 Config.OnSnapshotChange(dataset, snapID)（若已配置）。
+// 成功切换后、锁外调用 Config.OnSnapshotChange(dataset, snapID)（若已配置）；
+// 空操作不触发。
 func (c *Catalog) RefreshManifest(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	c.mu.Lock()
-	snapID, err := c.refreshManifestLocked(ctx)
+	snapID, switched, err := c.refreshManifestLocked(ctx)
 	c.mu.Unlock()
-	if err != nil {
+	if err != nil || !switched {
 		return err
 	}
 	c.notifySnapshotChange(snapID)
@@ -364,21 +367,25 @@ func (c *Catalog) RefreshManifest(ctx context.Context) error {
 
 // refreshManifestLocked 是 RefreshManifest 的持锁主体：只下载并校验 manifest，切换为
 // snapID + 空 entries（raw 置空：后续 Refresh 会因内容不匹配而全量重建）。
-func (c *Catalog) refreshManifestLocked(ctx context.Context) (string, error) {
+// switched=false 表示防线命中（同快照且现有映射非空）或校验链失败，未发生切换。
+func (c *Catalog) refreshManifestLocked(ctx context.Context) (string, bool, error) {
 	_, currentSnapID, manifestFP8, err := c.readCurrent(ctx)
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+	if st := c.state.Load(); st != nil && st.snapID == currentSnapID && len(st.entries) > 0 {
+		return currentSnapID, false, nil
 	}
 	m, err := c.loadManifest(ctx, currentSnapID, manifestFP8)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	c.state.Store(&snapshotState{
 		snapID:  m.SnapshotID,
 		entries: make(map[entryKey]Entry),
 		shards:  len(m.Shards),
 	})
-	return m.SnapshotID, nil
+	return m.SnapshotID, true, nil
 }
 
 // Follow 是阻塞式快照跟随循环（6.1 §5.9）：每 Config.RefreshInterval 检查一次

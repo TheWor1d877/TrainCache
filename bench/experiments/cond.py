@@ -2,7 +2,7 @@
 """COND 契约 v1 解析器与校验器。
 
 COND 文件位于 bench/experiments/conds/<name>.json,描述一个实验点。
-字段全集与校验规则见 cond.schema.md;runner 遇到未知字段直接拒绝。
+字段全集与校验规则见 docs/9.2 实验协议.md §C2/§C5;runner 遇到未知字段直接拒绝。
 """
 import json
 import re
@@ -14,7 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 
-# ---- schema 常量(与 cond.schema.md 冻结值逐字一致)----
+# ---- schema 常量(与 docs/9.2 §C 冻结值逐字一致)----
 SCHEMA_VERSION = "1"
 
 VALID_FIGURES = {
@@ -47,7 +47,7 @@ VALID_LOOKAHEAD = {8, 16, 32}
 # 正式实验块大小(D20:固定 8 MiB,写在 dataset.chunk_size_bytes)
 CHUNK_SIZE_BYTES = 8388608
 
-# 顶层允许字段(cond.schema.md §2.1)
+# 顶层允许字段(docs/9.2 §C2.1)
 ALLOWED_TOP = {
     "schema_version", "name", "figure", "group", "track",
     "dataset", "trace", "workload", "network", "cache",
@@ -164,7 +164,7 @@ def _require(obj: dict, key: str, path: str, errors: list) -> Any:
 
 
 def validate_cond(cond: dict) -> list[str]:
-    """按 cond.schema.md 校验,返回错误信息列表(空列表=通过)。"""
+    """按 docs/9.2 §C5 校验,返回错误信息列表(空列表=通过)。"""
     errors: list[str] = []
 
     # 1. 顶层未知字段 + schema_version
@@ -257,7 +257,7 @@ def validate_cond(cond: dict) -> list[str]:
             elif sha == "0" * 64:
                 errors.append("$.trace.sha256 是全零占位符,需填真实值")
             elif len(set(sha)) == 1:
-                # aaaa… / ffff… 这类单字符重复串也是占位符(schema 规则 9)
+                # aaaa… / ffff… 这类单字符重复串也是占位符(docs/9.2 §C5 规则 9)
                 errors.append("$.trace.sha256 是单字符重复占位符(如 aaaa…),需填真实值")
             elif sha.startswith("deadbeef"):
                 errors.append("$.trace.sha256 是占位符(deadbeef…),需填真实值")
@@ -502,7 +502,7 @@ def validate_cond(cond: dict) -> list[str]:
                 elif val.endswith("0" * 64):
                     errors.append(f"$.environment.images.{key} 是全零占位符,需填真实 digest")
                 else:
-                    # aaaa… / deadbeef… 也是占位符(schema 规则 9),digest 必须是真实镜像摘要
+                    # aaaa… / deadbeef… 也是占位符(docs/9.2 §C5 规则 9),digest 必须是真实镜像摘要
                     hexpart = val.split("sha256:", 1)[-1]
                     if len(set(hexpart)) == 1 or hexpart.startswith("deadbeef"):
                         errors.append(
@@ -581,24 +581,18 @@ def cond_to_track_d_args(cond: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# selftest:用 cond.schema.md 里的 JSON 示例做校验
+# selftest:用 fixtures/cond-example-invalid.json 这份示例 COND 做校验
 # ---------------------------------------------------------------------------
-def _extract_example_cond() -> dict:
-    """从 cond.schema.md 提取 ```json ... ``` 示例块。"""
-    schema_path = Path(__file__).resolve().parent / "cond.schema.md"
-    text = schema_path.read_text(encoding="utf-8")
-    start = text.find("```json")
-    if start < 0:
-        raise RuntimeError("cond.schema.md 中未找到 ```json 示例块")
-    end = text.find("```", start + 7)
-    if end < 0:
-        raise RuntimeError("cond.schema.md JSON 示例块未闭合")
-    block = text[start + 7:end].strip()
-    return json.loads(block)
+EXAMPLE_COND_PATH = Path(__file__).resolve().parent / "fixtures" / "cond-example-invalid.json"
+
+
+def _load_example_cond() -> dict:
+    """读示例 COND。它故意带占位符 digest/sha,必须被校验器拒收。"""
+    return json.loads(EXAMPLE_COND_PATH.read_text(encoding="utf-8"))
 
 
 def selftest() -> None:
-    cond = _extract_example_cond()
+    cond = _load_example_cond()
     errs = validate_cond(cond)
     # 示例里的 sha256 与镜像 digest 是全零占位符,应被规则 9 拒绝
     assert errs, "示例 COND 含占位符,预期校验失败"
@@ -618,7 +612,7 @@ def selftest() -> None:
     errs2 = validate_cond(good)
     assert not errs2, f"修正占位符后仍有错误: {errs2}"
 
-    # aaaa… 这类单字符重复串同样必须被拒(schema 规则 9)
+    # aaaa… 这类单字符重复串同样必须被拒(docs/9.2 §C5 规则 9)
     ph = json.loads(json.dumps(good))
     ph["trace"]["sha256"] = "a" * 64
     errs_ph = validate_cond(ph)

@@ -1,9 +1,4 @@
-# COND 契约
-
-> 作用：一个 COND 文件描述一个实验点；跑几次由 runner 决定，不由 COND 决定。
-> 文件位置：`bench/experiments/conds/<name>.json`。字段名、枚举、必填项以本文为准；runner 遇到未知字段直接拒绝。
-
-## 1. 命名规则
+## C1. 命名规则
 
 - 文件名与 `name` 字段一致，全小写，用 `-` 分隔，长度 ≤ 80。
 - 推荐格式：`<figure>-<track>-bw<rate>-ratio<ratio>-fan<fanout>-ep<epochs>-<shuffle>`。
@@ -11,9 +6,9 @@
 - 示例：`fig1-d-bw100-ratio2-fan2`、`fig2-b-bw300-size8-ep10`、`fig3-d-shuffle-per-epoch-ep3`。
 - 同一个 `name` 在 `conds/` 下必须唯一；重跑同一个 COND 用 `reps` 与产物目录区分，不改名字。
 
-## 2. 字段全集
+## C2. 字段全集
 
-### 2.1 顶层
+### C2.1 顶层
 
 | 字段 | 类型 | 必填 | 取值/约束 | 说明 |
 |---|---|---|---|---|
@@ -22,18 +17,18 @@
 | `figure` | string | 是 | `fig1`/`fig2`/`fig3`/`pareto1`/`pareto2`/`compare-d`/`compare-b`/`policy` | 这个点属于哪组实验 |
 | `group` | string | 是 | `direct`/`juicefs-cold`/`juicefs-warm`/`fluid-cold`/`fluid-warm`/`traincache-cold`/`traincache-warm` | 受试组态；冷热由组态名表达（D30） |
 | `track` | string | 是 | `B`/`C`/`D` | 数据轨；A 轨不进入本验收 |
-| `dataset` | object | 是 | 见 2.2 | 数据源与规模 |
-| `trace` | object | 是 | 见 2.3 | 请求轨迹 |
-| `workload` | object | 是 | 见 2.4 | 训练负载 |
-| `network` | object | 是 | 见 2.5 | tc 档位 |
-| `cache` | object | 是 | 见 2.6 | 缓存容量与策略 |
+| `dataset` | object | 是 | 见 C2.2 | 数据源与规模 |
+| `trace` | object | 是 | 见 C2.3 | 请求轨迹 |
+| `workload` | object | 是 | 见 C2.4 | 训练负载 |
+| `network` | object | 是 | 见 C2.5 | tc 档位 |
+| `cache` | object | 是 | 见 C2.6 | 缓存容量与策略 |
 | `prefetch` | object | 条件 | `group=traincache-cold`/`traincache-warm` 时必填 | 预取/门控/评分参数 |
-| `sampling` | object | 是 | 见 2.8 | 重复次数与统计 |
-| `environment` | object | 是 | 见 2.9 | 环境锁定 |
+| `sampling` | object | 是 | 见 C2.8 | 重复次数与统计 |
+| `environment` | object | 是 | 见 C2.9 | 环境锁定 |
 | `tags` | array[string] | 否 | 每个 tag ≤32 字符 | 检索用，不参与语义 |
 | `notes` | string | 否 | ≤500 字符 | 人类备注，不参与计算 |
 
-### 2.2 `dataset`
+### C2.2 `dataset`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -51,7 +46,7 @@
 
 `chunk_size_bytes` 与生产默认的关系：生产默认块大小 67108864（64 MiB）不变；实验把块切成 8 MiB，只改 trainpublish 发布快照时的 `-chunk-size` 参数，不改生产代码。原因：1 GiB 缓存按 64 MiB 只有 16 块，预取保护窗口（lookahead 16 块）覆盖整个缓存，淘汰排序统计失真；按 8 MiB 有 128 块，窗口占 1/8（D20）。正式实验一律读 8 MiB 切块的 `compare-data-8m` 快照（trainpublish `-chunk-size 8388608` 发布，Q12）。
 
-### 2.3 `trace`
+### C2.3 `trace`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -59,7 +54,7 @@
 | `sha256` | string | 是 | 64 位小写 hex | 轨迹文件 hash；产物目录要复核 |
 | `seed` | int | 是 | >0 | 轨迹生成种子；与 `dataset.seed` 分开记 |
 
-### 2.4 `workload`
+### C2.4 `workload`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -82,21 +77,21 @@
 
 `equal-thirds` 的精确语义：`E<3` 时全部 epoch 属于 stage 0；否则 `e < floor(E/3)` 为 stage 0、`e < floor(2E/3)` 为 stage 1、其余为 stage 2。分片集合取 `P = Random(dataset.seed).permutation(n_tars)` 的嵌套前缀：stage 0/1/2 分别为 `P[:n]`、`P[:ceil(2n/3)]`、`P[:ceil(n/3)]`；stage 内顺序为 `P` 过滤到该前缀，stage 内所有 epoch 一致。`E=1` 时退化为 stage 0 全量。
 
-### 2.5 `network`
+### C2.5 `network`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
-| `rate_mbit` | int | 是 | `100`/`300`/`1000` | tc tbf 速率；对照实验把它当自变量扫（D31） |
+| `rate_mbit` | int | 是 | `100`/`300`/`1000` | tc tbf 速率；对照实验把它当自变量扫（D31）；每步实测读量 S 档 ≈26.8MB/s、M 档 ≈107.4MB/s、L 档 ≈429.5MB/s |
 | `delay_ms` | int | 是 | 固定 20 | netem 延迟；全档位统一，避免与带宽混淆 |
-| `burst_k` | int | 是 | 由 `rate_mbit` 推导：`100`→1250、`300`→3750、`1000`→12500 | tbf burst，单位 KB |
+| `burst_k` | int | 是 | 由 `rate_mbit` 推导：`100`→1250、`300`→3750、`1000`→12500 | tbf burst，单位 KB；推导式 `rate_mbit × 125 KB/s × 0.1 s`，即约 0.1 秒的传输量 |
 
 `rate_mbit` 是被扫的轴。取值集合单点定义在 `bench/config.py` 的 `TC_RATE_MBITS`，COND 只能取这三个值。
 
-`burst_k` 由 `rate_mbit` 推导，口径是「约 0.1 秒的传输量」：`rate_mbit × 125 KB/s × 0.1 s`，即 100mbit → 1250k、300mbit → 3750k、1000mbit → 12500k。burst 固定不变会让突发窗口随带宽缩水（1600k 在 1000mbit 下只有 13ms），所以它必须跟着 rate 走。算式在 `bench/config.py` 的 `burst_for_rate`，runner 与校验器都从那里取。
+`burst_k` 跟着 `rate_mbit` 走，算式在 `bench/config.py` 的 `burst_for_rate`，runner 与校验器都从那里取；三档取值见上表。
 
-抖动（netem delay variation）**不是 COND 字段**，由档位与 rate 推导：`config.jitter_enabled(tier, rate_mbit)`，当「链路带宽 ÷ 每步读量」落在 `[1,2]` 这个临界区间时开启。按实测每步读量 S 档 ≈26.8MB/s、M 档 ≈107.4MB/s、L 档 ≈429.5MB/s，比值 BW/r 分别是 S：0.47/1.40/4.66，M：0.12/0.35/1.16，L：0.03/0.09/0.29 —— 所以抖动恰好落在 S@300 与 M@1000 两处。COND 里不写抖动开关，避免出现互相矛盾的两个真相。
+抖动（netem delay variation）**不是 COND 字段**，由 `config.jitter_enabled(tier, rate_mbit)` 推导，当「链路带宽 ÷ 每步读量」落在 `[1,2]` 这个区间时开启。COND 里不写抖动开关。
 
-### 2.6 `cache`
+### C2.6 `cache`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -110,7 +105,7 @@
 
 `ratio` 的档位：图一用 1/2/4；图二/图三用 2；C 轨倾斜场景用 3.3333，表示缓存容量为数据集字节的 30%。30% 是显式容量上限：`capacity_bytes = floor(dataset.bytes × 0.30)`，runner 以 `capacity_bytes` 为准，`ratio` 只作展示与交叉校验；稳态 `disk_usage_ratio` 是否落在 25%~35% 是验收检查，不是控制量。
 
-`capacity_ratio`、`ratio`、`capacity_bytes` 的关系（只有一套容量口径，不允许出现两套定义）：
+`capacity_ratio`、`ratio`、`capacity_bytes` 的关系：
 
 - `capacity_bytes` 是唯一的控制量（淘汰触发的容量上限）；`ratio = dataset.bytes ÷ capacity_bytes`，两者继续按校验规则 4 做 ±1% 交叉校验。
 - `capacity_ratio` 只是对照实验的档位别名，不引入新容量语义。固定映射：`S`↔ratio 2（2 GiB 数据 / 1 GiB 缓存）、`M`↔ratio 8（8 GiB / 1 GiB）、`L`↔ratio 32（32 GiB / 1 GiB）；三档缓存都是同一个 1 GiB。
@@ -120,7 +115,7 @@
 
 `warmup_seconds` 口径：预热外置于计时——所有组的预热在计时开始前完成并等待，超过 15 分钟整轮作废（D23）。冷组写 0 或不填；`juicefs-warm` 与 Fluid 热读组写预热预算（上限 900）。TrainCache 组写 0：它的「热」来自启动窗口把整块缓存灌满，属于 startup 阶段，计入 makespan，不是外置预热。实测预热耗时由 runner 记入产物 `summary.csv` 的 `warmup_seconds` 列，与 makespan 分列，不进成本以外的任何时间口径；预热搬的字节仍计入成本（预注册 §1）。
 
-### 2.7 `prefetch`（仅 `group=traincache-cold`/`traincache-warm`）
+### C2.7 `prefetch`（仅 `group=traincache-cold`/`traincache-warm`）
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -148,7 +143,7 @@
 | `half_life` | float | 固定 4 | 窗口外权重半衰期（块数） |
 | `cutoff` | int | 固定 8 | 权重截断距离（块数） |
 
-### 2.8 `sampling`
+### C2.8 `sampling`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -167,9 +162,9 @@
 | `M` | 3 | 固定 3 次 |
 | `L` | 1 | 固定 1 次（探点，见下） |
 
-`L` 档只跑 1 次，低于 3 次硬纪律，所以产物要标 `exploratory`，不进正式表、不报 CI。COND 里用 `capacity_ratio=L` 表达这个标记（`tags` 里另加一个 `exploratory` 便于检索，runner 以档位为准）。`run_bench.py` 的 `row_status()` 按 `TIER_EXPLORATORY` 给 L 档产物写 `status=exploratory`（作废轮写 `void`），`summary.csv` 的 `fieldnames` 含 `status` 列。
+`L` 档产物标 `exploratory`，不进正式表、不报 CI。COND 里用 `capacity_ratio=L` 表达这个标记（`tags` 里另加一个 `exploratory` 便于检索，runner 以档位为准）。`run_bench.py` 的 `row_status()` 按 `TIER_EXPLORATORY` 给 L 档产物写 `status=exploratory`（作废轮写 `void`），`summary.csv` 的 `fieldnames` 含 `status` 列。
 
-### 2.9 `environment`
+### C2.9 `environment`
 
 | 字段 | 类型 | 必填 | 约束 | 说明 |
 |---|---|---|---|---|
@@ -194,7 +189,7 @@
 
 镜像字段写 `repo@sha256:...` 形式，digest 由 runner 记入 `lock.json`。
 
-## 3. 按实验类型的额外约束
+## C3. 按实验类型的额外约束
 
 | `figure` | 额外约束 |
 |---|---|
@@ -209,9 +204,9 @@
 
 `compare-d` 扫两个轴：组态与带宽。基准带宽 100 mbit 跑全部七组态（轴 `group`）；300 mbit 只跑 `direct`/`fluid-cold`/`traincache-cold` 三组（临界档，`BW/r∈[1,2]`，开抖动）；1000 mbit 跑全部七组态。
 
-`group` 不是 `traincache-cold`/`traincache-warm` 时，`prefetch` 不生效，但 COND 里仍要写 `fanout` 与 `window_k` 的对照值（用同一档位下 `traincache-cold` 的同名 COND 共享），runner 会拒绝缺失的对照。组态名里的 `cold`/`warm` 指冷读与热读两种状态，是组态名的一部分（`traincache-cold` 就是 TrainCache 冷读），不再靠别的字段表达。
+`group` 不是 `traincache-cold`/`traincache-warm` 时，`prefetch` 不生效，但 COND 里仍要写 `fanout` 与 `window_k` 的对照值（用同一档位下 `traincache-cold` 的同名 COND 共享），runner 会拒绝缺失的对照。
 
-## 4. 字段与消费方对照
+## C4. 字段与消费方对照
 
 | COND 字段 | 消费方 |
 |---|---|
@@ -234,7 +229,7 @@
 | `sampling.reps` | runner 的重复次数；`reps=3` 的点不参与最终胜负结论 |
 | `environment.images` | kind manifest 的 image digest；runner 写入 `lock.json` |
 
-## 5. 校验规则
+## C5. 校验规则
 
 runner 在开跑前逐条校验，任一失败直接拒绝，不进入执行：
 
@@ -245,7 +240,7 @@ runner 在开跑前逐条校验，任一失败直接拒绝，不进入执行：
 5. `cache.enabled=false` 只允许 `group=direct`。
 6. `group=traincache-cold`/`traincache-warm` 时 `prefetch` 必填；其他组态 `prefetch` 可选，但对照字段必须齐。
 7. `workload.shuffle=curriculum` 时 `curriculum` 必填，且 `stages=3`、`shard_fractions` 与冻结值逐字一致。
-8. `sampling.reps` 取值：`fig1`/`fig2`/`fig3` 与 `policy` 为 3；`pareto1`/`pareto2` 必须为 7；`compare-*` 按容量档位走（D32）——`capacity_ratio=S` 时 3、`M` 时 3、`L` 时 1（`exploratory` 标记见 2.8）。
+8. `sampling.reps` 取值：`fig1`/`fig2`/`fig3` 与 `policy` 为 3；`pareto1`/`pareto2` 必须为 7；`compare-*` 按容量档位走（D32）——`capacity_ratio=S` 时 3、`M` 时 3、`L` 时 1（`exploratory` 标记见 C2.8）。
 9. `trace.sha256` 是 64 位小写 hex；`environment.images` 每项是 `repo@sha256:...`；两者为全零或 `aaaa…` 占位符时拒绝执行。
 10. 同一 `figure` 内，除被扫的自变量外，其余字段必须与基准 COND 一致。runner 用 `tags` 里的 `axis=<name>` 标出本点扫的轴。`compare-d` 扫两个轴：基准带宽点用 `axis=group`，非基准带宽点（300/1000 mbit）用 `axis=rate`；`compare-b` 只扫组态，用 `axis=group`。
 11. `cache.capacity_ratio` 只允许出现在 `figure=compare-d`/`compare-b`；出现时 `dataset.bytes`、`capacity_bytes`、`ratio` 必须满足 S↔2、M↔8、L↔32 的档位映射（±1%），且缓存 1 GiB、数据 2/8/32 GiB。
@@ -253,92 +248,6 @@ runner 在开跑前逐条校验，任一失败直接拒绝，不进入执行：
 13. `group` 只能是 7 个组态名之一（`direct`/`juicefs-cold`/`juicefs-warm`/`fluid-cold`/`fluid-warm`/`traincache-cold`/`traincache-warm`）；COND 写了 `capacity_ratio` 时，`group` 还必须落在该档位的参跑组集合内（`S` 七组态、`M` 三组、`L` 两组），越组直接拒绝（D30）。
 14. `network.rate_mbit` 只能是 100/300/1000；`network.burst_k` 必须等于该 rate 的推导值（1250/3750/12500）。抖动不出现在 COND 里，由 `config.jitter_enabled(capacity_ratio, rate_mbit)` 从档位与 rate 推导（D31）。
 
-## 6. 完整示例
+## C6. 完整示例
 
-`bench/experiments/conds/fig1-d-bw100-ratio2-fan2.json`：
-
-```json
-{
-  "schema_version": "1",
-  "name": "fig1-d-bw100-ratio2-fan2",
-  "figure": "fig1",
-  "group": "traincache-cold",
-  "track": "D",
-  "dataset": {
-    "name": "track-d",
-    "source": "local-nginx",
-    "endpoint": "http://127.0.0.1:9100",
-    "bytes": 2147483648,
-    "shards": 16,
-    "shard_size_bytes": 134217728,
-    "chunk_size_bytes": 8388608,
-    "seed": 20261015
-  },
-  "trace": {
-    "file": "traces/track-d-16shard-per-epoch.json",
-    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "seed": 20261015
-  },
-  "workload": {
-    "epochs": 1,
-    "batch": 32,
-    "workers": 4,
-    "steps_per_epoch": 400,
-    "prefetch_factor": 2,
-    "compute_ms": 200,
-    "shuffle": "fixed"
-  },
-  "network": {
-    "rate_mbit": 100,
-    "delay_ms": 20,
-    "burst_k": 1250
-  },
-  "cache": {
-    "enabled": true,
-    "capacity_bytes": 1073741824,
-    "ratio": 2.0,
-    "evict_policy": "heat",
-    "root": "/var/cache/traincache"
-  },
-  "prefetch": {
-    "lookahead": 8,
-    "window_k": 8,
-    "fanout": 2,
-    "fanout_min": 1,
-    "gate": {
-      "threshold": 0.9,
-      "gap_min": 0.1,
-      "slope_min": 0.001,
-      "t_max_s": 300,
-      "min_interval_s": 1
-    },
-    "score": {
-      "half_life": 4,
-      "cutoff": 8
-    }
-  },
-  "sampling": {
-    "reps": 3,
-    "coarse_reps": 3,
-    "upgrade_rule": "sign-change",
-    "bootstrap_iters": 10000
-  },
-  "environment": {
-    "kind_workers": 4,
-    "k8s_version": "v1.31.0",
-    "images": {
-      "agent": "traincache-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "controller": "traincache-controller@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "training": "traincache-train@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "minio": "minio/minio@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "juicefs": "juicefs/juicefs@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "fluid": "fluidcloudnative/fluid@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    },
-    "lock_file": "locks/fig1-d-bw100-ratio2-fan2.lock.json"
-  },
-  "tags": ["fig1", "axis=fanout", "bw100", "ratio2", "fan2"],
-  "notes": "示例值；实际 sha256 与镜像 digest 由 runner 在跑分前填充。"
-}
-```
-
-示例里的 `sha256` 和镜像 digest 是占位符，runner 校验到占位符会拒绝执行。
+示例 COND 在 `bench/experiments/fixtures/cond-example-invalid.json`（实验点 `fig1-d-bw100-ratio2-fan2`，15 个顶层键，字段名与取值按真实口径填）。它故意把 `trace.sha256` 与 `environment.images` 的 digest 写成全零占位符；`cond.py --selftest` 读这份文件，断言校验器按 §C5 规则 9 拒收它，再把占位符换成真值断言通过全部 14 条。示例的 `environment.images` 只列 6 个键，正式 COND 是 9 键（§C2.9）。

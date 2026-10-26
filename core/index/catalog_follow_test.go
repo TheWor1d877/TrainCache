@@ -108,7 +108,8 @@ func TestCatalogSnapID(t *testing.T) {
 	}
 }
 
-// TestRefreshManifest 覆盖：成功切换后 entries 为空、snapID/shards 正确且回调触发；
+// TestRefreshManifest 覆盖：无同快照非空映射时成功切换、entries 为空、snapID/shards
+// 正确且回调触发；snapID 未变且 entries 非空时为空操作（不清空、不回调，D60 防线）；
 // 失败时旧映射保持、OnSnapshotChange 不再调用；回调 panic 不向调用方传播。
 func TestRefreshManifest(t *testing.T) {
 	ctx := context.Background()
@@ -140,14 +141,9 @@ func TestRefreshManifest(t *testing.T) {
 	cfg.OnSnapshotError = func(ds string, err error) {
 		t.Errorf("unexpected OnSnapshotError(%q, %v)", ds, err)
 	}
+
+	// 无既有映射：成功切换为 snapID + 空 entries。
 	c := NewCatalog(env.store, dataset, cfg)
-
-	// 建立非空旧映射。
-	if err := c.Refresh(ctx); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	waitSnapshotChange(t, changes, dataset, snap1)
-
 	if err := c.RefreshManifest(ctx); err != nil {
 		t.Fatalf("RefreshManifest: %v", err)
 	}
@@ -170,13 +166,28 @@ func TestRefreshManifest(t *testing.T) {
 		t.Fatalf("Refresh with panicking callback = %v, want nil", err)
 	}
 
-	// 失败路径：重新建立非空映射 → 提交新快照并损坏其 manifest → RefreshManifest 失败。
+	// 防线（D60）：同快照且现有映射非空 → 空操作，entries/回调都不动。
 	if err := c.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh (rebuild): %v", err)
 	}
 	for _, e := range entries {
 		assertHit(t, c, e)
 	}
+	beforeNoop := changeCount.Load()
+	if err := c.RefreshManifest(ctx); err != nil {
+		t.Fatalf("RefreshManifest (noop): %v", err)
+	}
+	if got := c.SnapID(); got != snap1 {
+		t.Fatalf("SnapID after noop = %q, want %q", got, snap1)
+	}
+	for _, e := range entries {
+		assertHit(t, c, e)
+	}
+	if got := changeCount.Load(); got != beforeNoop {
+		t.Fatalf("OnSnapshotChange called %d times after noop, want %d", got, beforeNoop)
+	}
+
+	// 失败路径：提交新快照并损坏其 manifest → snapID 不同,防线不拦截,校验链失败。
 	d := Entry{Path: "/d/d", Chunk: 0, Size: 4, Node: "n3"}
 	d.Fingerprint = env.putBlock(t, "refreshmanifest-d")
 	snap2, err := w.Commit(ctx, dataset, []Entry{d})

@@ -70,7 +70,7 @@ func TestFollowSwitchesSnapshotWithinInterval(t *testing.T) {
 	defer cancel()
 
 	snap1 := commitFollowEntries(t, ag, ds, "a.tar")
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	// 模拟 ForOrder 安装订单(prefixesFn 数据源;避免真实预取器在测试中发回源请求)。
 	b.mu.Lock()
 	b.lastOrder = ordersource.ConsumeOrder{
@@ -122,7 +122,7 @@ func TestFollowFailureKeepsOldMappingAndCountsError(t *testing.T) {
 	defer cancel()
 
 	snap1 := commitFollowEntries(t, ag, ds, "a.tar")
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	b.mu.Lock()
 	b.lastOrder = ordersource.ConsumeOrder{
 		Dataset: ds, StageID: "s1",
@@ -164,10 +164,10 @@ func TestFollowStartsOncePerDataset(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ag.Prefetch.bundleFor(ds)
+	b := ag.Prefetch.bundleFor(ds, nil)
 	ag.StartBackground(ctx)
 	ag.StartBackground(ctx) // 重复调用不得重复启动
-	if again := ag.Prefetch.bundleFor(ds); again != b {
+	if again := ag.Prefetch.bundleFor(ds, nil); again != b {
 		t.Fatalf("bundleFor 应返回同一 bundle")
 	}
 

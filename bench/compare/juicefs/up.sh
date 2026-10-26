@@ -34,6 +34,10 @@ SHARD_INCLUDES="$(shard_include_args "$N_TARS")"
 JFS_CACHE_MB="${JFS_CACHE_MB:-1024}"
 JFS_CACHE_SIZE="$JFS_CACHE_MB"  # juicefs --cache-size 单位是 MiB
 
+# JuiceFS 卷名(= MinIO 桶内的对象前缀)。Redis 元数据丢了它还在,反之亦然;
+# 两者必须成对,见 format 段的孤儿卷自愈。
+JFS_VOL="traincache-demo"
+
 group_header "$GROUP"
 check_minio "$GROUP"
 
@@ -117,6 +121,32 @@ log_group "$GROUP" "redis 就绪"
 
 # ---- 5. JuiceFS 文件系统 format(仅首次;已 format 则跳过)----
 # format 命令需要能访问 MinIO 与 Redis;用一次性 Job 执行。
+
+# 清掉 MinIO 里本卷的对象前缀(只碰 $JFS_VOL/,绝不碰 shard-*.tar 源数据)。
+clean_orphan_volume() {
+  local pod
+  pod="$(kubectl -n "$MINIO_NS" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -z "$pod" ] || [ -z "$MINIO_BUCKET" ] || [ -z "$JFS_VOL" ]; then
+    log_group "$GROUP" "错误:MinIO Pod/桶名/卷名缺一,拒绝清理" >&2
+    return 1
+  fi
+  kubectl -n "$MINIO_NS" exec "$pod" -- mc alias set local \
+    http://localhost:9000 "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" >/dev/null 2>&1 || {
+      log_group "$GROUP" "错误:mc alias 设置失败" >&2; return 1; }
+  # mc rm 成功=删过;对象不存在时返回非 0,视为已空
+  if kubectl -n "$MINIO_NS" exec "$pod" -- mc rm --recursive --force \
+       "local/$MINIO_BUCKET/$JFS_VOL/" >/dev/null 2>&1; then
+    log_group "$GROUP" "已清空对象前缀 $MINIO_BUCKET/$JFS_VOL/"
+  else
+    log_group "$GROUP" "对象前缀 $MINIO_BUCKET/$JFS_VOL/ 本就为空"
+  fi
+  if kubectl -n "$MINIO_NS" exec "$pod" -- mc ls --recursive \
+       "local/$MINIO_BUCKET/$JFS_VOL/" 2>/dev/null | head -1 | grep -q .; then
+    log_group "$GROUP" "错误:清卷后 $JFS_VOL/ 仍有对象,中止" >&2
+    return 1
+  fi
+}
+
 FORMAT_JOB_YAML=$(cat <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -157,7 +187,7 @@ spec:
                 --bucket "\${MINIO_ENDPOINT:-$MINIO_ENDPOINT}/\$MINIO_BUCKET" \
                 --access-key "\$MINIO_ACCESS_KEY" \
                 --secret-key "\$MINIO_SECRET_KEY" \
-                "\$METAURL" traincache-demo
+                "\$METAURL" $JFS_VOL
               echo "JuiceFS format 完成"
 EOF
 )
@@ -165,7 +195,22 @@ EOF
 kubectl -n "$NS" delete job jfs-format --ignore-not-found 2>/dev/null || true
 echo "$FORMAT_JOB_YAML" | kubectl apply -f -
 log_group "$GROUP" "job/jfs-format 已创建(幂等:已 format 则立即退出)"
-kubectl -n "$NS" wait --for=condition=complete job/jfs-format --timeout=120s
+if ! kubectl -n "$NS" wait --for=condition=complete job/jfs-format --timeout=120s; then
+  # 自愈:Redis 元数据(juicefs ns 的 redis 无持久化)随重启丢失,而 MinIO 卷还在时,
+  # CE format 会拒绝 "storage is not empty"。此时旧块键(按 inode+chunk 命名)会被
+  # 新元数据当成有效数据读到,所以只能清卷重来,不能用 --force 复用陈旧块。
+  if kubectl -n "$NS" logs job/jfs-format 2>/dev/null | grep -q "is not empty"; then
+    log_group "$GROUP" "孤儿卷(元数据已丢):清卷后重新 format"
+    clean_orphan_volume || exit 1
+    kubectl -n "$NS" delete job jfs-format --ignore-not-found 2>/dev/null || true
+    echo "$FORMAT_JOB_YAML" | kubectl apply -f -
+    kubectl -n "$NS" wait --for=condition=complete job/jfs-format --timeout=120s
+  else
+    log_group "$GROUP" "错误:jfs-format 失败" >&2
+    kubectl -n "$NS" logs job/jfs-format --tail=20 >&2 || true
+    exit 1
+  fi
+fi
 log_group "$GROUP" "JuiceFS format 完成"
 
 # ---- 5.5. 数据导入:从 MinIO bench-b/shard-*.tar 同步到 JuiceFS(幂等,已有则跳过)----
@@ -282,7 +327,20 @@ for i in $(seq 1 120); do
 done
 log_group "$GROUP" "pod/jfs-mount 就绪且 /mnt/jfs 已挂载"
 
-# ---- 6.5. 预热(warm 组:juicefs warmup; 冷组:跳过)----
+# ---- 6.2. 回传挂载节点(测量 Pod 与它共置)----
+# CE 单机缓存只落在 mount Pod 所在节点的 hostPath /var/cache/jfs；测量 Pod 若被
+# 调度到别的节点，读的是自己那台空缓存——warm 组就退化成 cold。run_bench.py 用
+# 这行输出给测量 Pod 加 nodeSelector。
+MOUNT_NODE="$(kubectl -n "$NS" get pod jfs-mount -o jsonpath='{.spec.nodeName}')"
+log_group "$GROUP" "jfs-mount 所在节点=$MOUNT_NODE(测量 Pod 共置)"
+echo "[MOUNT_NODE] $MOUNT_NODE"
+
+# ---- 6.5. tc 档位(先挂限速,再预热)----
+# 预热与测量都从 MinIO egress 取数,顺序反了会把 warmup_seconds 记成满速搬运的成本。
+log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
+
+# ---- 6.7. 预热(warm 组:juicefs warmup; 冷组:跳过)----
 # warm 判定:RUN_BENCH=1 且 env JFS_WARMUP=1;或非 RUN_BENCH 手动调用时始终预热
 if [ "${JFS_WARMUP:-0}" = "1" ]; then
   log_group "$GROUP" "执行 juicefs warmup $JFS_WARMUP_TARGET (超时 ${JFS_WARMUP_TIMEOUT}s)"
@@ -302,10 +360,6 @@ if [ "${JFS_WARMUP:-0}" = "1" ]; then
 else
   log_group "$GROUP" "JFS_WARMUP!=1,跳过预热(冷启动)"
 fi
-
-# ---- 7. tc 档位(挂到 MinIO Pod egress)----
-log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST 抖动=$TC_JITTER(档位 $CAP_TIER)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" --tier "$CAP_TIER"
 
 log_group "$GROUP" "up 完成:JuiceFS CE 单机已挂载(hostPath 持久),cache=${JFS_CACHE_MB}MiB"
 echo "warmup: 已由 up.sh 自动完成(硬编码 15min 超时)"

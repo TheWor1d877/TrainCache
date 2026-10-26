@@ -295,7 +295,7 @@ func TestWiringCollectorHooksAndEvictor(t *testing.T) {
 		wiringOrder(wiringDataset, "epoch-1", ordersource.ChunkRef{Path: "p-000.tar"}))
 	waitFor(t, "collector 绑定首个 ring", func() bool { return ag.collector() != nil })
 
-	b := ag.Prefetch.bundleFor(wiringDataset)
+	b := ag.Prefetch.bundleFor(wiringDataset, nil)
 	waitFor(t, "订单阶段安装 epoch-1", func() bool { return b.prefetcher.Status().Stage == "epoch-1" })
 
 	// 钩子三型帧(§5.4 冻结 JSON 标签)。
@@ -394,7 +394,7 @@ func TestWiringDegradeAggregation(t *testing.T) {
 	gauge := func() float64 {
 		return testutil.ToFloat64(ag.Metrics.AgentDegraded().WithLabelValues("worker-01"))
 	}
-	stage := func() string { return ag.Prefetch.bundleFor(wiringDataset).prefetcher.Status().Stage }
+	stage := func() string { return ag.Prefetch.bundleFor(wiringDataset, nil).prefetcher.Status().Stage }
 
 	// ① 无 reader:不降级(gauge=0),并观察若干拍确认不是"尚未判定"。
 	waitFor(t, "无 reader 时不降级", func() bool { return gauge() == 0 })

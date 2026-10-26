@@ -190,7 +190,7 @@ func (e *m3Fixture) commit(t *testing.T, dataset string, specs []svcBlockSpec, m
 // "订单已到达、相关分片已加载"的前置状态;此后命中块走本地、免下载。
 func (e *m3Fixture) loadPrefixMapping(t *testing.T, dataset string, prefixes []string) {
 	t.Helper()
-	if err := e.fx.pm.bundleFor(dataset).catalog.LoadPrefixes(context.Background(), prefixes); err != nil {
+	if err := e.fx.pm.bundleFor(dataset, nil).catalog.LoadPrefixes(context.Background(), prefixes); err != nil {
 		t.Fatalf("LoadPrefixes(%v): %v", prefixes, err)
 	}
 }
@@ -556,7 +556,7 @@ func TestM3Acceptance8OrderStartsPrefetcher(t *testing.T) {
 	w.WriteOrder(m3Order(m3OrderDataset, "stage-1", 1, chunks...))
 
 	// 接收 + 启动:预取器调度已启动(Started)且首个阶段已安装(Stage)。
-	b := env.fx.pm.bundleFor(m3OrderDataset)
+	b := env.fx.pm.bundleFor(m3OrderDataset, nil)
 	waitFor(t, "收到 ConsumeOrder → 预取器启动并安装首个阶段", func() bool {
 		b.mu.Lock()
 		started := b.started
@@ -604,7 +604,7 @@ func TestM3Acceptance9StageSwitchKWindow(t *testing.T) {
 	// 第一份订单(阶段一):两块本地命中,完成后再做阶段切换(稳定态切换)。
 	stage1 := []ordersource.ChunkRef{{Path: "stage1/c-000.tar"}, {Path: "stage1/c-001.tar"}}
 	w.WriteOrder(m3Order(m3OrderDataset, "stage-1", 1, stage1...))
-	b := env.fx.pm.bundleFor(m3OrderDataset)
+	b := env.fx.pm.bundleFor(m3OrderDataset, nil)
 	waitFor(t, "首阶段块全部就绪(预取前沿到末块)", func() bool {
 		return b.prefetcher.Status().PrefetchFrontier == stage1[len(stage1)-1]
 	})

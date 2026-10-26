@@ -37,7 +37,7 @@ func TestInotifyOpenAdvancesConsumeOnce(t *testing.T) {
 	}
 
 	ag := &Agent{Metrics: fx.reg, Prefetch: fx.pm}
-	b := fx.pm.bundleFor(testDataset)
+	b := fx.pm.bundleFor(testDataset, nil)
 	fp := fps[chunks[0]]
 
 	ag.onInotifyOpen(fp)
@@ -134,7 +134,7 @@ func TestInotifySelfOpenFilteredEndToEnd(t *testing.T) {
 			map[string]string{"dataset": "other", "result": "success",
 				"source": "unknown", "phase": "unknown"}) >= 1
 	})
-	b := fx.pm.bundleFor(testDataset)
+	b := fx.pm.bundleFor(testDataset, nil)
 	if got := b.prefetcher.Status().Cursor; got != (ordersource.ChunkRef{}) {
 		t.Errorf("自打开后 Cursor = %+v, want 零值(未推进)", got)
 	}
@@ -189,7 +189,7 @@ func TestLookupFingerprintRebuildsPerOrderGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ForOrder(gen-1): %v", err)
 	}
-	b := fx.pm.bundleFor(testDataset)
+	b := fx.pm.bundleFor(testDataset, nil)
 	if got := b.lookupFingerprint(ctx, fp); !reflect.DeepEqual(got, first) {
 		t.Fatalf("第一代际 lookupFingerprint = %+v, want %+v", got, first)
 	}

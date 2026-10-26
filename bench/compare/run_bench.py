@@ -14,6 +14,8 @@
 
 预热时机（任务清单 #2/#7，D23）：
   预热统一在 group_up 里完成、等完成、不计入 makespan（15 分钟超时整轮作废）。
+  up.sh 里 tc 档位先于预热挂上：预热与测量走同一条限速链路。
+  juicefs 两组的测量 Pod 共置到 jfs-mount 所在节点（CE 单机缓存只在那台）。
     direct        : 无预热（直读 MinIO，零缓存基线）
     juicefs-cold  : 无预热（JFS_WARMUP=0）
     juicefs-warm  : up.sh 内 juicefs warmup /mnt/jfs/（hostPath 缓存）
@@ -356,10 +358,12 @@ def _clear_node_caches(tag):
 
 
 def cold_reset():
-    print("[cold_reset] 清理训练 Pod 与缓存(保留 Redis 元数据)...")
+    print("[cold_reset] 清理训练 Pod 与缓存(保留 Redis 与控制面)...")
     for ns in set(GROUP_NS.values()):
-        # 保留 Redis Pod(元数据引擎),其余全删以清空 emptyDir 缓存
-        kubectl(["delete", "pods", "-l", "app!=redis", "--grace-period=0", "--force"], namespace=ns, timeout=60)
+        # 只删训练 Pod：`app!=redis` 会连带删掉 traincache 控制面，
+        # agentd 重启后立刻回放 `/run/traincache/orders` 并写 `tmp-*`，
+        # 与下面的清缓存判空打架，冷态复位随机会失败。
+        kubectl(["delete", "pods", "-l", "app=train-job", "--grace-period=0", "--force"], namespace=ns, timeout=60)
     _clear_node_caches("cold_reset")
     time.sleep(5)
 
@@ -582,7 +586,18 @@ def build_run_trace():
         images_per_tar=IMAGES_PER_TAR)
 
 
+# JuiceFS mount Pod 所在节点，由 group_up 从 up.sh 输出回收；空=未起组。
+JFS_MOUNT_NODE = ""
+
+
 def group_up(group):
+    """起组，并回收 up.sh 回传的两个装置事实：预热时长与 JuiceFS 挂载节点。
+
+    JFS_MOUNT_NODE：CE 单机缓存只落在 mount Pod 所在节点，测量 Pod 必须共置，
+    否则 warm 组暖好的块在另一台节点读不到（见 docs/4 §7 第 16 条）。
+    """
+    global JFS_MOUNT_NODE
+    JFS_MOUNT_NODE = ""
     print(f"[up] {group}...")
     env = os.environ.copy()
     env["N_TARS"] = str(N_TARS)
@@ -623,7 +638,15 @@ def group_up(group):
         m = re.search(r"\[WARMUP_SECONDS\]\s+(\d+)", line)
         if m:
             warmup_seconds = float(m.group(1))
-            break
+            continue
+        m = re.search(r"\[MOUNT_NODE\]\s+(\S+)", line)
+        if m:
+            JFS_MOUNT_NODE = m.group(1)
+    if group.startswith("juicefs") and not JFS_MOUNT_NODE:
+        print(f"[up] {group} 失败:up.sh 未回传 [MOUNT_NODE],无法共置", flush=True)
+        return False, 0.0
+    if JFS_MOUNT_NODE:
+        print(f"[up] {group} 挂载节点={JFS_MOUNT_NODE}(测量 Pod 将共置)")
     # direct / juicefs-cold / fluid-cold / traincache-cold 默认 0.0
     print(f"[up] {group} 预热时长={warmup_seconds}s")
     return True, warmup_seconds
@@ -1315,6 +1338,10 @@ def create_measure_pod(group, run_id, trace_json):
             "volumes": volumes,
         },
     }
+    # JuiceFS CE 单机缓存只在 mount Pod 所在节点：测量 Pod 共置后，warm 暖好的块
+    # 才是读得到的；cold 同节点，warm/cold 差值才是同一台节点上的比较。
+    if group in ("juicefs-cold", "juicefs-warm") and JFS_MOUNT_NODE:
+        pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": JFS_MOUNT_NODE}
     # 任务清单 #5:traincache-warm 组走 traincache-scheduler + webhook gate
     # traincache-cold 不走 WarmupTask(K=0 被 ValidateTask 拒绝),普通调度
     if group == "traincache-warm":
