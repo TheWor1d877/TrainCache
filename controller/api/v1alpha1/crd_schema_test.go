@@ -74,10 +74,10 @@ func TestCRDShapeAndValidation(t *testing.T) {
 		t.Errorf("WarmupTask CRD has no score.cutoff")
 	}
 
-	// preheatFanout defaults to 1 and rejects zero/negative values (M13).
-	fanout := regexp.MustCompile(`(?s)preheatFanout:\n\s+default: 1\n.*?\n\s+minimum: 1\n`)
+	// preheatFanout defaults to 2 (D42) and rejects zero/negative values (M13).
+	fanout := regexp.MustCompile(`(?s)preheatFanout:\n\s+default: 2\n.*?\n\s+minimum: 1\n`)
 	if !fanout.MatchString(warmups) {
-		t.Errorf("WarmupTask CRD preheatFanout is missing default: 1 and minimum: 1")
+		t.Errorf("WarmupTask CRD preheatFanout is missing default: 2 and minimum: 1")
 	}
 
 	// M14: preheatFanout is the upper bound and preheatFanoutMin the lower
@@ -104,19 +104,24 @@ func TestCRDShapeAndValidation(t *testing.T) {
 		}
 	}
 
-	// PodDetail constraints.
-	if !strings.Contains(warmups, "uniqueItems: true") {
-		t.Errorf("PodDetail.initialConsumeOrder has no uniqueItems constraint")
+	// PodDetail constraints: the consume list is a list of shard names, K is
+	// optional with minimum 0 (0 means auto, D43), and index stays required.
+	if !regexp.MustCompile(`(?m)^\s+initialConsumeFiles:$`).MatchString(warmups) {
+		t.Errorf("PodDetail.initialConsumeFiles is missing")
+	}
+	filesBlock := regexp.MustCompile(`(?s)\n\s+initialConsumeFiles:\n(.*?)\n\s+k:`)
+	if m := filesBlock.FindStringSubmatch(warmups); len(m) != 2 || !strings.Contains(m[1], "type: string") {
+		t.Errorf("PodDetail.initialConsumeFiles is not a string list: %v", m)
 	}
 	if !regexp.MustCompile(`(?m)^\s+- index$`).MatchString(warmups) {
 		t.Errorf("PodDetail.index is not required")
 	}
-	if !regexp.MustCompile(`(?m)^\s+- k$`).MatchString(warmups) {
-		t.Errorf("PodDetail.k is not required")
+	if regexp.MustCompile(`(?m)^\s+- k$`).MatchString(warmups) {
+		t.Errorf("PodDetail.k is still required")
 	}
-	kMin := regexp.MustCompile(`(?s)\n\s+k:\n.*?\n\s+minimum: 1\n`)
-	if !kMin.MatchString(warmups) {
-		t.Errorf("PodDetail.k has no minimum: 1")
+	kBlock := regexp.MustCompile(`(?s)\n\s+k:\n(.*?)\n\s+resources:`)
+	if m := kBlock.FindStringSubmatch(warmups); len(m) != 2 || !strings.Contains(m[1], "minimum: 0") {
+		t.Errorf("PodDetail.k is missing minimum: 0: %v", m)
 	}
 }
 
@@ -210,9 +215,17 @@ func TestGoContractSurface(t *testing.T) {
 	}
 
 	pod := reflect.TypeOf(PodDetail{})
-	order, _ := pod.FieldByName("InitialConsumeOrder")
-	if !strings.Contains(string(order.Tag), "omitempty") {
-		t.Errorf("InitialConsumeOrder is not optional: %q", order.Tag)
+	files, ok := pod.FieldByName("InitialConsumeFiles")
+	if !ok || files.Type != reflect.TypeOf([]string(nil)) {
+		t.Errorf("PodDetail.InitialConsumeFiles = %v, want []string", files.Type)
+	} else if !strings.Contains(string(files.Tag), "omitempty") {
+		t.Errorf("InitialConsumeFiles is not optional: %q", files.Tag)
+	}
+	k, ok := pod.FieldByName("K")
+	if !ok || k.Type != reflect.TypeOf(int32(0)) {
+		t.Errorf("PodDetail.K = %v, want int32", k.Type)
+	} else if !strings.Contains(string(k.Tag), "omitempty") {
+		t.Errorf("PodDetail.K is not optional: %q", k.Tag)
 	}
 }
 

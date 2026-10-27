@@ -7,54 +7,64 @@ import (
 	"testing"
 
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
+	"traincache/controller/internal/config"
 )
 
-func orderTask(orders [][]int32, k int32) *traincachev1alpha1.WarmupTask {
-	details := make([]traincachev1alpha1.PodDetail, len(orders))
-	for i, order := range orders {
-		details[i] = traincachev1alpha1.PodDetail{Index: int32(i), InitialConsumeOrder: order, K: k}
+func fileTask(files [][]string, k int32) *traincachev1alpha1.WarmupTask {
+	details := make([]traincachev1alpha1.PodDetail, len(files))
+	for i, names := range files {
+		details[i] = traincachev1alpha1.PodDetail{Index: int32(i), InitialConsumeFiles: names, K: k}
 	}
 	return &traincachev1alpha1.WarmupTask{
 		Spec: traincachev1alpha1.WarmupTaskSpec{
-			PodCount:   int32(len(orders)),
+			PodCount:   int32(len(files)),
 			PodDetails: details,
 		},
 	}
 }
 
-func TestResolveConsumeOrdersExplicit(t *testing.T) {
-	task := orderTask([][]int32{{0, 1, 2}, {3, 4, 5}}, 2)
-	orders, source, err := ResolveConsumeOrders(task, 6)
+// testLayout is three shards covering global chunks [0,6).
+func testLayout() []traincachev1alpha1.BlockLayout {
+	return []traincachev1alpha1.BlockLayout{
+		{Shard: "a.tar", StartChunk: 0, Count: 3},
+		{Shard: "b.tar", StartChunk: 3, Count: 2},
+		{Shard: "c.tar", StartChunk: 5, Count: 1},
+	}
+}
+
+func TestResolveConsumeOrdersExplicitFiles(t *testing.T) {
+	task := fileTask([][]string{{"a.tar", "c.tar"}, {"b.tar"}}, 2)
+	orders, source, err := ResolveConsumeOrders(task, 6, testLayout())
 	if err != nil {
 		t.Fatalf("ResolveConsumeOrders: %v", err)
 	}
 	if source != traincachev1alpha1.ConsumeOrderSourceSpec {
 		t.Fatalf("source = %q, want Spec", source)
 	}
-	want := [][]int32{{0, 1, 2}, {3, 4, 5}}
+	want := [][]int32{{0, 1, 2, 5}, {3, 4}}
 	if !reflect.DeepEqual(orders, want) {
 		t.Fatalf("orders = %v, want %v", orders, want)
 	}
 }
 
-func TestResolveConsumeOrdersFallsBackOnAnyInvalidOrder(t *testing.T) {
-	cases := map[string][][]int32{
-		"empty":        {{0, 1}, {}},
-		"out of range": {{0, 1}, {2, 9}},
-		"duplicate":    {{0, 1}, {1, 2}},
-		"incomplete":   {{0}, {1}},
+func TestResolveConsumeOrdersFallsBackOnAnyInvalidFiles(t *testing.T) {
+	cases := map[string][][]string{
+		"empty":            {{"a.tar"}, {}},
+		"unknown shard":    {{"a.tar", "missing.tar"}, {"b.tar", "c.tar"}},
+		"duplicate shard":  {{"a.tar"}, {"a.tar", "b.tar", "c.tar"}},
+		"duplicate in pod": {{"a.tar", "a.tar"}, {"b.tar", "c.tar"}},
+		"incomplete":       {{"a.tar"}, {"b.tar"}},
 	}
-	for name, orders := range cases {
+	for name, files := range cases {
 		t.Run(name, func(t *testing.T) {
-			task := orderTask(orders, 1)
-			got, source, err := ResolveConsumeOrders(task, 4)
+			got, source, err := ResolveConsumeOrders(fileTask(files, 1), 6, testLayout())
 			if err != nil {
 				t.Fatalf("ResolveConsumeOrders: %v", err)
 			}
 			if source != traincachev1alpha1.ConsumeOrderSourceDefault {
 				t.Fatalf("source = %q, want Default", source)
 			}
-			want := [][]int32{{0, 1}, {2, 3}}
+			want := [][]int32{{0, 1, 2}, {3, 4, 5}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("default orders = %v, want %v", got, want)
 			}
@@ -63,8 +73,8 @@ func TestResolveConsumeOrdersFallsBackOnAnyInvalidOrder(t *testing.T) {
 }
 
 func TestResolveConsumeOrdersDefaultSplitMatchesPlan(t *testing.T) {
-	task := orderTask([][]int32{{0}, {1}, {2}}, 1) // incomplete -> default
-	got, source, err := ResolveConsumeOrders(task, 8)
+	task := fileTask([][]string{{"a.tar"}, {"b.tar"}, {"c.tar"}}, 1) // incomplete -> default
+	got, source, err := ResolveConsumeOrders(task, 8, []traincachev1alpha1.BlockLayout{{Shard: "all.tar", StartChunk: 0, Count: 8}})
 	if err != nil {
 		t.Fatalf("ResolveConsumeOrders: %v", err)
 	}
@@ -78,10 +88,119 @@ func TestResolveConsumeOrdersDefaultSplitMatchesPlan(t *testing.T) {
 }
 
 func TestResolveConsumeOrdersRejectsTotalBelowPods(t *testing.T) {
-	task := orderTask([][]int32{{}, {}, {}}, 1)
-	_, _, err := ResolveConsumeOrders(task, 2)
+	task := fileTask([][]string{nil, nil, nil}, 1)
+	_, _, err := ResolveConsumeOrders(task, 2, testLayout())
 	if !errors.Is(err, errInvalidSpec) {
 		t.Fatalf("error = %v, want errInvalidSpec", err)
+	}
+}
+
+func TestValidateExplicitK(t *testing.T) {
+	orders := [][]int32{{0, 1}, {2, 3, 4}}
+	task := fileTask([][]string{{"a.tar"}, {"b.tar"}}, 2)
+	if reasons := ValidateExplicitK(task, orders); len(reasons) != 0 {
+		t.Fatalf("K within W rejected: %v", reasons)
+	}
+
+	task.Spec.PodDetails[0].K = 0 // auto is not an explicit violation
+	if reasons := ValidateExplicitK(task, orders); len(reasons) != 0 {
+		t.Fatalf("K=0 rejected: %v", reasons)
+	}
+
+	task.Spec.PodDetails[0].K = 3
+	reasons := ValidateExplicitK(task, orders)
+	if len(reasons) != 1 || !strings.Contains(reasons[0], "exceeds") {
+		t.Fatalf("K > W reasons = %v", reasons)
+	}
+}
+
+func kTestDataSet(chunkSize int64) *traincachev1alpha1.DataSet {
+	return &traincachev1alpha1.DataSet{
+		Spec: traincachev1alpha1.DataSetSpec{ChunkSize: chunkSize},
+	}
+}
+
+func TestComputeKWindowOnly(t *testing.T) {
+	const mib = int64(1 << 20)
+	cfg := &config.Config{StartupWindowBytes: 512 * mib, MaxFillFraction: 0.125}
+	ds := kTestDataSet(8 * mib)
+
+	cases := []struct {
+		name  string
+		order []int32
+		want  int32
+	}{
+		{name: "window caps large W", order: make([]int32, 100), want: 64},
+		{name: "W caps window", order: make([]int32, 10), want: 10},
+		{name: "never below one", order: nil, want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := computeK(cfg, ds, [][]int32{tc.order})
+			if err != nil {
+				t.Fatalf("computeK: %v", err)
+			}
+			if got[0] != tc.want {
+				t.Fatalf("K = %d, want %d", got[0], tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeKCache(t *testing.T) {
+	const mib = int64(1 << 20)
+	cases := []struct {
+		name    string
+		cache   int64
+		pods    int
+		want    int32
+		window  int64
+		maxFill float64
+	}{
+		{name: "single pod", cache: 1 << 30, pods: 1, want: 16, window: 512 * mib, maxFill: 0.125},
+		{name: "two pods split budget", cache: 1 << 30, pods: 2, want: 8, window: 512 * mib, maxFill: 0.125},
+		{name: "cache zero skips kcache", cache: 0, pods: 1, want: 64, window: 512 * mib, maxFill: 0.125},
+		{name: "tiny cache clamps to one", cache: 1, pods: 1, want: 1, window: 512 * mib, maxFill: 0.125},
+		{name: "small W wins", cache: 1 << 30, pods: 1, want: 3, window: 512 * mib, maxFill: 0.125},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				CacheCapacityBytes: tc.cache,
+				StartupWindowBytes: tc.window,
+				MaxFillFraction:    tc.maxFill,
+			}
+			orders := make([][]int32, tc.pods)
+			for i := range orders {
+				orders[i] = make([]int32, 100)
+			}
+			if tc.name == "small W wins" {
+				orders[0] = make([]int32, tc.want)
+			}
+			got, err := computeK(cfg, kTestDataSet(8*mib), orders)
+			if err != nil {
+				t.Fatalf("computeK: %v", err)
+			}
+			if got[0] != tc.want {
+				t.Fatalf("K = %d, want %d", got[0], tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeKDefaultsAndErrors(t *testing.T) {
+	const mib = int64(1 << 20)
+	orders := [][]int32{make([]int32, 100)}
+	got, err := computeK(nil, kTestDataSet(8*mib), orders)
+	if err != nil {
+		t.Fatalf("computeK: %v", err)
+	}
+	// Default 512MiB / 8MiB = 64 and no cache budget.
+	if got[0] != 64 {
+		t.Fatalf("default K = %d, want 64", got[0])
+	}
+	if _, err := computeK(&config.Config{}, kTestDataSet(0), orders); !errors.Is(err, errInvalidSpec) {
+		t.Fatalf("chunkSize=0 error = %v, want errInvalidSpec", err)
 	}
 }
 
@@ -141,30 +260,35 @@ func TestExpandChunksRejectsOutOfLayout(t *testing.T) {
 }
 
 func TestValidateTask(t *testing.T) {
-	valid := orderTask([][]int32{{0, 1}, {2, 3}}, 2)
+	valid := fileTask([][]string{{"a.tar"}, {"b.tar"}}, 1)
 	if reasons := ValidateTask(valid); len(reasons) != 0 {
 		t.Fatalf("valid task rejected: %v", reasons)
 	}
 
-	duplicate := orderTask([][]int32{{0, 1}, {2, 3}}, 2)
+	duplicate := fileTask([][]string{{"a.tar"}, {"b.tar"}}, 1)
 	duplicate.Spec.PodDetails[1].Index = 0
 	if reasons := ValidateTask(duplicate); len(reasons) == 0 {
 		t.Fatal("duplicate index accepted")
 	}
 
-	zeroK := orderTask([][]int32{{0, 1}, {2, 3}}, 0)
-	if reasons := ValidateTask(zeroK); len(reasons) == 0 {
-		t.Fatal("K=0 accepted")
+	zeroK := fileTask([][]string{{"a.tar"}, {"b.tar"}}, 0)
+	if reasons := ValidateTask(zeroK); len(reasons) != 0 {
+		t.Fatalf("K=0 (auto) rejected: %v", reasons)
 	}
 
-	tooMany := orderTask(make([][]int32, maxPods+1), 1)
+	negativeK := fileTask([][]string{{"a.tar"}, {"b.tar"}}, -1)
+	if reasons := ValidateTask(negativeK); len(reasons) == 0 || !strings.Contains(strings.Join(reasons, ";"), "must be >= 0") {
+		t.Fatalf("K=-1 accepted: %v", reasons)
+	}
+
+	tooMany := fileTask(make([][]string, maxPods+1), 1)
 	if reasons := ValidateTask(tooMany); len(reasons) == 0 || !strings.Contains(strings.Join(reasons, ";"), "exceeds limit") {
 		t.Fatalf("P limit not enforced: %v", reasons)
 	}
 }
 
 func TestTaskID(t *testing.T) {
-	task := orderTask([][]int32{{0}}, 1)
+	task := fileTask([][]string{{"a.tar"}}, 1)
 	task.Namespace = "train"
 	task.Name = "t1"
 	if got := TaskID(task, 3); got != "train/t1/p3" {
@@ -180,5 +304,42 @@ func TestWindowChunksPreservesOrder(t *testing.T) {
 	}
 	if len(chunks) != 2 || chunks[0].Chunk != 5 || chunks[1].Chunk != 1 {
 		t.Fatalf("chunks = %#v, want [5,1]", chunks)
+	}
+}
+
+func TestKExceedsFill(t *testing.T) {
+	const mib = int64(1 << 20)
+	cfg := &config.Config{CacheCapacityBytes: 1 << 30, StartupWindowBytes: 512 * mib, MaxFillFraction: 0.125}
+	ds := kTestDataSet(8 * mib)
+	orders := [][]int32{make([]int32, 100), make([]int32, 100)}
+
+	task := fileTask([][]string{{"a.tar"}, {"b.tar"}}, 2)
+	if total, limit, exceeded := KExceedsFill(cfg, ds, task, orders); exceeded {
+		t.Fatalf("auto K exceeded cap: total=%d limit=%d", total, limit)
+	}
+
+	// Explicit K above the cache share is honoured but reported.
+	task.Spec.PodDetails[0].K = 64
+	task.Spec.PodDetails[1].K = 64
+	total, limit, exceeded := KExceedsFill(cfg, ds, task, orders)
+	if !exceeded {
+		t.Fatalf("explicit K not reported: total=%d limit=%d", total, limit)
+	}
+	if total != 128*8*mib || limit != 128*mib {
+		t.Fatalf("total=%d limit=%d, want %d/%d", total, limit, 128*8*mib, 128*mib)
+	}
+
+	// A cutoff above K counts toward the volume; it is capped by W_i.
+	task.Spec.PodDetails[0].K = 0
+	task.Spec.PodDetails[1].K = 0
+	task.Spec.Score.Cutoff = 64
+	if total, _, exceeded := KExceedsFill(cfg, ds, task, orders); !exceeded || total != 128*8*mib {
+		t.Fatalf("cutoff not counted: total=%d exceeded=%v", total, exceeded)
+	}
+
+	// An unset cache capacity disables the safety check.
+	cfg.CacheCapacityBytes = 0
+	if _, _, exceeded := KExceedsFill(cfg, ds, task, orders); exceeded {
+		t.Fatal("check ran with cacheCapacityBytes=0")
 	}
 }

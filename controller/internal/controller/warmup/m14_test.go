@@ -462,7 +462,7 @@ func podIndexString(index int32) string {
 // TestM14ValidateTaskFanoutBounds covers the defensive spec checks: negative
 // bounds are rejected and an effective minimum above the maximum is rejected.
 func TestM14ValidateTaskFanoutBounds(t *testing.T) {
-	base := orderTask([][]int32{{0, 1}}, 2)
+	base := fileTask([][]string{{"a.tar"}}, 2)
 	cases := []struct {
 		name      string
 		fanout    int32

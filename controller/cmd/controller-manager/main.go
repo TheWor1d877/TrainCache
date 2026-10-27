@@ -127,6 +127,9 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 		PollInterval:          cfg.PollInterval,
 		ScoreAnnotationPrefix: cfg.ScoreAnnotationPrefix,
 		GateName:              cfg.GateName,
+		CacheCapacityBytes:    cfg.CacheCapacityBytes,
+		StartupWindowBytes:    cfg.StartupWindowBytes,
+		MaxFillFraction:       cfg.MaxFillFraction,
 		Rand:                  rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	if err := warmupReconciler.SetupWithManager(mgr); err != nil {

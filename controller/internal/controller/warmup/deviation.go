@@ -70,7 +70,7 @@ func (r *Reconciler) reconcileDeviation(ctx context.Context, log *slog.Logger, t
 		log.Warn("deviation check skipped: get DataSet failed", "err", err)
 		return
 	}
-	orders, _, err := ResolveConsumeOrders(task, ds.Status.TotalChunks)
+	orders, _, err := ResolveConsumeOrders(task, ds.Status.TotalChunks, ds.Status.BlockLayout)
 	if err != nil {
 		log.Warn("deviation check skipped: consume order invalid", "err", err)
 		return

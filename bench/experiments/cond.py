@@ -69,7 +69,9 @@ ALLOWED_CACHE = {"enabled", "capacity_bytes", "ratio", "capacity_ratio",
 ALLOWED_PREFETCH = {
     "lookahead", "window_k", "fanout", "fanout_min", "gate", "score",
 }
-ALLOWED_GATE = {"threshold", "gap_min", "slope_min", "t_max_s", "min_interval_s"}
+ALLOWED_GATE = {"threshold", "gap_min", "slope_min", "t_max_s", "min_interval_s",
+                "mode"}
+GATE_MODES = {"gated", "free"}
 ALLOWED_SCORE = {"half_life", "cutoff"}
 ALLOWED_SAMPLING = {"reps", "coarse_reps", "upgrade_rule", "bootstrap_iters"}
 ALLOWED_ENVIRONMENT = {"kind_workers", "k8s_version", "images", "lock_file"}
@@ -444,6 +446,9 @@ def validate_cond(cond: dict) -> list[str]:
                 v = gate.get(k)
                 if v is not None and abs(float(v) - frozen) > 1e-9:
                     errors.append(f"$.prefetch.gate.{k} 必须为 {frozen}(收到 {v})")
+            mode = gate.get("mode")
+            if mode is not None and mode not in GATE_MODES:
+                errors.append(f"$.prefetch.gate.mode 必须为 gated/free(收到 {mode})")
         score = _require(prefetch, "score", "$.prefetch", errors)
         if isinstance(score, dict):
             _check_unknown(score, ALLOWED_SCORE, "$.prefetch.score", errors)
@@ -545,6 +550,9 @@ def cond_to_env(cond: dict) -> dict[str, str]:
         pf = cond.get("prefetch") or {}
         if "lookahead" in pf:
             env["TRAINCACHE_PREFETCH_LOOKAHEAD"] = str(pf["lookahead"])
+        mode = (pf.get("gate") or {}).get("mode")
+        if mode:
+            env["TRAINCACHE_GATE_MODE"] = str(mode)
     return env
 
 

@@ -29,6 +29,19 @@ const (
 	EnvLeaderElection    = "CONTROLLER_LEADER_ELECTION"
 	EnvMaxChunks         = "CONTROLLER_MAX_CHUNKS"
 	EnvLogLevel          = "CONTROLLER_LOG_LEVEL"
+
+	// K auto-default inputs. They live in the traincache-config ConfigMap so
+	// Agent and Controller read the same cacheCapacityBytes.
+	EnvCacheCapacityBytes = "TRAINCACHE_CACHE_CAPACITY_BYTES"
+	EnvStartupWindowBytes = "TRAINCACHE_STARTUP_WINDOW_BYTES"
+	EnvMaxFillFraction    = "TRAINCACHE_MAX_FILL_FRACTION"
+)
+
+// Defaults for the K auto-default inputs.
+const (
+	DefaultCacheCapacityBytes int64   = 0
+	DefaultStartupWindowBytes int64   = 536870912
+	DefaultMaxFillFraction    float64 = 0.125
 )
 
 // Config is the shared control-plane configuration.
@@ -47,6 +60,9 @@ type Config struct {
 	LeaderElection        bool
 	MaxChunks             int64
 	LogLevel              string
+	CacheCapacityBytes    int64
+	StartupWindowBytes    int64
+	MaxFillFraction       float64
 }
 
 // Load reads the process environment.
@@ -87,6 +103,15 @@ func load(lookup func(string) (string, bool)) (*Config, error) {
 	if cfg.MaxChunks, err = envInt64(lookup, EnvMaxChunks, 10_000_000); err != nil {
 		return nil, err
 	}
+	if cfg.CacheCapacityBytes, err = envInt64(lookup, EnvCacheCapacityBytes, DefaultCacheCapacityBytes); err != nil {
+		return nil, err
+	}
+	if cfg.StartupWindowBytes, err = envInt64(lookup, EnvStartupWindowBytes, DefaultStartupWindowBytes); err != nil {
+		return nil, err
+	}
+	if cfg.MaxFillFraction, err = envFloat(lookup, EnvMaxFillFraction, DefaultMaxFillFraction); err != nil {
+		return nil, err
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -122,6 +147,15 @@ func (c *Config) validate() error {
 	}
 	if c.MaxChunks <= 0 {
 		return fmt.Errorf("config: %s: must be positive", EnvMaxChunks)
+	}
+	if c.CacheCapacityBytes < 0 {
+		return fmt.Errorf("config: %s: must be >= 0", EnvCacheCapacityBytes)
+	}
+	if c.StartupWindowBytes <= 0 {
+		return fmt.Errorf("config: %s: must be positive", EnvStartupWindowBytes)
+	}
+	if c.MaxFillFraction <= 0 || c.MaxFillFraction > 0.25 {
+		return fmt.Errorf("config: %s: %v is outside (0,0.25]", EnvMaxFillFraction, c.MaxFillFraction)
 	}
 
 	if c.Namespace != "" && !validNamespace(c.Namespace) {
@@ -194,6 +228,15 @@ func envInt(lookup func(string) (string, bool), key string, def int) (int, error
 func envInt64(lookup func(string) (string, bool), key string, def int64) (int64, error) {
 	raw := env(lookup, key, strconv.FormatInt(def, 10))
 	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q: %w", key, raw, err)
+	}
+	return v, nil
+}
+
+func envFloat(lookup func(string) (string, bool), key string, def float64) (float64, error) {
+	raw := env(lookup, key, strconv.FormatFloat(def, 'g', -1, 64))
+	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return 0, fmt.Errorf("config: %s=%q: %w", key, raw, err)
 	}

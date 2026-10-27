@@ -24,6 +24,28 @@ type inflightCall struct {
 	fp      cas.Fingerprint
 	err     error
 	waiters int // 当前等待者数量，f.mu 保护；测试观测合并行为用
+	// promoted 在前台请求合并进来时关闭：后台 owner 据此放弃让路、改按前台准入，
+	// 避免需求读排在"让路门"后面等一个后台下载。
+	promoted    chan struct{}
+	promoteOnce sync.Once
+}
+
+// newInflightCall 构造一次合并下载记录。
+func newInflightCall() *inflightCall {
+	return &inflightCall{done: make(chan struct{}), promoted: make(chan struct{})}
+}
+
+// promote 标记该次下载已被前台请求合并；重复调用安全。
+func (c *inflightCall) promote() { c.promoteOnce.Do(func() { close(c.promoted) }) }
+
+// isPromoted 返回该次下载是否已被前台请求合并。
+func (c *inflightCall) isPromoted() bool {
+	select {
+	case <-c.promoted:
+		return true
+	default:
+		return false
+	}
 }
 
 // Fetcher 持有 objectstore.Store、*cas.Store、limiter、in-flight map（内部）。
@@ -59,19 +81,29 @@ func New(store objectstore.Store, cs *cas.Store, opts Options) *Fetcher {
 // 不改变 Fetch 语义。
 func (f *Fetcher) MaxInflightBytes() int64 { return f.opts.MaxInflightBytes }
 
-// Fetch 下载对象：Acquire(expectSize) 字节信号量 → store.Get 流经 cas.Put 落盘 →
-// Open 读回校验 → 失败则 Remove 后重试（≤ MaxRetries）→ Release 信号量。
-// 相同 key 的并发 Fetch 合并为一次实际下载（in-flight map，等待者共享结果）；
+// Fetch 下载对象（前台优先级：需求读补块、坏块修复）：Acquire(expectSize) 字节信号量 →
+// store.Get 流经 cas.Put 落盘 → Open 读回校验 → 失败则 Remove 后重试（≤ MaxRetries）→
+// Release 信号量。相同 key 的并发 Fetch 合并为一次实际下载（in-flight map，等待者共享结果）；
 // 等待者的 ctx 取消只影响等待者自身，不取消实际下载。
 // 返回块指纹。命中检查是调用方职责：先经 index.Catalog.Lookup 取指纹、cas.Open
 // 验存在，未命中才调用本方法（对应 docs/2 "缓存命中就不触及数据源"）。
 func (f *Fetcher) Fetch(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
+	return f.FetchWithPriority(ctx, key, expectSize, PriorityForeground)
+}
+
+// FetchWithPriority 与 Fetch 相同，多了准入等级：后台（预取）受半额任务/字节额度约束，
+// 且前台有下载在途时先让路；前台的额度与让路门均不生效。
+// 同 key 合并跨等级生效：后到的前台请求若撞上已在途的后台下载，直接共享该次下载结果。
+func (f *Fetcher) FetchWithPriority(ctx context.Context, key string, expectSize int64, prio Priority) (cas.Fingerprint, error) {
 	var zero cas.Fingerprint
 
 	// 同 key 已有实际下载：登记为等待者，共享其结果与错误（不占字节/任务额度）。
 	f.mu.Lock()
 	if c, ok := f.inflight[key]; ok {
 		c.waiters++
+		if prio == PriorityForeground {
+			c.promote()
+		}
 		f.mu.Unlock()
 		if f.OnMerge != nil {
 			f.OnMerge(key)
@@ -88,12 +120,12 @@ func (f *Fetcher) Fetch(ctx context.Context, key string, expectSize int64) (cas.
 			return zero, ctx.Err()
 		}
 	}
-	c := &inflightCall{done: make(chan struct{})}
+	c := newInflightCall()
 	f.inflight[key] = c
 	f.mu.Unlock()
 
 	// 本调用者是 owner：同步执行实际下载（全部尝试），完成后广播结果并摘除登记。
-	fp, err := f.download(ctx, key, expectSize)
+	fp, err := f.download(ctx, key, expectSize, prio, c)
 
 	c.fp, c.err = fp, err
 	close(c.done)
@@ -106,11 +138,36 @@ func (f *Fetcher) Fetch(ctx context.Context, key string, expectSize int64) (cas.
 }
 
 // download 是实际下载路径（仅 in-flight 合并的 owner 执行）：
-// 任务额度 → 字节额度（Acquire(expectSize)，持至成功或最终失败）→ 逐次尝试（≤ MaxRetries 次
-// 重下，指数退避 100ms 起、受 ctx 控制）。校验失败返回 ErrTooManyRetries；
-// 其他失败（Get/Put 错误等）耗尽重试后返回最后一次的错误。
-func (f *Fetcher) download(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
+// 准入（前台记账让路门后按全场额度；后台先等前台在途归零，再按后台半额、最后按全场额度）
+// → 逐次尝试（≤ MaxRetries 次重下，指数退避 100ms 起、受 ctx 控制）。
+// 校验失败返回 ErrTooManyRetries；其他失败（Get/Put 错误等）耗尽重试后返回最后一次的错误。
+// c 是该次下载的合并记录：后台 owner 在让路期间被前台请求合并时，按前台口径准入。
+func (f *Fetcher) download(ctx context.Context, key string, expectSize int64, prio Priority, c *inflightCall) (cas.Fingerprint, error) {
 	var zero cas.Fingerprint
+
+	// 后台准入：先给前台让路，再占半额任务/字节。让路期间若被前台请求合并（promote），
+	// 立刻改按前台口径，避免需求读被自己的合并对象挡在门外。
+	bg := prio == PriorityBackground && !c.isPromoted()
+	if bg {
+		if err := f.lim.gate.wait(ctx, c.promoted); err != nil {
+			return zero, err
+		}
+		bg = !c.isPromoted()
+	}
+	if bg {
+		if err := f.lim.bgTasks.acquire(ctx); err != nil {
+			return zero, err
+		}
+		defer f.lim.bgTasks.release()
+		bgGot, err := f.lim.bgBytes.acquire(ctx, expectSize)
+		if err != nil {
+			return zero, err
+		}
+		defer f.lim.bgBytes.release(bgGot)
+	} else {
+		f.lim.gate.enter()
+		defer f.lim.gate.exit()
+	}
 
 	if err := f.lim.tasks.acquire(ctx); err != nil {
 		return zero, err

@@ -44,7 +44,9 @@ type deps struct {
 	newCAS    func(dir string) (*cas.Store, error)
 	newWriter func(store objectstore.Store, cs *cas.Store) *index.Writer
 	probe     func(ctx context.Context, store objectstore.Store) error
-	publishFn func(ctx context.Context, store objectstore.Store, cs *cas.Store, w *index.Writer, sources []publish.Source, opt publish.Options) (publish.Result, error)
+	// ensureFormat 返回本次发布实际生效的 chunkSize；nil 时用 ensureBucketFormat。
+	ensureFormat func(ctx context.Context, store objectstore.Store, requested int64, explicit bool) (int64, error)
+	publishFn    func(ctx context.Context, store objectstore.Store, cs *cas.Store, w *index.Writer, sources []publish.Source, opt publish.Options) (publish.Result, error)
 }
 
 // defaultDeps 返回真实实现。
@@ -59,8 +61,9 @@ func defaultDeps() deps {
 		newWriter: func(store objectstore.Store, cs *cas.Store) *index.Writer {
 			return index.NewWriter(store, cs, index.Config{})
 		},
-		probe:     objectstore.ProbeConditionalWrite,
-		publishFn: publish.Publish,
+		probe:        objectstore.ProbeConditionalWrite,
+		ensureFormat: ensureBucketFormat,
+		publishFn:    publish.Publish,
 	}
 }
 
@@ -76,6 +79,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: trainpublish --dataset <name> [options] <tar> [<tar>...]")
+		fmt.Fprintln(stderr, "       trainpublish --dataset <name> --check-dataset <path>")
 		fs.PrintDefaults()
 	}
 
@@ -85,17 +89,39 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	secretKey := fs.String("secret-key", envOr(envObjstoreSecretKey, ""), "object store secret key")
 	bucket := fs.String("bucket", envOr(envObjstoreBucket, defaultObjstoreBucket), "object store bucket")
 	secure := fs.Bool("secure", envBool(envObjstoreSecure), "use TLS for the object store")
-	chunkSize := fs.Int64("chunk-size", publish.DefaultChunkSize, "chunk size in bytes")
+	chunkSize := fs.Int64("chunk-size", publish.DefaultChunkSize, "chunk size in bytes; only takes effect when initializing an empty bucket")
 	concurrency := fs.Int("concurrency", publish.DefaultConcurrency, "concurrent uploads")
 	workDirFlag := fs.String("work-dir", "", "work directory")
 	keepWorkDir := fs.Bool("keep-work-dir", false, "keep the work directory")
 	probeConditionalWrite := fs.Bool("probe-conditional-write", envBool(envObjstoreProbe), "probe conditional write support")
+	checkDataset := fs.String("check-dataset", "", "only check that the DataSet file matches the bucket format, then exit")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
 		return exitUsageError
+	}
+
+	// --chunk-size 只在空桶首次发布时生效：显式传入才算 explicit。
+	chunkSizeSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "chunk-size" {
+			chunkSizeSet = true
+		}
+	})
+
+	if *checkDataset != "" {
+		if *dataset == "" || fs.NArg() != 0 {
+			fs.Usage()
+			return exitUsageError
+		}
+		store, err := d.newStore(*endpoint, *accessKey, *secretKey, *bucket, *secure)
+		if err != nil {
+			reportError(stderr, fmt.Errorf("create object store: %w", err))
+			return exitRuntimeError
+		}
+		return runCheckDataset(context.Background(), store, *dataset, *checkDataset, stdout, stderr)
 	}
 
 	if *dataset == "" || fs.NArg() < 1 || *chunkSize <= 0 || *concurrency <= 0 {
@@ -117,6 +143,16 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	}
 
 	ctx := context.Background()
+	ensureFormat := d.ensureFormat
+	if ensureFormat == nil {
+		ensureFormat = ensureBucketFormat
+	}
+	effectiveChunkSize, err := ensureFormat(ctx, store, *chunkSize, chunkSizeSet)
+	if err != nil {
+		reportError(stderr, fmt.Errorf("ensure bucket format: %w", err))
+		return exitRuntimeError
+	}
+
 	if *probeConditionalWrite {
 		if err := d.probe(ctx, store); err != nil {
 			reportError(stderr, fmt.Errorf("probe conditional write: %w", err))
@@ -144,7 +180,7 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	writer := d.newWriter(store, cs)
 	result, err := d.publishFn(ctx, store, cs, writer, sources, publish.Options{
 		Dataset:     *dataset,
-		ChunkSize:   *chunkSize,
+		ChunkSize:   effectiveChunkSize,
 		Concurrency: *concurrency,
 	})
 	if err != nil {
@@ -154,6 +190,27 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 
 	fmt.Fprintf(stdout, "snapID=%s entries=%d bytes=%d unique_blocks=%d\n",
 		result.SnapID, result.Entries, result.Bytes, result.UniqueBlocks)
+	return exitOK
+}
+
+// runCheckDataset 只校验模式：读桶里的格式声明（不创建），再校验 DataSet 文件
+// 的 spec.datasetName / spec.chunkSize 与之一致。成功打印一行 ok 并返回 0。
+func runCheckDataset(ctx context.Context, store objectstore.Store, dataset, path string, stdout, stderr io.Writer) int {
+	format, err := readBucketFormat(ctx, store)
+	if errors.Is(err, objectstore.ErrNotFound) {
+		reportError(stderr, fmt.Errorf("桶里还没有格式声明 %s：先完成一次数据发布", formatKey))
+		return exitRuntimeError
+	}
+	if err != nil {
+		reportError(stderr, err)
+		return exitRuntimeError
+	}
+	if err := checkDatasetFile(path, dataset, format.ChunkSize); err != nil {
+		reportError(stderr, err)
+		return exitRuntimeError
+	}
+
+	fmt.Fprintf(stdout, "ok dataset=%s chunk_size=%d dataset_file=%s\n", dataset, format.ChunkSize, path)
 	return exitOK
 }
 

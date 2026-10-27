@@ -34,6 +34,9 @@ func TestLoadDefaults(t *testing.T) {
 		LeaderElection:        false,
 		MaxChunks:             10_000_000,
 		LogLevel:              "info",
+		CacheCapacityBytes:    0,
+		StartupWindowBytes:    536870912,
+		MaxFillFraction:       0.125,
 	}
 	if *cfg != want {
 		t.Fatalf("defaults = %#v, want %#v", *cfg, want)
@@ -42,20 +45,23 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadCustomValues(t *testing.T) {
 	cfg, err := load(lookupFrom(map[string]string{
-		EnvMetricsAddr:       "127.0.0.1:19412",
-		EnvHealthAddr:        ":18081",
-		EnvWebhookAddr:       ":19443",
-		EnvNamespace:         "train-system",
-		EnvAgentPort:         "19410",
-		EnvAgentTimeout:      "250ms",
-		EnvPollInterval:      "750ms",
-		EnvScoreTTL:          "90s",
-		EnvSchedulerScoreTTL: "45s",
-		EnvScoreAnnotation:   "example.io/scores",
-		EnvGateName:          "example.io/warmup",
-		EnvLeaderElection:    "true",
-		EnvMaxChunks:         "42",
-		EnvLogLevel:          "DEBUG",
+		EnvMetricsAddr:        "127.0.0.1:19412",
+		EnvHealthAddr:         ":18081",
+		EnvWebhookAddr:        ":19443",
+		EnvNamespace:          "train-system",
+		EnvAgentPort:          "19410",
+		EnvAgentTimeout:       "250ms",
+		EnvPollInterval:       "750ms",
+		EnvScoreTTL:           "90s",
+		EnvSchedulerScoreTTL:  "45s",
+		EnvScoreAnnotation:    "example.io/scores",
+		EnvGateName:           "example.io/warmup",
+		EnvLeaderElection:     "true",
+		EnvMaxChunks:          "42",
+		EnvLogLevel:           "DEBUG",
+		EnvCacheCapacityBytes: "1073741824",
+		EnvStartupWindowBytes: "268435456",
+		EnvMaxFillFraction:    "0.25",
 	}))
 	if err != nil {
 		t.Fatalf("load() error = %v", err)
@@ -71,6 +77,9 @@ func TestLoadCustomValues(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Fatalf("LogLevel = %q, want debug", cfg.LogLevel)
+	}
+	if cfg.CacheCapacityBytes != 1073741824 || cfg.StartupWindowBytes != 268435456 || cfg.MaxFillFraction != 0.25 {
+		t.Fatalf("K inputs not parsed: %#v", cfg)
 	}
 }
 
@@ -94,6 +103,13 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"bad log level", map[string]string{EnvLogLevel: "verbose"}, EnvLogLevel},
 		{"zero max chunks", map[string]string{EnvMaxChunks: "0"}, EnvMaxChunks},
 		{"zero scheduler ttl", map[string]string{EnvSchedulerScoreTTL: "0s"}, EnvSchedulerScoreTTL},
+		{"negative cache capacity", map[string]string{EnvCacheCapacityBytes: "-1"}, EnvCacheCapacityBytes},
+		{"bad cache capacity", map[string]string{EnvCacheCapacityBytes: "1GiB"}, EnvCacheCapacityBytes},
+		{"zero startup window", map[string]string{EnvStartupWindowBytes: "0"}, EnvStartupWindowBytes},
+		{"bad startup window", map[string]string{EnvStartupWindowBytes: "512MiB"}, EnvStartupWindowBytes},
+		{"zero fill fraction", map[string]string{EnvMaxFillFraction: "0"}, EnvMaxFillFraction},
+		{"fill fraction too high", map[string]string{EnvMaxFillFraction: "0.26"}, EnvMaxFillFraction},
+		{"bad fill fraction", map[string]string{EnvMaxFillFraction: "eighth"}, EnvMaxFillFraction},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

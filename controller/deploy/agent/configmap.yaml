@@ -1,0 +1,33 @@
+# Agent runtime parameters.
+#
+# One ConfigMap holds the knobs that used to be inlined as literal env values
+# in the Agent DaemonSet; the DaemonSet now only references these keys, so
+# changing a value is an edit here (no manifest rewrite of the workload).
+#
+#   cacheCapacityBytes      — Agent cache byte cap; "0" disables the byte
+#                             dimension, leaving the disk watermark as the only
+#                             eviction trigger.
+#   prefetchLookahead       — neighbour blocks prefetched ahead of the cursor.
+#   evictPolicy             — eviction order: heat / lru / lfu.
+#   datasetMetricsWhitelist — comma-separated DataSet names that keep their own
+#                             metrics label; "" merges every DataSet into the
+#                             "other" label (bounded cardinality, D35).
+#   startupWindowBytes      — Controller-only startup window used to derive K:
+#                             K_window = ceil(startupWindowBytes / chunkSize).
+#   maxFillFraction         — Controller-only share of cacheCapacityBytes that
+#                             all Pods' preheat windows may occupy (D43).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-config
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-config
+    app.kubernetes.io/part-of: traincache
+data:
+  cacheCapacityBytes: "0"
+  prefetchLookahead: "16"
+  evictPolicy: "heat"
+  datasetMetricsWhitelist: ""
+  startupWindowBytes: "536870912"
+  maxFillFraction: "0.125"

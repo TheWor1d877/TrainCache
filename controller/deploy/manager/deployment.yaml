@@ -54,6 +54,23 @@ spec:
               value: "10000000"
             - name: CONTROLLER_LOG_LEVEL
               value: info
+            # K auto-default inputs, shared with the Agent through
+            # traincache-config (D43). Missing keys block Pod startup.
+            - name: TRAINCACHE_CACHE_CAPACITY_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: cacheCapacityBytes
+            - name: TRAINCACHE_STARTUP_WINDOW_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: startupWindowBytes
+            - name: TRAINCACHE_MAX_FILL_FRACTION
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: maxFillFraction
           ports:
             - name: metrics
               containerPort: 9412

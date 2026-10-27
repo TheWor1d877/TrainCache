@@ -298,18 +298,31 @@ if [ "$HAVE_K8S" -eq 1 ] && kubectl -n traincache get ds traincache-agentd >/dev
     else
         warn "agentd Ready ${ready:-0}/${desired:-4}(make ctrl-up 会拉起)"
     fi
-    cap="$(kubectl -n traincache get ds traincache-agentd \
-        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_CACHE_CAPACITY_BYTES")].value}' \
-        2>/dev/null)"
+    cap="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null)"
     cap_rc=$?
     if [ "$cap_rc" -ne 0 ]; then
         fail "agentd 缓存上限查询失败(kubectl 退出码 $cap_rc)"
     elif [ -z "$cap" ]; then
-        fail "agentd 未注入 TRAINCACHE_CACHE_CAPACITY_BYTES(期望 1073741824)"
+        fail "traincache-config 缺少 cacheCapacityBytes(期望 1073741824)"
     elif [ "$cap" = "1073741824" ]; then
         pass "agentd 缓存上限 $cap 字节(1GiB)"
     else
         fail "agentd 缓存上限 $cap,期望 1073741824"
+    fi
+    sw="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
+    if [ "$sw" = "536870912" ]; then
+        pass "自动 K 启动窗口 $sw 字节(512MiB)"
+    else
+        fail "startupWindowBytes=${sw:-缺失},期望 536870912"
+    fi
+    mf="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.maxFillFraction}' 2>/dev/null || true)"
+    if [ "$mf" = "0.125" ]; then
+        pass "自动 K 缓存占比上限 $mf"
+    else
+        fail "maxFillFraction=${mf:-缺失},期望 0.125"
     fi
 else
     warn "agentd 未部署(首次 make bench-up 或 make ctrl-up 会部署)"

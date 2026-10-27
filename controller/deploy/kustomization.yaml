@@ -26,17 +26,3 @@ images:
     newTag: dev
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
     newTag: dev
-# Kubernetes 1.37 rejects CRD schemas containing uniqueItems ("runtime
-# complexity becomes quadratic"); older API server versions accepted it. The
-# generated CRD (controller/config/crd/bases, from the +kubebuilder marker on
-# PodDetail.InitialConsumeOrder) still carries it, so strip it at deploy time
-# until the API type is migrated to x-kubernetes-list-type: set.
-patches:
-  - target:
-      group: apiextensions.k8s.io
-      version: v1
-      kind: CustomResourceDefinition
-      name: warmuptasks.traincache.io
-    patch: |-
-      - op: remove
-        path: /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/podDetails/items/properties/initialConsumeOrder/uniqueItems

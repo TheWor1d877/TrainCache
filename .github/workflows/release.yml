@@ -1,12 +1,14 @@
 name: release
 
-# 发版唯一入口：push vX.Y.Z tag。CI 不创建 tag，版本号只来自 tag。
+# 发版构建入口：push vX.Y.Z tag。推四个镜像、渲染 digest、建 draft Release。
+# 不自动转正，转正由人工点 Publish；发布物验证由 release-smoke 接手。
+# CI 不创建 tag，版本号只来自 tag。
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write    # 建 Release、传附件
+  contents: write    # 建 draft Release、传附件
   packages: write    # 推 GHCR
 
 concurrency:
@@ -15,15 +17,15 @@ concurrency:
 
 jobs:
   release:
-    name: build, render, publish
+    name: build, render, draft release
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # 版本检查要读 tag
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: '**/go.sum'
@@ -33,16 +35,17 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: make verify-metadata
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: build and push images
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ github.ref_name }}"
           REG=ghcr.io/thewor1d877/traincache
           while IFS='|' read -r comp dockerfile var; do
             img="$REG/$comp"
@@ -108,6 +111,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" \
+            --draft \
             --title "$TAG" \
             --notes-file release-notes.md \
             install.yaml \

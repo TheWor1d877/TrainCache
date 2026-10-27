@@ -107,7 +107,7 @@ func TestM12WarmupReconcileLifecycleAndSummaryLogs(t *testing.T) {
 // §9.3 spec 校验失败.
 func TestM12WarmupSpecInvalidLogFields(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
-	task.Spec.PodDetails[0].K = 0 // fails ValidateTask
+	task.Spec.PodDetails[0].Index = 5 // fails ValidateTask
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	buf, log := m12JSONLog(t)
 	c := fixtureClient(t, task, ds)

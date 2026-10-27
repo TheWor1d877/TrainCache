@@ -91,7 +91,7 @@ func fixtureTask(podCount, k int32, orders [][]int32) *traincachev1alpha1.Warmup
 	for i := int32(0); i < podCount; i++ {
 		details[i] = traincachev1alpha1.PodDetail{Index: i, K: k}
 		if int(i) < len(orders) {
-			details[i].InitialConsumeOrder = orders[i]
+			details[i].InitialConsumeFiles = chunkFiles(orders[i])
 		}
 	}
 	return &traincachev1alpha1.WarmupTask{
@@ -180,8 +180,30 @@ func getTask(t *testing.T, c client.Client) *traincachev1alpha1.WarmupTask {
 	return task
 }
 
+// singleChunkShard names the one-chunk shard that carries a global chunk, so
+// tests can express an explicit per-chunk consume list as file names.
+func singleChunkShard(chunk int32) string {
+	return fmt.Sprintf("s%03d.tar", chunk)
+}
+
+// chunkFiles expands chunk numbers into the matching shard names.
+func chunkFiles(chunks []int32) []string {
+	out := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		out[i] = singleChunkShard(chunk)
+	}
+	return out
+}
+
+// singleShardLayout keeps its historical name but returns one single-chunk
+// shard per global chunk. The name predates initialConsumeFiles (D43); callers
+// use it only to build a layout for a fixed chunk count.
 func singleShardLayout(total int32) []traincachev1alpha1.BlockLayout {
-	return []traincachev1alpha1.BlockLayout{{Shard: "s.tar", StartChunk: 0, Count: total}}
+	out := make([]traincachev1alpha1.BlockLayout, 0, total)
+	for chunk := int32(0); chunk < total; chunk++ {
+		out = append(out, traincachev1alpha1.BlockLayout{Shard: singleChunkShard(chunk), StartChunk: chunk, Count: 1})
+	}
+	return out
 }
 
 func TestReconcileSubmitsPodWindowsToCandidates(t *testing.T) {
@@ -333,7 +355,7 @@ func TestReconcilePodLimit(t *testing.T) {
 	podCount := int32(maxPods + 1)
 	task := fixtureTask(podCount, 1, nil)
 	for i := range task.Spec.PodDetails {
-		task.Spec.PodDetails[i].InitialConsumeOrder = []int32{int32(i)}
+		task.Spec.PodDetails[i].InitialConsumeFiles = []string{singleChunkShard(int32(i))}
 	}
 	ds := fixtureDataSet(podCount, singleShardLayout(podCount), []string{"n1"})
 	pool := &fakeAgentPool{}
@@ -445,18 +467,78 @@ func TestReconcileDefaultsConsumeOrder(t *testing.T) {
 		t.Fatal("ConsumeOrderDefaulted event not recorded")
 	}
 
-	want := map[string][]int64{
-		"train/t1/p0": {0, 1},
-		"train/t1/p1": {2, 3},
+	want := map[string][]string{
+		"train/t1/p0": {singleChunkShard(0), singleChunkShard(1)},
+		"train/t1/p1": {singleChunkShard(2), singleChunkShard(3)},
 	}
 	for _, record := range pool.snapshot() {
-		got := make([]int64, 0, len(record.req.Chunks))
+		got := make([]string, 0, len(record.req.Chunks))
 		for _, chunk := range record.req.Chunks {
-			got = append(got, chunk.Chunk)
+			got = append(got, chunk.Path)
 		}
 		if fmt.Sprint(got) != fmt.Sprint(want[record.req.TaskId]) {
 			t.Fatalf("%s chunks = %v, want %v", record.req.TaskId, got, want[record.req.TaskId])
 		}
+	}
+}
+
+func TestReconcileDefaultsKAndRequeues(t *testing.T) {
+	task := fixtureTask(2, 0, [][]int32{{0, 1, 2}, {3, 4, 5}})
+	ds := fixtureDataSet(6, singleShardLayout(6), []string{"n1"})
+	ds.Spec.ChunkSize = 8 << 20
+	recorder := record.NewFakeRecorder(8)
+	c := fixtureClient(t, task, ds)
+	r := &Reconciler{
+		Client:             c,
+		Agents:             &fakeAgentPool{},
+		Recorder:           recorder,
+		CacheCapacityBytes: 1 << 30,
+		StartupWindowBytes: 512 << 20,
+		MaxFillFraction:    0.125,
+	}
+
+	result, err := reconcileResult(t, r)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("result = %#v, want Requeue after writing K", result)
+	}
+
+	updated := getTask(t, c)
+	for i := range updated.Spec.PodDetails {
+		// W_i=3, K_window=64, K_cache=8 -> K_i=3.
+		if got := updated.Spec.PodDetails[i].K; got != 3 {
+			t.Fatalf("pod %d K = %d, want 3", i, got)
+		}
+	}
+	if updated.Status.ConsumeOrderSource != traincachev1alpha1.ConsumeOrderSourceSpec {
+		t.Fatalf("consume order source = %q", updated.Status.ConsumeOrderSource)
+	}
+	found := false
+	for len(recorder.Events) > 0 {
+		if strings.Contains(<-recorder.Events, EventKDefaulted) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("KDefaulted event not recorded")
+	}
+}
+
+func TestReconcileRejectsExplicitKAboveWindow(t *testing.T) {
+	task := fixtureTask(2, 9, [][]int32{{0, 1, 2}, {3, 4, 5}})
+	ds := fixtureDataSet(6, singleShardLayout(6), []string{"n1"})
+	ds.Spec.ChunkSize = 8 << 20
+	c := fixtureClient(t, task, ds)
+	r := &Reconciler{Client: c, Agents: &fakeAgentPool{}}
+
+	if err := reconcile(t, r); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	cond := metaCondition(getTask(t, c), ConditionInvalidSpec)
+	if cond == nil || cond.Status != metav1.ConditionFalse || !strings.Contains(cond.Message, "exceeds") {
+		t.Fatalf("InvalidSpec condition = %#v", cond)
 	}
 }
 

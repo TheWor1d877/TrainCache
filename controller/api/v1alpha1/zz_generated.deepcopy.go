@@ -221,9 +221,9 @@ func (in *GatePolicy) DeepCopy() *GatePolicy {
 func (in *PodDetail) DeepCopyInto(out *PodDetail) {
 	*out = *in
 	in.Resources.DeepCopyInto(&out.Resources)
-	if in.InitialConsumeOrder != nil {
-		in, out := &in.InitialConsumeOrder, &out.InitialConsumeOrder
-		*out = make([]int32, len(*in))
+	if in.InitialConsumeFiles != nil {
+		in, out := &in.InitialConsumeFiles, &out.InitialConsumeFiles
+		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
 }

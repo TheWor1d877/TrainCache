@@ -1,0 +1,93 @@
+{
+  "schema_version": "1",
+  "name": "fig1-300-ratio1-fan1-free",
+  "figure": "fig1",
+  "group": "traincache-warm",
+  "track": "B",
+  "dataset": {
+    "name": "compare-data-8m",
+    "source": "minio",
+    "endpoint": "http://minio.minio.svc.cluster.local:9000",
+    "bucket": "bench-b",
+    "bytes": 2147483648,
+    "shards": 8,
+    "shard_size_bytes": 268435456,
+    "chunk_size_bytes": 8388608,
+    "seed": 20261015
+  },
+  "trace": {
+    "file": "experiments/traces/track-s8-fixed-ep1.json",
+    "sha256": "8911379cc8760b5527c87d02323a43931ea480f598f7109b264aa1cb1a6d07ea",
+    "seed": 20261015
+  },
+  "workload": {
+    "epochs": 1,
+    "batch": 32,
+    "workers": 4,
+    "steps_per_epoch": 400,
+    "prefetch_factor": 2,
+    "compute_ms": 200,
+    "shuffle": "fixed"
+  },
+  "network": {
+    "rate_mbit": 300,
+    "delay_ms": 20,
+    "burst_k": 3750
+  },
+  "cache": {
+    "enabled": true,
+    "evict_policy": "heat",
+    "capacity_bytes": 2147483648,
+    "ratio": 1,
+    "root": "/var/cache/traincache",
+    "warmup_seconds": 0
+  },
+  "prefetch": {
+    "lookahead": 8,
+    "window_k": 8,
+    "fanout": 1,
+    "fanout_min": 1,
+    "gate": {
+      "threshold": 0.9,
+      "gap_min": 0.1,
+      "slope_min": 0.001,
+      "t_max_s": 300,
+      "min_interval_s": 1,
+      "mode": "free"
+    },
+    "score": {
+      "half_life": 4,
+      "cutoff": 8
+    }
+  },
+  "sampling": {
+    "reps": 3,
+    "coarse_reps": 3,
+    "upgrade_rule": "none",
+    "bootstrap_iters": 10000
+  },
+  "environment": {
+    "kind_workers": 4,
+    "k8s_version": "v1.37.0",
+    "images": {
+      "agent": "ghcr.io/thewor1d877/traincache/traincache-agentd:dev@sha256:d4dab018983f25cb63415fcd5f9c21fcd2d885f9b33e97f8ec3991dedf01ca70",
+      "controller": "ghcr.io/thewor1d877/traincache/controller-manager:dev@sha256:99a256453c5451d3ae888f95628bfe780ef7f1115e776e476583ee6729da2bc3",
+      "webhook": "ghcr.io/thewor1d877/traincache/webhook:dev@sha256:7e1124303162df5409c33b5446a642fec861a124d12e24d23d0eb661f46a6eb9",
+      "scheduler": "ghcr.io/thewor1d877/traincache/kube-scheduler:dev@sha256:7aafef4f3d656d7c8d51166d7dd41eba19d60e5315d1d2d6e54829b41cbf1c44",
+      "training": "python:3.12-alpine@sha256:d892f6cb770c805ca76e681cc356e88a535f0fcfe1ab6984ea7446f75dab783f",
+      "minio": "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:2cde0f1131c931e16cb0b00c1c86353c80833dbc85630b97d3317ac8644c6fac",
+      "juicefs": "juicedata/mount:ce-v1.3.0@sha256:81bbde1cd3e0fe6fbd393840fb7f4cfe321d259c78d01e7a975096c22567cb7f",
+      "fluid": "fluidcloudnative/fluid-webhook:v1.0.8-6533239@sha256:11a24597a81d2e183ba6c05ec4cad93715eed838510d2a5d3313aa4dd07f67f4",
+      "fluid-csi": "fluidcloudnative/fluid-csi:v1.0.8-6533239@sha256:df6c4d8c6f757f071d9444b91aa5763d9d754f3ac95f51339c04763cc5b1c875"
+    },
+    "lock_file": "locks/fig1-300-ratio1-fan1-free.lock.json"
+  },
+  "tags": [
+    "fig1",
+    "rate=300",
+    "ratio=1",
+    "fanout=1",
+    "gate=free"
+  ],
+  "notes": "fig1: 8 个 256 MiB 分片（2 GiB），缓存 2147483648 B（ratio=1），fixed 顺序。"
+}

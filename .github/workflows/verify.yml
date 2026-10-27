@@ -16,8 +16,8 @@ jobs:
       matrix:
         module: [controller, core, agent]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module }}/go.mod
           cache-dependency-path: '**/go.sum'
@@ -28,8 +28,8 @@ jobs:
     name: kustomize render
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-kubectl@v4
+      - uses: actions/checkout@v7
+      - uses: azure/setup-kubectl@v5
         with:
           version: v1.34.1
       - name: render controller/deploy
@@ -41,7 +41,7 @@ jobs:
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # 版本检查要读 HEAD 上的 tag
       - name: check versions and doc refs

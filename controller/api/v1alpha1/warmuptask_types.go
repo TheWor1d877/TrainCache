@@ -106,16 +106,20 @@ type PodDetail struct {
 	// Resources are the Pod's requests, used for node capacity filtering.
 	Resources corev1.ResourceRequirements `json:"resources"`
 
-	// InitialConsumeOrder is the global chunk order. Empty means "use the
-	// default split"; if any Pod's order is invalid the whole set falls back
-	// to the default split (D29).
+	// InitialConsumeFiles lists the tar shard names this Pod consumes, in
+	// order. The chunks of each shard expand to its frozen BlockLayout range.
+	// Empty means "use the default split"; if any Pod's list is unknown,
+	// duplicated or does not together cover every shard exactly once, the
+	// whole group falls back to the default split (D29, D43).
 	// +optional
-	// +kubebuilder:validation:UniqueItems=true
-	InitialConsumeOrder []int32 `json:"initialConsumeOrder,omitempty"`
+	InitialConsumeFiles []string `json:"initialConsumeFiles,omitempty"`
 
 	// K is this Pod's startup window length and scoring plateau length.
-	// +kubebuilder:validation:Minimum=1
-	K int32 `json:"k"`
+	// Zero or omitted means the controller computes it from
+	// startupWindowBytes, cacheCapacityBytes and this Pod's chunk count (D43).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	K int32 `json:"k,omitempty"`
 }
 
 // GatePolicy configures the three-condition gate.
@@ -182,13 +186,15 @@ type WarmupTaskSpec struct {
 	PodCount int32 `json:"podCount"`
 
 	// PreheatFanout is the upper bound on the number of preheat nodes each Pod
-	// claims: default 1, typical value 2. Zero and negative values are rejected
-	// by the CRD. GWAA chooses the target count within
-	// [PreheatFanoutMin, PreheatFanout]. The actual Assignment may be below
-	// the lower bound when conflicts, capacity limits or out-of-target fallback
-	// cause MinUnmet, but it never exceeds this upper bound.
+	// claims. Default 2; zero and negative values are rejected by the CRD. With
+	// a single candidate node the actual Assignment is 1, so the default never
+	// pushes a single-node warmup below PreheatFanoutMin. GWAA chooses the
+	// target count within [PreheatFanoutMin, PreheatFanout]. The actual
+	// Assignment may be below the lower bound when conflicts, capacity limits
+	// or out-of-target fallback cause MinUnmet, but it never exceeds this upper
+	// bound.
 	// +optional
-	// +kubebuilder:default=1
+	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=1
 	PreheatFanout int32 `json:"preheatFanout,omitempty"`
 

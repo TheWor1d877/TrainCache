@@ -45,15 +45,33 @@ spec:
               value: ":9411"
             - name: TRAINCACHE_VERIFY
               value: "xxh3"
-            - name: TRAINCACHE_DATASET_WHITELIST
-              value: "compare-data"
             - name: TRAINCACHE_CACHE_ROOT
               value: "/var/cache/traincache"
-            # 显式容量上限(D6/Q5):缓存按这个字节数触发淘汰,不靠磁盘水位兜底。
-            # 对照实验 S/M/L 三档都用 1GiB 缓存;缺了这一项,重新 apply manifest
-            # 会让缓存失去上限、容量比口径失真。
+            # Runtime knobs live in the traincache-config ConfigMap so a value
+            # change does not require editing this DaemonSet. Defaults:
+            # cacheCapacityBytes=0 (byte cap off, disk watermark only),
+            # prefetchLookahead=16, datasetMetricsWhitelist="" (all DataSets
+            # collapse into the "other" metrics label).
+            - name: TRAINCACHE_DATASET_WHITELIST
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: datasetMetricsWhitelist
             - name: TRAINCACHE_CACHE_CAPACITY_BYTES
-              value: "1073741824"
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: cacheCapacityBytes
+            - name: TRAINCACHE_PREFETCH_LOOKAHEAD
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: prefetchLookahead
+            - name: TRAINCACHE_EVICT_POLICY
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: evictPolicy
             - name: TRAINCACHE_HEAT_DECAY_AGE
               value: "24h"
             - name: TRAINCACHE_HEAT_DUMP_INTERVAL

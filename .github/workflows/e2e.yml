@@ -1,10 +1,10 @@
 name: e2e
 
-# kind e2e 约 45 分钟，且依赖镜像拉取与节点资源，不进每个 PR。
-# 两种触发：PR 贴 ci/e2e 标签；Actions 页面手动 Run workflow。
+# kind e2e 约 45 分钟，作为 dev→main 的合并门禁，每个目标 main 的 PR 自动跑。
+# Actions 页面可手动 Run workflow 复跑。
 on:
   pull_request:
-    types: [labeled]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -14,14 +14,11 @@ concurrency:
 jobs:
   kind:
     name: kind e2e
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.label.name == 'ci/e2e'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: controller/go.mod
           cache-dependency-path: '**/go.sum'
@@ -34,7 +31,7 @@ jobs:
         run: make e2e
       - name: upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-results
           path: .traincachedata/controller/e2e/results/

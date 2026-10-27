@@ -39,12 +39,18 @@ type capture struct {
 	probeCalls   int
 	probeErr     error
 	publishCalls int
-	sources      []publish.Source
-	sourceData   []string
-	readErr      error
-	options      publish.Options
-	result       publish.Result
-	publishErr   error
+
+	ensureCalls     int
+	ensureRequested int64
+	ensureExplicit  bool
+	ensureEffective int64
+	ensureErr       error
+	sources         []publish.Source
+	sourceData      []string
+	readErr         error
+	options         publish.Options
+	result          publish.Result
+	publishErr      error
 }
 
 // fakeDeps 构造全部依赖均可观察、且完全不访问真实对象存储的 deps。
@@ -79,6 +85,19 @@ func fakeDeps(c *capture) deps {
 		probe: func(_ context.Context, _ objectstore.Store) error {
 			c.probeCalls++
 			return c.probeErr
+		},
+		// 桶格式声明默认不落到 store（fakeDeps 的 store 是 nil），由用例按需覆盖。
+		ensureFormat: func(_ context.Context, _ objectstore.Store, requested int64, explicit bool) (int64, error) {
+			c.ensureCalls++
+			c.ensureRequested = requested
+			c.ensureExplicit = explicit
+			if c.ensureErr != nil {
+				return 0, c.ensureErr
+			}
+			if c.ensureEffective != 0 {
+				return c.ensureEffective, nil
+			}
+			return requested, nil
 		},
 		publishFn: func(_ context.Context, _ objectstore.Store, _ *cas.Store, _ *index.Writer, sources []publish.Source, opt publish.Options) (publish.Result, error) {
 			c.publishCalls++

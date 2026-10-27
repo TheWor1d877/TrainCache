@@ -8,7 +8,8 @@ metrics.csv,产出预注册(docs/9.2 §0~§8)定义的五张旗舰图:
   fig2  全程 makespan 盈亏曲面(带宽 × 数据集 × epoch → 全程 makespan 差值)
   fig3  阶段切换 stall 回落曲线(epoch × shuffle → 回落时间平均数)
   pareto1  启动收益 vs 重复预热字节(fanout 1/2/3)
-  pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat/lru/lfu)
+  pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat/lru/lfu,
+           纵轴相对自身基线 lookahead=8+heat)
 
 五组对照(summary.csv)额外产出 4 张柱状对比图:
   startup_makespan / total_makespan / stall_ratio / hit_rate
@@ -25,6 +26,7 @@ metrics.csv,产出预注册(docs/9.2 §0~§8)定义的五张旗舰图:
 import argparse
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -89,6 +91,57 @@ def read_summary(path: Path) -> list[dict]:
     return rows
 
 
+def _num(value, default=0.0):
+    """把 '100mbit' / '1.5' / '' 统一成数字；取不到给 default。"""
+    if value is None or value == "":
+        return default
+    m = re.search(r"-?\d+(?:\.\d+)?", str(value))
+    return float(m.group()) if m else default
+
+
+def adapt_summary_rows(rows: list[dict]) -> list[dict]:
+    """把 run_bench.py 的 summary.csv 行映射成五张图认的字段名。
+
+    run_bench 写的是 rate/cache_ratio/startup_makespan/total_makespan/
+    prefetch_fanout/dataset_bytes；图函数按 rate_mbit/cache_ratio/
+    startup_makespan_s/full_makespan_s/fanout_actual/dataset_gb 取数。
+    组态名统一成 traincache/fluid/juicefs/direct 四类，冷热信息留在 raw_group。
+    """
+    out = []
+    for r in rows:
+        if str(r.get("void", "")).lower() == "true":
+            continue
+        raw = (r.get("group") or "").strip()
+        if raw.startswith("traincache"):
+            group = "traincache"
+        elif raw.startswith("fluid"):
+            group = "fluid"
+        elif raw.startswith("juicefs"):
+            group = "juicefs"
+        else:
+            group = raw
+        dataset_bytes = _num(r.get("dataset_bytes"))
+        row = dict(r)
+        row.update({
+            "raw_group": raw,
+            "group": group,
+            "rate_mbit": int(_num(r.get("rate"))),
+            "fanout_actual": int(_num(r.get("prefetch_fanout") or
+                                     r.get("warmup_fanout"))),
+            "cache_ratio": _num(r.get("cache_ratio")),
+            "startup_makespan_s": _num(r.get("startup_makespan")),
+            "full_makespan_s": _num(r.get("total_makespan")),
+            "dataset_gb": dataset_bytes / (1 << 30) if dataset_bytes else 0.0,
+            "epochs": int(_num(r.get("epochs"))),
+            "shuffle": r.get("shuffle") or "",
+            "gate_mode": r.get("gate_mode") or "gated",
+            "evict_policy": r.get("evict_policy") or "heat",
+            "lookahead": int(_num(r.get("prefetch_lookahead"))),
+        })
+        out.append(row)
+    return out
+
+
 def read_metrics_dir(root: Path) -> list[dict]:
     """递归读取 experiments 产物目录下所有 metrics.csv。"""
     rows = []
@@ -103,6 +156,41 @@ def read_metrics_dir(root: Path) -> list[dict]:
     return rows
 
 
+def read_recovery_runs(root: Path) -> list[dict]:
+    """扫描 run_bench 的 runs/*/recovery.json,把每次切换事件摊成一行。
+
+    图三的样本单位是「一次阶段切换」:同一 run 在 epoch 1..N 各切一次,
+    每次都有自己的回落时间。run.json 提供 cond/epochs/shuffle,recovery.json
+    提供每个事件的 status 与 recovery_time_s。
+    """
+    rows = []
+    if not root.is_dir():
+        return rows
+    for run_json in sorted(root.rglob("runs/*/run.json")):
+        run_dir = run_json.parent
+        rec_path = run_dir / "recovery.json"
+        if not rec_path.is_file():
+            continue
+        try:
+            meta = json.loads(run_json.read_text())
+            rec = json.loads(rec_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        args = meta.get("args") or {}
+        for ev in rec.get("events") or []:
+            rows.append({
+                "cond": meta.get("cond") or "",
+                "run_id": meta.get("run_id") or run_dir.name,
+                "epochs": args.get("epochs") or 0,
+                "shuffle": args.get("shuffle") or "",
+                "to_epoch": ev.get("to_epoch"),
+                "status": ev.get("status"),
+                "recovery_time_s": ev.get("recovery_time_s"),
+                "_source": f"{rec_path}#{ev.get('to_epoch')}",
+            })
+    return rows
+
+
 def discover_result_dirs(root: Path) -> list[Path]:
     """返回 root 下所有直接含 summary.csv 的目录(按路径排序)。
 
@@ -112,19 +200,34 @@ def discover_result_dirs(root: Path) -> list[Path]:
     """
     if not root.is_dir():
         return []
-    return sorted({p.parent for p in root.rglob("summary.csv")})
+    dirs = {p.parent for p in root.rglob("summary.csv")}
+    # M7 的补跑行在 summary.all.csv(merge_m7.py 生成);有合并表时只读它
+    dirs |= {p.parent for p in root.rglob("summary.all.csv")}
+    return sorted(dirs)
 
 
-def mean_ci(vals: list[float]):
-    """返回 (mean, lower, upper) 用均值±标准差;空返回 (0,0,0)。"""
+def _summary_path(directory: Path) -> Path:
+    """同目录优先 summary.all.csv,否则 summary.csv。"""
+    merged = directory / "summary.all.csv"
+    return merged if merged.is_file() else directory / "summary.csv"
+
+
+def mean_ci(vals: list[float], n_boot: int = 10000, seed: int = 42):
+    """返回 (点估计, 2.5% 分位, 97.5% 分位);空返回 (0,0,0)。
+
+    点估计用均值;区间用 bootstrap 重采样。固定 seed 让同一份数据每次出图一致。
+    """
     if not vals:
         return 0.0, 0.0, 0.0
     arr = np.asarray(vals, dtype=float)
     m = float(np.mean(arr))
     if arr.size < 2:
         return m, m, m
-    std = float(np.std(arr, ddof=1))
-    return m, m - std, m + std
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, arr.size, size=(n_boot, arr.size))
+    boot = arr[idx].mean(axis=1)
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    return m, float(lo), float(hi)
 
 
 def group_summary(rows: list[dict], metric: str) -> dict:
@@ -133,7 +236,9 @@ def group_summary(rows: list[dict], metric: str) -> dict:
     for g in GROUP_ORDER:
         vals = []
         for r in rows:
-            if r.get("group") != g:
+            # summary.csv 的组名是 traincache-cold 这类全名;adapt 之后 group 被
+            # 归一成 traincache/fluid/juicefs,原名留在 raw_group。
+            if (r.get("raw_group") or r.get("group")) != g:
                 continue
             if r.get("void", "").lower() == "true":
                 continue
@@ -226,30 +331,35 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
         print("  fig1: 无数据,跳过")
         return
 
-    # 按 (fanout, rate, ratio) 分组取 startup_makespan_s 平均数
+    # 按 (fanout, rate, ratio) 分组，门控与自由调度各自取均值后算改善%
     grid = {}
     for r in fig1_rows:
         try:
-            fo = int(r.get("fanout_actual") or r.get("fanout_max") or 0)
+            fo = int(r.get("fanout_actual") or 0)
             rate = int(r.get("rate_mbit") or 0)
             ratio = float(r.get("cache_ratio") or 0)
             sm = float(r.get("startup_makespan_s"))
         except (TypeError, ValueError):
             continue
-        key = (fo, rate, ratio)
-        grid.setdefault(key, []).append(sm)
+        cell = grid.setdefault((fo, rate, ratio), {"gated": [], "free": []})
+        cell.setdefault(r.get("gate_mode") or "gated", []).append(sm)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), subplot_kw={"projection": "3d"})
     for ax, fo in zip(axes, fanouts):
         X, Y, Z = [], [], []
         for rate in rates:
             for ratio in ratios:
-                vals = grid.get((fo, rate, ratio), [])
-                med, _, _ = mean_ci(vals)
+                cell = grid.get((fo, rate, ratio), {})
+                gated, _, _ = mean_ci(cell.get("gated", []))
+                free, _, _ = mean_ci(cell.get("free", []))
+                if gated and free:
+                    gain = 100.0 * (free - gated) / free
+                else:
+                    gain = np.nan
                 X.append(rate)
                 Y.append(ratio)
-                Z.append(med)
-        if not any(Z):
+                Z.append(gain)
+        if not np.isfinite(Z).any():
             ax.set_title(f"fanout={fo}\n(无数据)")
             continue
         Xa = np.array(X).reshape(3, 3)
@@ -310,7 +420,7 @@ def plot_fig2(metrics: list[dict], out_dir: Path):
             for ep in epochs:
                 tc_med, _, _ = mean_ci(tc_grid.get((rate, ep, ds), []))
                 fl_med, _, _ = mean_ci(fluid_grid.get((rate, ep, ds), []))
-                diff = tc_med - fl_med if (tc_med and fl_med) else 0
+                diff = tc_med - fl_med if (tc_med and fl_med) else np.nan
                 X.append(rate)
                 Y.append(ep)
                 Z.append(diff)
@@ -347,27 +457,51 @@ def plot_fig3(metrics: list[dict], out_dir: Path):
         return
 
     grid = {}
+    censored = {}
     for r in fig3_rows:
         try:
             ep = int(r.get("epochs") or 0)
             sh = r.get("shuffle") or ""
-            rt = float(r.get("recovery_time_s") or 0)
         except (TypeError, ValueError):
             continue
         if sh not in shuffles:
             continue
-        grid.setdefault((sh, ep), []).append(rt)
+        key = (sh, ep)
+        if r.get("status") == "recovered":
+            rt = r.get("recovery_time_s")
+            if rt is not None:
+                grid.setdefault(key, []).append(float(rt))
+        elif r.get("status") == "censored":
+            censored[key] = censored.get(key, 0) + 1
+
+    # 删失率单独落盘:没恢复的切换若混进均值,会把"恢复慢"伪装成"恢复快"。
+    rates = {}
+    for sh in shuffles:
+        for ep in epochs:
+            n_rec = len(grid.get((sh, ep), []))
+            n_cen = censored.get((sh, ep), 0)
+            rates[f"{sh}/ep{ep}"] = {
+                "recovered": n_rec, "censored": n_cen,
+                "censored_ratio": round(n_cen / (n_rec + n_cen), 4) if (n_rec + n_cen) else None,
+            }
+    (out_dir / "fig3_censoring.json").write_text(
+        json.dumps(rates, ensure_ascii=False, indent=2))
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for sh in shuffles:
-        ys, los, his = [], [], []
+        ys, err_lo, err_hi = [], [], []
         for ep in epochs:
-            med, lo, hi = mean_ci(grid.get((sh, ep), []))
+            samples = grid.get((sh, ep), [])
+            if not samples:
+                ys.append(np.nan)
+                err_lo.append(0.0)
+                err_hi.append(0.0)
+                continue
+            med, lo, hi = mean_ci(samples)
             ys.append(med)
-            los.append(lo)
-            his.append(hi)
-        ax.errorbar(epochs, ys, yerr=[[m - lo for m, lo in zip(ys, los)],
-                                       [hi - m for m, hi in zip(ys, his)]],
+            err_lo.append(max(0.0, med - lo))
+            err_hi.append(max(0.0, hi - med))
+        ax.errorbar(epochs, ys, yerr=[err_lo, err_hi],
                     marker="o", capsize=3, label=sh, color=colors[sh], linewidth=1.5)
     ax.set_xlabel("epoch 数")
     ax.set_ylabel("回落时间 (s)")
@@ -397,23 +531,27 @@ def plot_pareto1(metrics: list[dict], out_dir: Path):
     by_fanout = {}
     for r in p1_rows:
         try:
-            fo = int(r.get("fanout_actual") or r.get("fanout_max") or 0)
-            sb = float(r.get("startup_fetch_bytes") or 0)
+            fo = int(r.get("fanout_actual") or 0)
+            sb = float(r.get("startup_warmup_bytes") or 0)
             sm = float(r.get("startup_makespan_s") or 0)
         except (TypeError, ValueError):
             continue
-        by_fanout.setdefault(fo, {"bytes": [], "sm": []})
-        by_fanout[fo]["bytes"].append(sb)
-        by_fanout[fo]["sm"].append(sm)
-
-    # 需要自由调度基线来算改善%;这里用 fanout=1 作为近似基线(若无单独基线)
-    baseline_sm = mean_ci(by_fanout.get(1, {}).get("sm", []))[0]
+        cell = by_fanout.setdefault(fo, {"bytes": [], "sm": [], "free": []})
+        if (r.get("gate_mode") or "gated") == "free":
+            cell["free"].append(sm)
+        else:
+            cell["bytes"].append(sb)
+            cell["sm"].append(sm)
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for fo in sorted(by_fanout):
-        b_med, _, _ = mean_ci(by_fanout[fo]["bytes"])
-        sm_med, _, _ = mean_ci(by_fanout[fo]["sm"])
-        improve = (100 * (baseline_sm - sm_med) / baseline_sm) if baseline_sm else 0
+        cell = by_fanout[fo]
+        b_med, _, _ = mean_ci(cell["bytes"])
+        sm_med, _, _ = mean_ci(cell["sm"])
+        free_med, _, _ = mean_ci(cell["free"])
+        if not (b_med and sm_med and free_med):
+            continue
+        improve = 100 * (free_med - sm_med) / free_med
         ax.scatter(b_med / 1e9, improve, s=120, zorder=3,
                    label=f"fanout={fo}")
         ax.annotate(f"fanout={fo}", (b_med / 1e9, improve),
@@ -434,8 +572,21 @@ def plot_pareto1(metrics: list[dict], out_dir: Path):
 # ---------------------------------------------------------------------------
 # Pareto 二:全程收益 vs 持续预取字节
 # ---------------------------------------------------------------------------
+def _prefetch_bytes(r):
+    """持续预取总字节:优先 prefetch_bytes_run,退回 sustained_prefetch_bytes。"""
+    for key in ("prefetch_bytes_run", "sustained_prefetch_bytes"):
+        v = r.get(key)
+        if v not in (None, ""):
+            return float(v)
+    return None
+
+
 def plot_pareto2(metrics: list[dict], out_dir: Path):
-    """X=持续预取总字节, Y=全程 makespan 改善%。按 lookahead 着色,淘汰策略分 marker。"""
+    """X=持续预取总字节, Y=全程 makespan 改善%。按 lookahead 着色,淘汰策略分 marker。
+
+    基线是自身最小预取档(lookahead=8 + heat):纵轴表示相对该档的改善,
+    同档的点恒为 0。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     p2_rows = [r for r in metrics if r.get("cond", "").startswith("pareto2-")]
     if not p2_rows:
@@ -448,10 +599,15 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
     cmap = cm.viridis
     la_colors = {la: cmap(i / (len(lookaheads) - 1)) for i, la in enumerate(lookaheads)}
 
-    # Fluid 基线全程 makespan
-    fluid_rows = [r for r in p2_rows if r.get("group") == "fluid"]
-    baseline_fm = mean_ci([float(r["full_makespan_s"]) for r in fluid_rows
-                             if r.get("full_makespan_s")])[0]
+    base_rows = [r for r in p2_rows
+                 if int(r.get("lookahead") or 0) == 8
+                 and r.get("evict_policy") == "heat"
+                 and r.get("group") == "traincache"]
+    baseline_fm = mean_ci([float(r["full_makespan_s"]) for r in base_rows
+                           if r.get("full_makespan_s")])[0]
+    if not baseline_fm:
+        print("  pareto2: 缺 lookahead=8 + heat 基线,跳过")
+        return
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for la in lookaheads:
@@ -462,11 +618,11 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
                     and r.get("group") == "traincache"]
             if not rows:
                 continue
-            sb_med, _, _ = mean_ci([float(r["sustained_fetch_bytes"])
-                                      for r in rows if r.get("sustained_fetch_bytes")])
+            sb_med, _, _ = mean_ci([_prefetch_bytes(r) for r in rows
+                                    if _prefetch_bytes(r) is not None])
             fm_med, _, _ = mean_ci([float(r["full_makespan_s"])
-                                      for r in rows if r.get("full_makespan_s")])
-            improve = (100 * (baseline_fm - fm_med) / baseline_fm) if baseline_fm else 0
+                                    for r in rows if r.get("full_makespan_s")])
+            improve = (100 * (baseline_fm - fm_med) / baseline_fm) if fm_med else np.nan
             ax.scatter(sb_med / 1e9, improve, s=100, marker=markers[pol],
                        color=la_colors[la], edgecolor="black", linewidth=0.5,
                        zorder=3)
@@ -485,8 +641,8 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
               fontsize=8, title_fontsize=9)
 
     ax.set_xlabel("持续预取字节 (GB)")
-    ax.set_ylabel("全程 makespan 改善 (%)")
-    ax.set_title("Pareto 二:全程收益 vs 持续预取字节")
+    ax.set_ylabel("全程 makespan 相对自身基线改善 (%)")
+    ax.set_title("Pareto 二:全程收益 vs 持续预取字节(基线 lookahead=8+heat)")
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -518,7 +674,7 @@ def main():
     auto = args.summary is None and args.metrics_dir is None
     if auto:
         result_dirs = discover_result_dirs(RESULTS_DIR)
-        summary_paths = [d / "summary.csv" for d in result_dirs]
+        summary_paths = [_summary_path(d) for d in result_dirs]
         metrics_dirs = result_dirs
         print(f"[auto] {RESULTS_DIR} 下发现 {len(summary_paths)} 个含 summary.csv 的目录")
     else:
@@ -537,11 +693,16 @@ def main():
         if auto and "quick" in path.parts:
             print(f"[compare] 跳过 quick 产物 {path.parent}")
             continue
+        # m8 的图系列产物(fig1-*/fig2-*/fig3-*/pareto*)不是五组对照,
+        # 由下面的曲面/Pareto 函数单独消费。
+        if auto and path.parent.name.startswith(
+                ("fig1-", "fig2-", "fig3-", "pareto1-", "pareto2-")):
+            continue
         print(f"[compare] 读取 {path}")
         rows = read_summary(path)
-        valid = [r for r in rows if r.get("void", "").lower() != "true"]
-        print(f"  共 {len(rows)} 条,有效 {len(valid)} 条")
-        compare_rows.extend(rows)
+        mapped = adapt_summary_rows(rows)
+        print(f"  共 {len(rows)} 条,有效 {len(mapped)} 条")
+        compare_rows.extend(mapped)
     if compare_rows:
         plot_compare_all(compare_rows, args.out_dir)
     else:
@@ -550,14 +711,34 @@ def main():
     # 旗舰图(数据来自各结果目录下的 metrics.csv)
     metrics = []
     seen_sources = set()
+    # 图系列产物:每个 COND 一份 summary.csv,cond 列带 fig*/pareto* 前缀
+    for directory in metrics_dirs:
+        if not directory.name.startswith(
+                ("fig1-", "fig2-", "fig3-", "pareto1-", "pareto2-")):
+            continue
+        path = _summary_path(directory)
+        if not path.is_file():
+            continue
+        if str(path) in seen_sources:
+            continue
+        seen_sources.add(str(path))
+        metrics.extend(adapt_summary_rows(read_summary(path)))
     for directory in metrics_dirs:
         for row in read_metrics_dir(directory):
             source = row.get("_source")
             if source in seen_sources:
                 continue
             seen_sources.add(source)
+            metrics.extend(adapt_summary_rows([row]))
+    # 图三的回落时间不在 metrics.csv,来自 runs/*/recovery.json
+    for directory in metrics_dirs:
+        for row in read_recovery_runs(directory):
+            source = row.get("_source")
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
             metrics.append(row)
-    print(f"[experiments] 读取 {len(metrics)} 条 metrics")
+    print(f"[experiments] 读取 {len(metrics)} 条 metrics/回落样本")
     plot_fig1(metrics, args.out_dir)
     plot_fig2(metrics, args.out_dir)
     plot_fig3(metrics, args.out_dir)

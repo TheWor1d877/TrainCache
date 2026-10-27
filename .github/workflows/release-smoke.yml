@@ -1,8 +1,13 @@
 name: release-smoke
 
-# 发版后手动跑：下载 Release 里的 install.yaml，在临时 kind 里装机。
-# 验证镜像能拉、四个组件能起、CRD 能建。不替代 e2e。
+# 只验证发布物，不构建、不发布：五项资产齐全、SHA256SUMS 对得上、
+# 四个 GHCR digest 可拉、临时 kind 装机链路通。
+# 正常由 release.yml 成功后自动触发，也可手动输入 tag 复跑。
+# draft 转正由人工执行，本工作流不改动 Release 状态。
 on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -13,40 +18,54 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-smoke-${{ github.event_name }}-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
 jobs:
   smoke:
-    name: install release ${{ inputs.tag }}
+    name: install release ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+    # workflow_run 只在 release 成功时跑，手动触发不受这个条件影响。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
     steps:
-      - uses: actions/checkout@v4
+      - name: check tag
+        # tag 来自事件字段，先收敛成 vX.Y.Z 再交给后续脚本与 curl。
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "TAG 不是 vX.Y.Z: $TAG" >&2; exit 1; }
 
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+        with:
+          # 自动触发时回到 tag 对应的那次提交，手动触发用当前分支。
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: controller/go.mod
 
       - name: install kind
         run: go install sigs.k8s.io/kind@v0.33.0
 
-      - name: download release assets
+      - name: verify release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          mkdir -p .release
-          gh release download "$TAG" --pattern install.yaml --pattern SHA256SUMS --dir .release
-          (cd .release && grep ' install.yaml$' SHA256SUMS | sha256sum -c -)
+        run: ./hack/verify-release-assets.sh .release
 
       - name: run smoke
         env:
-          TAG: ${{ inputs.tag }}
           NODE_IMAGE: docker.io/kindest/node:v1.37.0
           TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
         run: ./hack/release-smoke.sh .release/install.yaml "$TAG"
 
       - name: upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-smoke-diagnostics
           path: .traincachedata/hack/release-smoke/

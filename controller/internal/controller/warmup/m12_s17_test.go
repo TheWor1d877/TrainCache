@@ -9,16 +9,16 @@ import (
 )
 
 // m12OrderTask builds a task whose PodDetails are indexed in slice order.
-func m12OrderTask(orders [][]int32) *traincachev1alpha1.WarmupTask {
-	details := make([]traincachev1alpha1.PodDetail, len(orders))
-	for i, order := range orders {
-		details[i] = traincachev1alpha1.PodDetail{Index: int32(i), InitialConsumeOrder: order, K: 1}
-	}
-	return &traincachev1alpha1.WarmupTask{
-		Spec: traincachev1alpha1.WarmupTaskSpec{
-			PodCount:   int32(len(orders)),
-			PodDetails: details,
-		},
+func m12OrderTask(files [][]string) *traincachev1alpha1.WarmupTask {
+	return fileTask(files, 1)
+}
+
+func m12Layout() []traincachev1alpha1.BlockLayout {
+	return []traincachev1alpha1.BlockLayout{
+		{Shard: "a.tar", StartChunk: 0, Count: 3},
+		{Shard: "b.tar", StartChunk: 3, Count: 2},
+		{Shard: "c.tar", StartChunk: 5, Count: 1},
+		{Shard: "d.tar", StartChunk: 6, Count: 1},
 	}
 }
 
@@ -30,11 +30,12 @@ func TestM12S17AnyInvalidPodDefaultsWholeGroup(t *testing.T) {
 		total = int32(7)
 		pods  = int32(3)
 	)
-	valid := [][]int32{{0, 6}, {1, 5}, {2, 3, 4}}
+	valid := [][]string{{"a.tar"}, {"b.tar"}, {"c.tar", "d.tar"}}
+	validOrders := [][]int32{{0, 1, 2}, {3, 4}, {5, 6}}
 
-	if got, src, err := ResolveConsumeOrders(m12OrderTask(valid), total); err != nil ||
-		src != traincachev1alpha1.ConsumeOrderSourceSpec || !reflect.DeepEqual(got, valid) {
-		t.Fatalf("valid explicit orders: got=%v src=%q err=%v, want Spec", got, src, err)
+	if got, src, err := ResolveConsumeOrders(m12OrderTask(valid), total, m12Layout()); err != nil ||
+		src != traincachev1alpha1.ConsumeOrderSourceSpec || !reflect.DeepEqual(got, validOrders) {
+		t.Fatalf("valid explicit files: got=%v src=%q err=%v, want Spec", got, src, err)
 	}
 
 	want, err := consumeorder.DefaultSplit(total, pods)
@@ -42,25 +43,24 @@ func TestM12S17AnyInvalidPodDefaultsWholeGroup(t *testing.T) {
 		t.Fatalf("DefaultSplit(%d,%d): %v", total, pods, err)
 	}
 
-	invalid := map[string]func([][]int32){
-		"empty":        func(o [][]int32) { o[0] = nil },
-		"out of range": func(o [][]int32) { o[0] = []int32{0, 7} },
-		"negative":     func(o [][]int32) { o[0] = []int32{0, -1} },
-		"duplicate":    func(o [][]int32) { o[0] = []int32{0, 1} },
-		"incomplete":   func(o [][]int32) { o[0] = []int32{0} },
+	invalid := map[string]func([][]string){
+		"empty":      func(f [][]string) { f[0] = nil },
+		"unknown":    func(f [][]string) { f[0] = []string{"missing.tar"} },
+		"duplicate":  func(f [][]string) { f[1] = []string{"a.tar"} },
+		"incomplete": func(f [][]string) { f[2] = []string{"c.tar"} },
 	}
 
 	for pos := 0; pos < int(pods); pos++ {
 		for name, mutate := range invalid {
-			orders := make([][]int32, len(valid))
+			files := make([][]string, len(valid))
 			for i := range valid {
-				orders[i] = append([]int32(nil), valid[i]...)
+				files[i] = append([]string(nil), valid[i]...)
 			}
-			mutate(orders)
-			// Move the invalid order to every position in turn.
-			orders[0], orders[pos] = orders[pos], orders[0]
+			mutate(files)
+			// Move the invalid list to every position in turn.
+			files[0], files[pos] = files[pos], files[0]
 
-			got, src, err := ResolveConsumeOrders(m12OrderTask(orders), total)
+			got, src, err := ResolveConsumeOrders(m12OrderTask(files), total, m12Layout())
 			if err != nil {
 				t.Fatalf("%s at pod %d: unexpected error %v", name, pos, err)
 			}

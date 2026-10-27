@@ -92,9 +92,10 @@ bench-verify:
 # 跑正式轮前后各跑一遍,任何一项红即整轮不该开跑。
 selftest:
 	@echo "== 装置自检(纯本地) =="
-	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/trace.py
+	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/merge_m7.py $(ROOT)/compare/summarize_m7.py $(ROOT)/compare/trace.py
 	@$(PY) $(ROOT)/compare/run_bench.py --selftest
 	@$(PY) $(ROOT)/experiments/cond.py --selftest
+	@$(PY) $(ROOT)/compare/summarize_m7.py --selftest
 	@$(PY) $(ROOT)/experiments/lock.py --selftest
 	@$(PY) $(ROOT)/experiments/collect.py --selftest
 	@$(PY) -c "import json,sys,glob,os; sys.path.insert(0,'$(ROOT)/experiments'); import cond; bad=[(os.path.basename(f),e) for f in sorted(glob.glob('$(ROOT)/experiments/conds/*.json')) for e in cond.validate_cond(json.load(open(f)))]; print('COND 全量校验: %d 个文件, %d 条错误' % (len(glob.glob('$(ROOT)/experiments/conds/*.json')), len(bad))); [print(' ', b) for b in bad[:5]]; sys.exit(1 if bad else 0)"
@@ -173,17 +174,25 @@ e2e-k8s:
 
 # ---- M2/M5 实验 runner:条件化入口 ----
 # make bench COND=<name> [REPS=n]   跑指定 COND 的重复采样
-#   COND 以 policy- 开头 → experiments/run_policy.py(C 轨淘汰×预取),
-#     不传 REPS 时取 COND 的 sampling.reps
-#   其余 → experiments/run.py,不传 REPS 时默认 7 次
+#   fig1-/fig2-/fig3-/pareto1- → experiments/run_figures.py(对照层 Pod+MinIO)
+#   policy-/pareto2-          → experiments/run_policy.py(C 轨淘汰×预取)
+#   其余                       → experiments/run.py,不传 REPS 时默认 7 次
 # make bench-list                   列出 conds/ 下所有 COND 名
 .PHONY: bench bench-list
 
+FIG_COND  = $(filter fig1-% fig2-% fig3-% pareto1-%,$(strip $(COND)))
+POL_COND  = $(filter policy-% pareto2-%,$(strip $(COND)))
 bench:
 	@if [ -z "$(strip $(COND))" ]; then \
 		echo "错误:需要 COND=<name>(make bench-list 查看)"; exit 2; \
 	fi
-	@$(PY) experiments/$(if $(filter policy-%,$(strip $(COND))),run_policy.py,run.py) --cond $(strip $(COND)) $(if $(strip $(REPS)),--reps $(strip $(REPS)))
+	@if [ -n "$(FIG_COND)" ]; then \
+		$(PY) experiments/run_figures.py --cond $(strip $(COND)); \
+	elif [ -n "$(POL_COND)" ]; then \
+		$(PY) experiments/run_policy.py --cond $(strip $(COND)) $(if $(strip $(REPS)),--reps $(strip $(REPS))); \
+	else \
+		$(PY) experiments/run.py --cond $(strip $(COND)) $(if $(strip $(REPS)),--reps $(strip $(REPS))); \
+	fi
 
 bench-list:
 	@if ls experiments/conds/*.json >/dev/null 2>&1; then \

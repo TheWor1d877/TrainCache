@@ -1,0 +1,167 @@
+{
+  "schema_version": "1",
+  "n_tars": 8,
+  "seed": 20261015,
+  "shuffle": "fixed",
+  "epochs": 10,
+  "batch": 32,
+  "steps_per_epoch": 400,
+  "images_per_tar": 1600,
+  "curriculum_fractions": [
+    1.0,
+    0.6666666666666666,
+    0.3333333333333333
+  ],
+  "per_epoch": [
+    {
+      "epoch": 0,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 1,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 2,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 3,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 4,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 5,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 6,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 7,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 8,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    },
+    {
+      "epoch": 9,
+      "stage": 0,
+      "shard_perm": [
+        6,
+        2,
+        4,
+        0,
+        5,
+        7,
+        1,
+        3
+      ],
+      "repeats": 1
+    }
+  ]
+}

@@ -29,6 +29,7 @@ import (
 
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
+	"traincache/controller/internal/config"
 	"traincache/controller/internal/gate"
 	"traincache/controller/internal/logging"
 	"traincache/controller/internal/metrics"
@@ -62,6 +63,14 @@ const (
 // invalid and the whole group falls back to the default split (D29).
 const EventConsumeOrderDefaulted = "ConsumeOrderDefaulted"
 
+// EventKDefaulted is emitted when PodDetail.K is omitted for one or more Pods
+// and the controller writes the computed K back to the spec (D43).
+const EventKDefaulted = "KDefaulted"
+
+// EventKExceedsFillLimit is emitted when explicit K values make the total
+// preheat volume exceed the maxFillFraction cap. The task still runs.
+const EventKExceedsFillLimit = "KExceedsFillLimit"
+
 // Retry sentinels request controller-runtime backoff because Node/Pod/DataSet
 // state may change (docs/7.1 §7.9).
 var (
@@ -86,6 +95,12 @@ type Reconciler struct {
 	ScoreAnnotationPrefix string
 	// GateName is the scheduling gate removed on release.
 	GateName string
+	// CacheCapacityBytes, StartupWindowBytes and MaxFillFraction feed the
+	// automatic PodDetail.K computation (D43). Zero values fall back to the
+	// package defaults so a bare Reconciler in tests stays well-defined.
+	CacheCapacityBytes int64
+	StartupWindowBytes int64
+	MaxFillFraction    float64
 	// Rand breaks GWAA ties. nil keeps gwaa's fixed-seed determinism; the
 	// manager injects a time-seeded source (D32).
 	Rand *rand.Rand
@@ -225,7 +240,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	meta.RemoveStatusCondition(&task.Status.Conditions, ConditionNoAccessibleNodes)
 
-	orders, source, err := ResolveConsumeOrders(task, ds.Status.TotalChunks)
+	orders, source, err := ResolveConsumeOrders(task, ds.Status.TotalChunks, ds.Status.BlockLayout)
 	if err != nil {
 		message := err.Error()
 		log.Warn("warmup consume order invalid", "reason", reasonInvalidSpec, "err", err)
@@ -241,9 +256,36 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if source == traincachev1alpha1.ConsumeOrderSourceDefault &&
 		task.Status.ConsumeOrderSource != traincachev1alpha1.ConsumeOrderSourceDefault {
 		r.event(task, corev1.EventTypeNormal, EventConsumeOrderDefaulted,
-			"one or more initialConsumeOrder values are invalid; default split applied")
+			"one or more initialConsumeFiles values are invalid; default split applied")
 	}
 	task.Status.ConsumeOrderSource = source
+
+	if reasons := ValidateExplicitK(task, orders); len(reasons) > 0 {
+		message := strings.Join(reasons, "; ")
+		log.Warn("warmup spec invalid", "reason", reasonInvalidSpec, "err", message)
+		if r.setCondition(task, ConditionInvalidSpec, metav1.ConditionFalse, reasonInvalidSpec, message) {
+			r.event(task, corev1.EventTypeWarning, reasonInvalidSpec, message)
+		}
+		return ctrl.Result{}, nil
+	}
+	if total, limit, exceeded := KExceedsFill(&config.Config{
+		CacheCapacityBytes: r.CacheCapacityBytes,
+		StartupWindowBytes: r.StartupWindowBytes,
+		MaxFillFraction:    r.MaxFillFraction,
+	}, ds, task, orders); exceeded {
+		message := fmt.Sprintf("preheat volume %d bytes exceeds maxFillFraction cap %d bytes; explicit K honoured", total, limit)
+		log.Warn("preheat volume exceeds maxFillFraction", "bytes", total, "cap_bytes", limit)
+		r.event(task, corev1.EventTypeWarning, EventKExceedsFillLimit, message)
+	}
+	defaulted, err := r.defaultK(ctx, log, task, ds, orders)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if defaulted {
+		// The spec now carries explicit K values. Requeue immediately so the
+		// next pass reads them from the API server and continues to preheat.
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	podNames, matchedPods, err := r.targetPodNames(ctx, task)
 	if err != nil {
@@ -464,6 +506,58 @@ func (r *Reconciler) targetPodNames(ctx context.Context, task *traincachev1alpha
 	return names, matched, nil
 }
 
+// defaultK writes the computed K for every Pod whose K is zero and reports
+// whether the spec changed. The caller requeues so the next reconcile reads the
+// persisted values, keeping gate and poll on a single source of truth (D43).
+func (r *Reconciler) defaultK(ctx context.Context, log *slog.Logger, task *traincachev1alpha1.WarmupTask, ds *traincachev1alpha1.DataSet, orders [][]int32) (bool, error) {
+	needed := false
+	for i := range task.Spec.PodDetails {
+		if task.Spec.PodDetails[i].K == 0 {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return false, nil
+	}
+
+	ks, err := computeK(&config.Config{
+		CacheCapacityBytes: r.CacheCapacityBytes,
+		StartupWindowBytes: r.StartupWindowBytes,
+		MaxFillFraction:    r.MaxFillFraction,
+	}, ds, orders)
+	if err != nil {
+		return false, err
+	}
+
+	// Patch a copy: the fake client and the API server return the stored
+	// object, which would drop in-memory status changes made earlier in this
+	// reconcile (the status patch in the deferred block still owns those).
+	patched := task.DeepCopy()
+	parts := make([]string, 0, len(ks))
+	for i := range patched.Spec.PodDetails {
+		detail := &patched.Spec.PodDetails[i]
+		if detail.K != 0 {
+			continue
+		}
+		k := ks[detail.Index]
+		detail.K = k
+		parts = append(parts, fmt.Sprintf("p%d=%d", detail.Index, k))
+	}
+	if err := r.Patch(ctx, patched, client.MergeFrom(task)); err != nil {
+		return false, fmt.Errorf("patch WarmupTask K: %w", err)
+	}
+
+	message := "startup window K computed: " + strings.Join(parts, ",")
+	r.event(task, corev1.EventTypeNormal, EventKDefaulted, message)
+	log.Info("startup window K defaulted",
+		"pod_count", len(ks),
+		"k", strings.Join(parts, ","),
+		"reason", "k_omitted",
+	)
+	return true, nil
+}
+
 func (r *Reconciler) patchStatus(ctx context.Context, base, task *traincachev1alpha1.WarmupTask) error {
 	if equality.Semantic.DeepEqual(base.Status, task.Status) {
 		return nil
@@ -555,9 +649,9 @@ func candidatesWithAgent(filtered []string, ready sets.Set[string]) []string {
 
 func consumeOrderReason(source traincachev1alpha1.ConsumeOrderSource) string {
 	if source == traincachev1alpha1.ConsumeOrderSourceDefault {
-		return "invalid, incomplete or missing initialConsumeOrder; default split applied"
+		return "invalid, incomplete or missing initialConsumeFiles; default split applied"
 	}
-	return "explicit initialConsumeOrder"
+	return "explicit initialConsumeFiles"
 }
 
 func sortedErrorKeys(m map[string]error) []string {

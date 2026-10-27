@@ -452,9 +452,9 @@ def main() -> None:
     if not args.cond:
         ap.error("需要 --cond(或用 --selftest 跑汇总层自检)")
 
-    # policy-* 属于 M5 淘汰×预取实验(C 轨),执行体是 run_policy.py。
+    # policy-*/pareto2-* 属于 M5 淘汰×预取实验(C 轨),执行体是 run_policy.py。
     # make bench 已在 Makefile 侧分流;这里兜住直接调用 run.py 的情况。
-    if args.cond.startswith("policy-"):
+    if args.cond.startswith(("policy-", "pareto2-")):
         import run_policy  # noqa: PLC0415
         run_policy.run_reps(args.cond, args.reps, args.conds_dir)
         return

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +37,32 @@ func TestNewEmitsJSONWithComponentVersion(t *testing.T) {
 	}
 	if got["msg"] != "starting" {
 		t.Fatalf("msg = %v, want starting", got["msg"])
+	}
+}
+
+// TestNewRedactsSentinelCredentials 用哨兵凭据验证 New 的 handler 已接脱敏（8.1 §3.4）。
+func TestNewRedactsSentinelCredentials(t *testing.T) {
+	const (
+		accessKey = "CTRL-ACCESS-KEY-SENTINEL"
+		secretKey = "CTRL-SECRET-KEY-SENTINEL"
+		signature = "CTRL-SIGNATURE-SENTINEL"
+	)
+	var buf bytes.Buffer
+	old := output
+	output = &buf
+	t.Cleanup(func() { output = old })
+
+	log := New("controller-manager", "v1.2.3", "info")
+	log.Error("dataset storage unavailable",
+		"err", errors.New("accessKey="+accessKey+" secretKey="+secretKey),
+		"url", "https://user:pass@minio:9000/bench-b/key?X-Amz-Signature="+signature,
+	)
+
+	out := buf.String()
+	for _, leak := range []string{accessKey, secretKey, signature, "user:pass@"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("log leaks %q: %s", leak, out)
+		}
 	}
 }
 

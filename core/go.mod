@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/zeebo/xxh3 v1.1.0
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (
@@ -20,7 +21,6 @@ require (
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/tinylib/msgp v1.6.5 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

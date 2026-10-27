@@ -117,8 +117,8 @@ func (c *podPatchFailClient) Patch(ctx context.Context, obj client.Object, patch
 }
 
 func TestReleaseGateRemovalIsIdempotentAfterPartialFailure(t *testing.T) {
-	task := fixtureTask(2, 2, [][]int32{{0, 1}, {0, 1}})
-	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1", "n2"})
+	task := fixtureTask(2, 2, [][]int32{{0, 1}, {2, 3}})
+	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1", "n2"})
 	pool := newFakeProgressPool()
 	for _, node := range []string{"n1", "n2"} {
 		for _, pod := range []string{"train/t1/p0", "train/t1/p1"} {

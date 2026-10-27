@@ -3,15 +3,13 @@
 
 流程(run_once):
   1. 创建产物目录 results/policy/<cond_name>/<run_id>/
-  2. 冷态:cold_reset.sh(selftest 跳过)
-  3. 挂 tc:tc_apply.sh(selftest 跳过)
-  4. 注入 TRAINCACHE_JOB_CREATED_AT + COND 环境变量
-     (TRAINCACHE_EVICT_POLICY / TRAINCACHE_PREFETCH_LOOKAHEAD /
-      TRAINCACHE_CACHE_CAPACITY_BYTES)
-  5. 跑负载:bench_track_c.py --out-dir <run_dir> ...
-     (selftest 模式用 mock 下载,不访问网络)
-  6. 采集:collect.py --run-dir <run_dir>(selftest 跳过)
-  7. 写 lock.json(lock.py)
+  2. 注入 COND 环境变量(TRAINCACHE_EVICT_POLICY /
+     TRAINCACHE_PREFETCH_LOOKAHEAD / TRAINCACHE_CACHE_CAPACITY_BYTES)
+  3. 真实模式:调对照层 run_bench.py,带 TRAINCACHE_TILT=1。
+     冷态、tc、measure Pod、采集都由它完成;倾斜双 Job 跑在同一个 Pod 里,
+     走真实 agent 与 hostPath 缓存。
+  4. selftest:mock 下载,不访问网络
+  5. 写 lock.json(lock.py)
 
 产物目录隔离:bench/results/policy/<cond_name>/<run_id>/
 selftest 完全 mock,不访问网络、不启动真实训练。
@@ -41,10 +39,8 @@ import config as bench_config  # noqa: E402
 RESULTS_DIR = bench_config.RESULTS_DIR
 POLICY_RESULTS_DIR = RESULTS_DIR / "policy"
 
-COLD_RESET_SH = SCRIPTS_DIR / "cold_reset.sh"
-TC_APPLY_SH = SCRIPTS_DIR / "tc_apply.sh"
 BENCH_TRACK_C = SCRIPTS_DIR / "bench_track_c.py"
-COLLECT_PY = EXPERIMENTS_DIR / "collect.py"
+RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"
 
 PY = sys.executable
 
@@ -90,14 +86,6 @@ def _run_cmd(cmd: list, env: dict | None = None,
         cmd, capture_output=True, text=True, env=env,
         cwd=str(cwd) if cwd else None, timeout=timeout, check=False)
     return proc.returncode, proc.stdout, proc.stderr
-
-
-def _tc_target(cond: dict) -> str | None:
-    """根据 dataset.source 决定 tc_apply.sh 的 --target。"""
-    source = cond.get("dataset", {}).get("source")
-    if source == "local-nginx":
-        return "source-d"
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -190,33 +178,6 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
 
 
 # ---------------------------------------------------------------------------
-# bench_track_c.py CLI 参数(真实模式)
-# ---------------------------------------------------------------------------
-def cond_to_track_c_args(cond: dict) -> list[str]:
-    """返回 bench_track_c.py 的 CLI 参数列表(不含可执行文件与 --out-dir)。
-
-    映射:--epochs-a / --epochs-b 取 workload.epochs;--seed 取 dataset.seed;
-    --workers-a / --workers-b 取 workload.workers;--batch;
-    --cache-capacity-bytes 取 cache.capacity_bytes;--shard-bytes 取
-    dataset.shard_size_bytes;--hot-shards / --full-shards 用 config.py 默认值
-    (由 synth_track_c.py 生成),不在此覆盖。
-    """
-    wl = cond["workload"]
-    epochs = wl["epochs"]
-    args = [
-        "--epochs-a", str(epochs),
-        "--epochs-b", str(epochs),
-        "--workers-a", str(wl["workers"]),
-        "--workers-b", str(wl["workers"]),
-        "--batch", str(wl["batch"]),
-        "--seed", str(cond["dataset"]["seed"]),
-        "--shard-bytes", str(cond["dataset"]["shard_size_bytes"]),
-        "--cache-capacity-bytes", str(cond["cache"]["capacity_bytes"]),
-    ]
-    return args
-
-
-# ---------------------------------------------------------------------------
 # 单轮执行
 # ---------------------------------------------------------------------------
 def run_once(cond: dict, run_id: str, reps_dir: Path,
@@ -240,41 +201,41 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
     base_env["TRAINCACHE_RUN_ID"] = run_id
 
     if not selftest:
-        # ---- 2. 冷态 ----
-        rc, out, err = _run_cmd(["bash", str(COLD_RESET_SH)])
+        # ---- 2~4. 冷态/挂 tc/跑负载统一交给对照层 run_bench.py ----
+        # 倾斜双 Job 跑在同一个 measure Pod 里（TRAINCACHE_TILT=1），
+        # 走真实 TrainCache agent 与 hostPath 缓存。
+        env = base_env.copy()
+        env.update({
+            "TRAINCACHE_FIGURE_MODE": "1",
+            "TRAINCACHE_TILT": "1",
+            "TRAINCACHE_COND_NAME": cond["name"],
+            # 两个旋钮分开：训练侧消费窗口固定 16，Agent 侧 lookahead 取 COND。
+            "TRAINCACHE_PREFETCH_K": "16",
+            "TRAINCACHE_PREFETCH_LOOKAHEAD": str(cond["prefetch"]["lookahead"]),
+            "N_TARS": str(cond["dataset"]["shards"]),
+            "EPOCHS": str(cond["workload"]["epochs"]),
+            "STEPS_PER_EPOCH": str(cond["workload"]["steps_per_epoch"]),
+            "BATCH": str(cond["workload"]["batch"]),
+            "SHUFFLE": cond["workload"]["shuffle"],
+            "SEED": str(cond["dataset"]["seed"]),
+            "DATASET_NAME": cond["dataset"]["name"],
+            "MINIO_BUCKET": cond["dataset"]["bucket"],
+            "TC_RATE": f"{cond['network']['rate_mbit']}mbit",
+            "TC_DELAY": f"{cond['network']['delay_ms']}ms",
+        })
+        rb_cmd = [PY, str(RUN_BENCH),
+                  "--tier", "S",
+                  "--rate", f"{cond['network']['rate_mbit']}mbit",
+                  "--groups", cond["group"],
+                  "--reps", "1",
+                  "--out", str(run_dir / "summary.csv")]
+        rc, out, err = _run_cmd(rb_cmd, env=env)
         if rc != 0:
-            reason = f"cold_reset 失败(rc={rc}): {err.strip()[:500]}"
+            reason = f"run_bench 失败(rc={rc}): {err.strip()[:500]}"
             _write_void(run_dir, reason)
             print(f"[{run_id}] {reason}", file=sys.stderr)
             return run_dir
-        print(f"[{run_id}] 冷态完成")
-
-        # ---- 3. 挂 tc ----
-        tc_args = cond_mod.cond_to_tc_args(cond)
-        target = _tc_target(cond)
-        tc_cmd = ["bash", str(TC_APPLY_SH)] + tc_args
-        if target:
-            tc_cmd += ["--target", target]
-        rc, out, err = _run_cmd(tc_cmd)
-        if rc != 0:
-            reason = f"tc_apply 失败(rc={rc}): {err.strip()[:500]}"
-            _write_void(run_dir, reason)
-            print(f"[{run_id}] {reason}", file=sys.stderr)
-            return run_dir
-        print(f"[{run_id}] tc 已挂载: {' '.join(tc_args)}"
-              f"{' --target ' + target if target else ''}")
-
-        # ---- 4. 跑负载(真实模式)----
-        tc_c_args = cond_to_track_c_args(cond)
-        tc_cmd = [PY, str(BENCH_TRACK_C)] + tc_c_args + \
-            ["--out-dir", str(run_dir)]
-        rc, out, err = _run_cmd(tc_cmd, env=base_env)
-        if rc != 0:
-            reason = f"bench_track_c 失败(rc={rc}): {err.strip()[:500]}"
-            _write_void(run_dir, reason)
-            print(f"[{run_id}] {reason}", file=sys.stderr)
-            return run_dir
-        print(f"[{run_id}] 负载完成")
+        print(f"[{run_id}] 倾斜双 Job 完成")
     else:
         # ---- selftest:mock 实验 ----
         print(f"[{run_id}] selftest:mock 模式,跳过 cold_reset/tc_apply")
@@ -290,17 +251,9 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
               f"evictions={ev['b_evictions_of_hot']} "
               f"hit_ratio={ev['a_hit_ratio']:.2%}")
 
-    # ---- 5. 采集(selftest 跳过,保持完全 mock)----
-    if not selftest:
-        collect_cmd = [PY, str(COLLECT_PY), "--run-dir", str(run_dir),
-                       "--prometheus-url", ""]
-        rc, out, err = _run_cmd(collect_cmd, env=base_env)
-        if rc != 0:
-            reason = f"collect 失败(rc={rc}): {err.strip()[:500]}"
-            _write_void(run_dir, reason)
-            print(f"[{run_id}] {reason}", file=sys.stderr)
-            return run_dir
-        print(f"[{run_id}] 采集完成 → {run_dir / 'metrics.csv'}")
+    # ---- 5. 采集 ----
+    # 真实模式的指标由 run_bench.py 直接写 summary.csv；mock 模式已在上面
+    # 落 eviction_stats.json，不再跑 collect.py。
 
     # ---- 6. 写 lock.json ----
     try:

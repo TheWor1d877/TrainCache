@@ -1,5 +1,5 @@
-# TrainCache 验证入口。CI 跑 verify；PR 到 main 另跑 verify-metadata；
-# e2e 需要 docker + kind，按标签或手动触发。
+# TrainCache 验证入口。CI 跑 verify；PR 到 main 另跑 verify-metadata 与 kind e2e；
+# e2e 需要 docker + kind，也可手动触发。
 
 .PHONY: verify verify-controller verify-core verify-agent verify-metadata e2e \
 	release-install release-smoke

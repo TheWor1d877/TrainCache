@@ -3,9 +3,10 @@
 //
 // 子命令:
 //
-//	traincache prefetch --path PATH --node NODE --chunks C1,C2 [--dataset NAME] [--snapshot-id ID] [--priority p0|p1|p2|p3]
+//	traincache prefetch --path PATH --node NODE (--chunks PATH:CHUNK,... | --files TAR,...) [--dataset NAME] [--snapshot-id ID] [--priority p0|p1|p2|p3]
 //	traincache node status --node NODE [--item agent|catalog|space|tasks|rescan]
 //	traincache status --node NODE --task-id ID
+//	traincache ls --dataset NAME [--snapshot-id ID] [--prefix P] [--chunks]
 //
 // 退出码:0 成功;1 RPC/运行错误;2 参数错误(usage)。
 package main
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -61,6 +63,8 @@ func run(args []string) int {
 		return runNode(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "ls":
+		return runLS(args[1:])
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return exitOK
@@ -73,9 +77,10 @@ func run(args []string) int {
 
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `用法:
-  traincache prefetch --path PATH --node NODE --chunks C1,C2 [--dataset NAME] [--snapshot-id ID] [--priority p0|p1|p2|p3]
+  traincache prefetch --path PATH --node NODE (--chunks PATH:CHUNK,... | --files TAR,...) [--dataset NAME] [--snapshot-id ID] [--priority p0|p1|p2|p3]
   traincache node status --node NODE [--item agent|catalog|space|tasks|rescan]
   traincache status --node NODE --task-id ID
+  traincache ls --dataset NAME [--snapshot-id ID] [--prefix P] [--chunks]
 
 全局选项:
   --endpoint ADDR   Agent gRPC 地址(默认 127.0.0.1:9410;--node 仅作请求校验字段,不做地址解析)
@@ -90,7 +95,8 @@ func runPrefetch(args []string) int {
 	taskID := fs.String("task-id", "", "预热任务 ID(幂等键,必填)")
 	path := fs.String("path", "", "数据路径前缀(必填)")
 	node := fs.String("node", "", "目标节点(必填;仅作请求校验字段)")
-	chunks := fs.String("chunks", "", "块名清单,逗号分隔(必填)")
+	chunks := fs.String("chunks", "", "精确块清单,逗号分隔,格式 path:chunk")
+	files := fs.String("files", "", "tar 分片名清单,逗号分隔;经 ListSnapshot 展开为块")
 	dataset := fs.String("dataset", "", "dataset 名(可选)")
 	snapshotID := fs.String("snapshot-id", "", "快照 ID(可选,空=当前 CURRENT)")
 	priority := fs.String("priority", "p0", "预取优先级 p0|p1|p2|p3")
@@ -103,10 +109,16 @@ func runPrefetch(args []string) int {
 	if *taskID == "" || *path == "" || *node == "" {
 		return usageError(fs, "prefetch: --task-id 与 --path 与 --node 必填")
 	}
-	// --chunks 仅校验非空(逗号切分);名字解析(chunk-NNN → (path, chunk) 字典序条目,
-	// D20)经 ListSnapshot 在 M3 落地,本里程碑不解析。
-	if len(splitCSV(*chunks)) == 0 {
-		return usageError(fs, "prefetch: --chunks 必填(逗号分隔块名)")
+	chunkSpecs := splitCSV(*chunks)
+	fileNames := splitCSV(*files)
+	if len(chunkSpecs) > 0 && len(fileNames) > 0 {
+		return usageError(fs, "prefetch: --chunks 与 --files 只能给一个")
+	}
+	if len(chunkSpecs) == 0 && len(fileNames) == 0 {
+		return usageError(fs, "prefetch: --chunks 或 --files 至少给一个")
+	}
+	if len(fileNames) > 0 && *dataset == "" {
+		return usageError(fs, "prefetch: --files 需要 --dataset 才能展开分片")
 	}
 	prio, ok := parsePriority(*priority)
 	if !ok {
@@ -123,14 +135,39 @@ func runPrefetch(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
 
+	var chunkRefs []*agentpb.ChunkRef
+	if len(fileNames) > 0 {
+		// --files 先按分片名查快照,再展开为该分片的全部块;Prefix 留空,
+		// 因为这里匹配的是分片名而不是数据路径前缀。
+		listResp, err := agentpb.NewNodeServiceClient(conn).ListSnapshot(ctx, &agentpb.ListSnapshotRequest{
+			Dataset:    *dataset,
+			SnapshotId: *snapshotID,
+		})
+		if err != nil {
+			return rpcError(err, "prefetch: ListSnapshot 失败")
+		}
+		var missing []string
+		chunkRefs, missing = expandFileChunks(listResp.GetEntries(), fileNames)
+		if len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "traincache: prefetch: 快照中找不到分片 %s\n", strings.Join(missing, ","))
+			return exitError
+		}
+	} else {
+		var err error
+		chunkRefs, err = parseChunkSpecs(chunkSpecs)
+		if err != nil {
+			return usageError(fs, "prefetch: %v", err)
+		}
+	}
+
 	resp, err := agentpb.NewPreheatServiceClient(conn).SubmitPreheat(ctx, &agentpb.SubmitPreheatRequest{
 		TaskId:     *taskID,
 		Node:       *node,
 		Dataset:    *dataset,
 		SnapshotId: *snapshotID,
 		Prefixes:   []string{*path}, // --path 即路径前缀(SubmitPreheatRequest.prefixes,§5.1)
+		Chunks:     chunkRefs,
 		Priority:   prio,
-		// chunks 留空:M3 经 ListSnapshot 解析 --chunks 名字后填充。
 	})
 	if err != nil {
 		return rpcError(err, "prefetch: 提交预热任务失败")
@@ -236,6 +273,138 @@ func runStatus(args []string) int {
 	}
 	printPreheatStatus(resp)
 	return exitOK
+}
+
+// snapshotLister 是 ListSnapshot 的最小客户端接口(agentpb.NodeServiceClient 实现),
+// 抽出接口便于测试注入 fake,不连真实 Agent。
+type snapshotLister interface {
+	ListSnapshot(ctx context.Context, in *agentpb.ListSnapshotRequest, opts ...grpc.CallOption) (*agentpb.ListSnapshotResponse, error)
+}
+
+// runLS 实现 `traincache ls`(design §5.6;只读列快照)。
+func runLS(args []string) int {
+	return lsSnapshot(args, os.Stdout, os.Stderr, dialSnapshot)
+}
+
+// lsSnapshot 是 runLS 的可测形式:输出流与客户端构造器由调用方注入。
+func lsSnapshot(args []string, stdout, stderr io.Writer, newClient func(string) (snapshotLister, func(), error)) int {
+	fs := flag.NewFlagSet("traincache ls", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	endpoint := fs.String("endpoint", defaultEndpoint, "Agent gRPC 地址(全局选项)")
+	dataset := fs.String("dataset", "", "dataset 名(必填)")
+	snapshotID := fs.String("snapshot-id", "", "快照 ID(空=当前 CURRENT)")
+	prefix := fs.String("prefix", "", "路径前缀(空=不过滤)")
+	byChunk := fs.Bool("chunks", false, "展开到块级明细(默认按文件聚合)")
+	if err := fs.Parse(args); err != nil {
+		return parseExitCode(err)
+	}
+	if fs.NArg() > 0 {
+		return usageError(fs, "ls: 不接受位置参数 %q", fs.Args())
+	}
+	if *dataset == "" {
+		return usageError(fs, "ls: --dataset 必填")
+	}
+
+	client, closeClient, err := newClient(*endpoint)
+	if err != nil {
+		fmt.Fprintf(stderr, "traincache: 建立连接失败: %v\n", err)
+		return exitError
+	}
+	defer closeClient()
+
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel()
+
+	resp, err := client.ListSnapshot(ctx, &agentpb.ListSnapshotRequest{
+		Dataset:    *dataset,
+		SnapshotId: *snapshotID,
+		Prefix:     *prefix,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "traincache: ListSnapshot 失败: %v\n", err)
+		return exitError
+	}
+	if err := writeListSnapshot(stdout, resp.GetEntries(), *byChunk); err != nil {
+		fmt.Fprintf(stderr, "traincache: 输出失败: %v\n", err)
+		return exitError
+	}
+	return exitOK
+}
+
+// dialSnapshot 建立 gRPC 连接并返回 ListSnapshot 客户端与关闭函数。
+func dialSnapshot(endpoint string) (snapshotLister, func(), error) {
+	conn, err := dial(endpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	return agentpb.NewNodeServiceClient(conn), func() { _ = conn.Close() }, nil
+}
+
+// fileSummary 是一个 path 的聚合结果:块数与字节合计。
+type fileSummary struct {
+	path   string
+	chunks int64
+	bytes  int64
+}
+
+// chunkSummary 是一个块的明细行。
+type chunkSummary struct {
+	path  string
+	chunk int64
+	bytes int64
+}
+
+// summarizeFiles 按 path 合并条目:块数计数、字节求和,结果按 path 升序。
+func summarizeFiles(entries []*agentpb.EntryRef) []fileSummary {
+	byPath := make(map[string]*fileSummary, len(entries))
+	for _, e := range entries {
+		s, ok := byPath[e.GetPath()]
+		if !ok {
+			s = &fileSummary{path: e.GetPath()}
+			byPath[e.GetPath()] = s
+		}
+		s.chunks++
+		s.bytes += e.GetSize()
+	}
+	out := make([]fileSummary, 0, len(byPath))
+	for _, s := range byPath {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
+}
+
+// expandChunks 展开块级条目,按 (path, chunk) 升序。
+func expandChunks(entries []*agentpb.EntryRef) []chunkSummary {
+	out := make([]chunkSummary, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, chunkSummary{path: e.GetPath(), chunk: e.GetChunk(), bytes: e.GetSize()})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].path != out[j].path {
+			return out[i].path < out[j].path
+		}
+		return out[i].chunk < out[j].chunk
+	})
+	return out
+}
+
+// writeListSnapshot 输出 ls 表格:默认 FILE/CHUNKS/BYTES 文件级聚合,
+// byChunk 时 FILE/CHUNK/BYTES 块级明细;空结果只输出表头。
+func writeListSnapshot(w io.Writer, entries []*agentpb.EntryRef, byChunk bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if byChunk {
+		fmt.Fprintln(tw, "FILE\tCHUNK\tBYTES")
+		for _, c := range expandChunks(entries) {
+			fmt.Fprintf(tw, "%s\t%d\t%d\n", c.path, c.chunk, c.bytes)
+		}
+	} else {
+		fmt.Fprintln(tw, "FILE\tCHUNKS\tBYTES")
+		for _, f := range summarizeFiles(entries) {
+			fmt.Fprintf(tw, "%s\t%d\t%d\n", f.path, f.chunks, f.bytes)
+		}
+	}
+	return tw.Flush()
 }
 
 // printNodeStatus 输出两列表格(design §5.6;Q9 结案:默认表格);--item 只显示对应行。
@@ -353,6 +522,55 @@ func parseItem(s string) (agentpb.NodeStatusItem, bool) {
 	default:
 		return agentpb.NodeStatusItem_UNSPECIFIED, false
 	}
+}
+
+// expandFileChunks 按 tar 分片名收集快照条目,输出顺序为 files 的给出顺序、
+// 文件内按 chunk 升序。未命中的分片名单独返回。
+func expandFileChunks(entries []*agentpb.EntryRef, files []string) (refs []*agentpb.ChunkRef, missing []string) {
+	wanted := make(map[string]struct{}, len(files))
+	order := make([]string, 0, len(files))
+	for _, name := range files {
+		if _, ok := wanted[name]; ok {
+			continue
+		}
+		wanted[name] = struct{}{}
+		order = append(order, name)
+	}
+	byFile := make(map[string][]*agentpb.EntryRef, len(order))
+	for _, e := range entries {
+		if _, ok := wanted[e.GetPath()]; ok {
+			byFile[e.GetPath()] = append(byFile[e.GetPath()], e)
+		}
+	}
+	for _, name := range order {
+		items := byFile[name]
+		if len(items) == 0 {
+			missing = append(missing, name)
+			continue
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].GetChunk() < items[j].GetChunk() })
+		for _, e := range items {
+			refs = append(refs, &agentpb.ChunkRef{Path: e.GetPath(), Chunk: e.GetChunk()})
+		}
+	}
+	return refs, missing
+}
+
+// parseChunkSpecs 解析 path:chunk 形式的精确块清单。
+func parseChunkSpecs(items []string) ([]*agentpb.ChunkRef, error) {
+	refs := make([]*agentpb.ChunkRef, 0, len(items))
+	for _, item := range items {
+		i := strings.LastIndex(item, ":")
+		if i <= 0 || i == len(item)-1 {
+			return nil, fmt.Errorf("块 %q 非法(需为 path:chunk)", item)
+		}
+		chunk, err := strconv.ParseInt(item[i+1:], 10, 64)
+		if err != nil || chunk < 0 {
+			return nil, fmt.Errorf("块 %q 的 chunk 非非负整数", item)
+		}
+		refs = append(refs, &agentpb.ChunkRef{Path: item[:i], Chunk: chunk})
+	}
+	return refs, nil
 }
 
 // splitCSV 逗号切分、TrimSpace、丢空项(--chunks 校验口径,M1 不解析名字)。

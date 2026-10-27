@@ -10,7 +10,7 @@
 #   4. Secret traincache-objstore(MinIO 凭证)
 #   5. webhook TLS Secret(含 ca.crt)+ MutatingWebhookConfiguration caBundle
 #   6. kubectl apply -k controller/deploy(仅清单哈希变化或工作负载缺失时)
-#   7. agentd 的 WHITELIST/BUCKET/CACHE_CAPACITY_BYTES
+#   7. traincache-config 的 WHITELIST/CACHE_CAPACITY_BYTES/STARTUP_WINDOW_BYTES/MAX_FILL_FRACTION 与 agentd 的 BUCKET
 #   8. 四个工作负载 rollout 就绪,打印 Ready 数与 Pod UID
 #
 # 幂等:清单哈希记在 namespace 注解 traincache.io/deploy-hash。哈希未变且
@@ -28,7 +28,9 @@ DATASET="${DATASET:-compare-data-8m}"
 DEPLOY_DIR="$REPO/controller/deploy"
 CRD_DIR="$REPO/controller/config/crd/bases"
 HASH_ANNOTATION="traincache.io/deploy-hash"
-CAPACITY_BYTES="1073741824"
+CAPACITY_BYTES="${TRAINCACHE_CACHE_CAPACITY_BYTES:-1073741824}"
+STARTUP_WINDOW_BYTES="536870912"
+MAX_FILL_FRACTION="0.125"
 CLUSTER_NAME="${CLUSTER_NAME:-$(cfg CLUSTER_NAME)}"
 CLUSTER_NAME="${CLUSTER_NAME:-traincache}"
 WEBHOOK_CA_B64=""
@@ -54,6 +56,21 @@ label_s3_nodes() {
 
 # ---- 2. 镜像预检:只查,不拉取 ----
 # 四个工作负载的 image 引用直接从 kustomize 渲染结果取,与清单同源。
+# kind load 刚结束时 containerd 元数据可能还没同步,单次 crictl 会误报缺失
+# (随即手工 crictl images -q 又正常),故每个镜像最多探 3 次、间隔 2s。
+image_present() {
+  local node="$1" img="$2" i
+  for i in 1 2 3; do
+    if docker exec "$node" crictl images -q "$img" 2>/dev/null | grep -q .; then
+      return 0
+    fi
+    if [ "$i" -lt 3 ]; then
+      sleep 2
+    fi
+  done
+  return 1
+}
+
 check_images() {
   local images nodes node img missing=0
   if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
@@ -78,7 +95,7 @@ check_images() {
       continue
     fi
     for img in $images; do
-      if ! docker exec "$node" crictl images -q "$img" 2>/dev/null | grep -q .; then
+      if ! image_present "$node" "$img"; then
         printf '缺失镜像: %s -> %s\n' "$node" "$img" >&2
         missing=1
       fi
@@ -197,18 +214,29 @@ ensure_control_plane() {
   log_group "$GROUP" "控制面已 apply(hash=${want:0:12})"
 }
 
-# ---- 5. agentd 配置(白名单/桶/容量)----
+# ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数)----
+# 白名单、容量与自动 K 的两个输入在 traincache-config ConfigMap;桶仍是 DaemonSet 显式 env。
 ensure_agent_config() {
-  local cur_wl cur_bucket cur_cap
-  cur_wl="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_DATASET_WHITELIST")].value}' 2>/dev/null || true)"
+  local cur_wl cur_bucket cur_cap cur_sw cur_mf changed=0
+  cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"
+  cur_cap="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null || true)"
+  cur_sw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
+  cur_mf="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.maxFillFraction}' 2>/dev/null || true)"
   cur_bucket="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_OBJSTORE_BUCKET")].value}' 2>/dev/null || true)"
-  cur_cap="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_CACHE_CAPACITY_BYTES")].value}' 2>/dev/null || true)"
-  if [ "$cur_wl" != "$DATASET" ] || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB)"
-    kubectl -n "$NS" set env daemonset/traincache-agentd \
-      TRAINCACHE_DATASET_WHITELIST="$DATASET" \
-      TRAINCACHE_OBJSTORE_BUCKET="$MINIO_BUCKET" \
-      TRAINCACHE_CACHE_CAPACITY_BYTES="$CAPACITY_BYTES" >/dev/null
+  if [ "$cur_wl" != "$DATASET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ] \
+     || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ]; then
+    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION"
+    kubectl -n "$NS" patch configmap traincache-config --type merge \
+      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\"}}" >/dev/null
+    changed=1
+  fi
+  if [ "$cur_bucket" != "$MINIO_BUCKET" ]; then
+    log_group "$GROUP" "修正 agentd 桶: BUCKET=$MINIO_BUCKET"
+    kubectl -n "$NS" set env daemonset/traincache-agentd TRAINCACHE_OBJSTORE_BUCKET="$MINIO_BUCKET" >/dev/null
+    changed=1
+  fi
+  if [ "$changed" -eq 1 ]; then
+    kubectl -n "$NS" rollout restart daemonset/traincache-agentd >/dev/null
     kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null
     log_group "$GROUP" "agentd 配置已修正并滚动更新完成"
   else

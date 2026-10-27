@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	corelog "traincache/core/logging"
 )
 
 // output is the JSON destination. Tests replace it to capture structured
@@ -29,7 +31,11 @@ const logSchemaVersion = 1
 // validation rejects invalid values before New is called; an unknown level
 // degrades to info so that logging can never prevent startup.
 func New(component, version, level string) *slog.Logger {
-	handler := slog.NewJSONHandler(output, &slog.HandlerOptions{Level: parseLevel(level)})
+	// 脱敏包在 JSON handler 外层：消息、字符串与 error 属性写出前统一处理，
+	// 调用点不需要逐个调用 Redact（D32）。
+	handler := corelog.NewRedactingHandler(
+		slog.NewJSONHandler(output, &slog.HandlerOptions{Level: parseLevel(level)}),
+	)
 	logger := slog.New(handler).With(
 		slog.String("component", component),
 		slog.String("version", version),

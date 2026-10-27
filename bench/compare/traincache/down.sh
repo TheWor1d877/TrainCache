@@ -25,7 +25,7 @@ kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2
 log_group "$GROUP" "warmuptask/compare-task 已删除"
 
 # DataSet(用 datasets.traincache.io 避免与 Fluid CRD 冲突)
-DATASET="${DATASET:-compare-data}"
+DATASET="${DATASET:-compare-data-8m}"
 kubectl -n "$NS" delete datasets.traincache.io "$DATASET" --ignore-not-found --wait=true 2>/dev/null || true
 log_group "$GROUP" "dataset/$DATASET 已删除"
 

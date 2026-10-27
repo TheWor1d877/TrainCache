@@ -46,7 +46,8 @@ N_TARS="${N_TARS:-32}"                        # M 档全量(8GiB);run_bench 按�
 # WarmupTask 预热块数:启动窗口口径=预热 1GiB 字节(=1GiB 缓存容量整档;
 # 对 M 档 8GiB 数据即"预热至多覆盖 1/8"的 9.0/D19 口径,与旧 64MiB×16 块同字节量)。
 # 块大小 8MiB 后 k = 1GiB / 8MiB = 128;块大小改档时按 字节量/CHUNK_BYTES 重算。
-# 0 = 不预热(冷启动)。可用 TRAINCACHE_WARMUP_K 覆盖。
+# 0 = bench 冷启动哨兵:跳过 WarmupTask 创建与 gate,不把 0 写进 CRD 的 podDetails[].k。
+# 可用 TRAINCACHE_WARMUP_K 覆盖。
 WARMUP_K="${TRAINCACHE_WARMUP_K:-128}"
 
 # 本地 tar 数据源(trainpublish 读本地文件切块上传)
@@ -60,8 +61,7 @@ TRAINCACHE_REPO="${TRAINCACHE_REPO:-$(cd "$COMPARE_ROOT/../.." && pwd)}"
 group_header "$GROUP"
 check_minio "$GROUP"
 
-# ---- 0. 发布数据快照(trainpublish 读本地 tar 切块上传,生成 dataset/$DATASET/CURRENT;
-#            正式口径快照 compare-data-8m 的发布为后续动作,MinIO 中暂不存在)----
+# ---- 0. 发布数据快照(五档共用一份;B 轨全部分片进 manifest,档位只收窄轨迹)----
 publish_snapshot() {
   local minio_pod
   minio_pod="$(kubectl -n "$MINIO_NS" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
@@ -69,14 +69,71 @@ publish_snapshot() {
     log_group "$GROUP" "错误: MinIO Pod 未就绪,无法发布数据" >&2
     return 1
   fi
-  # 确保 MinIO pod 内有 mc alias
   kubectl -n "$MINIO_NS" exec "$minio_pod" -- mc alias set local \
     http://localhost:9000 "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" >/dev/null 2>&1 || true
-  # 幂等:CURRENT 已存在则跳过
-  if kubectl -n "$MINIO_NS" exec "$minio_pod" -- mc stat "local/$MINIO_BUCKET/dataset/$DATASET/CURRENT" >/dev/null 2>&1; then
-    log_group "$GROUP" "数据快照已存在,跳过发布"
+
+  # 快照覆盖的 tar 数：manifest 的 shards[] 是 idx 文件（trainpublish 会把
+  # 多个 tar 打进同一个 idx），必须数 idx 里的 distinct path，不能数 manifest 条目。
+  snapshot_shard_count() {
+    local cur man keys key idx_tmp n
+    cur="$(kubectl -n "$MINIO_NS" exec "$minio_pod" -- \
+      mc cat "local/$MINIO_BUCKET/dataset/$DATASET/CURRENT" 2>/dev/null | awk '{print $1}' || true)"
+    [ -n "$cur" ] || { echo 0; return 0; }
+    man="$(kubectl -n "$MINIO_NS" exec "$minio_pod" -- \
+      mc cat "local/$MINIO_BUCKET/dataset/$DATASET/snapshots/$cur/manifest.json" 2>/dev/null || true)"
+    keys="$(printf '%s' "$man" | "$PY" -c 'import json,sys
+try:
+    print("\n".join(s["key"] for s in json.load(sys.stdin).get("shards", [])))
+except Exception:
+    pass' 2>/dev/null || true)"
+    [ -n "$keys" ] || { echo 0; return 0; }
+    idx_tmp="$(mktemp)"
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      kubectl -n "$MINIO_NS" exec "$minio_pod" -- \
+        mc cat "local/$MINIO_BUCKET/$key" >>"$idx_tmp" 2>/dev/null || true
+      printf '\n' >>"$idx_tmp"
+    done <<< "$keys"
+    n="$("$PY" -c 'import json,sys
+data=open(sys.argv[1], encoding="utf-8", errors="replace").read()
+dec=json.JSONDecoder(); i=0; paths=set()
+while i < len(data):
+    while i < len(data) and data[i].isspace():
+        i += 1
+    if i >= len(data):
+        break
+    try:
+        obj, i = dec.raw_decode(data, i)
+    except ValueError:
+        break
+    for e in obj:
+        if isinstance(e, dict) and e.get("path"):
+            paths.add(e["path"])
+print(len(paths))' "$idx_tmp" 2>/dev/null || echo 0)"
+    rm -f "$idx_tmp"
+    echo "${n:-0}"
+  }
+
+  # 全部分片进一份快照:S/M/L 的轨迹只决定消费前几个,不另发布小快照
+  local tars=() f
+  for f in "$TRACK_B_DIR"/shard-*.tar; do
+    [ -f "$f" ] && tars+=("$f")
+  done
+  if [ "${#tars[@]}" -eq 0 ]; then
+    log_group "$GROUP" "错误: $TRACK_B_DIR 下没有 shard-*.tar" >&2
+    return 1
+  fi
+  local want="${#tars[@]}" have
+  have="$(snapshot_shard_count | tr -d '[:space:]')"
+  have="${have:-0}"
+  if [ "$have" -ge "$want" ]; then
+    log_group "$GROUP" "数据快照已覆盖 $have 个分片(need $want),跳过发布"
     return 0
   fi
+  if [ "$have" -gt 0 ]; then
+    log_group "$GROUP" "数据快照只覆盖 $have 个分片,补发布到 $want"
+  fi
+
   # 构建 trainpublish(缺失时)
   if [ ! -x "$TRAINPUBLISH_BIN" ]; then
     if [ ! -d "$TRAINCACHE_REPO/core/cmd/trainpublish" ]; then
@@ -88,18 +145,14 @@ publish_snapshot() {
     (cd "$TRAINCACHE_REPO" && go build -o "$TRAINPUBLISH_BIN" ./core/cmd/trainpublish) \
       || { log_group "$GROUP" "错误: trainpublish 构建失败" >&2; return 1; }
   fi
-  # 收集前 N_TARS 个 shard
-  local tars=() i f
-  for i in $(seq 0 $(( N_TARS - 1 ))); do
-    f="$(printf '%s/shard-%05d.tar' "$TRACK_B_DIR" "$i")"
-    [ -f "$f" ] || { log_group "$GROUP" "错误: 缺少 $f" >&2; return 1; }
-    tars+=("$f")
-  done
   # 经 nodePort 访问 MinIO(kind 不映射到宿主机,用节点 InternalIP)
   local node_ip
   node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
   local node_port="${MINIO_NODEPORT:-30090}"
-  log_group "$GROUP" "发布 ${#tars[@]} 个 shard 到 MinIO (dataset=$DATASET)..."
+  # work-dir 必须落在数据层:默认 /tmp 是 16 GiB tmpfs,128 分片全量快照会写爆
+  local work_dir="${TRAINPUBLISH_WORK_DIR:-$TRACK_B_DIR/../../_trainpublish}"
+  mkdir -p "$work_dir"
+  log_group "$GROUP" "发布 ${#tars[@]} 个 shard 到 MinIO (dataset=$DATASET, work=$work_dir)..."
   "$TRAINPUBLISH_BIN" \
     --dataset "$DATASET" \
     --endpoint "${node_ip}:${node_port}" \
@@ -108,9 +161,16 @@ publish_snapshot() {
     --bucket "$MINIO_BUCKET" \
     --chunk-size "$CHUNK_BYTES" \
     --concurrency 8 \
+    --work-dir "$work_dir" \
     "${tars[@]}" \
     || { log_group "$GROUP" "错误: trainpublish 发布失败" >&2; return 1; }
-  log_group "$GROUP" "数据快照发布完成"
+
+  have="$(snapshot_shard_count | tr -d '[:space:]')"
+  if [ "${have:-0}" -lt "$want" ]; then
+    log_group "$GROUP" "错误: 快照只发布 ${have:-0}/$want 个分片" >&2
+    return 1
+  fi
+  log_group "$GROUP" "数据快照发布完成($have 个分片)"
 }
 publish_snapshot
 
@@ -204,23 +264,31 @@ bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 6. WarmupTask CR(先删后建,不可原地更新)----
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
-# gate 绝对超时。默认 5m;S 档 100mbit 的 warm 格用 7m
-# (单一 MinIO 出站 100mbit × fanout 4,4GiB 预热约需 344s)。
+# gate 绝对超时。全档统一 5m(单一 MinIO 出站 100mbit × fanout 2,
+# 2GiB 预热约需 172s,5m 留足余量;9.2 §7 撤销了旧的 7m 特例)。
 GATE_TMAX="${TRAINCACHE_GATE_TMAX:-5m}"
 WARM_SECONDS=0
 kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2>/dev/null || true
 
 if [ "$WARMUP_K" = "0" ]; then
-  # traincache-cold:K=0 被 ValidateTask 拒绝,不创建 WarmupTask,不走 gate
+  # traincache-cold:WARMUP_K=0 是 bench 冷启动哨兵,不创建 WarmupTask,不走 gate
   log_group "$GROUP" "WARMUP_K=0(cold):跳过 WarmupTask 创建与等待"
   echo "[WARMUP_SECONDS] 0"  # run_bench.py 解析此行
+  echo "[WARMUP_BASIS] cold"
 else
-  # fanout 到全部 s3-access 节点:train-job PodCount=1 但 preheatFanout 拉满
+  # fanout 固定 2(D26):先给两个节点预热,scheduler 按就绪度选落点;
+  # 节点数只作上限校验,不够 2 个直接中止
   S3_NODE_CNT=$(kubectl get nodes -l traincache.io/s3-access=true --no-headers 2>/dev/null | wc -l)
-  if [ "$S3_NODE_CNT" -lt 1 ]; then
-    S3_NODE_CNT=4
+  PREHEAT_FANOUT="${TRAINCACHE_PREHEAT_FANOUT:-2}"
+  PREHEAT_FANOUT_MIN="${TRAINCACHE_PREHEAT_FANOUT_MIN:-1}"
+  if [ "$S3_NODE_CNT" -lt "$PREHEAT_FANOUT" ]; then
+    log_group "$GROUP" "错误: s3-access 节点数 $S3_NODE_CNT 少于 fanout $PREHEAT_FANOUT" >&2
+    exit 1
   fi
-  log_group "$GROUP" "WarmupTask fanout: preheatFanoutMin=$S3_NODE_CNT preheatFanout=$S3_NODE_CNT ($S3_NODE_CNT 个 s3-access 节点)"
+  if [ "$PREHEAT_FANOUT_MIN" -gt "$PREHEAT_FANOUT" ]; then
+    PREHEAT_FANOUT_MIN="$PREHEAT_FANOUT"
+  fi
+  log_group "$GROUP" "WarmupTask fanout: preheatFanoutMin=$PREHEAT_FANOUT_MIN preheatFanout=$PREHEAT_FANOUT ($S3_NODE_CNT 个 s3-access 节点)"
 
   WARMUP_YAML=$(cat <<EOF
 apiVersion: traincache.io/v1alpha1
@@ -236,8 +304,8 @@ spec:
     kind: Pod
     name: train-job-0
   podCount: 1
-  preheatFanoutMin: $S3_NODE_CNT
-  preheatFanout: $S3_NODE_CNT
+  preheatFanoutMin: $PREHEAT_FANOUT_MIN
+  preheatFanout: $PREHEAT_FANOUT
   affinity: Any
   trainingType: static
   podDetails:
@@ -273,9 +341,24 @@ EOF
     GATE_STATE=$(kubectl -n "$NS" get warmuptask compare-task -o jsonpath='{.status.gateDecision.state}' 2>/dev/null || echo "")
     if [ "$WARM_PHASE" = "Released" ] || [ "$GATE_STATE" = "Released" ]; then
       WARM_T1=$(date +%s)
-      WARM_SECONDS=$(( WARM_T1 - WARM_T0 ))
-      log_group "$GROUP" "warmuptask/compare-task 已 Released,预热时长=${WARM_SECONDS}s (phase=$WARM_PHASE gate=$GATE_STATE)"
+      WALL_SECONDS=$(( WARM_T1 - WARM_T0 ))
+      # 预热时长优先取控制器事件时间：startedAt → gateDecision.decidedAt，
+      # 不受轮询量化影响。字段缺失时回退墙钟。
+      STARTED_AT=$(kubectl -n "$NS" get warmuptask compare-task -o jsonpath='{.status.startedAt}' 2>/dev/null || true)
+      DECIDED_AT=$(kubectl -n "$NS" get warmuptask compare-task -o jsonpath='{.status.gateDecision.decidedAt}' 2>/dev/null || true)
+      WARM_SECONDS=$WALL_SECONDS
+      WARM_BASIS=wall
+      if [ -n "$STARTED_AT" ] && [ -n "$DECIDED_AT" ]; then
+        S_EPOCH=$(date -d "$STARTED_AT" +%s 2>/dev/null || true)
+        D_EPOCH=$(date -d "$DECIDED_AT" +%s 2>/dev/null || true)
+        if [ -n "$S_EPOCH" ] && [ -n "$D_EPOCH" ] && [ "$D_EPOCH" -ge "$S_EPOCH" ]; then
+          WARM_SECONDS=$(( D_EPOCH - S_EPOCH ))
+          WARM_BASIS=event
+        fi
+      fi
+      log_group "$GROUP" "warmuptask/compare-task 已 Released,预热时长=${WARM_SECONDS}s(basis=$WARM_BASIS,wall=${WALL_SECONDS}s,phase=$WARM_PHASE gate=$GATE_STATE)"
       echo "[WARMUP_SECONDS] $WARM_SECONDS"  # run_bench.py 解析此行
+      echo "[WARMUP_BASIS] $WARM_BASIS"
       break
     fi
     if [ "$WARM_PHASE" = "Failed" ] || [ "$WARM_PHASE" = "Degraded" ]; then
@@ -287,7 +370,7 @@ EOF
       log_group "$GROUP" "等待 WarmupTask 超时(>${TRAINCACHE_WARMUP_TIMEOUT}s,phase=$WARM_PHASE gate=$GATE_STATE),整轮作废" >&2
       exit 1
     fi
-    sleep 10
+    sleep 2
   done
 fi
 
