@@ -79,7 +79,7 @@ release.yml 完成后
 
 | 文件 | 触发 |
 |---|---|
-| `verify.yml` | push、PR 到 `dev`/`main` |
+| `verify.yml` | push 到 `dev`/`main`；任意 base 的 PR |
 | `e2e.yml` | PR 到 `main` 自动，或手动 |
 | `release.yml` | push tag `v*` |
 | `release-smoke.yml` | `release.yml` 成功后自动，或手动输入 tag |
@@ -88,7 +88,7 @@ release.yml 完成后
 
 | 触发 | 内容 | 时长 | 是否阻塞 |
 |---|---|---|---|
-| push `dev` / PR→`dev` | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染 | ~5 min | 必须过 |
+| push `dev` / 任意 PR | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染 | ~5 min | 必须过 |
 | PR `dev`→`main` | 同上 + 版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 对齐）+ 文档引用完整性 | ~5 min | 必须过 |
 | PR `dev`→`main` | kind e2e | ~45 min | 必须过，合并门禁 |
 | push tag `v*` | 构建推镜像 → 渲染 `install.yaml` → 打 tar → 建 draft Release | ~15 min | 发布本身 |

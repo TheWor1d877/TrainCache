@@ -4,7 +4,6 @@ on:
   push:
     branches: [dev, main]
   pull_request:
-    branches: [dev, main]
   workflow_dispatch:
 
 jobs:
@@ -46,3 +45,17 @@ jobs:
           fetch-depth: 0   # 版本检查要读 HEAD 上的 tag
       - name: check versions and doc refs
         run: make verify-metadata
+
+  # 门禁只认这一个名字：以后往 matrix 加模块，GitHub 保护规则不用改。
+  gate:
+    name: verify gate
+    needs: [unit, render, metadata]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: |
+          set -euo pipefail
+          for r in '${{ needs.unit.result }}' '${{ needs.render.result }}' '${{ needs.metadata.result }}'; do
+            [[ "$r" == success || "$r" == skipped ]] || { echo "上游 $r，不放行" >&2; exit 1; }
+          done
