@@ -1,4 +1,5 @@
-# e2e tenant namespace and object-store credentials.
+# e2e tenant namespace, object-store credentials, and the manager's Secret-read
+# grant in this namespace.
 #
 # Two Secrets are needed because the controller reads the DataSet credential
 # from the workload namespace (Q9 namespaced RBAC) while the Agent DaemonSet
@@ -29,3 +30,34 @@ type: Opaque
 stringData:
   accessKey: traincache
   secretKey: traincache-probe
+---
+# The manager reads the DataSet credential Secret from the DataSet's own
+# namespace (docs/7.3 Q9), so this tenant namespace needs its own get grant.
+# The shipped Role in controller/deploy/manager/rbac.yaml covers traincache only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: traincache-dataset-secrets
+  namespace: traincache-e2e
+  labels:
+    app.kubernetes.io/part-of: traincache
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-controller-manager-secrets
+  namespace: traincache-e2e
+  labels:
+    app.kubernetes.io/part-of: traincache
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: traincache-dataset-secrets
+subjects:
+  - kind: ServiceAccount
+    name: traincache-controller-manager
+    namespace: traincache

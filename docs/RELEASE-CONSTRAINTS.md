@@ -131,6 +131,8 @@ release.yml 完成后
 - 控制面：`DataSet.spec.endpoint`（不带 scheme）、`spec.bucket`、`spec.secretRef`。Secret 字段 `accessKey`、`secretKey`，与 DataSet 同 namespace。
 - Agent：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_ACCESS_KEY`、`TRAINCACHE_OBJSTORE_SECRET_KEY`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`。
 
+控制面读凭证按 DataSet 所在 namespace 逐个授权，集群默认只授了 `traincache` 一个 namespace（`controller/deploy/manager/rbac.yaml`）。DataSet 放到别的 namespace，安装方要在该 namespace 补一份 Role + RoleBinding，给 controller-manager 的 ServiceAccount `secrets: get`；写法见 `controller/e2e/manifests/tenant.yaml`。漏授时 DataSet 停在 `Ready=False`，condition 报 `StorageUnreachable: ... secrets "traincache-objstore" is forbidden`。不给集群级 Secret 读权限（7.3 Q9）。
+
 条件写支持用 `trainpublish --probe-conditional-write` 探测。
 
 ### 5.2 训练负载

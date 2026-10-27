@@ -2,9 +2,10 @@
 #
 # Secrets are intentionally NOT granted cluster-wide (docs/7.3 Q9). The manager
 # only reads the object-store credential Secret referenced by a DataSet, so a
-# namespaced Role is bound per tenant namespace. The shipped Role targets the
-# e2e tenant namespace; production installs add one RoleBinding per dataset
-# namespace.
+# namespaced Role is bound per tenant namespace. The shipped Role covers the
+# traincache namespace; every additional DataSet namespace needs its own
+# Role + RoleBinding for this ServiceAccount (the e2e tenant ships its own in
+# controller/e2e/manifests/tenant.yaml).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -55,10 +56,11 @@ subjects:
     name: traincache-controller-manager
     namespace: traincache
 ---
-# Namespaced Secret read for the e2e tenant. Add the same Role/RoleBinding to
-# every namespace that hosts DataSets. Only "get" is granted: the manager
-# disables client caching for Secrets (Q9), so no cluster-wide list/watch is
-# needed; the storage factory caches stores by Secret resourceVersion.
+# Namespaced Secret read for DataSets hosted in the traincache namespace. Add
+# the same Role/RoleBinding to every other namespace that hosts DataSets. Only
+# "get" is granted: the manager disables client caching for Secrets (Q9), so no
+# cluster-wide list/watch is needed; the storage factory caches stores by Secret
+# resourceVersion.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
