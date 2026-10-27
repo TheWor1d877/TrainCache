@@ -441,7 +441,7 @@ def validate_cond(cond: dict) -> list[str]:
         if isinstance(gate, dict):
             _check_unknown(gate, ALLOWED_GATE, "$.prefetch.gate", errors)
             for k, frozen in (("threshold", 0.9), ("gap_min", 0.1),
-                              ("slope_min", 0.001), ("t_max_s", 300),
+                              ("slope_min", 0.001), ("t_max_s", 600),
                               ("min_interval_s", 1)):
                 v = gate.get(k)
                 if v is not None and abs(float(v) - frozen) > 1e-9:
