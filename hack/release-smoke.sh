@@ -52,6 +52,14 @@ kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --wait 180s >/dev/nu
 printf '\n== install %s\n' "$TAG"
 kubectl apply -f "$INSTALL" >/dev/null && ok "install.yaml applied" || fail "kubectl apply"
 
+printf '\n== objstore credential\n'
+# agentd 的 DaemonSet 要求同命名空间存在凭证 Secret；smoke 不读写块数据，
+# 值非空即可让容器启动。
+kubectl -n "$NS" create secret generic traincache-objstore \
+  --from-literal=accessKey=smoke --from-literal=secretKey=smoke \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+  && ok "objstore secret" || fail "objstore secret"
+
 printf '\n== webhook TLS\n'
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
   -keyout "$TLS/ca.key" -out "$TLS/ca.crt" -subj "/CN=traincache-smoke-ca" >/dev/null 2>&1 \
