@@ -14,6 +14,13 @@ spec:
     kind: Job
     name: train-job
   podCount: 2
+  # One preheat Node per Pod. GWAA fits a single placement unit per Node, so
+  # with the two labelled candidates the CRD default of 2 lets the first Pod
+  # claim both Nodes and starves the second (MinUnmet, never preheated); the
+  # train-job nodeAffinity also needs each Pod warm on exactly one Node to make
+  # the NodeDeviation landing deterministic.
+  preheatFanout: 1
+  preheatFanoutMin: 1
   affinity: Any
   trainingType: static
   podDetails:

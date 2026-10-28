@@ -17,6 +17,11 @@
 #   SKIP_BUILD=1            (reuse images without a freshness check; may test
 #                            stale code, never the default)
 #   SKIP_NODE_LABELS=1      (skip the simulated admin labelling step)
+#   TRAINCACHE_DATA_ROOT=<结果与 MinIO 数据的根，默认 <repo 同级>/traincachedata>
+#
+# setup/run/assert switch the global kubectl context to kind-$CLUSTER and never
+# switch it back; export a private KUBECONFIG copy when other clusters are
+# configured on the host.
 #
 # Images are rebuilt automatically when any of their build inputs (the
 # go.work files plus the per-component source trees listed next to each
@@ -516,18 +521,25 @@ assert_webhook_injection() {
 
 assert_preheat_and_release() {
   step "assert 2: preheat progress and gate release"
-  local phase gate_state ready_rows pod_count
+  local phase gate_state ready_rows pod_count fanout warm_pods
   phase="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.phase}')"
   gate_state="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.gateDecision.state}')"
   ready_rows="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json | jq '[.status.podNodeReadiness[]?] | length')"
   pod_count="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.spec.podCount}')"
+  fanout="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.spec.preheatFanout}')"
+  warm_pods="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json \
+    | jq '[.status.podNodeReadiness[]? | select(.nodeName != null and .nodeName != "") | .podIndex] | unique | length')"
   [[ "$phase" == "Released" ]] && ok "WarmupTask phase=Released" || fail "WarmupTask phase=$phase"
   [[ "$gate_state" == "Released" ]] && ok "gateDecision.state=Released ($(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.gateDecision.reason}'))" \
     || fail "gateDecision.state=$gate_state"
-  # M12/S15: exactly one PodNodeReadiness entry per Pod; candidate-node
-  # granularity lives in status.readinessTable.
-  [[ "$ready_rows" -eq "$pod_count" ]] && ok "preheat progress rows=$ready_rows (one per Pod)" \
-    || fail "podNodeReadiness rows=$ready_rows, want podCount=$pod_count"
+  # docs/7.1 §6.1: rows expand per (Pod, 预热节点) pair, so the count is bounded by
+  # podCount × preheatFanout rather than equal to podCount. A Pod that claimed no
+  # Node appears only as a NodeName-empty summary row, which is the starvation
+  # signal GWAA's MinUnmet reports.
+  [[ "$warm_pods" -eq "$pod_count" ]] && ok "every Pod preheated on a Node ($warm_pods/$pod_count)" \
+    || fail "only $warm_pods/$pod_count Pods have a preheat Node (MinUnmet starvation)"
+  (( ready_rows <= pod_count * fanout )) && ok "rows=$ready_rows within podCount×preheatFanout=$((pod_count * fanout))" \
+    || fail "podNodeReadiness rows=$ready_rows exceeds podCount×preheatFanout=$((pod_count * fanout))"
   # The readiness facts must show actual ready blocks on the assigned nodes.
   local progress
   progress="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json | jq '[.status.podNodeReadiness[]? | select((.readyInWindow // 0) > 0 or ((.readyBlockBitmap // "") | length > 0))] | length')"
@@ -561,26 +573,40 @@ assert_gates_and_scheduling() {
 
 assert_node_scores() {
   step "assert 4: per-task Node score annotations"
-  local key nodes n ann
+  local key nodes n ann pairs
   key="$(score_key "$TENANT" "$TASK")"
   info "score annotation key: $key"
   nodes="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json | jq -r '.status.candidateNodes[]?')"
   if [[ -z "$nodes" ]]; then fail "candidateNodes is empty"; return; fi
+  # 控制器只为 podNodeReadiness 里真实配过对的 (pod,node) 写条目（docs/7.1 §6.2），
+  # 缺条目是 Scheduler 的取 0 分支（§5.8），不是错误。所以按配对集合逐项核对，
+  # 而不是要求每个候选节点都带齐所有 Pod。
+  pairs="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json \
+    | jq -r '.status.podNodeReadiness[]? | select(.nodeName != null) | "\(.nodeName) \(.podIndex)"')"
   for n in $nodes; do
     ann="$(kubectl get node "$n" -o json | jq -r --arg k "$key" '.metadata.annotations[$k] // empty')"
     if [[ -z "$ann" ]]; then
       fail "node $n missing annotation $key"
       continue
     fi
-    if jq -e --arg task "$TASK_REF" '
+    if ! jq -e --arg task "$TASK_REF" '
       .v == 1 and .task == $task and (.g >= 1) and
       (.t | type == "string") and
-      (.p["0"] | type == "number") and (.p["0"] >= 0 and .p["0"] <= 100) and
-      (.p["1"] | type == "number") and (.p["1"] >= 0 and .p["1"] <= 100)
+      (.p | to_entries | all(((.value | type) == "number") and .value >= 0 and .value <= 100)) and
+      (.p | length >= 1)
     ' >/dev/null 2>&1 <<<"$ann"; then
-      ok "node $n annotation parses; p=$(jq -c '.p' <<<"$ann") g=$(jq -r '.g' <<<"$ann")"
-    else
       fail "node $n annotation invalid: $ann"
+      continue
+    fi
+    local pod node_field missing=""
+    while read -r node_field pod; do
+      [[ -n "$pod" ]] || continue
+      jq -e --arg p "$pod" '(.p[$p] | type) == "number"' >/dev/null 2>&1 <<<"$ann" || missing="$missing $pod"
+    done <<<"$(grep -s "^$n " <<<"$pairs")"
+    if [[ -n "$missing" ]]; then
+      fail "node $n annotation has no score for paired pod(s):$missing (p=$(jq -c '.p' <<<"$ann"))"
+    else
+      ok "node $n annotation parses; p=$(jq -c '.p' <<<"$ann") g=$(jq -r '.g' <<<"$ann")"
     fi
   done
 }
@@ -730,6 +756,11 @@ main() {
     assert) assert_all ;;
     *) say "usage: $0 [clean|setup|run|assert]"; exit 2 ;;
   esac
+  # 失败必须留现场：CI 只上传 results/ 目录，而 collect_artifacts 原本只在断言阶段
+  # 跑，run_flow 或 setup 一失败就直接退出，pod 日志因此从未进过 artifact。
+  if (( FAILS > 0 )) && [[ "$MODE" != clean ]]; then
+    collect_artifacts
+  fi
   if [[ "$FAILS" -gt 0 ]]; then
     say ""
     say "RESULT: FAIL ($FAILS assertion/step failure(s)); see $RESULTS/run.log and $LOGS/"

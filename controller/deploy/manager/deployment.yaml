@@ -32,8 +32,8 @@ spec:
               value: ":9412"
             - name: CONTROLLER_HEALTH_ADDR
               value: ":8081"
-            # Empty means all namespaces; the manager is the only cluster-wide
-            # control-plane component.
+            # Recorded in the startup log only: the manager watches every
+            # namespace whatever this holds.
             - name: CONTROLLER_NAMESPACE
               value: ""
             - name: CONTROLLER_AGENT_PORT

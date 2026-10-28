@@ -7,12 +7,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
@@ -130,7 +128,6 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 		CacheCapacityBytes:    cfg.CacheCapacityBytes,
 		StartupWindowBytes:    cfg.StartupWindowBytes,
 		MaxFillFraction:       cfg.MaxFillFraction,
-		Rand:                  rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	if err := warmupReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("register warmup controller: %w", err)

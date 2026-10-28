@@ -74,7 +74,7 @@ Agent 在 `controller/deploy/agent/daemonset.yaml` 的 env 里配置；控制面
 | Agent | `TRAINCACHE_OBJSTORE_ENDPOINT` | DaemonSet env | `127.0.0.1:9000` | S3 兼容端点，不带 scheme |
 | Agent | `TRAINCACHE_OBJSTORE_ACCESS_KEY` | DaemonSet env，值取自 Secret `traincache-objstore` 的 `accessKey` | 空 | 静态 AK，生产用 Secret 注入 |
 | Agent | `TRAINCACHE_OBJSTORE_SECRET_KEY` | DaemonSet env，值取自 Secret `traincache-objstore` 的 `secretKey` | 空 | 静态 SK |
-| Agent | `TRAINCACHE_OBJSTORE_BUCKET` | DaemonSet env | `traincache` | 单桶 |
+| Agent | `TRAINCACHE_OBJSTORE_BUCKET` | DaemonSet env | `traincache` | 单桶；须等于 `DataSet.spec.bucket`（`SubmitPreheat` 不带桶名，不一致时每个块读取都失败） |
 | Agent | `TRAINCACHE_OBJSTORE_SECURE` | DaemonSet env | `false` | `true` 时用 HTTPS |
 | Agent | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | DaemonSet env | `false` | 启动时探测后端条件写 |
 | DataSet | `spec.endpoint` / `spec.bucket` / `spec.secretRef` | DataSet YAML | 无 | 控制面读这三个字段；Secret 字段 `accessKey`、`secretKey`，与 DataSet 同 namespace |
@@ -134,13 +134,17 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 | 变量 | 改哪里 | 部署清单值 | 说明 |
 |---|---|---|---|
 | `CONTROLLER_POLL_INTERVAL` | manager Deployment env | `1s` | Controller 轮询 Agent 状态的间隔 |
+| `CONTROLLER_AGENT_PORT` | manager Deployment env | `9410` | Controller 连接 Agent 的 gRPC 端口，必须与 Agent 实际监听一致 |
 | `CONTROLLER_AGENT_TIMEOUT` | manager Deployment env | `5s` | 单次 Agent 调用超时 |
 | `CONTROLLER_SCORE_TTL` | manager Deployment env | `10m` | 调度分数有效期 |
 | `SCHEDULER_SCORE_TTL` | scheduler Deployment env | `10m` | Scheduler 读取分数的有效期，必须与 Controller 一致 |
 | `CONTROLLER_MAX_CHUNKS` | manager Deployment env | `10000000` | 单任务块数上限 |
 | `CONTROLLER_LOG_LEVEL` | manager / webhook / scheduler Deployment env | `info` | `debug` / `info` / `warn` / `error` |
 | `CONTROLLER_LEADER_ELECTION` | manager Deployment env | `false` | 多副本时开 |
-| `CONTROLLER_NAMESPACE` | manager / webhook Deployment env | 空 | 空 = 监听所有 namespace |
+| `CONTROLLER_METRICS_ADDR` | manager / webhook / scheduler Deployment env | `:9412` | Prometheus 指标监听 |
+| `CONTROLLER_HEALTH_ADDR` | manager / webhook / scheduler Deployment env | `:8081` | `healthz` / `readyz` 监听，探针按同名端口引用 |
+| `CONTROLLER_WEBHOOK_ADDR` | webhook Deployment env | `:9443` | webhook server 监听，Service 443 转发到这里 |
+| `CONTROLLER_NAMESPACE` | manager / webhook Deployment env | 空 | 只校验格式并记进启动日志，不改变任何监听范围：manager 始终 watch 全部 namespace，webhook 的准入范围由 `objectSelector` 的 `traincache.io/warmup: enabled` 决定；留空即可 |
 
 manager、webhook、scheduler 三个 Deployment 分别在 `controller/deploy/manager/`、`webhook/`、`scheduler/` 下的 `deployment.yaml`。
 
@@ -222,7 +226,7 @@ WarmupTask 在提交训练任务时创建，字段都在 `spec` 下，只改 War
 | `candidate.ignoreNoSchedule` | WarmupTask YAML | `false` | 忽略 NoSchedule 污点 |
 | `candidate.minFreeDiskBytes` | WarmupTask YAML | `0` | 候选节点最小剩余磁盘 |
 
-`preheatFanout` 是上限，不是必须凑满。多节点上预热 IO 与缓存占用最多按 fanout 翻倍；介意成本就显式写 `preheatFanout: 1`。
+`preheatFanout` 是上限，不是必须凑满：预热不占调度容量，一个候选节点只服务一个 Pod 的预热，所以要让每个 Pod 都有落点，候选节点数得 ≥ `podCount × preheatFanout`。不足时排在前面的 Pod 把节点认领干净，其余 Pod 记 `MinUnmet`、一个块都没被预热，它们的速率恒为 0 会把门控推向 `marginal_gain_insufficient` 提前放行。介意成本或候选节点少，就显式写 `preheatFanout: 1`。
 
 ### 4.1 启动窗口 K 的计算
 

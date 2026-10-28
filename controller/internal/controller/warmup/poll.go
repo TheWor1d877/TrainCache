@@ -58,12 +58,14 @@ type failureKey struct {
 }
 
 // pollTracker owns the only mutable in-memory polling state: the accepted
-// generation/seq high-water mark, consecutive failure counters and rateHistory.
+// generation/seq high-water mark, consecutive failure counters, rateHistory and
+// the generation whose gate decision this process committed.
 type pollTracker struct {
 	mu          sync.Mutex
 	marks       map[progressKey]progressMark
 	failures    map[failureKey]int
 	rateHistory map[string][]RateSample
+	released    map[string]int64
 }
 
 // check reports whether a response is fresh. A repeated seq is treated as
@@ -130,6 +132,31 @@ func (t *pollTracker) nodeFailed(taskUID, node string, generation uint64, pods i
 		}
 	}
 	return true
+}
+
+// markReleased records the highest generation whose gate decision this process
+// has committed to the API server (D44).
+func (t *pollTracker) markReleased(taskUID string, generation int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.released == nil {
+		t.released = map[string]int64{}
+	}
+	if generation >= t.released[taskUID] {
+		t.released[taskUID] = generation
+	}
+}
+
+// committedRelease reports whether this process already wrote the gate decision
+// for taskUID at generation. The release's own status patch enqueues another
+// reconcile that can start from a cached copy still showing a non-terminal
+// phase, so isTerminal alone cannot freeze the release snapshot; this memo is
+// the guard that survives that race. A spec update bumps the generation and
+// reopens the loop.
+func (t *pollTracker) committedRelease(taskUID string, generation int64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.released[taskUID] >= generation
 }
 
 // recordRate keeps at most the two most recent samples and drops a sample that

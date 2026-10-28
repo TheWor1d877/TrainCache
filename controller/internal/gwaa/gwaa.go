@@ -59,8 +59,9 @@ type NodeState struct {
 }
 
 // Input is the frozen GWAA input. Nodes are the candidate set in the caller's
-// column order; Rand is injected so production can use a time seed while tests
-// use a fixed seed.
+// column order; Rand is injected so the caller controls the tie-breaking seed:
+// the warmup controller derives it per WarmupTask generation, tests use a fixed
+// seed.
 type Input struct {
 	Pods  []PodState
 	Nodes []NodeState
@@ -242,8 +243,8 @@ func Compute(in Input) Output {
 	fanout, fanoutMin := normalizedFanout(in)
 	rng := in.Rand
 	if rng == nil {
-		// Production injects a time-seeded source. A fixed fallback keeps the
-		// function total and reproducible when a caller forgets.
+		// A fixed fallback keeps the function total and reproducible when a
+		// caller forgets to inject a seeded source.
 		rng = rand.New(rand.NewSource(0))
 	}
 

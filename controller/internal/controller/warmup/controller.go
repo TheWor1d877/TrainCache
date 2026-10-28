@@ -101,8 +101,9 @@ type Reconciler struct {
 	CacheCapacityBytes int64
 	StartupWindowBytes int64
 	MaxFillFraction    float64
-	// Rand breaks GWAA ties. nil keeps gwaa's fixed-seed determinism; the
-	// manager injects a time-seeded source (D32).
+	// Rand overrides the GWAA tie-breaking source. Tests set it to a fixed seed;
+	// the manager leaves it nil so gwaaRand seeds each task from its own UID and
+	// generation (D32).
 	Rand *rand.Rand
 
 	// progress holds seq high-water marks, consecutive failure counters and
@@ -175,6 +176,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			if retErr == nil {
 				retErr = err
 			}
+		} else if isTerminal(task) {
+			r.progress.markReleased(string(task.UID), task.Generation)
 		}
 		fields := []any{"duration_ms", r.now().Sub(start).Milliseconds()}
 		if retErr != nil {
@@ -188,7 +191,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// stays before the isTerminal short-circuit.
 	r.reconcileDeviation(ctx, log, task)
 
-	if isTerminal(task) {
+	// The release's own status patch re-enqueues this task, and the next pass
+	// can start from a cached copy that still shows a pre-release phase, so
+	// isTerminal alone does not freeze the release snapshot. The in-process
+	// memo blocks that pass from re-drawing the assignment and cancelling the
+	// submits it just made (D44).
+	if isTerminal(task) || r.progress.committedRelease(string(task.UID), task.Generation) {
 		r.Metrics.ForgetGateTask(TaskKey(task))
 		log.Debug("warmup task already terminal; skipped",
 			"state", task.Status.GateDecision.State,

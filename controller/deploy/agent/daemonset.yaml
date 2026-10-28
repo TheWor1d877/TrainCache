@@ -107,7 +107,10 @@ spec:
                   name: traincache-objstore
                   key: secretKey
             - name: TRAINCACHE_OBJSTORE_BUCKET
-              value: "bench-b"
+              # Must equal DataSet.spec.bucket: SubmitPreheat has no bucket
+              # field, so a mismatch fails every block read. The bench harness
+              # overrides this value to bench-b.
+              value: "traincache"
             - name: TRAINCACHE_OBJSTORE_SECURE
               value: "false"
           ports:

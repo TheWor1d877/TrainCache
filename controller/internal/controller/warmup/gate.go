@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"math/rand"
 	"sort"
 	"strings"
 	"time"
@@ -89,12 +91,28 @@ func (r *Reconciler) computePlacement(
 	placement := gwaa.Compute(gwaa.Input{
 		Pods:      pods,
 		Nodes:     nodes,
-		Rand:      r.Rand,
+		Rand:      r.gwaaRand(task),
 		Fanout:    fanoutMax,
 		FanoutMin: fanoutMin,
 	})
 	r.Metrics.ObservePlacement(datasetKey(task), placement.PreheatSet, len(placement.UnassignedPods), placement.FellBack)
 	return placement
+}
+
+// gwaaRand returns the tie-breaking source for one placement computation. The
+// seed comes from the task UID and generation, so every poll of the same
+// generation draws the same shuffle order: at cold start all c_ij are equal, and
+// a per-reconcile random stream would flip the assignment each round and cancel
+// the previous submits (D32). Different tasks and spec updates still get an
+// independent order. Reconciler.Rand overrides it in tests.
+func (r *Reconciler) gwaaRand(task *traincachev1alpha1.WarmupTask) *rand.Rand {
+	if r.Rand != nil {
+		return r.Rand
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(task.UID))
+	_, _ = fmt.Fprintf(hash, "/%d", task.Generation)
+	return rand.New(rand.NewSource(int64(hash.Sum64())))
 }
 
 // readinessAt returns table[pod][column] defensively.
