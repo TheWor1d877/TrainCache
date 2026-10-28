@@ -16,7 +16,8 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # draft Release 只对具备 push 权限的 token 可见，read 会把草稿从列表里过滤掉。
+  contents: write
 
 concurrency:
   group: release-smoke-${{ github.event_name }}-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
