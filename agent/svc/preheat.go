@@ -543,6 +543,7 @@ func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.Preh
 		TotalBlocks:     tk.total.Load(),
 		CompletedBlocks: tk.completed.Load(),
 		FailedBlocks:    tk.failed.Load(),
+		Canceled:        tk.canceled.Load(),
 		StartedAt:       timestamppb.New(tk.startedAt),
 		UpdatedAt:       timestamppb.New(time.Unix(0, tk.updatedAt.Load())),
 		Generation:      tk.generation.Load(),

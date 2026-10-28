@@ -21,6 +21,10 @@ import (
 var (
 	ErrAgentUnavailable = errors.New("agentclient: agent unavailable")
 	ErrPermanent        = errors.New("agentclient: permanent agent error")
+	// ErrTaskNotFound is codes.NotFound: this Agent has no task under that
+	// task_id. It answers "not submitted here", which is how placement builds
+	// its submitted-task ledger. Cancel treats it as an idempotent no-op.
+	ErrTaskNotFound = errors.New("agentclient: agent has no such task")
 )
 
 // DefaultRPCTimeout is the per-call timeout from CONTROLLER_AGENT_TIMEOUT.
@@ -186,9 +190,9 @@ func (p *GRPCPool) drop(node string) {
 	}
 }
 
-// classify maps transport failures to ErrAgentUnavailable and protocol
-// rejections to ErrPermanent. Caller cancellation is returned unchanged so it
-// can be distinguished from a timeout.
+// classify maps transport failures to ErrAgentUnavailable, an absent task to
+// ErrTaskNotFound and other protocol rejections to ErrPermanent. Caller
+// cancellation is returned unchanged so it can be distinguished from a timeout.
 func classify(parent context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -201,8 +205,10 @@ func classify(parent context.Context, err error) error {
 		return fmt.Errorf("%w: %v", ErrAgentUnavailable, err)
 	}
 	switch st.Code() {
+	case codes.NotFound:
+		return fmt.Errorf("%w: %s: %s", ErrTaskNotFound, st.Code(), st.Message())
 	case codes.InvalidArgument, codes.FailedPrecondition, codes.Unimplemented,
-		codes.NotFound, codes.PermissionDenied, codes.Unauthenticated, codes.OutOfRange:
+		codes.PermissionDenied, codes.Unauthenticated, codes.OutOfRange:
 		return fmt.Errorf("%w: %s: %s", ErrPermanent, st.Code(), st.Message())
 	default:
 		// Unavailable, DeadlineExceeded, ResourceExhausted, Unknown,

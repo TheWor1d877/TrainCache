@@ -364,10 +364,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	// M4 submits every candidate until GWAA has produced an assignment. From
-	// then on only the diff RPCs run, so a cancelled preheat task is not
-	// recreated on every reconcile.
-	initialFanout := task.Status.StartedAt == nil || !hasAssignment(task)
+	task.Status.CandidateNodes = append([]string(nil), candidates...)
+	if task.Status.StartedAt == nil {
+		now := metav1.NewTime(r.now())
+		task.Status.StartedAt = &now
+	}
+	if task.Status.Phase != traincachev1alpha1.WarmupPhaseGating {
+		task.Status.Phase = traincachev1alpha1.WarmupPhasePreheating
+	}
+
+	// M5 runs before M4: the Agents' replies are the only record of which
+	// preheat tasks exist, and the wide preheat must not repeat towards a Node
+	// that already holds one. Polling failures degrade individual pairs; they
+	// never replace the submission error/backoff.
+	outcome := pollOutcome{}
+	var facts map[readinessKey]readinessFact
+	if len(candidates) > 0 && len(windows) > 0 {
+		outcome, facts = r.pollReadiness(ctx, log, task, windows, candidates, podNames)
+	}
+
+	// M4 submits every candidate while no Agent reports holding a task for this
+	// Warmup Task. From the first accepted task on only the diff RPCs run, so a
+	// preheat task is never cancelled and recreated round after round.
+	initialFanout := !anyTaskHeld(outcome.Tasks)
 	submission := newSubmitResult()
 	var submitErr error
 	if initialFanout {
@@ -391,23 +410,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 	}
 
-	task.Status.CandidateNodes = append([]string(nil), candidates...)
-	if task.Status.StartedAt == nil {
-		now := metav1.NewTime(r.now())
-		task.Status.StartedAt = &now
-	}
-	if task.Status.Phase != traincachev1alpha1.WarmupPhaseGating {
-		task.Status.Phase = traincachev1alpha1.WarmupPhasePreheating
-	}
-
-	// M5: poll every (pod,node) fact. Polling failures degrade individual
-	// pairs; they never replace the submission error/backoff.
-	outcome := pollOutcome{}
-	var facts map[readinessKey]readinessFact
-	if len(candidates) > 0 && len(windows) > 0 {
-		outcome, facts = r.pollReadiness(ctx, log, task, windows, candidates, podNames)
-	}
-
 	// M6: recompute GWAA after each poll and issue only the RPC differences.
 	// M7: evaluate the gate on the assigned node's readiness.
 	if len(candidates) > 0 && len(windows) > 0 {
@@ -423,7 +425,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				Task:      task,
 				DataSet:   ds,
 				Windows:   windows,
-				Previous:  previousPreheat(task, windows, candidates, initialFanout),
+				Previous:  submittedLedger(task, windows, candidates, outcome.Tasks, initialFanout, submission),
 				Placement: placement,
 				PodNames:  podNames,
 				Fanout:    fanout,
