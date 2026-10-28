@@ -8,7 +8,7 @@
 # 用法:
 #   TAG=v0.1.0 ./hack/verify-release-assets.sh <下载目录>
 #
-# 依赖: GH_TOKEN（contents: read）、gh、curl、sha256sum、docker。
+# 依赖: GH_TOKEN（需有草稿可见的写权限）、gh、sha256sum、docker。
 # draft Release 用列表接口解析，按 tag 查单条的接口不保证返回草稿。
 set -uo pipefail
 
@@ -23,7 +23,7 @@ FAILS=0
 ok()   { printf '  [OK]   %s\n' "$*"; }
 fail() { printf '  [FAIL] %s\n' "$*"; FAILS=$((FAILS + 1)); }
 
-for t in gh curl sha256sum docker awk sort; do
+for t in gh sha256sum docker awk sort; do
   command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 2; }
 done
 
@@ -39,7 +39,7 @@ ok "release id $rid"
 
 printf '\n== asset list\n'
 mkdir -p "$DIR"
-gh api "${API}/${rid}/assets" --paginate --jq '.[] | "\(.name)\t\(.browser_download_url)"' \
+gh api "${API}/${rid}/assets" --paginate --jq '.[] | "\(.name)\t\(.id)"' \
   >"$DIR/assets.tsv" || fail "list assets"
 
 # 期望五项：清单、镜像 tar、两个 CLI、校验和文件本身。
@@ -59,9 +59,10 @@ else
 fi
 
 printf '\n== download assets\n'
-while IFS=$'\t' read -r name url; do
-  [[ -n "$name" && -n "$url" ]] || continue
-  if curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$DIR/$name" "$url"; then
+while IFS=$'\t' read -r name _; do
+  [[ -n "$name" ]] || continue
+  if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+       --pattern "$name" --dir "$DIR" --clobber; then
     ok "$name"
   else
     fail "download $name"
