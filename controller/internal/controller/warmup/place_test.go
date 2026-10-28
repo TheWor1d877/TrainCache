@@ -80,13 +80,15 @@ func testPlacementInput() PlacementApplyInput {
 			testChunks("b"),
 			testChunks("c"),
 			testChunks("d"),
-			testChunks("new"),
+			// Pod 4's window grew to 9 chunks while the Agent still reports the
+			// 1-byte bitmap it accepted for the previous (<=8 chunk) window.
+			testChunks("new", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9"),
 		},
 		Previous: map[PreheatPair]ExistingPreheat{
-			{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("a"), Generation: 7},   // unchanged
-			{PodIndex: 1, Node: "n1"}: {Chunks: testChunks("b"), Generation: 7},   // moved to n3
-			{PodIndex: 2, Node: "n2"}: {Chunks: testChunks("c"), Generation: 7},   // unassigned
-			{PodIndex: 4, Node: "n0"}: {Chunks: testChunks("old"), Generation: 7}, // same pair, new window
+			{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 1}, // unchanged
+			{PodIndex: 1, Node: "n1"}: {Generation: 7, BitmapBytes: 1}, // moved to n3
+			{PodIndex: 2, Node: "n2"}: {Generation: 7, BitmapBytes: 1}, // unassigned
+			{PodIndex: 4, Node: "n0"}: {Generation: 7, BitmapBytes: 1}, // same pair, window grew -> Update
 		},
 		Placement: gwaa.Output{
 			Assignment: map[int32][]string{
@@ -130,7 +132,10 @@ func TestPlacementActionsUnknownGenerationForcesUpdate(t *testing.T) {
 	in := testPlacementInput()
 	in.Placement.Assignment = map[int32][]string{0: {"n0"}}
 	in.Previous = map[PreheatPair]ExistingPreheat{
-		{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("a"), Generation: 0},
+		{PodIndex: 0, Node: "n0"}: {
+			Generation:  0,
+			BitmapBytes: bitmapBytes(len(in.Windows[0])),
+		},
 	}
 	actions, err := PlacementActions(in)
 	if err != nil {
@@ -170,8 +175,8 @@ func TestApplyPlacementOnlyDiffRPC(t *testing.T) {
 	for index, nodes := range in.Placement.Assignment {
 		for _, node := range nodes {
 			previous[PreheatPair{PodIndex: index, Node: node}] = ExistingPreheat{
-				Chunks:     in.Windows[index],
-				Generation: uint64(in.Task.Generation),
+				Generation:  uint64(in.Task.Generation),
+				BitmapBytes: bitmapBytes(len(in.Windows[index])),
 			}
 		}
 	}
@@ -313,14 +318,16 @@ func TestPlacementActionsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestChunkRefsEqual(t *testing.T) {
-	if !chunkRefsEqual(testChunks("a", "b"), testChunks("a", "b")) {
-		t.Fatal("equal chunk lists reported different")
+func TestBitmapBytes(t *testing.T) {
+	if got := bitmapBytes(0); got != 0 {
+		t.Fatalf("bitmapBytes(0) = %d, want 0", got)
 	}
-	if chunkRefsEqual(testChunks("a"), testChunks("a", "b")) {
-		t.Fatal("different lengths reported equal")
+	for n := 1; n <= 8; n++ {
+		if got := bitmapBytes(n); got != 1 {
+			t.Fatalf("bitmapBytes(%d) = %d, want 1", n, got)
+		}
 	}
-	if chunkRefsEqual(testChunks("a"), testChunks("b")) {
-		t.Fatal("different paths reported equal")
+	if got := bitmapBytes(9); got != 2 {
+		t.Fatalf("bitmapBytes(9) = %d, want 2", got)
 	}
 }

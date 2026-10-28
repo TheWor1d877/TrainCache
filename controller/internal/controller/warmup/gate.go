@@ -153,18 +153,6 @@ func (r *Reconciler) nodeStopped(task *traincachev1alpha1.WarmupTask, node strin
 	return found
 }
 
-// hasAssignment reports whether any Pod already has a GWAA assignment. Until
-// then the initial M4 fan-out keeps running, which also retries Nodes whose
-// first Submit failed.
-func hasAssignment(task *traincachev1alpha1.WarmupTask) bool {
-	for i := range task.Status.PodNodeReadiness {
-		if task.Status.PodNodeReadiness[i].NodeName != "" {
-			return true
-		}
-	}
-	return false
-}
-
 // assignedNodes returns the current GWAA preheat node set for a Pod, in
 // assignment (c_ij descending) order. A Pod with no feasible node has only a
 // summary entry with an empty NodeName, so the result is empty.
@@ -210,49 +198,63 @@ func applyAssignment(
 	buildPodDetails(task, facts, podNames, candidates, placement.Assignment, minUnmet)
 }
 
-// previousPreheat reconstructs the Agent tasks that should already exist.
-//
-// On the first reconcile M4 submitted every (pod,node) pair. After GWAA has
-// narrowed the set, only the assigned pair per Pod remains. Generation is the
-// previous reconcile's generation when it changed, so ApplyPlacement emits an
-// Update even when the window is unchanged (M7 cross-milestone fix).
-func previousPreheat(
+// submittedLedger is the "already submitted" side of the placement diff: every
+// task an Agent confirmed it holds this round, plus every task this round's
+// wide-preheat broadcast just accepted (that poll ran before the broadcast). A
+// pair whose Agent gave no answer at all is absent, so it triggers neither
+// Submit nor Cancel until the Controller can see it.
+func submittedLedger(
 	task *traincachev1alpha1.WarmupTask,
 	windows [][]*agentpb.ChunkRef,
 	candidates []string,
+	observations map[readinessKey]AgentTaskObservation,
 	initial bool,
+	submission submitResult,
 ) map[PreheatPair]ExistingPreheat {
-	generation := uint64(task.Generation)
-	if task.Status.ObservedGeneration > 0 && task.Status.ObservedGeneration != task.Generation {
-		generation = uint64(task.Status.ObservedGeneration)
-	}
-
-	pods := int(task.Spec.PodCount)
-	previous := make(map[PreheatPair]ExistingPreheat, pods*len(candidates))
-	for pod := 0; pod < pods; pod++ {
-		var chunks []*agentpb.ChunkRef
-		if pod < len(windows) {
-			chunks = windows[pod]
+	previous := make(map[PreheatPair]ExistingPreheat, len(observations)+len(candidates)*len(windows))
+	for key, observation := range observations {
+		if !observation.Held {
+			continue
 		}
-		if !initial {
-			if nodes := assignedNodes(task, int32(pod)); len(nodes) > 0 {
-				for _, node := range nodes {
-					previous[PreheatPair{PodIndex: int32(pod), Node: node}] = ExistingPreheat{
-						Chunks:     chunks,
-						Generation: generation,
-					}
-				}
+		previous[PreheatPair{PodIndex: key.podIndex, Node: key.node}] = ExistingPreheat{
+			Generation:  observation.Generation,
+			BitmapBytes: observation.BitmapBytes,
+		}
+	}
+	if !initial {
+		return previous
+	}
+	for _, node := range candidates {
+		if _, failed := submission.Unavailable[node]; failed {
+			continue
+		}
+		if _, rejected := submission.Permanent[node]; rejected {
+			continue
+		}
+		for pod, window := range windows {
+			pair := PreheatPair{PodIndex: int32(pod), Node: node}
+			if _, ok := previous[pair]; ok {
 				continue
 			}
-		}
-		for _, node := range candidates {
-			previous[PreheatPair{PodIndex: int32(pod), Node: node}] = ExistingPreheat{
-				Chunks:     chunks,
-				Generation: generation,
+			previous[pair] = ExistingPreheat{
+				Generation:  uint64(task.Generation),
+				BitmapBytes: bitmapBytes(len(window)),
 			}
 		}
 	}
 	return previous
+}
+
+// anyTaskHeld reports whether some Agent already holds a task for this Warmup
+// Task. It is the only signal that the wide-preheat broadcast has run: status
+// fields can lag or be dropped, an Agent's own answer cannot.
+func anyTaskHeld(observations map[readinessKey]AgentTaskObservation) bool {
+	for _, observation := range observations {
+		if observation.Held {
+			return true
+		}
+	}
+	return false
 }
 
 // gateEvaluation bundles the pure decision with the assembled input for logs.

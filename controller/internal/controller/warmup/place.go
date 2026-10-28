@@ -23,14 +23,14 @@ type PreheatPair struct {
 	Node     string
 }
 
-// ExistingPreheat is a previously submitted (Pod, node) task, the window it
-// carried and the generation it was submitted with. Chunks and Generation are
-// compared against the current request to decide whether an Update is needed;
-// a changed generation always requires an Update so the Agent never lags.
-// Generation 0 means "unknown" and is treated as current for compatibility.
+// ExistingPreheat is one task an Agent confirmed it holds, the generation it
+// accepted and the ready_bitmap length that bounds its window. It is built
+// from the Agent's own GetPreheatStatus reply, never from what this Controller
+// meant to send: an unconfirmed pair is absent, so the diff cannot cancel or
+// re-submit a task it has not seen.
 type ExistingPreheat struct {
-	Chunks     []*agentpb.ChunkRef
-	Generation uint64
+	Generation  uint64
+	BitmapBytes int32
 }
 
 // PlacementApplyInput feeds one GWAA result into the diff/RPC orchestration.
@@ -86,8 +86,8 @@ type PreheatRPC interface {
 	Cancel(ctx context.Context, node string, req *agentpb.CancelPreheatRequest) error
 }
 
-// PlacementActions compares the desired GWAA assignment with the tasks already
-// submitted and returns only the RPCs needed:
+// PlacementActions compares the desired GWAA assignment with the tasks the
+// Agents confirmed they hold and returns only the RPCs needed:
 //
 //	new pair                     -> Submit
 //	same pair, changed window    -> Update
@@ -124,10 +124,8 @@ func PlacementActions(in PlacementApplyInput) ([]PlacementAction, error) {
 			pair := PreheatPair{PodIndex: index, Node: node}
 			desired[pair] = struct{}{}
 			if previous, ok := in.Previous[pair]; ok {
-				// Generation 0 means the submitted generation is unknown, so it
-				// cannot be trusted as current and forces an Update.
-				generationChanged := previous.Generation != uint64(in.Task.Generation)
-				if chunkRefsEqual(previous.Chunks, chunks) && !generationChanged {
+				if previous.Generation == uint64(in.Task.Generation) &&
+					previous.BitmapBytes == bitmapBytes(len(chunks)) {
 					continue
 				}
 				actions = append(actions, PlacementAction{
@@ -247,6 +245,14 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 		default:
 			return result, fmt.Errorf("warmup: unknown placement action %q", action.Kind)
 		}
+		if callErr != nil && action.Kind == ActionCancel && errors.Is(callErr, agentclient.ErrTaskNotFound) {
+			// The Agent already dropped this task (TTL, restart, earlier
+			// cancel), so cancelling it again is an idempotent no-op.
+			log.Debug("agent cancel skipped",
+				"warmup_task", taskKey, "task_id", taskID, "node", action.Node,
+				"reason", "task not found on agent")
+			callErr = nil
+		}
 		op, _ := preheatOp(action.Kind)
 		if callErr == nil {
 			in.Metrics.ObservePreheatRPC(op, metrics.RPCOK)
@@ -307,16 +313,10 @@ func placementWindow(windows [][]*agentpb.ChunkRef, index int32) ([]*agentpb.Chu
 	return windows[index], nil
 }
 
-func chunkRefsEqual(a, b []*agentpb.ChunkRef) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].GetPath() != b[i].GetPath() || a[i].GetChunk() != b[i].GetChunk() {
-			return false
-		}
-	}
-	return true
+// bitmapBytes is the ready_bitmap length an Agent reports for an n-chunk
+// window: ceil(n/8), with bit i bound to chunks[i] (docs/6.3 D56).
+func bitmapBytes(n int) int32 {
+	return int32((n + 7) / 8)
 }
 
 // logPlacementChange records the M6/M13/M14 log points: top-K assignment

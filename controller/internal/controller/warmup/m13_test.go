@@ -211,9 +211,10 @@ func TestM13PairDiffSubmitsUpdatesCancels(t *testing.T) {
 			testChunks("c"),
 		},
 		Previous: map[PreheatPair]ExistingPreheat{
-			{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("old"), Generation: 7}, // window changed -> Update
-			{PodIndex: 0, Node: "n1"}: {Chunks: testChunks("a"), Generation: 7},   // removed -> Cancel
-			{PodIndex: 2, Node: "n0"}: {Chunks: testChunks("c"), Generation: 7},   // removed -> Cancel
+			// same pair, window shrank past the reported bitmap -> Update
+			{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 2},
+			{PodIndex: 0, Node: "n1"}: {Generation: 7, BitmapBytes: 1}, // removed -> Cancel
+			{PodIndex: 2, Node: "n0"}: {Generation: 7, BitmapBytes: 1}, // removed -> Cancel
 		},
 		Placement: gwaa.Output{
 			Assignment: map[int32][]string{

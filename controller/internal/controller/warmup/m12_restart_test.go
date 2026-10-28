@@ -11,17 +11,22 @@ import (
 
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
+	"traincache/controller/internal/agentclient"
 )
 
-// m12RestartPool records the differential RPCs issued after a restart. Progress
-// returns an empty payload, so the status written before the restart must be
-// carried over unchanged.
+// m12RestartPool records the differential RPCs issued after a restart. The
+// Agents survived the controller restart and still report the tasks they hold
+// (held, keyed by task_id@node) at the generation they accepted; every other
+// task_id answers ErrTaskNotFound. The stale replies keep readiness facts
+// away, so the status written before the restart must be carried over
+// unchanged.
 type m12RestartPool struct {
 	mu            sync.Mutex
 	submitCalls   int
 	updateCalls   int
 	cancelCalls   int
 	progressCalls int
+	held          map[string]*agentpb.PreheatStatus
 }
 
 func (p *m12RestartPool) Submit(context.Context, string, *agentpb.SubmitPreheatRequest) error {
@@ -45,17 +50,21 @@ func (p *m12RestartPool) Cancel(context.Context, string, *agentpb.CancelPreheatR
 	return nil
 }
 
-func (p *m12RestartPool) Progress(context.Context, string, string, uint64) (*agentpb.PreheatStatus, error) {
+func (p *m12RestartPool) Progress(_ context.Context, node, taskID string, _ uint64) (*agentpb.PreheatStatus, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.progressCalls++
-	return nil, nil
+	if status, ok := p.held[progressKeyOf(taskID, node)]; ok {
+		return status, nil
+	}
+	return nil, agentclient.ErrTaskNotFound
 }
 
 // TestM12RestartRebuildsStateFromStatus simulates a controller process restart:
 // a brand-new Reconciler (empty in-memory tracker) reconciles a WarmupTask that
-// already carries a P×N table and per-Pod GWAA assignments. It must continue
-// from the CRD status, not fan out Submit again, and must preserve the
+// already carries a P×N table and per-Pod GWAA assignments. The Agents still
+// hold the assigned tasks, so the pass must not fan out Submit again, must
+// Update the held tasks to the new generation and must preserve the
 // assigned-node readiness facts.
 func TestM12RestartRebuildsStateFromStatus(t *testing.T) {
 	task := fixtureTask(2, 4, [][]int32{{0, 1, 2, 3}, {4, 5, 6, 7}})
@@ -75,7 +84,12 @@ func TestM12RestartRebuildsStateFromStatus(t *testing.T) {
 	}
 
 	ds := fixtureDataSet(8, singleShardLayout(8), []string{"n1", "n2"})
-	pool := &m12RestartPool{}
+	pool := &m12RestartPool{held: map[string]*agentpb.PreheatStatus{
+		// The Agents survived the restart holding the two assigned tasks,
+		// each still accepting generation 2 for the 4-chunk window.
+		progressKeyOf("train/t1/p0", "n1"): {Generation: 2, Seq: 1, ReadyBitmap: make([]byte, 1), State: agentpb.PreheatStatus_RUNNING},
+		progressKeyOf("train/t1/p1", "n2"): {Generation: 2, Seq: 1, ReadyBitmap: make([]byte, 1), State: agentpb.PreheatStatus_RUNNING},
+	}}
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureNode("n2"),
 		fixtureAgentPod("n1"), fixtureAgentPod("n2"),
 		fixtureTargetPod(0), fixtureTargetPod(1))

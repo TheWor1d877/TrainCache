@@ -4,6 +4,41 @@
 
 ## A. bug 级
 
+warmup 控制器每轮 reconcile 都会算一遍 desired assignment，再和「已提交给 Agent 的任务」比对，不相等就 cancel + 重提。随机源修好后 desired 已经稳定（每次都是
+p0=traincache-worker2），但比对判据仍恒定判不等，于是每 60–80 秒取消重提一次，Agent 每次从块 0 重来。
+
+- fanout=1：600 s 内一个块没搬完 → GateDegraded: tmax_exceeded
+- fanout=2：循环慢一点，能在 t_max 内跑完，但字节放大 3–4 倍（请求 1 GiB，实搬 2.8–3.9 GB），warm 慢于 cold，steady 命中率反而低（0.853 vs cold 0.959）
+
+复现：单 pod、preheatFanout: 1、100 mbit，必现。现场日志：results/m7/_logs/probe-fan1b_*.log、warm4_*.log，以及控制器 gwaa assignment changed（55 次/25 分钟，reason 恒为 desired assignment
+differs from submitted tasks）和 Agent 侧成对的「任务取消 / 已取消任务重新提交视为新任务」。
+
+根因：「已提交清单」不是记录，是从 `status.podNodeReadiness` 反推的（`previousPreheat`），反推的第一手依据 `hasAssignment` 只看 status 里有没有带节点名的条目。宽预热因此把「我的 status 看不见到指派」当成「还没派过活」，只要 status 那一条没落住（写回失败、部署的 CRD 落后被裁剪、条目节点名为空、空数组被 merge patch 发成 `null`
+删字段），首轮判据就永久为真，每轮向所有候选节点广播、再把落选节点取消，Agent 按契约把取消后的同名提交当新任务，位图清零从块 0 重下。反推的第二手是窗口内容：它拿本轮算出的窗口去证明本轮的窗口没变，内容这一维形同不存在。
+
+修法（已落地代码，判据全文见 7.1 §7.4、§5.9、§12.1）：
+
+| 改动 | 落点 |
+|---|---|
+| 「已提交」只认本轮 `GetPreheatStatus` 的回报：报 generation 与位图长度＝持有，报 `NotFound`＝未提交，Agent 无回答＝本轮该配对不动作（不提交也不取消） | `submittedLedger`（gate.go）、`AgentTaskObservation`（poll.go） |
+| 「未变化」判据改为 generation 相同且位图长度等于 `ceil(本轮窗口块数/8)`；不再用本轮窗口自证未变 | `PlacementActions`（place.go） |
+| 宽预热条件从「status 查不到指派」改成「没有任何 Agent 报持有」，poll 前置于广播 | controller.go M4/M5 换序，`hasAssignment`、`previousPreheat` 删除 |
+| `Cancel` 后任务仍在 Agent 任务表里、`GetPreheatStatus` 仍报持有，被重新选中的节点会静默不预热；`PreheatStatus` 增 `canceled=15` 让取消可查，Held 只认未取消的任务 | agent.proto、agent/svc/preheat.go、6.1 附录 A.2、7.1 §12.1、6.3 D55、7.3 D11 |
+| Agent 上没有该任务不再算「永久拒绝」：新增 `ErrTaskNotFound`，`Cancel` 收到它按幂等空操作成功 | agentclient/client.go、place.go |
+
+验收：单 Pod、多候选节点、期望指派稳定时连续三轮 reconcile，首轮之后 `Submit`/`Cancel` 计数为 0、被指派节点不被取消。
+
+守门用例（已落地并通过）：
+
+| 用例 | 断言 |
+|---|---|
+| `stable_placement_test.go` `TestReconcileWideFanoutRunsOnceWithSeveralCandidates` | 3 候选 × 1 Pod：首轮 3 次 `Submit` + 1 次 `Cancel`（只取消落选节点），第 2/3 轮计数不再增加、指派不变 |
+| `stable_placement_test.go` `TestSubmittedLedgerOnlyCountsHeldTasks` | Agent 三态：报持有入台账、报 `canceled` 不算持有（被重新选中要发 `Submit` 而非静默跳过）、无回答不进任何动作桶 |
+| `controller_test.go` `fakeAgentPool` | 按 7.x 契约有记忆：受理过的 task_id 回 generation 与 `ceil(块数/8)` 位图，Cancel 只打取消标记，其余 `ErrTaskNotFound` |
+| `agent/svc/preheat_update_test.go` `TestPreheatCancelIdempotentAndResubmitNewTask` | 取消后 `GetPreheatStatus` 报 `canceled=true`，同名重提后回到 false |
+
+把 `anyTaskHeld` 强改 `false` 可复现旧行为，前者立刻报「三轮 9 次 Submit」。剩 fanout=1/100 mbit 探针在新构建上不再出现成对的「任务取消 / 重新提交视为新任务」，本条结案。
+
 ## B. 上生产前必做
 
 | 出处 | 事项 | 不做的后果 |
@@ -32,6 +67,8 @@
 | 8.1 §3.1；8.5 §三 | 契约字段接线：`err_class` 与 `sampled`/`sample_rate` 由生产代码发射，`err` 与 `err_class` 成对 | 告警与聚合只能靠 `err` 原文匹配，采样比例无法核对 |
 | 8.2 P3；8.1 §6/附录 A | 告警规则 + Grafana 三层看板 + runbook 链接：门控 Hold 超时、Agent 不可达、read stall 超阈值、磁盘危险线、日志采集断流 | 出问题只能人肉查，没有阈值与处置入口 |
 | 7.0 inotify「辅助预热」 | 冷启动按 `heatmap.json` 预热历史热块；手动入口为 `traincache prefetch`，排期待裁决 | 冷启动命中率低、首 epoch 慢；功能不坏 |
+| 7.1 §7.4；`controller/internal/controller/warmup/place.go` `bitmapBytes` | 「未变化」判据只到 `ceil(块数/8)` 粒度：同一区间内的窗口变化（8 块→7 块、同代际）不触发 `Update`。要精确到块，需 `PreheatStatus` 回报窗口指纹或块数 | 同代际内的窗口缩放在该区间内不被发现，Agent 按旧窗口继续预热；块数变化跨区间时正常触发 |
+全局e2e的位置问题
 
 ## D. 做不做都行
 
@@ -75,15 +112,3 @@ E. inotify 兜底保持"只做统计"，不承担正确性恢复。
 
 执行顺序：先改文档对齐定位（删"命令式"表述、修正 6.1 design 294/554-556 偏差）→ 再做 A/B/C 语义拆分 → 最后补 D 的追当前阶段与 debounce。
 
-
-## 分支问题
-对象: main
-规则: 必须走 PR；required checks 选全 5 个：unit + static
-(controller)、unit + static (core)、unit + static (agent)、kustomize
-render、release metadata；禁止 force push 与删除；不要勾「Require
-branches to be up to date」，否则每次 push 都重跑
-
-对象: dev
-规则: 允许直推；只禁 force push 与删除
-审批人数：个人开发填 0，有协作者填 1。私有仓库的 ruleset / 分支保护需要
-Pro 或 Team 套餐。

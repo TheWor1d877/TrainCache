@@ -251,8 +251,8 @@ func TestPreheatSeqMonotonic(t *testing.T) {
 	}
 }
 
-// TestPreheatCancelIdempotentAndResubmitNewTask:Cancel 幂等;取消后同代际 Submit 视为
-// 新任务(seq 重新从 1 计);取消后 Update 拒绝。
+// TestPreheatCancelIdempotentAndResubmitNewTask:Cancel 幂等;取消后 Status 报
+// canceled=true;同代际 Submit 视为新任务(seq 重新从 1 计、canceled 清零);取消后 Update 拒绝。
 func TestPreheatCancelIdempotentAndResubmitNewTask(t *testing.T) {
 	fx := newSvcFixture(t)
 	fx.commitDataset(t, testDataset, []svcBlockSpec{
@@ -281,6 +281,11 @@ func TestPreheatCancelIdempotentAndResubmitNewTask(t *testing.T) {
 	if resp, err := fx.tasks.Cancel(ctx, m3Cancel("t-absent", 1)); err != nil || !resp.GetAccepted() {
 		t.Fatalf("不存在任务 Cancel = %+v, err=%v, want accepted", resp, err)
 	}
+	// 取消只标记不删除,所以同名任务必须查得到 canceled:Controller 的台账靠它
+	// 区分"节点上还有这个任务"和"已经取消"。
+	if st, err := fx.tasks.Status(ctx, "t-cancel"); err != nil || !st.GetCanceled() {
+		t.Fatalf("取消后 Status = canceled %v(err=%v), want true", st.GetCanceled(), err)
+	}
 	if _, err := fx.tasks.Update(ctx, m3Update("t-cancel", 1, m3Chunk("c-000.tar", 0))); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("取消后 Update code = %v, want FailedPrecondition", status.Code(err))
 	}
@@ -292,6 +297,9 @@ func TestPreheatCancelIdempotentAndResubmitNewTask(t *testing.T) {
 		t.Fatalf("取消后重 Submit = %+v, err=%v, want accepted", resp, err)
 	}
 	fresh := waitTaskState(t, fx.tasks, "t-cancel", agentpb.PreheatStatus_DONE)
+	if fresh.GetCanceled() {
+		t.Error("重建任务 canceled = true, want false(取消标记属于旧任务)")
+	}
 	if fresh.GetSeq() != 3 {
 		t.Errorf("重建任务 seq = %d, want 3(新任务从 1 起:1+2 次置位)", fresh.GetSeq())
 	}

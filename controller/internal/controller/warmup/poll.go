@@ -196,6 +196,21 @@ type pollOutcome struct {
 	// Pending is true while at least one (pod,node) pair has not reached a
 	// terminal Ready/Failed state.
 	Pending bool
+	// Tasks is what every Agent answered about the task_id this round. It is
+	// the ledger placement diffs against, because only the Agent knows whether
+	// a preheat task still exists on its node.
+	Tasks map[readinessKey]AgentTaskObservation
+}
+
+// AgentTaskObservation is one Agent's answer about one task_id during this
+// round's poll. Held is true only for an active task: Cancel marks a task
+// without deleting it, and the Agent reports that flag, so a cancelled task is
+// not held. A pair with no answer at all is missing from the map entirely,
+// which places it in no action bucket for this round.
+type AgentTaskObservation struct {
+	Held        bool
+	Generation  uint64
+	BitmapBytes int32
 }
 
 // readinessFact is one poll round's observation for a (Pod, candidate node).
@@ -230,6 +245,7 @@ func (r *Reconciler) pollReadiness(
 	pods := int(task.Spec.PodCount)
 	generation := uint64(task.Generation)
 	facts := make(map[readinessKey]readinessFact)
+	tasks := make(map[readinessKey]AgentTaskObservation)
 	table := remapReadinessTable(task, pods, candidates)
 
 	reported := make([]bool, pods)
@@ -253,6 +269,7 @@ func (r *Reconciler) pollReadiness(
 				"node", node,
 				"generation", generation,
 			)
+			pairKey := readinessKey{podIndex: int32(pod), node: node}
 			attemptKey := failureKey{
 				taskUID:    string(task.UID),
 				podIndex:   int32(pod),
@@ -264,6 +281,15 @@ func (r *Reconciler) pollReadiness(
 			resp, err := r.Agents.Progress(ctx, node, taskID, generation)
 			duration := r.now().Sub(start).Milliseconds()
 			if err != nil {
+				if errors.Is(err, agentclient.ErrTaskNotFound) {
+					// The Agent answered definitively: it holds no such task.
+					// Placement may submit to this pair again; it must not
+					// cancel it.
+					tasks[pairKey] = AgentTaskObservation{}
+					r.Metrics.ObserveAgentPoll(metrics.PollOK)
+					pairLog.Debug("agent holds no such task", "duration_ms", duration)
+					continue
+				}
 				if errors.Is(err, agentclient.ErrAgentUnavailable) {
 					r.Metrics.ObserveAgentPoll(metrics.PollUnavailable)
 					attempt := r.progress.fail(attemptKey)
@@ -273,7 +299,7 @@ func (r *Reconciler) pollReadiness(
 						"err", err,
 					)
 					if attempt >= unavailableFailureThreshold {
-						facts[readinessKey{podIndex: int32(pod), node: node}] = readinessFact{
+						facts[pairKey] = readinessFact{
 							state: traincachev1alpha1.PreheatStateFailed,
 						}
 						pairLog.Warn("preheat progress degraded",
@@ -296,6 +322,16 @@ func (r *Reconciler) pollReadiness(
 				// Tests and defensive callers may return an empty payload.
 				r.Metrics.ObserveAgentPoll(metrics.PollError)
 				continue
+			}
+
+			// The Agent holds this task; the generation it reports decides
+			// whether placement sends an Update, and the bitmap length bounds
+			// the window it was built for (D56). This is recorded before the
+			// stale-response drops below so a lagging Agent is still seen.
+			tasks[pairKey] = AgentTaskObservation{
+				Held:        !resp.GetCanceled(),
+				Generation:  resp.GetGeneration(),
+				BitmapBytes: int32(len(resp.GetReadyBitmap())),
 			}
 
 			if resp.GetGeneration() != generation {
@@ -346,7 +382,7 @@ func (r *Reconciler) pollReadiness(
 				lastReportTime: reportTime(resp, r.now()),
 				hasData:        true,
 			}
-			facts[readinessKey{podIndex: int32(pod), node: node}] = fact
+			facts[pairKey] = fact
 			table[pod][nodeIndex] = decoded.ReadyInWindow
 
 			pairLog.Debug("progress updated",
@@ -409,7 +445,10 @@ func (r *Reconciler) pollReadiness(
 		task.Status.LastUpdated = &lastUpdated
 	}
 
-	return pollOutcome{Pending: pollPending(task, facts, candidates, pods)}, facts
+	return pollOutcome{
+		Pending: pollPending(task, facts, candidates, pods),
+		Tasks:   tasks,
+	}, facts
 }
 
 // remapReadinessTable starts from the published table and remaps its columns

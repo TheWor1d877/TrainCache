@@ -209,7 +209,8 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 			in: func() PlacementApplyInput {
 				in := testPlacementInput()
 				in.Previous = map[PreheatPair]ExistingPreheat{
-					{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("old"), Generation: 7},
+					// Agent holds a stale (larger) window bitmap -> Update.
+					{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 2},
 				}
 				in.Placement = gwaa.Output{Assignment: map[int32][]string{0: {"n0"}}}
 				return in
@@ -221,7 +222,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 			in: func() PlacementApplyInput {
 				in := testPlacementInput()
 				in.Previous = map[PreheatPair]ExistingPreheat{
-					{PodIndex: 0, Node: "n0"}: {Chunks: testChunks("a"), Generation: 7},
+					{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 1},
 				}
 				in.Placement = gwaa.Output{}
 				return in

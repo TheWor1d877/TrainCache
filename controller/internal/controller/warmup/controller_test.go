@@ -31,11 +31,23 @@ type submitted struct {
 	req  *agentpb.SubmitPreheatRequest
 }
 
+// heldTask is what the fake Agent remembers about one accepted task_id: the
+// generation it accepted and the window length behind its ready_bitmap.
+// Cancel keeps the entry and only sets canceled, like the real Agent (D55).
+type heldTask struct {
+	generation uint64
+	chunks     int
+	canceled   bool
+}
+
 type fakeAgentPool struct {
 	mu          sync.Mutex
 	records     []submitted
 	submitCalls int
+	cancelCalls int
+	cancelled   []string
 	fail        map[string]error
+	held        map[string]heldTask
 }
 
 func (p *fakeAgentPool) Submit(_ context.Context, node string, req *agentpb.SubmitPreheatRequest) error {
@@ -46,19 +58,60 @@ func (p *fakeAgentPool) Submit(_ context.Context, node string, req *agentpb.Subm
 		return err
 	}
 	p.records = append(p.records, submitted{node: node, req: req})
+	if p.held == nil {
+		p.held = map[string]heldTask{}
+	}
+	p.held[progressKeyOf(req.GetTaskId(), node)] = heldTask{
+		generation: req.GetGeneration(),
+		chunks:     len(req.GetChunks()),
+	}
 	return nil
 }
 
-func (p *fakeAgentPool) Update(context.Context, string, *agentpb.UpdatePreheatRequest) error {
+func (p *fakeAgentPool) Update(_ context.Context, node string, req *agentpb.UpdatePreheatRequest) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.held == nil {
+		p.held = map[string]heldTask{}
+	}
+	p.held[progressKeyOf(req.GetTaskId(), node)] = heldTask{
+		generation: req.GetGeneration(),
+		chunks:     len(req.GetChunks()),
+	}
 	return nil
 }
 
-func (p *fakeAgentPool) Cancel(context.Context, string, *agentpb.CancelPreheatRequest) error {
+func (p *fakeAgentPool) Cancel(_ context.Context, node string, req *agentpb.CancelPreheatRequest) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cancelCalls++
+	p.cancelled = append(p.cancelled, node)
+	key := progressKeyOf(req.GetTaskId(), node)
+	if task, ok := p.held[key]; ok {
+		task.canceled = true
+		p.held[key] = task
+	}
 	return nil
 }
 
-func (p *fakeAgentPool) Progress(context.Context, string, string, uint64) (*agentpb.PreheatStatus, error) {
-	return nil, nil
+// Progress mirrors the 7.x Agent contract: an accepted task_id is reported
+// with the generation it accepted, its cancellation flag and a zero
+// ready_bitmap of ceil(chunks/8) bytes; anything else answers ErrTaskNotFound
+// ("not submitted here").
+func (p *fakeAgentPool) Progress(_ context.Context, node, taskID string, _ uint64) (*agentpb.PreheatStatus, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	task, ok := p.held[progressKeyOf(taskID, node)]
+	if !ok {
+		return nil, agentclient.ErrTaskNotFound
+	}
+	return &agentpb.PreheatStatus{
+		Generation:  task.generation,
+		Seq:         1,
+		ReadyBitmap: make([]byte, bitmapBytes(task.chunks)),
+		State:       agentpb.PreheatStatus_RUNNING,
+		Canceled:    task.canceled,
+	}, nil
 }
 
 func (p *fakeAgentPool) snapshot() []submitted {
@@ -303,14 +356,19 @@ func TestReconcileIsIdempotent(t *testing.T) {
 	if err := reconcile(t, r); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
-	first := getTask(t, c)
 	if err := reconcile(t, r); err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
+	first := getTask(t, c)
+	if err := reconcile(t, r); err != nil {
+		t.Fatalf("third Reconcile: %v", err)
+	}
 	second := getTask(t, c)
 
-	// M6 makes later rounds differential: the initial M4 fan-out runs once and
-	// the replay issues no duplicate Submit.
+	// M6 makes later rounds differential: the initial M4 fan-out runs once,
+	// the Agents report they hold the submitted tasks and the replay issues
+	// no duplicate Submit. The second pass already sees the Agents' answers,
+	// so the status is compared from the steady state onwards.
 	if pool.submitCalls != 2 {
 		t.Fatalf("submit calls = %d, want 2 (initial fan-out only)", pool.submitCalls)
 	}

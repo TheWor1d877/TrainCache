@@ -292,8 +292,8 @@ func TestPlacementGenerationChangeSendsUpdate(t *testing.T) {
 	in.Placement.Assignment = map[int32][]string{0: {"n0"}}
 	in.Previous = map[PreheatPair]ExistingPreheat{
 		{PodIndex: 0, Node: "n0"}: {
-			Chunks:     testChunks("a"),
-			Generation: uint64(in.Task.Generation) - 1,
+			Generation:  uint64(in.Task.Generation) - 1,
+			BitmapBytes: bitmapBytes(len(in.Windows[0])),
 		},
 	}
 	actions, err := PlacementActions(in)
@@ -305,15 +305,15 @@ func TestPlacementGenerationChangeSendsUpdate(t *testing.T) {
 	}
 
 	in.Previous[PreheatPair{PodIndex: 0, Node: "n0"}] = ExistingPreheat{
-		Chunks:     testChunks("a"),
-		Generation: uint64(in.Task.Generation),
+		Generation:  uint64(in.Task.Generation),
+		BitmapBytes: bitmapBytes(len(in.Windows[0])),
 	}
 	actions, err = PlacementActions(in)
 	if err != nil {
 		t.Fatalf("PlacementActions: %v", err)
 	}
 	if len(actions) != 0 {
-		t.Fatalf("actions = %+v, want none when chunks and generation match", actions)
+		t.Fatalf("actions = %+v, want none when generation and bitmap match", actions)
 	}
 }
 
