@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# render-install.sh — 把发布清单里的四个镜像换成 digest 后渲染成单文件。
+# render-install.sh — 把发布清单里的四个镜像后缀换成 digest 后渲染成单文件。
 #
 # 用法:
 #   ./hack/render-install.sh <vX.Y.Z> <d_manager> <d_webhook> <d_scheduler> <d_agent> [output]

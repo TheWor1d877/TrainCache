@@ -216,6 +216,10 @@ load_image() {
 
 build_images() {
   step "images"
+  # Retag locally present base images to their official short names first;
+  # otherwise BuildKit resolves them remotely and a slow network stalls the
+  # pull. Missing images are left to the builder (CI pulls them normally).
+  "$REPO_ROOT/hack/build-images.sh" --prepare-only
   # go.work references all three modules, so every build needs a context with
   # agent/, core/ and controller/. Stage just those instead of sending the
   # multi-gigabyte repository root to the Docker daemon.

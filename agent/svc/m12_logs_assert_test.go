@@ -292,7 +292,7 @@ func TestM12PreheatUpdateWindowLogs(t *testing.T) {
 // 4. Cancel 存在 + 不存在 两种路径
 // ————————————————————————————————————————————————————
 
-// TestM12PreheatCancelLogs: Cancel 存在的任务 → "任务取消(在途 P0 不取消)" Info；
+// TestM12PreheatCancelLogs: Cancel 存在的任务 → "任务取消(撤回未完成的下载,D62)" Info；
 // Cancel 不存在的 task_id → "取消不存在的任务(幂等空操作)" Info。
 func TestM12PreheatCancelLogs(t *testing.T) {
 	buf := m12CaptureLogs(t)
