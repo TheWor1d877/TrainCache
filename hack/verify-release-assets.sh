@@ -36,8 +36,8 @@ fi
 
 if [[ -f "$DIR/candidate.json" && "${#refs[@]}" -eq 4 ]]; then
   printf '\n== candidate digests match install.yaml\n'
-  mapfile -t cand < <(jq -r '.images[]' "$DIR/candidate.json" | sed 's/^/sha256:/' | sort)
-  mapfile -t have < <(printf '%s\n' "${refs[@]}" | sed 's/.*@//' | sort)
+  mapfile -t cand < <(jq -r '.images[]' "$DIR/candidate.json" | sed 's/^sha256://' | sort)
+  mapfile -t have < <(printf '%s\n' "${refs[@]}" | sed 's/.*@//; s/^sha256://' | sort)
   if [[ "${#cand[@]}" -eq 4 && "${cand[*]}" == "${have[*]}" ]]; then
     ok "install.yaml 的四个 digest 与 candidate.json 一致"
   else
