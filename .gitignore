@@ -18,6 +18,3 @@ __pycache__/
 
 # 探针运行时缓存(Agent 落盘模拟目录)
 probes/.cache/
-
-# 本地待办清单:只在本机维护,不入库
-docs/TODO.md
