@@ -1,49 +1,73 @@
 name: release-smoke
 
-# 只验证发布物，不构建、不发布：五项资产齐全、SHA256SUMS 对得上、
-# 四个 GHCR digest 可拉、临时 kind 装机链路通。
-# 正常由 release.yml 成功后自动触发，也可手动输入 tag 复跑。
-# draft 转正由人工执行，本工作流不改动 Release 状态。
+# 只验证候选产物，不构建、不发布：文件齐全、SHA256SUMS 对得上、
+# 四个 GHCR digest 可解析、临时 kind 装机链路通。
+# 候选构建成功后自动触发，也可手动给 sha（必要时给候选 run_id）复跑。
+# 版本号取自候选的 candidate.json；draft 转正由人工执行，本工作流不改 Release 状态。
 on:
   workflow_run:
-    workflows: [release]
+    workflows: [release-candidate]
     types: [completed]
   workflow_dispatch:
     inputs:
-      tag:
-        description: 已发布的 tag，如 v0.1.0
+      sha:
+        description: 候选提交的完整 sha
         required: true
+        type: string
+      run_id:
+        description: 候选 run 的 id；留空按 sha 取最近一次成功的 run
+        required: false
+        default: ""
         type: string
 
 permissions:
   contents: read
+  actions: read      # 下载候选 artifact
 
 concurrency:
-  group: release-smoke-${{ github.event_name }}-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  group: release-smoke-${{ inputs.sha || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
   smoke:
-    name: install release ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
-    # workflow_run 只在 release 成功时跑，手动触发不受这个条件影响。
+    name: install candidate ${{ inputs.sha || github.event.workflow_run.head_sha }}
+    # workflow_run 只在候选构建成功时跑，手动触发不受这个条件影响。
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
     steps:
-      - name: check tag
-        # tag 来自事件字段，先收敛成 vX.Y.Z 再交给后续脚本与 curl。
+      - name: fetch candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_IN: ${{ inputs.sha || github.event.workflow_run.head_sha }}
+          RUN_IN: ${{ inputs.run_id }}
+          EVENT_RUN: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "TAG 不是 vX.Y.Z: $TAG" >&2; exit 1; }
+          [[ "$SHA_IN" =~ ^[0-9a-f]{40}$ ]] || { echo "sha 不是 40 位 commit: $SHA_IN" >&2; exit 1; }
+          short="${SHA_IN:0:7}"
+          run_id="$RUN_IN"
+          [[ -n "$run_id" ]] || run_id="$EVENT_RUN"
+          if [[ -z "$run_id" ]]; then
+            run_id="$(gh run list --workflow release-candidate.yml \
+              --commit "$SHA_IN" --status success --limit 1 \
+              --json databaseId --jq '.[0].databaseId')"
+          fi
+          if [[ -z "$run_id" || "$run_id" == "null" ]]; then
+            echo "没有找到 $SHA_IN 的成功候选构建：先跑 release-candidate" >&2
+            exit 1
+          fi
+          gh run download "$run_id" -n "release-candidate-$short" -D .candidate
+          version="$(jq -r .version .candidate/candidate.json)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "candidate.json 的 version 非法: $version" >&2; exit 1; }
+          echo "SHORT_SHA=$short" >>"$GITHUB_ENV"
+          echo "TAG=$version" >>"$GITHUB_ENV"
 
       - uses: actions/checkout@v7
         with:
-          # 自动触发时回到 tag 对应的那次提交，手动触发用当前分支。
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ inputs.sha || github.event.workflow_run.head_sha }}
 
       - uses: actions/setup-go@v7
         with:
@@ -52,21 +76,19 @@ jobs:
       - name: install kind
         run: go install sigs.k8s.io/kind@v0.33.0
 
-      - name: verify release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./hack/verify-release-assets.sh .release
+      - name: verify candidate assets
+        run: ./hack/verify-release-assets.sh .candidate
 
       - name: run smoke
         env:
           NODE_IMAGE: docker.io/kindest/node:v1.37.0
           TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
-        run: ./hack/release-smoke.sh .release/install.yaml "$TAG"
+        run: ./hack/release-smoke.sh .candidate/install.yaml "$TAG"
 
       - name: upload diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: release-smoke-diagnostics
+          name: release-smoke-diagnostics-${{ env.SHORT_SHA }}
           path: .traincachedata/hack/release-smoke/
           if-no-files-found: ignore

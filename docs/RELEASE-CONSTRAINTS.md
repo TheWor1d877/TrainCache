@@ -22,7 +22,7 @@
 
 ### 2.2 构建
 
-从仓库根构建。`VERSION` 默认 `dev`，发版时传 tag：
+从仓库根构建。`VERSION` 默认 `dev`，候选构建时传目标版本号（将来的 tag）：
 
 ```bash
 docker build -f agent/Dockerfile \
@@ -32,10 +32,13 @@ docker build -f agent/Dockerfile \
 
 基础镜像从 docker.io 拉取，走宿主 docker daemon 的 `registry-mirrors`，构建命令不带 registry 参数。
 
+四个镜像的本机构建用 `hack/build-images.sh`：`TAG` 默认 `dev`，参数给组件名只构建子集。脚本先把基础镜像准备成官方短名，本机只有带镜像站前缀的同名副本时执行 `docker tag` 复用，不产生网络访问；两种名字都不在本机时立即报错，并给出 `docker pull` 与 `docker tag` 两条处理命令。
+
 ### 2.3 清单
 
 - 仓库内清单写 `:dev`，用 `kustomize build controller/deploy` 渲染。
 - 发布清单由 kustomize `images:` 把四个镜像改成 `@sha256:<digest>`，不手改组件 YAML。
+- 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `kind load docker-image` 导入同名镜像，清单的 `imagePullPolicy` 是 `IfNotPresent`。
 
 ## 3. 发布
@@ -53,59 +56,76 @@ docker build -f agent/Dockerfile \
 - 只发 linux/amd64。
 - 清单用 digest（`@sha256:`）引用。tag 配 `IfNotPresent` 时节点不会重拉同名旧镜像，digest 可以。
 - 发布包不含 `controller/deploy/observability/`，也不含 minio、busybox、kindest/node 和对象存储。
-- `install.yaml`、单 tar、CLI 二进制、`SHA256SUMS` 由 `release.yml` 在 tag 上生成并挂到 draft Release，不入库。
+- `install.yaml` 与两个 CLI 由候选构建产出，tag 晋升后连同单 tar、`SHA256SUMS` 挂到 draft Release，不入库。
 
 ## 4. CI
 
-四个 workflow，都在 `.github/workflows/`。合入门禁、产物构建、发布验证、draft 转正各归一段，前后关系见下图。
+五个 workflow，都在 `.github/workflows/`。合入门禁、候选构建、候选验证、tag 晋升、审批发布依次排列，前后关系见下图。
 
 ```
 PR（dev→main）
   └─ e2e.yml 自动跑（门禁：代码在 kind 集群里能跑通）
        └─ 绿 → 合入 main
 
-main 上打 tag v0.1.0 并推送
-  └─ release.yml 触发
-       ├─ 构建四个镜像 → 推 GHCR
-       ├─ 渲染 digest
+main 上手动触发 release-candidate（version=vX.Y.Z）
+  └─ release-candidate.yml
+       ├─ 构建四个镜像 → 推 :sha-<7 位短 sha>（VERSION 烤进二进制）
+       ├─ 渲染 install.yaml
+       ├─ 编译两个 CLI
+       └─ 上传 artifact release-candidate-<短 sha>（含 candidate.json）
+
+候选构建完成
+  └─ release-smoke.yml 触发（workflow_run 监听 release-candidate 成功）
+       └─ 验证：候选文件齐全、四个 digest 可解析、装机链路通
+            ├─ 通过 → 进入下一步
+            └─ 失败 → 没改代码就重跑同一 sha 的候选与 smoke
+
+main 上打 tag vX.Y.Z 并推送
+  └─ release.yml
+       ├─ 找同一 sha 的候选，断言 candidate.json 的 version 与 tag 逐字相等
+       ├─ 把候选 digest 晋升成 :vX.Y.Z
        └─ 生成 draft Release（草稿，不正式发布）
 
-release.yml 完成后
-  └─ release-smoke.yml 触发（workflow_run 监听 release.yml 成功）
-       └─ 验证：镜像能拉、digest 正确、Release 资产完整、装机链路通
-            ├─ 通过 → 人工确认，把 draft Release 发布为正式版
-            └─ 失败 → 修复后重打 tag 或重跑
+人工确认
+  └─ 把 draft Release 发布为正式版
 ```
 
 | 文件 | 触发 |
 |---|---|
 | `verify.yml` | push 到 `dev`/`main`；任意 base 的 PR |
 | `e2e.yml` | PR 到 `main` 自动，或手动 |
+| `release-candidate.yml` | 手动输入 `version` 与可选 `sha` |
 | `release.yml` | push tag `v*` |
-| `release-smoke.yml` | `release.yml` 成功后自动，或手动输入 tag |
+| `release-smoke.yml` | `release-candidate` 成功后自动，或手动输入 `sha`（可选 `run_id`） |
 
 ### 4.1 触发矩阵
 
-| 触发 | 内容 | 时长 | 是否阻塞 |
-|---|---|---|---|
-| push `dev` / 任意 PR | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染 | ~5 min | 必须过 |
-| PR `dev`→`main` | 同上 + 版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 对齐）+ 文档引用完整性 | ~5 min | 必须过 |
-| PR `dev`→`main` | kind e2e | ~45 min | 必须过，合并门禁 |
-| push tag `v*` | 构建推镜像 → 渲染 `install.yaml` → 打 tar → 建 draft Release | ~15 min | 发布本身 |
-| `release.yml` 成功 | release-smoke：五项资产齐全且哈希对得上、四个 digest 可解析、临时 kind 装机链路通 | ~15 min | 通过后人工把 draft 转正 |
+| 触发                     | 内容                                                                                                    | 是否阻塞         |
+|--------------------------|---------------------------------------------------------------------------------------------------------|------------------|
+| push `dev` / 任意 PR     | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染                      | 必须过           |
+| PR `dev`→`main`          | 同上 + 版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 对齐）+ 文档引用完整性 | 必须过           |
+| PR `dev`→`main`          | kind e2e                                                                                                | 必须过，合并门禁 |
+| 手动 `release-candidate` | 四个镜像推 `:sha-<7 位短 sha>` → 渲染 `install.yaml` → 编译 CLI → 上传候选 artifact                     | 发版前置         |
+| 候选构建成功             | release-smoke：候选文件齐全且哈希对得上、四个 digest 可解析、临时 kind 装机链路通                       | 通过后才打 tag   |
+| push tag `v*`            | 断言候选 version 与 tag 一致 → 候选 digest 晋升 `:vX.Y.Z` → 打单 tar → 建 draft Release                 | 发布本身         |
 
 ### 4.2 纪律
 
 - `main` 只收 PR，`verify` 与 `kind e2e` 设 required；`dev` 允许直推。
 - CI 不跑 bench：bench 依赖本机数据层和 32G 内存，属于实验装置。
+- 候选或 smoke 失败先判性质：没改代码就重跑同一 sha 的候选与 smoke，`version` 不变；要改代码就回 PR 重新走，用新提交重建候选，`version` 仍不变。
+- 只有已经 Publish 的版本才升版本号；候选与晋升阶段的基础设施失败不消耗版本号。
+- 候选 artifact 保留 14 天，tag 要在候选构建后 14 天内打；超期就按同一 sha 重跑候选，版本号不变。
+- 版本号与 tag 逐字一致靠构建期注入：候选构建用 `--build-arg VERSION=<version>` 把版本烤进镜像与二进制，tag job 断言 `candidate.json` 的 version 与 tag 相等，不等就失败并提示重建候选。
 
 ### 4.3 实现
 
 - `make verify-<module>` 依次跑 build、vet、`go test -race`、gofmt；controller 的 job 另查禁用符号（`GetPreheatProgress`、`ScorePolicy.Window`、`consumeOrderRef`）。
 - `make verify-metadata` 跑 `hack/verify-release-metadata.sh`（版本、镜像名、CHANGELOG 与 tag）和 `hack/verify-doc-refs.sh`（文档相对链接）。
-- `release.yml` 只在 tag 上跑；它推四个镜像、编译 CLI、用 `hack/render-install.sh` 把 digest 写进 `install.yaml`、`docker save` 单 tar，并把清单、tar、CLI 与 `SHA256SUMS` 挂到 draft Release。
-- draft 转正由人工在 Release 页面点 Publish，CI 不自动发布。要改成自动，在 `release-smoke` 成功后追加 `gh release edit <tag> --draft=false`，该步需要 `contents: write` 权限。
-- `release-smoke.yml` 由 `workflow_run` 在 `release.yml` 成功后触发，也可以手动输入 tag；该文件要先合入 `main`，`workflow_run` 才会注册。它先跑 `hack/verify-release-assets.sh`：五项资产（清单、镜像 tar、两个 CLI、`SHA256SUMS`）逐项比对齐全，`SHA256SUMS` 覆盖的四个文件哈希对得上，`install.yaml` 里的四个 `@sha256:` 引用在 GHCR 可解析（`docker manifest inspect`，只看 manifest，不下载层）。层数据的真拉由紧随其后的装机段完成：kind 节点按清单里的 digest 从 GHCR 匿名拉取，包不是 Public 就在这一步起不来。装机段检查四个组件 Ready、CRD Established、Pod 用的是 GHCR 镜像。它不跑业务闭环，闭环由 e2e 覆盖。
+- `release-candidate.yml` 推四个 `:sha-<7 位短 sha>` 镜像，产出 `install.yaml`、两个 CLI、`candidate.json` 与 `SHA256SUMS`，作为 artifact `release-candidate-<短 sha>` 保留 14 天。`candidate.json` 记 `sha`、`short_sha`、`version`、`images` 下四个组件的 digest 与 `created_at`。
+- `release.yml` 只在 tag 上跑：按 commit 找成功的候选 run，校验 version 与 tag 逐字相等、候选 sha 与 tag 指向的提交相同，用 `docker buildx imagetools create` 把候选 digest 晋升成 `:vX.Y.Z`，再回查 `:vX.Y.Z` 的 digest 与候选一致；随后 `docker pull` 四个镜像、`docker save` 成单 tar，连同候选的 `install.yaml`、两个 CLI 与 `SHA256SUMS` 挂到 draft Release。
+- draft 转正由人工在 Release 页面点 Publish，CI 不自动发布。要改成自动，在 `release.yml` 建完 draft 后追加 `gh release edit <tag> --draft=false`，该步已具备 `contents: write` 权限。
+- `release-smoke.yml` 由 `workflow_run` 在 `release-candidate` 成功后触发，也可以手动输入 sha；该文件要先合入 `main`，`workflow_run` 才会注册。它先跑 `hack/verify-release-assets.sh <候选目录>`：`install.yaml` 恰好四个 `@sha256:` 引用、`SHA256SUMS` 覆盖目录内每个文件且哈希对得上、四个 digest 在 GHCR 可解析（`docker manifest inspect`，只看 manifest，不下载层）。层数据的真拉由紧随其后的装机段完成：kind 节点按清单里的 digest 从 GHCR 匿名拉取，包不是 Public 就在这一步起不来。装机段检查四个组件 Ready、CRD Established、Pod 用的是 GHCR 镜像。它不跑业务闭环，闭环由 e2e 覆盖。
 - e2e 与 smoke 的节点镜像由 `NODE_IMAGE` 指定，默认 `docker.io/kindest/node:v1.37.0`；产物分别写到 `TRAINCACHE_DATA_ROOT/controller/e2e/results/` 与 `TRAINCACHE_DATA_ROOT/hack/release-smoke/`。
 
 ## 5. 用户自备
@@ -163,7 +183,7 @@ ConfigMap 的 key 用 camelCase。Agent 四个 key 由 DaemonSet 用 `configMapK
 
 ## 6. CLI 下发
 
-发布两个二进制：gRPC 客户端 `traincache`（`agent/cmd/traincache`）与快照发布器 `trainpublish`（`core/cmd/trainpublish`）。发版时由 `release.yml` 编译 `traincache-linux-amd64`、`trainpublish-linux-amd64`（linux/amd64、CGO 关闭、静态链接），与 `install.yaml`、镜像 tar、`SHA256SUMS` 一起挂在 Release 上。
+发布两个二进制：gRPC 客户端 `traincache`（`agent/cmd/traincache`）与快照发布器 `trainpublish`（`core/cmd/trainpublish`）。候选构建时由 `release-candidate.yml` 编译 `traincache-linux-amd64`、`trainpublish-linux-amd64`（linux/amd64、CGO 关闭、静态链接），这两个文件随候选 artifact 进入 Release 资产，与 `install.yaml`、镜像 tar、`SHA256SUMS` 一起挂在 Release 上。
 
 安装：
 
