@@ -57,11 +57,15 @@ func isTerminal(task *traincachev1alpha1.WarmupTask) bool {
 
 // computePlacement runs GWAA over the current readiness table. Submitted
 // failures are treated as stopped nodes so a Pod is not assigned to a node
-// whose initial Submit already failed.
+// whose initial Submit already failed. previous is this round's ledger: pairs
+// still running at the current generation are the hysteresis input (docs/7.1
+// §5.5, D45) that keeps an incumbent from being replaced just because another
+// node landed one block first.
 func (r *Reconciler) computePlacement(
 	task *traincachev1alpha1.WarmupTask,
 	candidates []string,
 	submitFailed map[string]error,
+	previous map[PreheatPair]ExistingPreheat,
 ) gwaa.Output {
 	pods := make([]gwaa.PodState, 0, task.Spec.PodCount)
 	for index := int32(0); index < task.Spec.PodCount; index++ {
@@ -88,9 +92,17 @@ func (r *Reconciler) computePlacement(
 		})
 	}
 	fanoutMax, fanoutMin, _ := normalizeFanoutRange(task.Spec.PreheatFanout, task.Spec.PreheatFanoutMin)
+	held := make(map[int32][]string, len(pods))
+	for pair, existing := range previous {
+		if existing.Generation != uint64(task.Generation) {
+			continue
+		}
+		held[pair.PodIndex] = append(held[pair.PodIndex], pair.Node)
+	}
 	placement := gwaa.Compute(gwaa.Input{
 		Pods:      pods,
 		Nodes:     nodes,
+		Held:      held,
 		Rand:      r.gwaaRand(task),
 		Fanout:    fanoutMax,
 		FanoutMin: fanoutMin,

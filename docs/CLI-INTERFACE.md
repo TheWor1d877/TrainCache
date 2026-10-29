@@ -171,7 +171,7 @@ CLI 与 `traincache-agentd` 同源码、同 git tag 构建，随 Agent 镜像分
 
 ## 10. trainpublish
 
-把本地 tar 切块上传并提交一次索引快照的独立命令，源码 `core/cmd/trainpublish`。当前可执行文件名是 `trainpublish`；改名为 `traincachepublish` 并保留别名登记在 `docs/TODO.md` D 类，尚未实施。
+把本地 tar 切块上传并提交一次索引快照的独立命令，源码 `core/cmd/trainpublish`，可执行文件名 `trainpublish`。
 
 ```
 trainpublish --dataset NAME [options] <tar> [<tar>...]

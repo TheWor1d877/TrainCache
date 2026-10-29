@@ -29,6 +29,7 @@ const (
 	EnvLeaderElection    = "CONTROLLER_LEADER_ELECTION"
 	EnvMaxChunks         = "CONTROLLER_MAX_CHUNKS"
 	EnvLogLevel          = "CONTROLLER_LOG_LEVEL"
+	EnvDebugAddr         = "CONTROLLER_DEBUG_ADDR"
 
 	// K auto-default inputs. They live in the traincache-config ConfigMap so
 	// Agent and Controller read the same cacheCapacityBytes.
@@ -36,6 +37,9 @@ const (
 	EnvStartupWindowBytes = "TRAINCACHE_STARTUP_WINDOW_BYTES"
 	EnvMaxFillFraction    = "TRAINCACHE_MAX_FILL_FRACTION"
 )
+
+// DefaultDebugAddr is the default /debug/loglevel listener: loopback only.
+const DefaultDebugAddr = "127.0.0.1:6060"
 
 // Defaults for the K auto-default inputs.
 const (
@@ -60,9 +64,11 @@ type Config struct {
 	LeaderElection        bool
 	MaxChunks             int64
 	LogLevel              string
-	CacheCapacityBytes    int64
-	StartupWindowBytes    int64
-	MaxFillFraction       float64
+	// DebugAddr 是 /debug/loglevel 的监听地址，只允许回环；空字符串关闭端点。
+	DebugAddr          string
+	CacheCapacityBytes int64
+	StartupWindowBytes int64
+	MaxFillFraction    float64
 }
 
 // Load reads the process environment.
@@ -79,6 +85,7 @@ func load(lookup func(string) (string, bool)) (*Config, error) {
 		ScoreAnnotationPrefix: env(lookup, EnvScoreAnnotation, "traincache.io/scores"),
 		GateName:              env(lookup, EnvGateName, "traincache.io/warmup"),
 		LogLevel:              strings.ToLower(env(lookup, EnvLogLevel, "info")),
+		DebugAddr:             env(lookup, EnvDebugAddr, DefaultDebugAddr),
 	}
 
 	var err error
@@ -127,6 +134,16 @@ func (c *Config) validate() error {
 	} {
 		if err := validateAddr(addr); err != nil {
 			return fmt.Errorf("config: %s: %w", name, err)
+		}
+	}
+
+	if c.DebugAddr != "" {
+		if err := validateAddr(c.DebugAddr); err != nil {
+			return fmt.Errorf("config: %s: %w", EnvDebugAddr, err)
+		}
+		host, _, _ := net.SplitHostPort(c.DebugAddr)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("config: %s: %q must bind a loopback address", EnvDebugAddr, c.DebugAddr)
 		}
 	}
 

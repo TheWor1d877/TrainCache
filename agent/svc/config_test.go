@@ -41,6 +41,24 @@ func setBaseEnv(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
+	// TRAINCACHE_DEBUG_ADDR 区分"未设置"与"显式空串",不能设成空串,直接清除。
+	unsetEnv(t, "TRAINCACHE_DEBUG_ADDR")
+}
+
+// unsetEnv 删除环境变量,并在用例结束时恢复原值。
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	old, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
 }
 
 // wantDefaultHeat 是 D14/D30 默认十一值:N=24h、M=30min、T=24h(因子 0.5)、β=0.15、
@@ -114,6 +132,48 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ObjstoreProbeConditionalWrite {
 		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
+	}
+	if cfg.DebugAddr != defaultDebugAddr {
+		t.Errorf("DebugAddr = %q, want %q", cfg.DebugAddr, defaultDebugAddr)
+	}
+}
+
+// TestLoadDebugAddr 覆盖 /debug/loglevel 地址的默认、显式与关闭三种取值。
+func TestLoadDebugAddr(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		set     bool
+		want    string
+		wantErr bool
+	}{
+		{name: "default when unset", want: defaultDebugAddr},
+		{name: "explicit", set: true, value: "127.0.0.1:16060", want: "127.0.0.1:16060"},
+		{name: "empty disables", set: true, value: "", want: ""},
+		{name: "not loopback", set: true, value: "0.0.0.0:6060", wantErr: true},
+		{name: "not host port", set: true, value: "6060", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			if tc.set {
+				t.Setenv("TRAINCACHE_DEBUG_ADDR", tc.value)
+			}
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.DebugAddr != tc.want {
+				t.Fatalf("DebugAddr = %q, want %q", cfg.DebugAddr, tc.want)
+			}
+		})
 	}
 }
 

@@ -326,7 +326,7 @@ func TestComputePlacementStopsFailedNodes(t *testing.T) {
 	r := &Reconciler{}
 	placement := r.computePlacement(task, []string{"n1", "n2"}, map[string]error{
 		"n1": fmt.Errorf("%w: down", agentclient.ErrAgentUnavailable),
-	})
+	}, nil)
 	if placement.Err != nil {
 		t.Fatalf("Compute: %v", placement.Err)
 	}

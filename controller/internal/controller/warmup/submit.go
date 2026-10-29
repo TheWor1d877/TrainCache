@@ -77,7 +77,6 @@ func submitToCandidates(
 					"pod_index", index,
 					"node", node,
 					"generation", task.Generation,
-					"attempt", 1,
 					"err", err,
 				}
 				if errors.Is(err, agentclient.ErrPermanent) {

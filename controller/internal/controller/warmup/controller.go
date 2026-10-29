@@ -414,7 +414,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// M7: evaluate the gate on the assigned node's readiness.
 	if len(candidates) > 0 && len(windows) > 0 {
 		stopped := submitFailures(submission)
-		placement := r.computePlacement(task, candidates, stopped)
+		ledger := submittedLedger(task, windows, candidates, outcome.Tasks, initialFanout, submission)
+		placement := r.computePlacement(task, candidates, stopped, ledger)
 		if placement.Err != nil {
 			log.Error("gwaa computation failed", "err", placement.Err)
 			if submitErr == nil {
@@ -425,13 +426,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				Task:      task,
 				DataSet:   ds,
 				Windows:   windows,
-				Previous:  submittedLedger(task, windows, candidates, outcome.Tasks, initialFanout, submission),
+				Previous:  ledger,
 				Placement: placement,
 				PodNames:  podNames,
 				Fanout:    fanout,
 				FanoutMin: fanoutMin,
 				Metrics:   r.Metrics,
 			})
+			r.dropResubmittedMarks(task, applied)
 			if applyErr != nil {
 				log.Warn("placement apply incomplete",
 					"err", applyErr,
@@ -448,7 +450,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				"fanout", fanout,
 				"fanout_min", fanoutMin,
 				"fanout_max", fanout,
-				"assign", formatAssignment(placement.Assignment),
+				"assign", assignmentView(placement.Assignment),
 				"warm_node_count", formatWarmNodeCounts(placement.Assignment),
 				"status_entries", len(task.Status.PodNodeReadiness),
 				"unassigned", len(placement.UnassignedPods),

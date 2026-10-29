@@ -87,6 +87,14 @@ type Input struct {
 	// claims (M14). Zero or negative means 1; Compute rejects a normalized
 	// minimum larger than the normalized maximum.
 	FanoutMin int32
+
+	// Held is the in-register set for the D45 hysteresis (docs/7.1 §5.5):
+	// podIndex -> nodes whose preheat task this Agent confirmed it is still
+	// running this round. A held node that remains feasible and within the
+	// retention line keeps its place in the target set, so lockstep progress
+	// across the wide preheat cannot flip the assignment one block at a time.
+	// Affinity units take the union of their members.
+	Held map[int32][]string
 }
 
 // PodDecision records why GWAA chose a Pod's target fanout (M14). It is the
@@ -506,10 +514,34 @@ func buildUnits(in Input, nodes []node, rng *rand.Rand, fanout, fanoutMin int32)
 		}
 		setTops(&u, nodes)
 		fullPref := preference(u.c, nodes, rng)
-		planUnit(&u, nodes, fullPref, unitK, unitMax, unitMin)
+		planUnit(&u, nodes, fullPref, heldNodes(in.Held, u.pods, nodes), unitK, unitMax, unitMin)
 		units = append(units, u)
 	}
 	return units, nil
+}
+
+// heldNodes resolves Input.Held (Pod -> node names the Agent confirmed it is
+// running) into node positions for one unit, taking the union of its members.
+func heldNodes(held map[int32][]string, pods []int32, nodes []node) map[int]struct{} {
+	var names map[string]struct{}
+	for _, index := range pods {
+		for _, name := range held[index] {
+			if names == nil {
+				names = make(map[string]struct{})
+			}
+			names[name] = struct{}{}
+		}
+	}
+	if names == nil {
+		return nil
+	}
+	out := make(map[int]struct{}, len(names))
+	for i := range nodes {
+		if _, ok := names[nodes[i].name]; ok && !nodes[i].stopped {
+			out[i] = struct{}{}
+		}
+	}
+	return out
 }
 
 // memberBounds computes an affinity unit's fanout bounds: the lower bound is
@@ -535,13 +567,14 @@ func memberBounds(pods []int32, fanout, fanoutMin int32) (unitMin, unitMax int32
 }
 
 // planUnit fills the deterministic target set and the claim orders from the
-// per-node readiness aggregate. It implements docs/7.1 §5.5 steps 1-9.
+// per-node readiness aggregate. It implements docs/7.1 §5.5 steps 1-9 plus the
+// D45 hysteresis over held.
 //
 // target is ordered by c_ij descending and node name ascending, independent of
 // the input node order and of the RNG. pref keeps the injected RNG for equal
 // c_ij ties, so assignment order stays reproducible per seed while the target
 // set itself is stable. fallback holds the excluded feasible nodes.
-func planUnit(u *unit, nodes []node, fullPref []int, unitK, fanout, fanoutMin int32) {
+func planUnit(u *unit, nodes []node, fullPref []int, held map[int]struct{}, unitK, fanout, fanoutMin int32) {
 	order := targetOrder(u.c, nodes)
 	feasible := len(order)
 	u.target = nil
@@ -597,7 +630,18 @@ func planUnit(u *unit, nodes []node, fullPref []int, unitK, fanout, fanoutMin in
 		target = 0
 	}
 
-	u.target = append([]int(nil), order[:target]...)
+	choice := make(map[int]struct{}, target)
+	for _, n := range order[:target] {
+		choice[n] = struct{}{}
+	}
+	keepHeld(u, order, held, choice, target, best, lowSignal)
+
+	u.target = make([]int, 0, len(choice))
+	for _, n := range order {
+		if _, ok := choice[n]; ok {
+			u.target = append(u.target, n)
+		}
+	}
 	u.decision = PodDecision{
 		TargetFanout: int32(target),
 		LowSignal:    lowSignal,
@@ -605,23 +649,59 @@ func planUnit(u *unit, nodes []node, fullPref []int, unitK, fanout, fanoutMin in
 		MinUnmet:     fanoutMin > int32(feasible),
 	}
 
-	inTarget := make(map[int]struct{}, len(u.target))
-	for _, n := range u.target {
-		inTarget[n] = struct{}{}
-	}
 	for _, n := range fullPref {
-		if _, ok := inTarget[n]; ok {
+		if _, ok := choice[n]; ok {
 			u.pref = append(u.pref, n)
 		}
 	}
 	// Fallback order stays deterministic (c_ij descending, node name ascending)
 	// because it is a new M14 path, not one of the existing RNG tie-breaks.
-	u.fallback = append([]int(nil), order[target:]...)
+	for _, n := range order {
+		if _, ok := choice[n]; !ok {
+			u.fallback = append(u.fallback, n)
+		}
+	}
 	for i, n := range u.pref {
 		u.rank[n] = i
 	}
 	for i, n := range u.fallback {
 		u.rank[n] = len(u.pref) + i
+	}
+}
+
+// keepHeld applies the D45 hysteresis (docs/7.1 §5.5): a node the Agent reports
+// as still running this round keeps its place in the target set while it is
+// feasible and within the retention line, displacing the lowest-ranked member
+// that is not itself held. Without it the wide preheat's lockstep progress makes
+// the strict c_ij ordering hand the slot to whichever node landed a block first,
+// and every hand costs a Submit plus a Cancel.
+func keepHeld(u *unit, order []int, held map[int]struct{}, choice map[int]struct{}, target int, best float64, lowSignal bool) {
+	for _, candidate := range order {
+		if _, ok := held[candidate]; !ok {
+			continue
+		}
+		if _, ok := choice[candidate]; ok {
+			continue
+		}
+		if !lowSignal && 2*u.c[candidate] < best {
+			continue
+		}
+		if len(choice) < target {
+			choice[candidate] = struct{}{}
+			continue
+		}
+		for i := len(order) - 1; i >= 0; i-- {
+			victim := order[i]
+			if _, ok := choice[victim]; !ok {
+				continue
+			}
+			if _, keep := held[victim]; keep {
+				continue
+			}
+			delete(choice, victim)
+			choice[candidate] = struct{}{}
+			break
+		}
 	}
 }
 

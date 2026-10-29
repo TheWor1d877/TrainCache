@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio:latest
+          image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
           imagePullPolicy: IfNotPresent
           args: ["server", "/data", "--console-address", ":9001"]
           env:

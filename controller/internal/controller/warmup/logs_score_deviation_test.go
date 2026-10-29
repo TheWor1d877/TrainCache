@@ -84,6 +84,22 @@ func TestM12GwaaPlacementAppliedLogFields(t *testing.T) {
 	m12RequireFields(t, rec, "component", "warmup_task",
 		"fanout", "fanout_min", "fanout_max",
 		"assign", "warm_node_count", "status_entries", "unassigned")
+	// assign 是 Pod→节点列表的结构化对象:每个 Pod 单独取得到,节点名各自成元素。
+	assign := m12AssignNodes(t, rec)
+	if len(assign) != 2 {
+		t.Fatalf("assign = %v, want one entry per Pod", assign)
+	}
+	known := map[string]struct{}{"n1": {}, "n2": {}}
+	for _, pod := range []string{"p0", "p1"} {
+		if len(assign[pod]) == 0 {
+			t.Fatalf("assign[%s] = %v, want at least one node", pod, assign[pod])
+		}
+		for _, node := range assign[pod] {
+			if _, ok := known[node]; !ok {
+				t.Fatalf("assign[%s] holds %q, want a candidate node", pod, node)
+			}
+		}
+	}
 }
 
 // §4.1 第 17 点: a released Pod on a node outside its assignment records the

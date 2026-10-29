@@ -29,6 +29,7 @@ import (
 	"traincache/controller/internal/logging"
 	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/storage"
+	corelog "traincache/core/logging"
 )
 
 const (
@@ -79,6 +80,8 @@ func run(ctx context.Context) error {
 }
 
 func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, registry *metrics.Metrics) error {
+	startDebugServer(ctx, cfg, log)
+
 	opts := managerOptions(cfg, newScheme(), registry)
 	log.Debug("manager options prepared",
 		"metrics_addr", opts.Metrics.BindAddress,
@@ -155,6 +158,12 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 
 	log.Info("starting manager", "metrics_addr", cfg.MetricsAddr, "health_addr", cfg.HealthAddr)
 	return mgr.Start(ctx)
+}
+
+// startDebugServer 挂载 /debug/loglevel。DebugAddr 为空时不监听;监听失败只记
+// Error,不影响管理器(见 docs/8.1 §7)。
+func startDebugServer(ctx context.Context, cfg *config.Config, log *slog.Logger) {
+	go corelog.ServeLevel(ctx, cfg.DebugAddr, component, log)
 }
 
 func newScheme() *runtime.Scheme {

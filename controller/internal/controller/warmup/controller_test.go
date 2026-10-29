@@ -38,6 +38,11 @@ type heldTask struct {
 	generation uint64
 	chunks     int
 	canceled   bool
+	// seq is the bitmap-change counter the Agent reports; a Submit restarts it
+	// at 1, exactly as docs/6.1 附录 A.2 prescribes for a resubmitted task.
+	seq uint64
+	// ready is the number of window blocks that are resident on this node.
+	ready int32
 }
 
 type fakeAgentPool struct {
@@ -64,6 +69,7 @@ func (p *fakeAgentPool) Submit(_ context.Context, node string, req *agentpb.Subm
 	p.held[progressKeyOf(req.GetTaskId(), node)] = heldTask{
 		generation: req.GetGeneration(),
 		chunks:     len(req.GetChunks()),
+		seq:        1,
 	}
 	return nil
 }
@@ -77,6 +83,7 @@ func (p *fakeAgentPool) Update(_ context.Context, node string, req *agentpb.Upda
 	p.held[progressKeyOf(req.GetTaskId(), node)] = heldTask{
 		generation: req.GetGeneration(),
 		chunks:     len(req.GetChunks()),
+		seq:        1,
 	}
 	return nil
 }
@@ -95,9 +102,9 @@ func (p *fakeAgentPool) Cancel(_ context.Context, node string, req *agentpb.Canc
 }
 
 // Progress mirrors the 7.x Agent contract: an accepted task_id is reported
-// with the generation it accepted, its cancellation flag and a zero
-// ready_bitmap of ceil(chunks/8) bytes; anything else answers ErrTaskNotFound
-// ("not submitted here").
+// with the generation it accepted, its cancellation flag, its bitmap-change
+// counter and a ready_bitmap of ceil(chunks/8) bytes whose first `ready` bits
+// are set; anything else answers ErrTaskNotFound ("not submitted here").
 func (p *fakeAgentPool) Progress(_ context.Context, node, taskID string, _ uint64) (*agentpb.PreheatStatus, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -105,13 +112,37 @@ func (p *fakeAgentPool) Progress(_ context.Context, node, taskID string, _ uint6
 	if !ok {
 		return nil, agentclient.ErrTaskNotFound
 	}
+	seq := task.seq
+	if seq == 0 {
+		seq = 1
+	}
+	bitmap := make([]byte, bitmapBytes(task.chunks))
+	for i := 0; i < int(task.ready) && i < task.chunks; i++ {
+		bitmap[i/8] |= 1 << uint(i%8)
+	}
 	return &agentpb.PreheatStatus{
 		Generation:  task.generation,
-		Seq:         1,
-		ReadyBitmap: make([]byte, bitmapBytes(task.chunks)),
+		Seq:         seq,
+		ReadyBitmap: bitmap,
 		State:       agentpb.PreheatStatus_RUNNING,
 		Canceled:    task.canceled,
 	}, nil
+}
+
+// advance reports new preheat progress for a node's task the way the Agent
+// would: a fresh bitmap and the next seq. Blocks already on disk keep counting
+// as ready after a resubmit, so `ready` stays monotonic per node.
+func (p *fakeAgentPool) advance(node, taskID string, seq uint64, ready int32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := progressKeyOf(taskID, node)
+	task, ok := p.held[key]
+	if !ok {
+		return
+	}
+	task.seq = seq
+	task.ready = ready
+	p.held[key] = task
 }
 
 func (p *fakeAgentPool) snapshot() []submitted {

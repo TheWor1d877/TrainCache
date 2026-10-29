@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 	"traincache/agent/internal/logging"
 	"traincache/agent/svc"
+	corelog "traincache/core/logging"
 )
 
 // metricsShutdownTimeout 是 /metrics 服务优雅停止的上限(与 gRPC GracefulStop 并发执行)。
@@ -27,11 +29,21 @@ const metricsShutdownTimeout = 3 * time.Second
 // version is replaced at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+// agentLogLevel 读 TRAINCACHE_LOG_LEVEL:未设置或未知值退化为 info。
+func agentLogLevel() string {
+	raw := strings.TrimSpace(os.Getenv("TRAINCACHE_LOG_LEVEL"))
+	if _, ok := corelog.ParseLevel(raw); !ok {
+		return "info"
+	}
+	return strings.ToLower(raw)
+}
+
 func main() {
 	// 结构化 JSON 日志(slog;Q6 结案:高基数维度 path/fp/task_id 走行级日志)。
-	// component/version 由 logging.New 注入并设为默认 logger;P0 级别固定 info,
-	// 动态级别属于 P1。
-	logging.New("agentd", version, "info")
+	// component/version 由 logging.New 注入并设为默认 logger;启动级别取
+	// TRAINCACHE_LOG_LEVEL(默认 info,未知值退化为 info),运行中由
+	// /debug/loglevel 修改(见 docs/8.1 §7)。
+	logging.New("agentd", version, agentLogLevel())
 
 	cfg, err := svc.Load()
 	if err != nil {
@@ -69,6 +81,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// /debug/loglevel 只绑回环;随 ctx 取消优雅停止,监听失败不影响缓存服务。
+	go corelog.ServeLevel(ctx, cfg.DebugAddr, "agentd", slog.Default())
 
 	// R1/R2(6.1 §5.9/§5.10):前缀感知快照跟随 + 读者声明心跳;随 signal ctx 退出,
 	// 退出时对已知 dataset 撤销 claim。

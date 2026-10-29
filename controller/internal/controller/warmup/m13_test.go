@@ -458,6 +458,26 @@ func logFieldsForSeed(t *testing.T, seed int64) {
 	if counts, _ := applied["warm_node_count"].(string); counts != wantCounts {
 		t.Fatalf("warm_node_count = %q, want %q", counts, wantCounts)
 	}
+	// assign 是一 Pod 一个键的结构化对象,节点列表与 status 里的配对一致。
+	assign := m12AssignNodes(t, applied)
+	if len(assign) != int(task.Spec.PodCount) {
+		t.Fatalf("assign = %v, want %d Pod entries", assign, task.Spec.PodCount)
+	}
+	for pod := int32(0); pod < task.Spec.PodCount; pod++ {
+		entries := podEntries(updated, pod)
+		if got := assign[fmt.Sprintf("p%d", pod)]; len(got) != len(entries) {
+			t.Fatalf("assign[p%d] = %v, want %d nodes", pod, got, len(entries))
+		}
+		want := make(map[string]struct{}, len(entries))
+		for _, entry := range entries {
+			want[entry.NodeName] = struct{}{}
+		}
+		for _, node := range assign[fmt.Sprintf("p%d", pod)] {
+			if _, ok := want[node]; !ok {
+				t.Fatalf("assign[p%d] holds %q, not in status %v", pod, node, entries)
+			}
+		}
+	}
 
 	evaluated := m12FindLog(t, &buf, "gate evaluated")
 	for _, field := range []string{"fanout", "warm_node_count", "status_entries", "hit_nodes"} {
@@ -506,7 +526,7 @@ func podsPerNodePairsForSeed(t *testing.T, seed int64) {
 		Rand: rand.New(rand.NewSource(seed))}
 	task := fanoutTask(t, 2, 1, 2, [][]int32{{0}, {1}})
 
-	placement := r.computePlacement(task, []string{"n1", "n2", "n3", "n4"}, nil)
+	placement := r.computePlacement(task, []string{"n1", "n2", "n3", "n4"}, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}

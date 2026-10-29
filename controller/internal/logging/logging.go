@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 
 	corelog "traincache/core/logging"
 )
@@ -31,10 +30,14 @@ const logSchemaVersion = 1
 // validation rejects invalid values before New is called; an unknown level
 // degrades to info so that logging can never prevent startup.
 func New(component, version, level string) *slog.Logger {
+	// 级别存在 corelog 的进程级 LevelVar 上：启动时写入 env 值，运行中由
+	// /debug/loglevel 修改，所有已构造的 handler 立即跟随。
+	lvl, _ := corelog.ParseLevel(level)
+	corelog.Level().Set(lvl)
 	// 脱敏包在 JSON handler 外层：消息、字符串与 error 属性写出前统一处理，
 	// 调用点不需要逐个调用 Redact（D32）。
 	handler := corelog.NewRedactingHandler(
-		slog.NewJSONHandler(output, &slog.HandlerOptions{Level: parseLevel(level)}),
+		slog.NewJSONHandler(output, &slog.HandlerOptions{Level: corelog.Level()}),
 	)
 	logger := slog.New(handler).With(
 		slog.String("component", component),
@@ -61,16 +64,3 @@ func From(ctx context.Context) *slog.Logger {
 }
 
 type loggerKey struct{}
-
-func parseLevel(level string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}

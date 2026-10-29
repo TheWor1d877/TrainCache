@@ -65,8 +65,8 @@ func TestComputePlacementStableAcrossPolls(t *testing.T) {
 	task := d32ColdTask()
 	nodes := task.Status.CandidateNodes
 
-	before := r.computePlacement(task, nodes, nil)
-	after := r.computePlacement(task, nodes, nil)
+	before := r.computePlacement(task, nodes, nil, nil)
+	after := r.computePlacement(task, nodes, nil, nil)
 	if before.Err != nil || after.Err != nil {
 		t.Fatalf("computePlacement errors: %v / %v", before.Err, after.Err)
 	}

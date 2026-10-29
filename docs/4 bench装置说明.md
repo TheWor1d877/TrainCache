@@ -57,7 +57,7 @@ bench/
 | `scripts/upload_bench.py` | B 轨灌 MinIO | 无参；只追加不覆盖（D41）：桶里已有的 `shard-*.tar` 跳过，`UPLOAD_FORCE=1` 才重传；每次运行重设公开读 policy |
 | `scripts/trainpublish` | 发布 TrainCache 块快照 | Go 二进制，源码在 `core/cmd/trainpublish`，重编 `/usr/local/go/bin/go build`；关键旗标 `-chunk-size`，实验取 8388608，只在空桶首次发布时写桶级声明（§3）；`-work-dir` 必须放数据层（默认 `/tmp` 是 16 GiB tmpfs，128 分片全量发布会写爆） |
 | `scripts/ctrl_up.sh` / `ctrl_down.sh` | 控制面起停 | up：命名空间、节点标签、`traincache-objstore`/webhook TLS 两个 Secret、caBundle、`kubectl apply -k controller/deploy`、agentd 配置、四个工作负载就绪；down：删控制面资源，保留 namespace/集群/数据，支持 `--dry-run` |
-| `k8s/kind-config.yaml`、`k8s/minio.yaml` | 集群与源站基座 | kind 5 节点配置；MinIO 带 30Gi PVC，所以 `kind delete` 后源数据仍在宿主机（§7 第 6 条）；metrics 端点匿名只读（`MINIO_PROMETHEUS_AUTH_TYPE=public`，nodePort 30090），每轮抓 `minio_s3_traffic_sent_bytes` 做出站对账 |
+| `k8s/kind-config.yaml`、`k8s/minio.yaml` | 集群与源站基座 | kind 5 节点配置；MinIO 镜像 `pgsty/minio:RELEASE.2026-08-04T00-00-00Z`，`Makefile` 的 `kind-up` 预载与 `compare/_common.sh` 的 `MINIO_IMAGE` 默认值跟清单用同一镜像，否则新建集群多一次无效拉取，两处版本也会分裂；MinIO 带 30Gi PVC，所以 `kind delete` 后源数据仍在宿主机（§7 第 6 条）；metrics 端点匿名只读（`MINIO_PROMETHEUS_AUTH_TYPE=public`，nodePort 30090），每轮抓 `minio_s3_traffic_sent_bytes` 做出站对账 |
 
 ### 2.2 五组对照层（compare/）
 
@@ -154,7 +154,7 @@ make bench-up
 
 `ctrl-up` 的前置与保证：
 
-- 控制面镜像 manager/webhook/scheduler/agentd 统一用 `dev` 标签，镜像名为 `ghcr.io/thewor1d877/traincache/<组件>:dev`，必须已在 4 个 worker 的 containerd 中，`kind-up` 不预载。缺失时 `ctrl_up.sh` 直接失败并打印 `docker pull` 与 `kind load docker-image ... --name traincache`，不在脚本内重试拉取。预检本身对每个镜像探 3 次、间隔 2s：`kind load` 刚结束时 containerd 元数据可能还没同步，单次 `crictl images -q` 会误报缺失。
+- 控制面镜像 manager/webhook/scheduler/agentd 统一用 `dev` 标签，镜像名为 `ghcr.io/thewor1d877/traincache/<组件>:dev`，必须已在 4 个 worker 的 containerd 中，`kind-up` 不预载。缺失时 `ctrl_up.sh` 直接失败并打印 `docker pull` 与 `kind load docker-image ... --name traincache`，不在脚本内重试拉取。预检本身对每个镜像探 3 次、间隔 2s：`kind load` 刚结束时 containerd 元数据可能还没同步，单次 `crictl images -q` 会误报缺失。四个镜像用 `hack/build-images.sh` 构建；基础镜像只在本机以镜像站前缀名字存在时，脚本先 `docker tag` 出官方短名，构建不走远端拉取。
 - webhook TLS Secret 缺失时自签生成，并把 CA 注入 MutatingWebhookConfiguration `traincache-pod-warmup` 的 caBundle。
 - 凭证 Secret `traincache-objstore` 用 `config.py` 的 MinIO 凭证创建，已存在则跳过。
 - worker 节点缺 `traincache.io/s3-access=true` 时自动补标签。

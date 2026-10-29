@@ -58,7 +58,7 @@ TC_BURST="${TC_BURST:-$(burst_for_rate)}"; TC_BURST="${TC_BURST:-$(cfg TC_BURST)
 # ---- 镜像(允许环境变量覆盖,默认取 survey 实测版本)----
 JUICEFS_IMAGE="${JUICEFS_IMAGE:-juicedata/mount:ce-v1.3.0}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
-MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
+MINIO_IMAGE="${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z}"
 BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:latest}"
 TRAIN_IMAGE="${TRAIN_IMAGE:-python:3.12-alpine}"
 

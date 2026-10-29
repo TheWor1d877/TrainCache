@@ -129,7 +129,7 @@ func TestComputePlacementEmitsGWAAMetrics(t *testing.T) {
 	r := &Reconciler{Metrics: m, Now: func() time.Time { return time.Unix(100, 0) }}
 	task := fixtureTask(2, 2, [][]int32{{0, 1}, {2, 3}})
 
-	placement := r.computePlacement(task, []string{"n1", "n2"}, nil)
+	placement := r.computePlacement(task, []string{"n1", "n2"}, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}
