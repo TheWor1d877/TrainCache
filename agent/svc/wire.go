@@ -53,67 +53,33 @@ func collectorConfig(h HeatConfig) collector.CollectorConfig {
 	}
 }
 
-// —— collector 懒绑定(§5.5;主对话裁决:单 Collector 绑"首个发现的 reader")——
+// —— collector 订单上下文与回调(D63/§5.5:collector 不持有 ring)——
 
-// collector 返回当前 collector(未绑定 → nil)。
+// collector 返回采集层(装配期构造;测试注入点)。
 func (a *Agent) collector() *collector.Collector {
-	a.collMu.Lock()
-	defer a.collMu.Unlock()
 	return a.Collector
 }
 
-// boundRing 返回所绑 ring 与其 pod-uid(未绑定 → nil, "")。
-func (a *Agent) boundRing() (*ordersource.Reader, string) {
-	a.collMu.Lock()
-	defer a.collMu.Unlock()
-	return a.ring, a.ringPod
+// orderContext 是 collector 的订单上下文 provider(D63):按打开引用/指纹解析
+// dataset、StageID 与当前订单;没有订单时返回 dataset 但 ok=false(统计照常,
+// 标签仍可用 dataset),完全无归属时返回空串。
+func (a *Agent) orderContext(ref ordersource.ChunkRef, fp cas.Fingerprint) (dataset, stage string, order ordersource.ConsumeOrder, ok bool) {
+	if a.Prefetch == nil {
+		return "", "", ordersource.ConsumeOrder{}, false
+	}
+	return a.Prefetch.orderContext(ref, fp)
 }
 
-// bindCollector 是首个 ring 发现回调(OrderDiscovery.SetOnReader;发现循环 goroutine 内
-// 调用):以所绑 reader 构造 collector 并启动。后续 ring 不重建也不换绑——collector 的
-// 冻结构造签名持有单一 ring 且无换绑接口;所绑 ring 消失/关闭后由降级判定接管
-// (collector 内部单 ring 判定 + orders.go 的聚合 tick 共同覆盖,聚合口径权威)。
-// ctx = 发现循环 ctx,collector 后台循环随之退出。
-func (a *Agent) bindCollector(ctx context.Context, podUID string, r *ordersource.Reader) {
-	a.collMu.Lock()
-	if a.Collector != nil {
-		a.collMu.Unlock()
+// onCalibratedAdvance 是 collector 交叉校准重对齐回调(§5.5):以校准打开时的 dataset
+// 与 ref 直接转投预取器;dataset 缺失时按 ref 归属回退解析,仍失败则丢弃。
+func (a *Agent) onCalibratedAdvance(dataset string, ref ordersource.ChunkRef) {
+	if dataset == "" {
+		dataset, _ = a.resolveDataset(ref)
+	}
+	if dataset == "" {
 		return
 	}
-	c := collector.NewCollector(a.Cfg.CacheRoot, r, a.Metrics, collectorConfig(a.Cfg.Heat))
-	a.Collector, a.ring, a.ringPod = c, r, podUID
-	a.collMu.Unlock()
-
-	c.SetAdvanceCallback(a.onCalibratedAdvance)
-	// D49:inotify 兜底 OPEN → 指纹反查当前订单 → 推进纯消费位点(门控在 collector 内:
-	// 钩子活跃期不回调,避免与 source=hook 双计)。
-	c.SetOpenCallback(a.onInotifyOpen)
-	// D49 self-open guard:prefetch/fetch/rescan/backfill 等 Agent 自身读打开的指纹在
-	// TTL 内不触发 onInotifyOpen(热度/命中率仍照常 noteOpen)。
-	if a.selfOpen != nil {
-		c.SetOpenFilter(a.selfOpen.SelfOpened)
-	}
-	slog.Info("collector: 绑定首个 order ring", "pod_uid", podUID, "block_dir", a.Cfg.CacheRoot)
-	c.Start(ctx)
-}
-
-// onCalibratedAdvance 是 collector 交叉校准重对齐回调(§5.5:advance 事件与校准重对齐共用
-// 同一回调):回调只带 chunk 号,经所绑 ring 的当前订单解析回块引用后转投预取器;解析
-// 失败(无 ring/无订单/位点不在订单)丢弃。
-func (a *Agent) onCalibratedAdvance(chunk int64) {
-	r, _ := a.boundRing()
-	if r == nil {
-		return
-	}
-	o, ok := r.CurrentOrder()
-	if !ok {
-		return
-	}
-	ref, ok := chunkRefIn(o.Chunks, chunk)
-	if !ok {
-		return
-	}
-	a.Prefetch.OnConsumeSideAdvance(context.Background(), o.Dataset, ref)
+	a.Prefetch.OnConsumeSideAdvance(context.Background(), dataset, ref)
 }
 
 // onInotifyOpen 是 collector inotify 兜底打开回调(D49):按指纹反查各 dataset 当前订单的
@@ -139,31 +105,13 @@ func (a *Agent) onInotifyOpen(fp cas.Fingerprint) {
 	}
 }
 
-// chunkRefIn 在订单 chunks 中找 chunk 号对应的第一个引用(找不到 → false)。
-func chunkRefIn(chunks []ordersource.ChunkRef, chunk int64) (ordersource.ChunkRef, bool) {
-	for _, c := range chunks {
-		if c.Chunk == chunk {
-			return c, true
-		}
-	}
-	return ordersource.ChunkRef{}, false
-}
-
 // —— 钩子三型 handler(§5.4/D33)——
 
-// resolveRef 解析一个块引用所属的 dataset 与指纹(§5.4 接线口径):先按 collector 所绑
-// ring 的 CurrentOrder().Dataset 查索引;失败(未绑定/无订单/未命中)再按已知 dataset
-// (bundle 集合)逐个查;都未命中 → ok=false(调用方丢弃或跳过)。
+// resolveRef 解析一个块引用所属的 dataset 与指纹(§5.4 接线口径):按已知 dataset
+// (bundle 集合)逐个查索引;都未命中 → ok=false(调用方丢弃或跳过)。
 // 指纹只能来自索引条目,要求命中的调用方(open/advance、本地探测)适用本口径;
 // demand 补块只需 dataset 归属,走 resolveDataset,不受索引未命中影响(D60)。
 func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fingerprint, ok bool) {
-	if r, _ := a.boundRing(); r != nil {
-		if o, has := r.CurrentOrder(); has && o.Dataset != "" {
-			if e, found, err := a.Prefetch.lookupRef(o.Dataset, ref); err == nil && found {
-				return o.Dataset, e.Fingerprint, true
-			}
-		}
-	}
 	for _, ds := range a.Prefetch.bundleNames() {
 		if e, found, err := a.Prefetch.lookupRef(ds, ref); err == nil && found {
 			return ds, e.Fingerprint, true
@@ -173,14 +121,11 @@ func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fin
 }
 
 // resolveDataset 解析块引用的 dataset 归属,不要求路径索引命中(§5.4/D60):
-// 先取所绑 ring 的 CurrentOrder().Dataset,再回退已知 bundle 集合的第一个;
-// 两者都没有 → ok=false(调用方丢弃帧)。D25 键由 (dataset, path, chunk) 直接构造,
-// demand 补块不依赖索引。
+// 先按引用/指纹找订单上下文,再回退已知 bundle 集合的第一个;都没有 → ok=false
+// (调用方丢弃帧)。D25 键由 (dataset, path, chunk) 直接构造,demand 补块不依赖索引。
 func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok bool) {
-	if r, _ := a.boundRing(); r != nil {
-		if o, has := r.CurrentOrder(); has && o.Dataset != "" {
-			return o.Dataset, true
-		}
+	if ds, _, _, _ := a.orderContext(ref, cas.Fingerprint{}); ds != "" {
+		return ds, true
 	}
 	if names := a.Prefetch.bundleNames(); len(names) > 0 {
 		return names[0], true
@@ -192,14 +137,14 @@ func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok boo
 //   - open_report:解析指纹 → collector.Open(fp, ref)(未绑定 collector / 解析失败 → 丢弃);
 //   - advance:collector.Advance(chunk) + phaseTracker.OnOrder + 预取器
 //     OnConsumeSideAdvance + consumption_advance{source=hook};
-//   - stage_switch:以所绑 ring 的 CurrentOrder 为基底覆盖 stage_id/shuffle_seed 构造订单
+//   - stage_switch:以最近一次成功安装的订单为基底覆盖 stage_id/shuffle_seed 构造订单
 //     转交预取器(去重:与当前订单同 stage_id+shuffle_seed → 跳过;ring 路径先到时由此闭环);
 //   - read_miss(D44):async demand 补块入口 handleReadMiss;
 //   - read_stall(D47):stallAttributor.Attribute + ObserveReadStall(见 stallattr.go)。
 //
-// collector 阶段上下文继续跟随 ring 的 CurrentOrder(冻结接口无重定位能力:直报阶段在
-// ring 写入后自然一致)。handler 只做内存/非阻塞操作;ctx 用后台 ctx(集帧自身无 ctx,
-// 预取器生命周期仍受其调度 ctx 约束)。
+// 钩子帧不带 dataset:stage_switch 的基底取最近安装的订单,多条 dataset 并发时以
+// 最后安装者为准(已知限制,见 §7.4)。handler 只做内存/非阻塞操作;ctx 用后台 ctx
+// (集帧自身无 ctx,预取器生命周期仍受其调度 ctx 约束)。
 func (a *Agent) hookHandlers() HookHandlers {
 	return HookHandlers{
 		Open: func(ref ordersource.ChunkRef) {
@@ -229,16 +174,13 @@ func (a *Agent) hookHandlers() HookHandlers {
 	}
 }
 
-// onHookStageSwitch 处理阶段切换直报帧(D33):ring 当前订单为基底 + 帧内 stage_id/seed
+// onHookStageSwitch 处理阶段切换直报帧(D33):最近安装的订单为基底 + 帧内 stage_id/seed
 // 覆盖 → ForOrder 转交(前缀已加载,只走 OnStageSwitch)。与当前订单完全同阶段 → 去重跳过
-// (ring 路径已转交;D11 先到者为准)。
+// (ring 路径已转交;D11 先到者为准)。尚无任何订单时丢弃帧(无 dataset 归属)。
 func (a *Agent) onHookStageSwitch(stageID string, seed int64) {
-	r, pod := a.boundRing()
-	if r == nil {
-		return
-	}
-	o, ok := r.CurrentOrder()
+	pod, o, ok := a.Prefetch.lastInstalled()
 	if !ok {
+		slog.Warn("hooksock: stage_switch 缺少订单基底,丢弃", "stage_id", stageID)
 		return
 	}
 	if o.StageID == stageID && o.ShuffleSeed == seed {
@@ -257,8 +199,8 @@ func (a *Agent) onHookStageSwitch(stageID string, seed int64) {
 // SetOrderTouchHook;§7.6 任务 4;D24 t_touch 三源之"新订单刷新"):对该订单 Chunks 全部
 // 块引用,经该 dataset 的 Catalog.Lookup 解析指纹后 Collector.Touch(fp, now)(同一订单
 // 取同一时刻 now);Lookup 未命中/未加载映射的块跳过,空 chunks 不进入本回调。
-// 在 ForOrder 调用链内同步执行(索引解析为纯内存查询,不阻塞);collector 尚未绑定
-// (首个 ring 发现前)时整体跳过——后续订单到达时自然补齐。
+// 在 ForOrder 调用链内同步执行(索引解析为纯内存查询,不阻塞);collector 未装配时
+// 整体跳过(测试骨架)。
 func (a *Agent) onOrderTouch(dataset string, cat *index.Catalog, refs []prefetch.ChunkRef) {
 	c := a.collector()
 	if c == nil || cat == nil {

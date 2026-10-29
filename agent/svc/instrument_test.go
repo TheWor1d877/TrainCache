@@ -6,11 +6,10 @@ package svc
 //     index_refresh_duration_seconds{success} 样本、index_shards_loaded 置真实分片数;
 //   - 延迟线(⑥):四个业务 RPC 成功与错误各计一次 request_duration_seconds{endpoint,result};
 //   - 订单到达 t_touch 刷新(④;§7.6 任务 4):订单内块经索引解析指纹后被
-//     Collector.Touch 刷新(LastTouch 推进),索引未命中/空 chunks/未绑定 collector 跳过。
+//     Collector.Touch 刷新(LastTouch 推进),索引未命中/空 chunks 跳过。
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -197,17 +196,10 @@ func TestOrderTouchRefreshOnConsumeOrder(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ringPath := filepath.Join(t.TempDir(), "pod-a.ring")
-	writeTestRing(t, ringPath, 1, 1, 256, 2, wiringOrder(wiringDataset, "ring-seed"))
-	r := ordersource.NewReader(ringPath, filepath.Dir(ringPath))
-	t.Cleanup(func() {
-		cancel() // 先停 collector 后台循环,再关 reader
-		r.Close()
-	})
-	ag.bindCollector(ctx, "pod-a", r)
+	t.Cleanup(cancel)
 	c := ag.collector()
 	if c == nil {
-		t.Fatal("collector 未绑定")
+		t.Fatal("collector 未装配")
 	}
 
 	// 预置旧 t_touch:fp0 将被订单刷新推进;fp2 作订单外对照应保持不变。
@@ -258,36 +250,5 @@ func TestOrderTouchRefreshOnConsumeOrder(t *testing.T) {
 		if lt, ok := beforeEmpty[e.FP]; !ok || !lt.Equal(e.LastTouch) {
 			t.Errorf("空 chunks 订单不应刷新 t_touch:%s 的 LastTouch = %v, want %v", e.FP, e.LastTouch, lt)
 		}
-	}
-}
-
-// TestOrderTouchSkipsUnboundCollector(综合验收 ④ 边界):collector 未绑定(首个 ring
-// 发现回调之前)时订单到达不报错、不留 t_touch 条目(跳过语义;后续订单到达自然补齐)。
-func TestOrderTouchSkipsUnboundCollector(t *testing.T) {
-	ag, _ := newWiringAgent(t)
-	fps := commitWiringBlocks(t, ag, wiringDataset, wiringBlock{path: "u-000.tar", content: "unbound-0"})
-	// 本地副本 Evict 且源站无对象:预取下载必失败(不产生 onBlockDone 成功触达)。
-	if err := ag.CS.Evict(fps["u-000.tar#0"]); err != nil {
-		t.Fatalf("cas.Evict: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	if err := ag.Prefetch.ForOrder(ctx, "pod-a",
-		wiringOrder(wiringDataset, "epoch-1", ordersource.ChunkRef{Path: "u-000.tar"})); err != nil {
-		t.Fatalf("ForOrder(未绑定 collector): %v", err)
-	}
-
-	// 此后绑定 collector:此前的订单未留下任何热度条目。
-	ringPath := filepath.Join(t.TempDir(), "pod-a.ring")
-	writeTestRing(t, ringPath, 1, 1, 256, 2, wiringOrder(wiringDataset, "ring-seed"))
-	r := ordersource.NewReader(ringPath, filepath.Dir(ringPath))
-	t.Cleanup(func() {
-		cancel()
-		r.Close()
-	})
-	ag.bindCollector(ctx, "pod-a", r)
-	if got := len(ag.collector().ListForEviction()); got != 0 {
-		t.Fatalf("热度表条目 = %d, want 0(未绑定 collector 时订单不触发 t_touch)", got)
 	}
 }

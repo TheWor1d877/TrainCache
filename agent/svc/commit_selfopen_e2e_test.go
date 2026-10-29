@@ -71,7 +71,7 @@ func TestCommitSelfOpenRegisteredAndFiltered(t *testing.T) {
 	selfPath := writeWatchBlock(t, blockDir, selfFP)
 	trainPath := writeWatchBlock(t, blockDir, trainFP)
 
-	c := collector.NewCollector(blockDir, nil, fx.reg, collector.CollectorConfig{})
+	c := collector.NewCollector(blockDir, fx.reg, collector.CollectorConfig{})
 	c.SetOpenCallback(ag.onInotifyOpen)
 	c.SetOpenFilter(guard.SelfOpened)
 	watchCtx, cancel := context.WithCancel(ctx)

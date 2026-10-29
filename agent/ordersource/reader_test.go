@@ -131,6 +131,23 @@ func readerState(r *Reader) (attached bool, gen, lastSeq int64, missing bool) {
 	return r.attached, r.lastGen, r.lastReadSeq, r.missing
 }
 
+// droppedDelta 返回丢单计数相对基线 (r0, c0, i0) 的增量。
+// 包级计数为节点级累计且不重置,测试一律用前后差值断言。
+func droppedDelta(r0, c0, i0 int64) (resync, corrupt, invalid int64) {
+	resync, corrupt, invalid = DroppedTotals()
+	return resync - r0, corrupt - c0, invalid - i0
+}
+
+// assertDroppedDelta 断言丢单计数相对基线的增量。
+func assertDroppedDelta(t *testing.T, r0, c0, i0, wantResync, wantCorrupt, wantInvalid int64) {
+	t.Helper()
+	resync, corrupt, invalid := droppedDelta(r0, c0, i0)
+	if resync != wantResync || corrupt != wantCorrupt || invalid != wantInvalid {
+		t.Fatalf("丢单计数增量 = (resync %d, corrupt %d, invalid %d), want (%d, %d, %d)",
+			resync, corrupt, invalid, wantResync, wantCorrupt, wantInvalid)
+	}
+}
+
 // newRingPath 在临时目录下建 ring 路径。
 func newRingPath(t *testing.T) string {
 	t.Helper()
@@ -261,8 +278,9 @@ func TestReaderGenerationChangeRereads(t *testing.T) {
 	}
 }
 
-// TestReaderGenerationChangeSamePayloadNoRedelivery gen 变化但 payload 字节相同 → 不重推(去重)。
-func TestReaderGenerationChangeSamePayloadNoRedelivery(t *testing.T) {
+// TestReaderGenerationChangeSamePayloadRedelivered gen 变化但 payload 字节相同 → 重放一次
+// (design §7.4:sidecar 重启后会话要追到当前阶段,不能按字节吞掉)。
+func TestReaderGenerationChangeSamePayloadRedelivered(t *testing.T) {
 	fastPoll(t)
 	path := newRingPath(t)
 	w := newRingWriter(t, path, 1, 512, 8)
@@ -276,21 +294,179 @@ func TestReaderGenerationChangeSamePayloadNoRedelivery(t *testing.T) {
 	})
 	ch := subscribeTest(t, r)
 
-	w.SetGeneration(2) // 代际变化(同 payload,seq 未推进)
+	w.SetGeneration(2) // 代际变化(同 payload)
 	w.WriteOrder(o)    // 同 payload 字节,新 seq
 
-	// 白盒:读端已复验新代际并追到 seq=2(证明处理已发生,而非尚未轮询)
-	mustEventually(t, "读端完成代际复验与追读", func() bool {
-		attached, gen, lastSeq, _ := readerState(r)
-		return attached && gen == 2 && lastSeq == 2
+	assertOrderEqual(t, recvOrder(t, ch), o) // 新代际重放一次
+	mustEventually(t, "CurrentOrder 更新到新代际订单", func() bool {
+		cur, ok := r.CurrentOrder()
+		return ok && orderEqual(cur, o)
 	})
-	expectNoEvent(t, ch) // 按字节去重:不重推
+	mustEventually(t, "Generation 跟进新代际", func() bool { return r.Generation() == 2 })
+	expectNoEvent(t, ch) // 只重放一次:同代际后续 poll 不重复推送
+}
 
-	cur, ok := r.CurrentOrder()
-	if !ok {
-		t.Fatal("去重不应清空当前订单")
+// TestReaderInitialSnapshotNotDelivered 启动快照只置 CurrentOrder,不投递;
+// 同代际相同载荷仍按字节去重,载荷变化才推送。
+func TestReaderInitialSnapshotNotDelivered(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 8)
+	o := testOrder("epoch-1", 1)
+	w.WriteOrder(o)
+
+	r := newTestReader(t, path) // 初始快照:读到 o,不投递
+	ch := subscribeTest(t, r)
+	expectNoEvent(t, ch)
+
+	w.WriteOrder(o) // 同代际同字节,新 seq
+	mustEventually(t, "读端追到第二个 seq", func() bool {
+		_, _, lastSeq, _ := readerState(r)
+		return lastSeq == 2
+	})
+	expectNoEvent(t, ch) // 同代际按字节去重
+
+	o2 := testOrder("epoch-2", 2)
+	w.WriteOrder(o2)
+	assertOrderEqual(t, recvOrder(t, ch), o2)
+}
+
+// TestReaderGeneration 未接入(文件缺失)与关闭时 Generation 为 0,接入后随头代际变化。
+func TestReaderGeneration(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	r := newTestReader(t, path)
+	if got := r.Generation(); got != 0 {
+		t.Fatalf("文件缺失时 Generation = %d, want 0", got)
 	}
-	assertOrderEqual(t, cur, o)
+
+	w := newRingWriter(t, path, 7, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 1))
+	mustEventually(t, "代际 7 生效", func() bool { return r.Generation() == 7 })
+
+	w.SetGeneration(8)
+	mustEventually(t, "代际 8 生效", func() bool { return r.Generation() == 8 })
+
+	r.Close()
+	if got := r.Generation(); got != 0 {
+		t.Fatalf("Close 后 Generation = %d, want 0", got)
+	}
+}
+
+// ---------------- 丢单计数(design §7.4 / decisions D63) ----------------
+
+// TestDroppedTotalsResync 首次接入跳过的历史不计数;已接入后新代际跳读按跳过序号数计入 resync。
+func TestDroppedTotalsResync(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 8)
+	first := testOrder("epoch-1", 1)
+	w.WriteOrder(first)
+
+	r0, c0, i0 := DroppedTotals()
+	r := newTestReader(t, path) // 首次接入即跳过 seq=1 的历史
+	mustEventually(t, "首次接入就绪", func() bool {
+		cur, ok := r.CurrentOrder()
+		return ok && orderEqual(cur, first)
+	})
+	assertDroppedDelta(t, r0, c0, i0, 0, 0, 0) // 尚无消费者,首次接入不计数
+	ch := subscribeTest(t, r)
+
+	// 新代际直接跳到 seq=4(2..4 三份订单被跳过),单次头写入避免中间态。
+	w.WriteRawSlot(2, mustMarshal(t, testOrder("epoch-2", 2)))
+	w.WriteRawSlot(3, mustMarshal(t, testOrder("epoch-3", 3)))
+	latest := testOrder("epoch-4", 4)
+	w.WriteRawSlot(4, mustMarshal(t, latest))
+	w.SetGenerationAndSeq(2, 4)
+
+	mustEventually(t, "resync 计数 +3", func() bool {
+		resync, _, _ := droppedDelta(r0, c0, i0)
+		return resync == 3
+	})
+	assertOrderEqual(t, recvOrder(t, ch), latest) // 最新一份照常投递
+	assertDroppedDelta(t, r0, c0, i0, 3, 0, 0)
+}
+
+// TestDroppedTotalsCorrupt 追读路径遇损坏槽跳过一次:corrupt +1,同一槽不重复计。
+func TestDroppedTotalsCorrupt(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	r := newTestReader(t, path)
+	ch := subscribeTest(t, r)
+
+	r0, c0, i0 := DroppedTotals()
+	w.WriteRawSlot(1, []byte("{not-json"))
+	w.CommitSeq(1)
+
+	mustEventually(t, "corrupt 计数 +1", func() bool {
+		_, corrupt, _ := droppedDelta(r0, c0, i0)
+		return corrupt == 1
+	})
+	mustEventually(t, "读端越过损坏槽", func() bool {
+		_, _, lastSeq, _ := readerState(r)
+		return lastSeq == 1
+	})
+
+	next := testOrder("epoch-2", 2)
+	w.WriteOrder(next)
+	assertOrderEqual(t, recvOrder(t, ch), next) // 后续订单照常投递
+	time.Sleep(quietWindow)                     // 跨多个 poll 周期:同一槽不重复计数
+	assertDroppedDelta(t, r0, c0, i0, 0, 1, 0)
+}
+
+// TestDroppedTotalsCorruptOnResync 新代际最新槽损坏:resync 跳过计 1,当前订单被清空。
+func TestDroppedTotalsCorruptOnResync(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	w.WriteOrder(testOrder("epoch-1", 1))
+	r := newTestReader(t, path)
+	mustEventually(t, "初始订单就绪", func() bool {
+		_, ok := r.CurrentOrder()
+		return ok
+	})
+
+	r0, c0, i0 := DroppedTotals()
+	w.WriteRawSlot(2, []byte("garbage"))
+	w.SetGenerationAndSeq(2, 2)
+
+	mustEventually(t, "resync 损坏槽计数 +1", func() bool {
+		_, corrupt, _ := droppedDelta(r0, c0, i0)
+		return corrupt == 1
+	})
+	if _, ok := r.CurrentOrder(); ok {
+		t.Fatal("代际变化后最新槽损坏:当前订单应已清空,不残留旧代际")
+	}
+	time.Sleep(quietWindow)
+	assertDroppedDelta(t, r0, c0, i0, 1, 1, 0) // 跳过的 seq 2 同时计 resync
+}
+
+// TestDroppedTotalsInvalid 解析成功但 chunks 为空的订单计 invalid,行为不变(仍更新并投递)。
+func TestDroppedTotalsInvalid(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 4)
+	r := newTestReader(t, path)
+	ch := subscribeTest(t, r)
+
+	r0, c0, i0 := DroppedTotals()
+	empty := ConsumeOrder{Dataset: "b-track", SnapshotID: "snap-20261014", StageID: "empty"}
+	w.WriteOrder(empty)
+
+	assertOrderEqual(t, recvOrder(t, ch), empty) // 行为不变:仍投递
+	mustEventually(t, "CurrentOrder 仍更新", func() bool {
+		cur, ok := r.CurrentOrder()
+		return ok && orderEqual(cur, empty)
+	})
+	mustEventually(t, "invalid 计数 +1", func() bool {
+		_, _, invalid := droppedDelta(r0, c0, i0)
+		return invalid == 1
+	})
+
+	w.WriteOrder(testOrder("epoch-2", 2)) // 非空订单不计数
+	assertOrderEqual(t, recvOrder(t, ch), testOrder("epoch-2", 2))
+	assertDroppedDelta(t, r0, c0, i0, 0, 0, 1)
 }
 
 // TestReaderBadMagicIgnoredAndCounted magic 非法 → CurrentOrder false、无事件、magic 计数 +1。

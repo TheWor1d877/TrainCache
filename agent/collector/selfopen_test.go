@@ -9,7 +9,7 @@ import (
 // TestOpenFilterSkipsCallbackKeepsNoteOpen:filter 为 true 时 open 回调不触发,但 noteOpen
 // 的热度/命中率逻辑照常生效;false 与 nil filter 均正常触发回调。
 func TestOpenFilterSkipsCallbackKeepsNoteOpen(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	selfFP, trainFP := testFP(0x81), testFP(0x82)
 
 	var got []cas.Fingerprint

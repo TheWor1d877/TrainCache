@@ -110,6 +110,15 @@ func (w *ringWriter) SetGeneration(gen int64) {
 	w.writeHeader()
 }
 
+// SetGenerationAndSeq 一次写头同时改代际与 write_seq(模拟 sidecar 重启后直接跳到最新序号;
+// 单次 64B 头写入,读端不会观察到"新代际 + 旧序号"的中间态)。
+func (w *ringWriter) SetGenerationAndSeq(gen, seq int64) {
+	w.t.Helper()
+	w.gen = gen
+	w.seq = seq
+	w.writeHeader()
+}
+
 // writeSlot 写整槽(必要处先扩文件,模拟写端"只增不缩"的 ftruncate 至覆盖该槽)。
 func (w *ringWriter) writeSlot(seq int64, declaredLen int32, payload []byte) {
 	w.t.Helper()

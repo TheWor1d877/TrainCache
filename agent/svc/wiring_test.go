@@ -146,14 +146,11 @@ func startWiringBackground(t *testing.T, ag *Agent) {
 func TestWiringFieldsRescanRepairAndStatus(t *testing.T) {
 	ag, cfg := newWiringAgent(t)
 
-	// 字段完整性(D34):导出字段齐全;collector 懒绑定(首个 ring 前为 nil)。
+	// 字段完整性(D34):导出字段齐全;collector 装配期构造(D63,不绑 ring)。
 	if ag.CS == nil || ag.Fetcher == nil || ag.ObjectStore == nil || ag.Metrics == nil ||
 		ag.Orders == nil || ag.Prefetch == nil || ag.Preheat == nil || ag.Rescan == nil ||
-		ag.Evictor == nil || ag.HookSock == nil {
+		ag.Evictor == nil || ag.HookSock == nil || ag.Collector == nil {
 		t.Fatalf("Agent 字段不齐全: %+v", ag)
-	}
-	if ag.Collector != nil {
-		t.Fatalf("首个 ring 前 collector 应为 nil(懒绑定)")
 	}
 
 	// 预置:一块正常 + 一块将被破坏(源站备好 D25 键 → 修复重下可成功)。
@@ -273,7 +270,7 @@ func TestWiringFieldsRescanRepairAndStatus(t *testing.T) {
 	}
 }
 
-// TestWiringCollectorHooksAndEvictor:首个 ring → collector 懒绑定;钩子三型帧端到端
+// TestWiringCollectorHooksAndEvictor:collector 装配与钩子三型帧端到端
 // (open_report 入热度 / advance 进预取命中率 / stage_switch 换阶段);淘汰闭环经装配层
 // 适配(HeatSource=collector 快照、ProtectedSource=预取窗口、Sweep=core GC)删本地冷块。
 func TestWiringCollectorHooksAndEvictor(t *testing.T) {
@@ -286,14 +283,10 @@ func TestWiringCollectorHooksAndEvictor(t *testing.T) {
 
 	setScanInterval(t, 10*time.Millisecond)
 	startWiringBackground(t, ag)
-	if ag.collector() != nil {
-		t.Fatalf("首个 ring 前 collector 应为 nil")
-	}
 
-	// 落订单 ring → 发现 → 绑定 collector 并启动。
+	// 落订单 ring → 发现 → 订单安装(collector 已在装配期构造)。
 	writeTestRing(t, filepath.Join(cfg.OrdersDir, "pod-a.ring"), 1, 1, 256, 2,
 		wiringOrder(wiringDataset, "epoch-1", ordersource.ChunkRef{Path: "p-000.tar"}))
-	waitFor(t, "collector 绑定首个 ring", func() bool { return ag.collector() != nil })
 
 	b := ag.Prefetch.bundleFor(wiringDataset, nil)
 	waitFor(t, "订单阶段安装 epoch-1", func() bool { return b.prefetcher.Status().Stage == "epoch-1" })
@@ -373,11 +366,11 @@ func setDegradeTickInterval(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { degradeTickInterval = old })
 }
 
-// TestWiringDegradeAggregation:降级聚合判定与推送闸门(§7.4;注入时钟造停滞)——
-//   - 无 reader:不降级(即使时钟错位);
-//   - reader 出现且推进正常:订单正常推送(gauge=0);
-//   - 时钟错位(> 停滞阈值视为停滞):gauge=1,降级期间订单被抑制;
-//   - 时钟恢复(模拟推进恢复):gauge=0,后续订单恢复推送。
+// TestWiringDegradeAggregation:订单通道状态聚合(§7.4/D63;注入时钟造停滞)——
+//   - 无 reader:none、gauge=0、各状态计数为 0;
+//   - reader 出现且推进正常:healthy、gauge=0,订单正常推送;
+//   - 时钟错位(> 停滞阈值):stalled/all_stalled、gauge=1,但订单投递不受影响;
+//   - 时钟恢复:回 healthy、gauge=0。
 func TestWiringDegradeAggregation(t *testing.T) {
 	ag, cfg := newWiringAgent(t)
 	commitWiringBlocks(t, ag, wiringDataset, wiringBlock{path: "p-000.tar", content: "degrade-p0"})
@@ -394,44 +387,53 @@ func TestWiringDegradeAggregation(t *testing.T) {
 	gauge := func() float64 {
 		return testutil.ToFloat64(ag.Metrics.AgentDegraded().WithLabelValues("worker-01"))
 	}
+	state := func(s string) float64 {
+		return testutil.ToFloat64(ag.Metrics.AgentOrdersources().WithLabelValues("worker-01", s))
+	}
 	stage := func() string { return ag.Prefetch.bundleFor(wiringDataset, nil).prefetcher.Status().Stage }
 
-	// ① 无 reader:不降级(gauge=0),并观察若干拍确认不是"尚未判定"。
+	// ① 无 reader:none(gauge=0、各状态计数 0),观察若干拍确认不是"尚未判定"。
 	waitFor(t, "无 reader 时不降级", func() bool { return gauge() == 0 })
 	quiet := time.Now().Add(5 * degradeTickInterval)
 	for time.Now().Before(quiet) {
 		if got := gauge(); got != 0 {
 			t.Fatalf("无 reader 时 agent_degraded = %v, want 0", got)
 		}
+		if got := state(metrics.OrderSourceHealthy) + state(metrics.OrderSourceStalled) + state(metrics.OrderSourceDiscovered); got != 0 {
+			t.Fatalf("无 reader 时 ordersources 计数和 = %v, want 0", got)
+		}
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// ② 时钟恢复 → 落 ring:reader 出现且正常推进 → 订单推送、阶段安装、gauge=0。
+	// ② 时钟恢复 → 落 ring:reader 出现且正常推进 → healthy、订单推送、gauge=0。
 	offset.Store(0)
 	ring := filepath.Join(cfg.OrdersDir, "pod-a.ring")
 	writeTestRing(t, ring, 1, 1, 256, 2,
 		wiringOrder(wiringDataset, "epoch-1", ordersource.ChunkRef{Path: "p-000.tar"}))
 	waitFor(t, "epoch-1 阶段安装(正常推送)", func() bool { return stage() == "epoch-1" })
-	waitFor(t, "推进正常时 gauge=0", func() bool { return gauge() == 0 })
+	waitFor(t, "推进正常时 healthy=1、gauge=0", func() bool {
+		return state(metrics.OrderSourceHealthy) == 1 && gauge() == 0
+	})
 
-	// ③ 时钟错位(全部 reader 停滞)→ 聚合判定降级。
+	// ③ 时钟错位(全部 reader 停滞)→ stalled/all_stalled、gauge=1。
 	offset.Store(int64(31 * time.Second))
-	waitFor(t, "全部 reader 停滞 → gauge=1", func() bool { return gauge() == 1 })
+	waitFor(t, "全部 reader 停滞 → stalled=1、gauge=1", func() bool {
+		return state(metrics.OrderSourceStalled) == 1 && gauge() == 1
+	})
 
-	// ④ 降级期间新订单被抑制(推送闸门;观察窗 ≥ 数个读端轮询周期)。
+	// ④ 降级期间订单照常投递(订单是提示不是命令;§7.4 投递与降级解耦)。
 	writeTestRing(t, ring, 2, 2, 256, 2,
 		wiringOrder(wiringDataset, "epoch-2", ordersource.ChunkRef{Path: "p-000.tar"}))
-	quiet = time.Now().Add(250 * time.Millisecond)
-	for time.Now().Before(quiet) {
-		if got := stage(); got != "epoch-1" {
-			t.Fatalf("降级期间订单被推送:stage = %q, want 保持 epoch-1", got)
-		}
-		time.Sleep(5 * time.Millisecond)
+	waitFor(t, "stalled 期间订单仍安装 epoch-2", func() bool { return stage() == "epoch-2" })
+	if got := gauge(); got != 1 {
+		t.Fatalf("订单投递不应改变降级状态:agent_degraded = %v, want 1", got)
 	}
 
-	// ⑤ 恢复(时钟回正,等价"任一 reader 推进")→ 解除降级,后续订单自动续。
+	// ⑤ 恢复(时钟回正,等价"任一 reader 推进")→ healthy、gauge=0,后续订单自动续。
 	offset.Store(0)
-	waitFor(t, "推进恢复 → gauge=0", func() bool { return gauge() == 0 })
+	waitFor(t, "推进恢复 → healthy=1、gauge=0", func() bool {
+		return state(metrics.OrderSourceHealthy) == 1 && gauge() == 0
+	})
 	writeTestRing(t, ring, 3, 3, 256, 2,
 		wiringOrder(wiringDataset, "epoch-3", ordersource.ChunkRef{Path: "p-000.tar"}))
 	waitFor(t, "epoch-3 阶段安装(恢复推送)", func() bool { return stage() == "epoch-3" })
