@@ -33,6 +33,21 @@
 - 宽预热在训练 Pod 尚未创建时把 `PodSetMismatch` 置为 True，日志与告警被刷屏；现在 Pod 集为空只记 Debug 并清除该条件，只有部分不匹配才 Warn。
 - 窗口是否变化改按 `window_blocks` 判定，不再比较 bitmap 字节数，字节数相同的不同窗口不再被当成同一窗口。
 
+## [v0.3.1] - 2026-10-30
+
+### Added
+
+- 控制面到 Agent 的四个 RPC 新增 gRPC metadata 三键 `x-traincache-request-id`/`x-traincache-task`/`x-traincache-generation`：Controller 客户端注入，Agent 拦截器把三者写进 context logger，两端日志可按同一次请求串联。契约见 `docs/8.1 design.md` §5。
+- 钩子帧可携带任务身份 `warmup_task`/`pod`/`pod_index`/`dataset`/`generation`，缺省时行为与旧帧一致；`read_miss` 的补块日志带上这组字段。webhook 相应补注入 `TRAINCACHE_POD`。契约见 `docs/8.0 日志与监控.md` 与 `docs/6.1 design.md` §5.4。
+- 日志采样与限流：`TRAINCACHE_LOG_SAMPLE_RATE`（Info，默认 1.0）与 `TRAINCACHE_LOG_DEBUG_SAMPLE_RATE`（Debug，默认 0.01）控制级别采样，配进程内令牌桶（控制面 100 行/秒、Agent 200 行/秒）与 60s 去重窗口；Warn/Error 不采样、不被丢弃。丢弃条数由新增的 `traincache_log_dropped_total{component,level}` 暴露。契约见 `docs/8.1 design.md` §3.3。
+- 日志固定带 `sampled`/`sample_rate` 两个字段；带 `err` 的 Warn/Error 固定成对带 `err_class`（`invalid_spec`/`not_found`/`unavailable`/`permanent`/`corrupt`/`io`/`timeout`）。契约见 `docs/8.1 design.md` §3.1。
+- Agent 高频路径改为 60s 汇总：逐块下载/校验每窗口一条 Info（块数、字节、失败数、P50/P99），缓存命中/未命中/read_miss 每窗口一条 Info（按 dataset 与 reason）。逐块明细降为 Debug 1/100 采样。契约见 `docs/8.1 design.md` §3.3 与 §4.2。
+- observability 装置补齐告警与看板：五条 Prometheus 规则（门控 Hold 超时、Agent 不可达、read stall 超阈值、磁盘危险线、日志断流），每条带 `runbook_url` 指向 `docs/8.1 design.md` 附录 A；Grafana 增加控制平面、Agent、DataLoader 三层看板并从 ConfigMap 自动加载。
+
+### Changed
+
+- `read_stall` 归因关联窗口从固定 ±5s 改为可配：`TRAINCACHE_READ_STALL_WINDOW_MS`，默认 `5000`，表示以帧 `ts` 为中心前后各该毫秒数。契约见 `docs/PARAMETER-CONFIGURATION.md`。
+
 ## [v0.2.0] - 2026-10-29
 
 ### Added

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"traincache/agent/collector"
@@ -146,7 +147,17 @@ func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok boo
 // 最后安装者为准(已知限制,见 §7.4)。handler 只做内存/非阻塞操作;ctx 用后台 ctx
 // (集帧自身无 ctx,预取器生命周期仍受其调度 ctx 约束)。
 func (a *Agent) hookHandlers() HookHandlers {
+	// 帧身份暂存(Meta 先于类型回调、同一读循环 goroutine 顺序执行):read_miss 的补块
+	// 动作在后台 goroutine,而 Miss 签名冻结不带身份,故在此读出后随闭包转交。
+	// 加锁仅为让任何调用方在 -race 下都安全,开销可忽略。
+	var metaMu sync.Mutex
+	var curMeta HookMeta
 	return HookHandlers{
+		Meta: func(_ string, m HookMeta) {
+			metaMu.Lock()
+			curMeta = m
+			metaMu.Unlock()
+		},
 		Open: func(ref ordersource.ChunkRef) {
 			c := a.collector()
 			if c == nil {
@@ -169,8 +180,13 @@ func (a *Agent) hookHandlers() HookHandlers {
 			}
 		},
 		StageSwitch: a.onHookStageSwitch,
-		Miss:        a.handleReadMiss,
-		Stall:       a.handleReadStall,
+		Miss: func(ref ordersource.ChunkRef, reason string) {
+			metaMu.Lock()
+			m := curMeta
+			metaMu.Unlock()
+			a.handleReadMissMeta(ref, reason, m)
+		},
+		Stall: a.handleReadStall,
 	}
 }
 

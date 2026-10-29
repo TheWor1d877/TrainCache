@@ -159,6 +159,10 @@ func (a *Agent) StartBackground(ctx context.Context) {
 	if a.Collector != nil {
 		a.Collector.Start(ctx)
 	}
+	// 8.1 §3.3/§4.2:下载与缓存两类汇总共用这一个 60s 调度器(单 ticker)。
+	if a.LogAgg != nil {
+		a.LogAgg.Start(ctx)
+	}
 	if a.Prefetch != nil {
 		a.Prefetch.startFollows(ctx)
 	}

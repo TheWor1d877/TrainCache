@@ -12,6 +12,7 @@ import (
 
 	"traincache/agent/collector"
 	"traincache/agent/evictor"
+	"traincache/agent/logagg"
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/agent/prefetch"
@@ -58,6 +59,9 @@ type Agent struct {
 	Collector   *collector.Collector // 采集层(M5/D63;装配期构造,StartBackground 启动)
 	Evictor     *evictor.Evictor     // 磁盘淘汰循环(M6/§7.6)
 	HookSock    *HookSock            // 钩子收端(M5/§5.4)
+	// LogAgg 是 60s 汇总日志聚合器(8.1 §3.3/§4.2):下载与缓存两类汇总共用一条
+	// ticker,由 StartBackground 启动;nil 表示不记汇总(仅测试装配)。
+	LogAgg *logagg.Aggregator
 	// ReaderRegistry 是 R2 读者登记器(6.1 §5.10):声明本节点跟随的 snapID,
 	// 供 GC 按读者确认删除。装配期构造,StartBackground 起心跳。
 	ReaderRegistry *index.ReaderRegistry
@@ -120,11 +124,15 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		DatasetWhitelist: cfg.DatasetWhitelist,
 		Node:             cfg.NodeName.String(),
 	})
+	// 8.1 §3.3/§4.2:逐块下载与缓存命中共用一个 60s 汇总聚合器(单 ticker);
+	// 逐块明细走 Debug 采样,Info 只留窗口汇总。
+	ag.LogAgg = logagg.New(logagg.Options{Verify: cfg.Verify})
 
 	// M9/D46 阶段跟踪器(窗口 K 取 lookahead)。
 	ag.phase = newPhaseTracker(lookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
 	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
+	ag.Prefetch.SetLogAggregator(ag.LogAgg)   // 8.1 §4.2:逐块下载计入 60s 汇总
 	// R1/R2(6.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
 	// 与 core ReaderGrace 默认口径一致)。Follow/心跳由 StartBackground 注入 ctx 后启动。
 	interval := cfg.indexRefreshInterval()
@@ -149,8 +157,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	})
 	// M9/D47 归因依赖:本地存在性 + 预取 pending/当前窗口(桩返回 false,逻辑由 M9 填写)。
 	ag.stall = newStallAttributorWithThreshold(ag.stallLocalExists, ag.stallInflight,
-		ag.stallCurrentWindow, cfg.ReadStallMinWaitMS)
+		ag.stallCurrentWindow, cfg.ReadStallMinWaitMS, cfg.ReadStallWindowMS)
 	ag.Preheat = NewPreheatTasks(cfg, ag.Prefetch)
+	ag.Preheat.SetLogAggregator(ag.LogAgg) // 任务结束提前输出下载汇总
 	// 读时坏块修复(D35)与块完成触达(D24/D28)接线(实现见 wire.go)。
 	ag.Prefetch.SetBlockDoneHook(ag.onBlockDone)
 	ag.Prefetch.SetCorruptRepairHook(ag.repairCorrupt)
@@ -164,6 +173,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	ag.Collector.SetAdvanceCallback(ag.onCalibratedAdvance)
 	ag.Collector.SetOpenCallback(ag.onInotifyOpen)
 	ag.Collector.SetOpenFilter(ag.selfOpen.SelfOpened)
+	ag.Collector.SetLogAggregator(ag.LogAgg) // 8.1 §4.2:命中/未命中计入 60s 汇总
 
 	// 重扫描(M4/D35):catalogFor 与预取管理器共用同一 bundle(同一 dataset 一个 Catalog)。
 	ag.Rescan = rescan.New(cs, ag.Fetcher, obj, ag.catalogFor, rescanMetrics{ag.Metrics})
@@ -247,6 +257,7 @@ type PrefetchManager struct {
 	fetcher  *fetch.Fetcher
 	m        *metrics.Registry
 	selfOpen *prefetch.SelfOpenGuard // D49 自打开守卫(SetSelfOpenGuard 注入;m.mu 保护)
+	logAgg   *logagg.Aggregator      // 60s 汇总聚合器(SetLogAggregator 注入;m.mu 保护)
 
 	baseCtx context.Context // 预取器调度生命周期(Close 取消)
 	cancel  context.CancelFunc
@@ -337,6 +348,14 @@ func NewPrefetchManager(store objectstore.Store, cs *cas.Store, f *fetch.Fetcher
 func (m *PrefetchManager) SetSelfOpenGuard(g *prefetch.SelfOpenGuard) {
 	m.mu.Lock()
 	m.selfOpen = g
+	m.mu.Unlock()
+}
+
+// SetLogAggregator 注入 60s 汇总聚合器(装配期在首个 bundle 构造前调用一次)。
+// 传 nil 解除。m.mu 串行化,bundleFor 在同一锁下读取。
+func (m *PrefetchManager) SetLogAggregator(a *logagg.Aggregator) {
+	m.mu.Lock()
+	m.logAgg = a
 	m.mu.Unlock()
 }
 
@@ -495,6 +514,7 @@ func (m *PrefetchManager) bundleFor(dataset string, initialPrefixes []string) *d
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
 		Lookahead:     lookahead,
 		SelfOpenGuard: m.selfOpen, // D49:本地命中/读回/ETA 探测打开前 Mark
+		LogAgg:        m.logAgg,   // 8.1 §4.2:逐块下载/校验计入 60s 汇总
 		OnP0Done: func(ref prefetch.ChunkRef, err error) {
 			// 完成即移出 P0 在途保护表(在分发预热状态机之前,保持保护表新鲜)。
 			m.removeP0Ref(dataset, ref)
@@ -861,6 +881,12 @@ func (m *PrefetchManager) PreheatScope() (context.Context, context.CancelFunc) {
 // ctx 是本次请求的生存期(取消则拒绝入队);work 是这批块的下载作用域,取消 work 即撤回
 // 尚未完成的块(D62),须来自 PreheatScope。阶段绑定与在途保护按 work 走。
 func (m *PrefetchManager) ForPreheat(ctx, work context.Context, dataset string, refs []prefetch.ChunkRef) error {
+	return m.ForPreheatTask(ctx, work, "", dataset, refs)
+}
+
+// ForPreheatTask 与 ForPreheat 同语义,额外携带预热任务 ID(进 60s 下载汇总的
+// task_id 分组,任务结束可提前输出);空 taskID 与 ForPreheat 完全等价。
+func (m *PrefetchManager) ForPreheatTask(ctx, work context.Context, taskID, dataset string, refs []prefetch.ChunkRef) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -877,7 +903,7 @@ func (m *PrefetchManager) ForPreheat(ctx, work context.Context, dataset string, 
 		b.started = true
 		b.prefetcher.Start(m.baseCtx)
 	}
-	if err := b.prefetcher.EnqueueP0Scoped(ctx, work, refs); err != nil {
+	if err := b.prefetcher.EnqueueP0ScopedTask(ctx, work, taskID, refs); err != nil {
 		return err
 	}
 	// 入队成功即登记 P0 在途硬保护(§7.6;完成回调移出)。

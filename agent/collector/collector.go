@@ -36,6 +36,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"traincache/agent/logagg"
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/core/cas"
@@ -125,6 +126,10 @@ type Collector struct {
 
 	hr  *hitRate
 	cal *calibrator
+
+	// logAgg 是 60s 汇总聚合器(8.1 §4.2;装配期注入一次,读路径原子读)。nil 安全。
+	logAgg atomic.Pointer[logagg.Aggregator]
+
 
 	started atomic.Bool // Start 幂等守卫
 }
@@ -241,6 +246,19 @@ func (cfg CollectorConfig) withDefaults() CollectorConfig {
 		cfg.CalibrateThreshold = defaultCalibrateThreshold
 	}
 	return cfg
+}
+
+// SetLogAggregator 注入 60s 汇总聚合器(装配期调用一次;传 nil 解除)。只影响日志
+// 汇总,指标打点与计数源不变(§4.2:不新增重复计数源)。
+func (c *Collector) SetLogAggregator(a *logagg.Aggregator) {
+	if c == nil {
+		return
+	}
+	if a == nil {
+		c.logAgg.Store(nil)
+		return
+	}
+	c.logAgg.Store(a)
 }
 
 // Start 启动采集层后台循环(非阻塞;ctx 取消后各循环退出):
@@ -450,15 +468,25 @@ func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now t
 
 	// ② 命中率:打开块与本地块求交集(命中 = 本地副本存在)。
 	hit := c.localBlock(fp)
-	if c.m != nil {
+	// 汇总复用同一判定结果:指标仍由 c.m 打点,聚合器只做 60s 日志汇总(不新增计数源)。
+	if agg, m := c.logAgg.Load(), c.m; m != nil || agg != nil {
 		source, phase := c.cacheLabels(dataset, fp, ref)
-		if hit {
-			c.m.ObserveCacheHit(dataset, source, phase)
-		} else {
-			// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按 D36 二元口径记
-			// result=success(正常未命中,消费侧将自行回源);error/refetched 由 fetch/
-			// 修复路径分别计数(接线阶段)。D46:带上 phase。
-			c.m.ObserveCacheMiss(dataset, metrics.ResultSuccess, phase)
+		if m != nil {
+			if hit {
+				m.ObserveCacheHit(dataset, source, phase)
+			} else {
+				// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按 D36 二元口径记
+				// result=success(正常未命中,消费侧将自行回源);error/refetched 由 fetch/
+				// 修复路径分别计数(接线阶段)。D46:带上 phase。
+				m.ObserveCacheMiss(dataset, metrics.ResultSuccess, phase)
+			}
+		}
+		if agg != nil {
+			if hit {
+				agg.ObserveCacheHit(dataset, ref.Chunk, source, phase)
+			} else {
+				agg.ObserveCacheMiss(dataset, ref.Chunk, phase)
+			}
 		}
 	}
 	c.hr.observe(now, stage, hit)

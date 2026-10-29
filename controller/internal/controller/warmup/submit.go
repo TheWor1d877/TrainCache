@@ -10,6 +10,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
 	"traincache/controller/internal/metrics"
+	corelog "traincache/core/logging"
 )
 
 // submitResult records per-node failures so the controller can report them
@@ -64,7 +65,8 @@ func submitToCandidates(
 				Priority:   agentpb.PreheatPriority_P0,
 				Generation: uint64(task.Generation),
 			}
-			if err := pool.Submit(ctx, node, req); err != nil {
+			callCtx := corelog.WithRequestMeta(ctx, "", taskID, uint64(task.Generation))
+			if err := pool.Submit(callCtx, node, req); err != nil {
 				if errors.Is(err, agentclient.ErrPermanent) {
 					metric.ObservePreheatRPC(metrics.PreheatSubmit, metrics.RPCPermanent)
 				} else {

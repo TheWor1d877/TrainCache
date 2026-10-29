@@ -8,6 +8,8 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	agentlog "traincache/agent/internal/logging"
 )
 
 // ordersource 格式错误 counter 的固定维度(decisions D23:counter,labels=["reason"]∈{magic,version};
@@ -197,6 +199,11 @@ func New(cfg Config) *Registry {
 	r.initHooksAndEvidence()
 	// D63 订单通道 3 个 family。
 	r.initOrderChannel()
+	// 日志采样/限流丢弃计数(8.1 §3.3):logging.New 已构造进程采样器时才挂
+	// Collector,未初始化(如指标包单测)时注册表不多出空 family。
+	if sampler := agentlog.Sampler(); sampler != nil {
+		r.reg.MustRegister(NewLogDroppedCollector(sampler))
+	}
 	return r
 }
 

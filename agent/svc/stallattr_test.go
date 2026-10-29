@@ -8,7 +8,7 @@ import (
 	"traincache/agent/ordersource"
 )
 
-// stallattr_test.go:M9/D47 read_stall 归因(100ms 阈值、ts±5s、四类 cause)。
+// stallattr_test.go:M9/D47 read_stall 归因(100ms 阈值、可配关联窗口、四类 cause)。
 
 // fixedStallNow 构造固定时间源。
 func fixedStallNow(at time.Time) func() time.Time { return func() time.Time { return at } }
@@ -47,6 +47,7 @@ func TestStallThresholdConfigurable(t *testing.T) {
 		func(string, ordersource.ChunkRef) bool { return false },
 		func(string, ordersource.ChunkRef) bool { return false },
 		50,
+		defaultReadStallWindowMS,
 	)
 	a.now = fixedStallNow(stallTestNow)
 	ref := phaseRef("p", 1)
@@ -59,8 +60,8 @@ func TestStallThresholdConfigurable(t *testing.T) {
 	}
 }
 
-// TestStallCorrelationWindow:ts 为零值(解析失败)或 |now-ts|>5s → unknown 且记录;
-// 恰为 ±5s 仍在窗内。
+// TestStallCorrelationWindow:默认窗口 5000ms 表示帧 ts 前后各 5000ms;
+// ts 为零值(解析失败)或 |now-ts|>5000ms → unknown 且记录;恰为 ±5000ms 仍在窗内。
 func TestStallCorrelationWindow(t *testing.T) {
 	a := newStallAttributor(
 		func(ordersource.ChunkRef) (string, bool) { return "ds", true },
@@ -70,10 +71,11 @@ func TestStallCorrelationWindow(t *testing.T) {
 	a.now = fixedStallNow(stallTestNow)
 	ref := phaseRef("p", 1)
 
+	half := time.Duration(defaultReadStallWindowMS) * time.Millisecond
 	for _, ts := range []time.Time{
 		{},
-		stallTestNow.Add(stallCorrelationWindow + time.Millisecond),
-		stallTestNow.Add(-stallCorrelationWindow - time.Millisecond),
+		stallTestNow.Add(half + time.Nanosecond),
+		stallTestNow.Add(-half - time.Nanosecond),
 	} {
 		cause, record := a.Attribute(ref, 150, ts)
 		if !record || cause != metrics.CauseUnknown {
@@ -81,12 +83,45 @@ func TestStallCorrelationWindow(t *testing.T) {
 		}
 	}
 	for _, ts := range []time.Time{
-		stallTestNow.Add(stallCorrelationWindow),
-		stallTestNow.Add(-stallCorrelationWindow),
+		stallTestNow.Add(half),
+		stallTestNow.Add(-half),
 	} {
 		cause, record := a.Attribute(ref, 150, ts)
 		if !record || cause != metrics.CauseLocalSlow {
 			t.Errorf("ts=%v → (%q, record=%v), want (local_slow,true)", ts, cause, record)
+		}
+	}
+}
+
+// TestStallCorrelationWindowConfigurable:显式窗口 1000ms 时边界为帧 ts 前后各 1000ms
+// (C3:窗口可配,恰在边界内可关联,越界 1ns 记 unknown)。
+func TestStallCorrelationWindowConfigurable(t *testing.T) {
+	a := newStallAttributorWithThreshold(
+		func(ordersource.ChunkRef) (string, bool) { return "ds", true },
+		func(string, ordersource.ChunkRef) bool { return false },
+		func(string, ordersource.ChunkRef) bool { return false },
+		stallMinWaitMS,
+		1000,
+	)
+	a.now = fixedStallNow(stallTestNow)
+	ref := phaseRef("p", 1)
+
+	for _, ts := range []time.Time{
+		stallTestNow.Add(1000 * time.Millisecond),
+		stallTestNow.Add(-1000 * time.Millisecond),
+	} {
+		cause, record := a.Attribute(ref, 150, ts)
+		if !record || cause != metrics.CauseLocalSlow {
+			t.Errorf("窗口边界 ts=%v → (%q, record=%v), want (local_slow,true)", ts, cause, record)
+		}
+	}
+	for _, ts := range []time.Time{
+		stallTestNow.Add(1000*time.Millisecond + time.Nanosecond),
+		stallTestNow.Add(-1000*time.Millisecond - time.Nanosecond),
+	} {
+		cause, record := a.Attribute(ref, 150, ts)
+		if !record || cause != metrics.CauseUnknown {
+			t.Errorf("窗口外 ts=%v → (%q, record=%v), want (unknown,true)", ts, cause, record)
 		}
 	}
 }

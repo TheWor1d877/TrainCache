@@ -16,6 +16,7 @@ import (
 
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
+	corelog "traincache/core/logging"
 )
 
 // hooksock.go:钩子 Unix datagram 收端(design §5.4;decisions D33)。
@@ -29,6 +30,9 @@ import (
 //	{"type":"open_report","path":"...","chunk":3}                        → Open(ChunkRef)
 //	{"type":"read_miss","path":"...","chunk":3,"reason":"absent","ts":"..."} → Miss(ChunkRef, reason)
 //	{"type":"read_stall","path":"...","chunk":3,"wait_ms":250,"ts":"..."}    → Stall(ChunkRef, waitMS, ts)
+//
+// 每帧还可选带任务身份 warmup_task/pod/pod_index/dataset/generation(8.0;缺省取零值,
+// 旧帧行为不变),经 HookHandlers.Meta 在类型回调之前回调;帧里不出现 task 与 seq。
 //
 // 处理语义:
 //   - 非法 JSON / 未知帧类型 / 超限帧丢弃并计数(metrics.IncHookFormatErrors,
@@ -47,8 +51,21 @@ const hookReadBuf = hookMaxFrame + 1
 // hookSockMode 是套接字文件权限(训练 Pod 内钩子需写权限)。
 const hookSockMode = 0o666
 
+// HookMeta 是钩子帧可选携带的任务身份(8.0 帧字段口径):warmup_task/pod/pod_index/
+// dataset/generation。全字段可缺省,缺失取零值;帧里不出现 task 与 seq。
+type HookMeta struct {
+	WarmupTask string
+	Pod        string
+	PodIndex   int
+	Dataset    string
+	Generation uint64
+}
+
 // HookHandlers 是钩子帧分发目标(D33 冻结):nil 字段 = 丢弃该类帧。
 type HookHandlers struct {
+	// Meta 接收每帧可选的任务身份(kind = 线上帧类型名),在类型回调之前、同一
+	// 读循环 goroutine 内调用;nil = 不关心身份。旧帧(无身份字段)以零值回调。
+	Meta func(kind string, m HookMeta)
 	// Advance 接收消费侧推进帧(advance):实际消费到的块引用。
 	Advance func(ref ordersource.ChunkRef)
 	// StageSwitch 接收阶段切换直报帧(stage_switch):仅作信号,接线层结合
@@ -74,6 +91,13 @@ type hookFrame struct {
 	Reason      string `json:"reason"`
 	TS          string `json:"ts"`
 	WaitMS      int64  `json:"wait_ms"`
+
+	// 可选任务身份(8.0):旧帧不带这些键时取零值,分发行为与旧帧一致。
+	WarmupTask string `json:"warmup_task"`
+	Pod        string `json:"pod"`
+	PodIndex   int    `json:"pod_index"`
+	Dataset    string `json:"dataset"`
+	Generation uint64 `json:"generation"`
 }
 
 // HookSock 是钩子 socket 收端(D33 冻结构造签名):New 后 Start 一次,
@@ -172,7 +196,7 @@ func (s *HookSock) readLoop(conn *net.UnixConn) {
 		n, _, err := conn.ReadFromUnix(buf)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				slog.Warn("hooksock: 读帧失败,收端退出", "path", s.path, "err", err)
+				slog.Warn("hooksock: 读帧失败,收端退出", "path", s.path, "err", err, "err_class", errClass(err))
 			}
 			return
 		}
@@ -209,10 +233,27 @@ func (s *HookSock) dispatch(line string) {
 	var f hookFrame
 	if err := json.Unmarshal([]byte(line), &f); err != nil {
 		s.countFormatError(metrics.ReasonParse)
-		slog.Warn("hooksock: 帧 JSON 非法,丢弃", "path", s.path, "err", err)
+		slog.Warn("hooksock: 帧 JSON 非法,丢弃", "path", s.path, "err", err, "err_class", corelog.ErrClassInvalidSpec)
 		return
 	}
 	ref := ordersource.ChunkRef{Path: f.Path, Chunk: f.Chunk}
+	// 未知帧类型:discard + parse 计数(不回调任务身份,保持旧口径)。
+	if !isHookFrameType(f.Type) {
+		s.countFormatError(metrics.ReasonParse)
+		slog.Warn("hooksock: 未知帧类型,丢弃", "path", s.path, "type", f.Type)
+		return
+	}
+	// 任务身份回调先于类型回调(同一读循环 goroutine 顺序执行):回调方可在类型
+	// 回调内直接取用最近一帧身份。旧帧全字段缺失 → 零值。
+	if s.h.Meta != nil {
+		s.h.Meta(f.Type, HookMeta{
+			WarmupTask: f.WarmupTask,
+			Pod:        f.Pod,
+			PodIndex:   f.PodIndex,
+			Dataset:    f.Dataset,
+			Generation: f.Generation,
+		})
+	}
 	switch f.Type {
 	case "advance":
 		if s.h.Advance != nil {
@@ -246,9 +287,16 @@ func (s *HookSock) dispatch(line string) {
 		if s.h.Stall != nil {
 			s.h.Stall(ref, waitMS, ts)
 		}
+	}
+}
+
+// isHookFrameType 报告 t 是否属冻结五型(未知类型不计任务身份)。
+func isHookFrameType(t string) bool {
+	switch t {
+	case "advance", "open_report", "stage_switch", "read_miss", "read_stall":
+		return true
 	default:
-		s.countFormatError(metrics.ReasonParse)
-		slog.Warn("hooksock: 未知帧类型,丢弃", "path", s.path, "type", f.Type)
+		return false
 	}
 }
 

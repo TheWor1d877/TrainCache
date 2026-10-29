@@ -110,6 +110,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 | `TRAINCACHE_ORDERS_DIR` | DaemonSet env | `/run/traincache/orders` | OrderSource ring 目录 |
 | `TRAINCACHE_INDEX_REFRESH_INTERVAL` | DaemonSet env | `5s` | 快照跟随刷新周期 |
 | `TRAINCACHE_READ_STALL_MIN_WAIT_MS` | DaemonSet env | `100` | `read_stall` 入直方图的最小等待毫秒 |
+| `TRAINCACHE_READ_STALL_WINDOW_MS` | DaemonSet env | `5000` | `read_stall` 归因关联窗口，单位毫秒，以帧 `ts` 为中心前后各该值 |
 
 热度与磁盘水位共 11 个 `TRAINCACHE_HEAT_*`，都改 DaemonSet env。默认值只在需要细调淘汰排序时改：
 

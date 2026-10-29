@@ -1,0 +1,97 @@
+# TrainCache 告警规则。独立 ConfigMap,与 scrape 配置分开,便于单独迭代与
+# promtool check rules。挂载到 /etc/prometheus/rules,由 prometheus.yml 的
+# rule_files 统一加载。
+#
+# 指标名全部以代码为准:
+#   controller/internal/metrics/metrics.go  gate_tasks / gate_hold_duration_seconds
+#   agent/metrics/families.go               agent_up / disk_usage_ratio / read_stall_seconds
+#   agent/metrics/logging.go                log_dropped_total
+#
+# runbook_url 指向仓库内文档附录 A(相对路径,不写内网域名)。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: rules
+    app.kubernetes.io/part-of: traincache
+data:
+  traincache-alerts.yaml: |
+    groups:
+      # 门控:任务在 hold 状态滞留,通常是预取速率未达标或 Agent 进度不前。
+      - name: traincache-gate
+        rules:
+          - alert: TraincacheGateHoldStuck
+            expr: sum(traincache_controller_gate_tasks{state="hold"}) > 0
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "有 WarmupTask 在 hold 门控状态滞留超过 30 分钟"
+              description: "当前 hold 任务数 {{ $value }}。先查 gate evaluated 日志的 rates/required,再看 Agent 的 GetPreheatStatus 进度。"
+              runbook_url: "docs/8.1%20design.md#附录-a排障-runbook"
+
+      # Agent 不可达:agent_up 归零,或整条抓取目标不可用(进程消失时序列会消失,
+      # 只能用 Prometheus 自身的 up 兜底)。
+      - name: traincache-agent
+        rules:
+          - alert: TraincacheAgentUnreachable
+            expr: |
+              max by (node) (traincache_agent_up) == 0
+              or
+              max by (instance) (up{job="traincache-components", component="traincache-agentd"}) == 0
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "节点 {{ $labels.node }} 上的 traincache-agentd 不可达"
+              description: "agent_up 为 0 或抓取目标 down 持续 2 分钟。查 DaemonSet 状态、Pod 日志与 gRPC 端口。"
+              runbook_url: "docs/8.1%20design.md#附录-a排障-runbook"
+
+      # 读停顿:read_stall 直方图只收 >=100ms 的等待,p95 超过 2s 说明消费侧
+      # 已经明显被拖慢。用分位而不是计数,避免低流量时误报。
+      - name: traincache-dataloader
+        rules:
+          - alert: TraincacheReadStallHigh
+            expr: |
+              histogram_quantile(0.95,
+                sum by (le) (rate(traincache_read_stall_seconds_bucket[5m]))) > 2
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "DataLoader 读停顿 p95 超过 2 秒"
+              description: "当前 p95 为 {{ $value | humanizeDuration }}。按 cause 归因:prefetch_lag 查预取,origin_slow 查对象存储,local_slow 查本地盘。"
+              runbook_url: "docs/8.1%20design.md#附录-a排障-runbook"
+
+      # 磁盘危险线:缓存盘利用率 0..1,超过 0.9 后淘汰压力与写失败风险都陡增。
+      - name: traincache-capacity
+        rules:
+          - alert: TraincacheDiskUsageHigh
+            expr: max by (instance, node, dataset) (traincache_disk_usage_ratio) > 0.9
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "节点 {{ $labels.node }} 的缓存盘利用率超过 90%"
+              description: "dataset={{ $labels.dataset }} 当前利用率 {{ $value | humanizePercentage }}。查 evict_blocks_total 与容量上限配置。"
+              runbook_url: "docs/8.1%20design.md#附录-a排障-runbook"
+
+      # 日志断流:丢弃计数突然抬升说明采样/限流异常;指标整体消失说明采集管道
+      # 或进程已不可用(Collector 在 sampler 初始化后恒定输出四档序列)。
+      - name: traincache-logging
+        rules:
+          - alert: TraincacheLogDropped
+            expr: |
+              sum by (component) (rate(traincache_log_dropped_total{level=~"WARN|ERROR"}[5m])) > 5
+              or
+              absent_over_time(traincache_log_dropped_total[10m]) == 1
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "日志丢弃速率异常或 log_dropped_total 指标消失"
+              description: "WARN/ERROR 级别每秒丢弃超过 5 条,或该 family 已 10 分钟无样本。查采样配置、Debug 开关与日志采集链路。"
+              runbook_url: "docs/8.1%20design.md#附录-a排障-runbook"

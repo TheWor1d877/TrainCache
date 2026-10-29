@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	agentpb "traincache/agent/api/agentpb"
+	"traincache/agent/logagg"
 	"traincache/agent/prefetch"
 	"traincache/core/index"
 )
@@ -35,6 +36,9 @@ type PreheatTasks struct {
 	// byDataset 是 dataset → 任务追加表(回调按 dataset 定位任务的只读快照;登记任务时
 	// 以 COW 整体替换,回调路径无锁读)。
 	byDataset atomic.Pointer[map[string][]*preheatTask]
+
+	// logAgg 是 60s 汇总聚合器(8.1 §4.2;装配期注入一次,任务创建时带到 task 上)。
+	logAgg *logagg.Aggregator
 }
 
 // taskTTL 是任务记录存活时长(Q13 结案:24h;入口惰性清理,不另起协程)。判定口径:
@@ -92,6 +96,9 @@ type preheatTask struct {
 	dlCancel context.CancelFunc
 
 	startedAt time.Time // 任务创建时刻(只读)
+
+	// logAgg 是本任务的 60s 下载汇总出口(创建时从 PreheatTasks 带入;nil 安全)。
+	logAgg *logagg.Aggregator
 }
 
 // attachScope 结本任务的下载作用域(D62);无预取管理器(仅测试装配)时不结。
@@ -121,6 +128,14 @@ func newPreheatTask(taskID, node string, req preheatRequest) *preheatTask {
 	t.seq.Store(1) // 新任务 = 一次位图重置(空 → 请求 chunks)
 	t.touch()
 	return t
+}
+
+// flushDownloadSummary 在任务终态时提前输出本任务的下载汇总(8.1 §4.2“任务结束时
+// 或窗口到期时”);无下载记录时不产生日志,窗口到期由聚合器兜底。
+func (t *preheatTask) flushDownloadSummary() {
+	if t.logAgg != nil {
+		t.logAgg.FlushTask(t.taskID)
+	}
 }
 
 // stateNow 返回当前状态(atomic 读)。
@@ -240,6 +255,7 @@ func (t *preheatTask) finish() {
 				"task_id", t.taskID, "dataset", t.req.dataset, "state", target.String(),
 				"total_blocks", t.total.Load(), "completed_blocks", t.completed.Load(),
 				"failed_blocks", t.failed.Load())
+			t.flushDownloadSummary()
 			return
 		}
 	}
@@ -262,6 +278,7 @@ func (t *preheatTask) markError(reason string) {
 		if t.state.CompareAndSwap(cur, int32(agentpb.PreheatStatus_ERROR)) {
 			t.touch()
 			slog.Warn("preheat: 任务失败", "task_id", t.taskID, "dataset", t.req.dataset, "reason", reason)
+			t.flushDownloadSummary()
 			return
 		}
 	}
@@ -277,6 +294,14 @@ func NewPreheatTasks(cfg Config, pm *PrefetchManager) *PreheatTasks {
 		pm.SetP0Done(t.onP0Done)
 	}
 	return t
+}
+
+// SetLogAggregator 注入 60s 汇总聚合器(装配期调用一次;传 nil 解除)。任务结束时
+// 由任务自己把该 task_id 的下载汇总提前输出。
+func (t *PreheatTasks) SetLogAggregator(a *logagg.Aggregator) {
+	t.mu.Lock()
+	t.logAgg = a
+	t.mu.Unlock()
 }
 
 // onP0Done 是预取器 P0 完成回调(调度协程内同步调用,不得阻塞):按 dataset 无锁取任务
@@ -366,6 +391,7 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}
 	tk := newPreheatTask(taskID, t.cfg.NodeName.String(), summary)
 	tk.generation.Store(gen)
+	tk.logAgg = t.logAgg // 任务结束提前输出下载汇总
 	t.tasks[taskID] = tk
 	t.mu.Unlock()
 
@@ -407,7 +433,7 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}
 
 	// 6) P0 入队;失败置 ERROR(任务不撤销:状态查询可见失败原因)。
-	if err := t.pm.ForPreheat(ctx, tk.dlCtx, dataset, enq); err != nil {
+	if err := t.pm.ForPreheatTask(ctx, tk.dlCtx, tk.taskID, dataset, enq); err != nil {
 		tk.markError(fmt.Sprintf("P0 入队失败: %v", err))
 	} else {
 		tk.markRunning()
@@ -473,7 +499,7 @@ func (t *PreheatTasks) Update(ctx context.Context, req *agentpb.UpdatePreheatReq
 	}
 	if t.pm == nil {
 		tk.markError("预取管理器未装配")
-	} else if err := t.pm.ForPreheat(ctx, tk.dlCtx, tk.req.dataset, enq); err != nil {
+	} else if err := t.pm.ForPreheatTask(ctx, tk.dlCtx, tk.taskID, tk.req.dataset, enq); err != nil {
 		tk.markError(fmt.Sprintf("P0 入队失败: %v", err))
 	} else {
 		tk.markRunning()

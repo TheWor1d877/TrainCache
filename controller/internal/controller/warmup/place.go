@@ -13,6 +13,7 @@ import (
 	"traincache/controller/internal/agentclient"
 	"traincache/controller/internal/gwaa"
 	"traincache/controller/internal/metrics"
+	corelog "traincache/core/logging"
 )
 
 // PreheatPair identifies one (Pod, node) preheat task. task_id is derived from
@@ -211,12 +212,15 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 			"node", action.Node,
 			"generation", in.Task.Generation,
 		}
+		// 每个 task_id 的 RPC 都带上本次 reconcile 的 request_id 与自己的
+		// task/generation（docs/8.1 §5 第 4 跳）。
+		callCtx := corelog.WithRequestMeta(ctx, "", taskID, uint64(in.Task.Generation))
 		var callErr error
 		switch action.Kind {
 		case ActionSubmit:
 			// Empty snapshot_id = Agent CURRENT (7.x Agent contract; a
 			// concrete id is rejected as InvalidArgument).
-			callErr = rpc.Submit(ctx, action.Node, &agentpb.SubmitPreheatRequest{
+			callErr = rpc.Submit(callCtx, action.Node, &agentpb.SubmitPreheatRequest{
 				TaskId:     taskID,
 				Node:       action.Node,
 				Dataset:    in.DataSet.Spec.DatasetName,
@@ -227,7 +231,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 			})
 			fields = append(fields, "chunks", len(action.Chunks))
 		case ActionUpdate:
-			callErr = rpc.Update(ctx, action.Node, &agentpb.UpdatePreheatRequest{
+			callErr = rpc.Update(callCtx, action.Node, &agentpb.UpdatePreheatRequest{
 				TaskId:     taskID,
 				Node:       action.Node,
 				Generation: uint64(in.Task.Generation),
@@ -236,7 +240,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 			})
 			fields = append(fields, "chunks", len(action.Chunks))
 		case ActionCancel:
-			callErr = rpc.Cancel(ctx, action.Node, &agentpb.CancelPreheatRequest{
+			callErr = rpc.Cancel(callCtx, action.Node, &agentpb.CancelPreheatRequest{
 				TaskId:     taskID,
 				Node:       action.Node,
 				Generation: uint64(in.Task.Generation),
@@ -266,7 +270,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 			in.Metrics.ObservePreheatRPC(op, metrics.RPCUnavailable)
 		}
 
-		fields = append(fields, "err", callErr)
+		fields = append(fields, "err", callErr, "err_class", agentclient.ErrClass(callErr))
 		failed[action.Node] = struct{}{}
 		if errors.Is(callErr, agentclient.ErrPermanent) {
 			result.Permanent[action.Node] = callErr

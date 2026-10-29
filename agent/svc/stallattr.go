@@ -2,14 +2,15 @@ package svc
 
 // stallattr.go:read_stall 实测归因(D47;M9 落地)。
 //
-// D47 冻结:仅 wait ≥100ms 入直方图(阈值可配);按 ts±5s 关联:
+// D47 冻结:仅 wait ≥100ms 入直方图(阈值可配);按 ts 关联窗口(默认前后各 2500ms):
 //   - 本地存在且非当前窗口预取 → local_slow;
 //   - core fetch 在途 → origin_slow;
 //   - 未本地且未在途(pending 或未知)→ prefetch_lag;
 //   - 无法解析/超窗/dataset 无法归属 → unknown。
 //
 // Q15 备注:阈值默认 100ms(stallMinWaitMS)可由 svc 配置 TRAINCACHE_READ_STALL_MIN_WAIT_MS
-// 注入;关联窗口 ±5s 仍取固定常量,bench 标定后回填。
+// 注入;关联窗口(C3)由 TRAINCACHE_READ_STALL_WINDOW_MS 注入,默认 5000ms,以帧 ts
+// 为中心前后各取半个窗口。
 
 import (
 	"time"
@@ -21,14 +22,14 @@ import (
 const (
 	// stallMinWaitMS 是 read_stall 入直方图的最小等待(D47/Q15:默认 100ms,可配)。
 	stallMinWaitMS = int64(100)
-	// stallCorrelationWindow 是 ts 与当前时刻的最大关联偏差(D47/Q15:±5s)。
-	stallCorrelationWindow = 5 * time.Second
 )
 
 // stallAttributor 是读等待归因器(依赖由 svc 现有能力提供)。
 type stallAttributor struct {
 	// minWaitMS 是入直方图的最小等待毫秒(D47/Q15:默认 100,可由 svc 配置注入)。
 	minWaitMS int64
+	// halfWindow 是 ts 关联的半窗口(C3:帧 ts 前后各 windowMS 内可关联)。
+	halfWindow time.Duration
 	// exists 做本地存在性检查:返回 resolveRef 得到的 dataset 与块是否本地可 Open。
 	exists func(ref ordersource.ChunkRef) (dataset string, found bool)
 	// inflight 报告该块是否在 fetcher/prefetch pending 中(origin_slow 判据)。
@@ -39,28 +40,34 @@ type stallAttributor struct {
 	now func() time.Time
 }
 
-// newStallAttributor 构造归因器(参数可为 nil;阈值取 D47 默认 100ms)。
+// newStallAttributor 构造归因器(参数可为 nil;阈值取 D47 默认 100ms,窗口取默认 5000ms)。
 func newStallAttributor(
 	exists func(ref ordersource.ChunkRef) (dataset string, found bool),
 	inflight func(dataset string, ref ordersource.ChunkRef) bool,
 	currentWindow func(dataset string, ref ordersource.ChunkRef) bool,
 ) *stallAttributor {
-	return newStallAttributorWithThreshold(exists, inflight, currentWindow, stallMinWaitMS)
+	return newStallAttributorWithThreshold(exists, inflight, currentWindow,
+		stallMinWaitMS, defaultReadStallWindowMS)
 }
 
-// newStallAttributorWithThreshold 构造归因器并注入最小等待阈值(D47/Q15 可配;
-// minWaitMS<=0 回退默认常量)。
+// newStallAttributorWithThreshold 构造归因器并注入最小等待阈值与关联窗口
+// (D47/Q15、C3 可配;minWaitMS<=0 回退默认 100ms,windowMS<=0 回退默认 5000ms)。
 func newStallAttributorWithThreshold(
 	exists func(ref ordersource.ChunkRef) (dataset string, found bool),
 	inflight func(dataset string, ref ordersource.ChunkRef) bool,
 	currentWindow func(dataset string, ref ordersource.ChunkRef) bool,
 	minWaitMS int64,
+	windowMS int64,
 ) *stallAttributor {
 	if minWaitMS <= 0 {
 		minWaitMS = stallMinWaitMS
 	}
+	if windowMS <= 0 {
+		windowMS = defaultReadStallWindowMS
+	}
 	return &stallAttributor{
 		minWaitMS:     minWaitMS,
+		halfWindow:    time.Duration(windowMS) * time.Millisecond,
 		exists:        exists,
 		inflight:      inflight,
 		currentWindow: currentWindow,
@@ -68,9 +75,9 @@ func newStallAttributorWithThreshold(
 	}
 }
 
-// Attribute 返回归因结果与是否记录。最小等待阈值过滤与 ts±5s 关联由本方法负责
-// (D47;不在 hooksock dispatch 做)。wait < 阈值 → 不记录;ts 为零值(解析失败)或
-// |now-ts| >5s → unknown 且记录。
+// Attribute 返回归因结果与是否记录。最小等待阈值过滤与 ts 关联窗口由本方法负责
+// (D47/C3;不在 hooksock dispatch 做)。wait < 阈值 → 不记录;ts 为零值(解析失败)或
+// |now-ts| > 窗口/2 → unknown 且记录。
 func (a *stallAttributor) Attribute(ref ordersource.ChunkRef, waitMS int64, ts time.Time) (cause string, record bool) {
 	minWaitMS := a.minWaitMS
 	if minWaitMS <= 0 {
@@ -83,7 +90,7 @@ func (a *stallAttributor) Attribute(ref ordersource.ChunkRef, waitMS int64, ts t
 	if a.now != nil {
 		now = a.now
 	}
-	if ts.IsZero() || absDuration(now().Sub(ts)) > stallCorrelationWindow {
+	if ts.IsZero() || absDuration(now().Sub(ts)) > a.halfWindow {
 		return metrics.CauseUnknown, true
 	}
 

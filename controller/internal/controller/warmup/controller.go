@@ -33,6 +33,7 @@ import (
 	"traincache/controller/internal/gate"
 	"traincache/controller/internal/logging"
 	"traincache/controller/internal/metrics"
+	corelog "traincache/core/logging"
 )
 
 // Condition types written by the M4 reconciler. Negative-named conditions use
@@ -148,6 +149,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	base := task.DeepCopy()
 	taskKey := TaskKey(task)
 	requestID := fmt.Sprintf("%s/%d/%d", task.UID, task.Generation, start.UnixNano())
+	// 本次 reconcile 的 request_id 随 ctx 下传，Agent 客户端再补 task 与
+	// generation 后注入 gRPC metadata（docs/8.1 §5）。
+	ctx = corelog.WithRequestMeta(ctx, requestID, "", 0)
 	fanout, fanoutMin, clamped := normalizeFanoutRange(task.Spec.PreheatFanout, task.Spec.PreheatFanoutMin)
 	log := r.logger(ctx).With(
 		"warmup_task", taskKey,
@@ -172,7 +176,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	defer func() {
 		task.Status.ObservedGeneration = task.Generation
 		if err := r.patchStatus(ctx, base, task); err != nil {
-			log.Error("warmup status patch failed", "err", err)
+			log.Error("warmup status patch failed", "err", err, "err_class", corelog.Classify(err))
 			if retErr == nil {
 				retErr = err
 			}
@@ -207,7 +211,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	if reasons := ValidateTask(task); len(reasons) > 0 {
 		message := strings.Join(reasons, "; ")
-		log.Warn("warmup spec invalid", "reason", reasonInvalidSpec, "err", message)
+		log.Warn("warmup spec invalid", "reason", reasonInvalidSpec, "err", message, "err_class", corelog.ErrClassInvalidSpec)
 		if r.setCondition(task, ConditionInvalidSpec, metav1.ConditionFalse, reasonInvalidSpec, message) {
 			r.event(task, corev1.EventTypeWarning, reasonInvalidSpec, message)
 		}
@@ -221,7 +225,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			return ctrl.Result{}, fmt.Errorf("get DataSet %s/%s: %w", task.Namespace, task.Spec.DataSetRef.Name, err)
 		}
 		message := fmt.Sprintf("DataSet %s/%s not found", task.Namespace, task.Spec.DataSetRef.Name)
-		log.Warn("dataset not found", "reason", reasonDataSetNotFound, "err", err)
+		log.Warn("dataset not found", "reason", reasonDataSetNotFound, "err", err, "err_class", corelog.ErrClassNotFound)
 		if r.setCondition(task, ConditionDataSetNotReady, metav1.ConditionFalse, reasonDataSetNotFound, message) {
 			r.event(task, corev1.EventTypeWarning, reasonDataSetNotFound, message)
 		}
@@ -229,7 +233,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	if !dataSetReady(ds) || ds.Status.TotalChunks <= 0 || len(ds.Status.BlockLayout) == 0 {
 		message := fmt.Sprintf("DataSet %s is not Ready", task.Spec.DataSetRef.Name)
-		log.Warn("dataset not ready", "reason", reasonDataSetNotReady, "err", message)
+		log.Warn("dataset not ready", "reason", reasonDataSetNotReady, "err", message, "err_class", corelog.ErrClassUnavailable)
 		if r.setCondition(task, ConditionDataSetNotReady, metav1.ConditionFalse, reasonDataSetNotReady, message) {
 			r.event(task, corev1.EventTypeWarning, reasonDataSetNotReady, message)
 		}
@@ -251,7 +255,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	orders, source, err := ResolveConsumeOrders(task, ds.Status.TotalChunks, ds.Status.BlockLayout)
 	if err != nil {
 		message := err.Error()
-		log.Warn("warmup consume order invalid", "reason", reasonInvalidSpec, "err", err)
+		log.Warn("warmup consume order invalid", "reason", reasonInvalidSpec, "err", err, "err_class", corelog.ErrClassInvalidSpec)
 		if r.setCondition(task, ConditionInvalidSpec, metav1.ConditionFalse, reasonInvalidSpec, message) {
 			r.event(task, corev1.EventTypeWarning, reasonInvalidSpec, message)
 		}
@@ -270,7 +274,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	if reasons := ValidateExplicitK(task, orders); len(reasons) > 0 {
 		message := strings.Join(reasons, "; ")
-		log.Warn("warmup spec invalid", "reason", reasonInvalidSpec, "err", message)
+		log.Warn("warmup spec invalid", "reason", reasonInvalidSpec, "err", message, "err_class", corelog.ErrClassInvalidSpec)
 		if r.setCondition(task, ConditionInvalidSpec, metav1.ConditionFalse, reasonInvalidSpec, message) {
 			r.event(task, corev1.EventTypeWarning, reasonInvalidSpec, message)
 		}
@@ -410,6 +414,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		if submitErr != nil {
 			log.Warn("preheat submission incomplete",
 				"err", submitErr,
+				"err_class", agentclient.ErrClass(submitErr),
 				"submitted", submission.Submitted,
 				"unavailable", len(submission.Unavailable),
 			)
@@ -423,7 +428,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		ledger := submittedLedger(task, windows, candidates, outcome.Tasks, initialFanout, submission)
 		placement := r.computePlacement(task, candidates, stopped, ledger)
 		if placement.Err != nil {
-			log.Error("gwaa computation failed", "err", placement.Err)
+			log.Error("gwaa computation failed", "err", placement.Err, "err_class", corelog.Classify(placement.Err))
 			if submitErr == nil {
 				submitErr = placement.Err
 			}
@@ -443,6 +448,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			if applyErr != nil {
 				log.Warn("placement apply incomplete",
 					"err", applyErr,
+					"err_class", agentclient.ErrClass(applyErr),
 					"submitted", applied.Submitted,
 					"updated", applied.Updated,
 					"cancelled", applied.Cancelled,

@@ -20,6 +20,8 @@ data:
         isDefault: true
         editable: false
       - name: Prometheus
+        # uid 固定为 prometheus,看板 JSON 按此引用数据源。
+        uid: prometheus
         type: prometheus
         access: proxy
         url: http://prometheus.observability.svc.cluster.local:9090

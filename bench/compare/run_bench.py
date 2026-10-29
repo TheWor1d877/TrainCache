@@ -1031,8 +1031,38 @@ HOOK_SOCK = os.environ.get("TRAINCACHE_HOOK_SOCK", "/run/tc-hook/agent.sock")
 _chunk_map = None
 _order_written = False
 
+def _hook_identity():
+    """按 env 组装钩子帧可选任务身份（8.0 口径）；缺失的键不出现，旧帧逐字一致。"""
+    ident = {}
+    task = os.environ.get("TRAINCACHE_TASK")
+    if task:
+        ident["warmup_task"] = task
+    pod = os.environ.get("TRAINCACHE_POD")
+    if pod:
+        ident["pod"] = pod
+    try:
+        ident["pod_index"] = int(os.environ.get("TRAINCACHE_POD_INDEX", ""))
+    except ValueError:
+        pass
+    dataset = os.environ.get("TRAINCACHE_DATASET")
+    if dataset:
+        ident["dataset"] = dataset
+    try:
+        ident["generation"] = int(os.environ.get("TRAINCACHE_GENERATION", ""))
+    except ValueError:
+        pass
+    return ident
+
+_HOOK_IDENTITY = _hook_identity()
+
 def _hook_send(frame):
-    """best-effort 上报一帧；每次新建 socket，多读线程并发安全。"""
+    """best-effort 上报一帧；每次新建 socket，多读线程并发安全。
+
+    帧身份字段仅在 env 有值时附在原有键之后；env 全缺省时与旧版帧内容逐字一致。
+    """
+    if _HOOK_IDENTITY:
+        frame = dict(frame)
+        frame.update(_HOOK_IDENTITY)
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         try:

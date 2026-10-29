@@ -16,6 +16,7 @@ import (
 	"traincache/controller/internal/agentclient"
 	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/nodescore"
+	corelog "traincache/core/logging"
 )
 
 const (
@@ -289,7 +290,8 @@ func (r *Reconciler) pollReadiness(
 			}
 
 			start := r.now()
-			resp, err := r.Agents.Progress(ctx, node, taskID, generation)
+			callCtx := corelog.WithRequestMeta(ctx, "", taskID, generation)
+			resp, err := r.Agents.Progress(callCtx, node, taskID, generation)
 			duration := r.now().Sub(start).Milliseconds()
 			if err != nil {
 				if errors.Is(err, agentclient.ErrTaskNotFound) {
@@ -308,6 +310,7 @@ func (r *Reconciler) pollReadiness(
 						"attempt", attempt,
 						"duration_ms", duration,
 						"err", err,
+						"err_class", agentclient.ErrClass(err),
 					)
 					if attempt >= unavailableFailureThreshold {
 						facts[pairKey] = readinessFact{
@@ -324,6 +327,7 @@ func (r *Reconciler) pollReadiness(
 					pairLog.Warn("agent progress failed",
 						"duration_ms", duration,
 						"err", err,
+						"err_class", agentclient.ErrClass(err),
 					)
 				}
 				continue
@@ -379,6 +383,7 @@ func (r *Reconciler) pollReadiness(
 					"seq", resp.GetSeq(),
 					"duration_ms", duration,
 					"err", decodeErr,
+					"err_class", corelog.ErrClassInvalidSpec,
 				)
 				continue
 			}

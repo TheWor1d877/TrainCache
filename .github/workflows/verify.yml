@@ -23,6 +23,50 @@ jobs:
       - name: verify ${{ matrix.module }}
         run: make verify-${{ matrix.module }}
 
+  # 真实 S3 兼容后端(MinIO)集成:验证条件写语义(If-Match / If-None-Match)。
+  # 未设置 TC_S3_* 时 core 的普通 go test 仍会 skip 该用例,不影响 unit job。
+  s3-integration:
+    name: S3 integration (MinIO)
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+        env:
+          MINIO_ROOT_USER: traincache
+          MINIO_ROOT_PASSWORD: traincache-probe
+        ports:
+          - 127.0.0.1:9000:9000
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: wait for MinIO
+        run: |
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "MinIO 未在 120s 内就绪" >&2
+          exit 1
+      - name: create bucket
+        working-directory: controller
+        run: >-
+          go run ./e2e/mkbucket
+          --endpoint 127.0.0.1:9000
+          --access-key traincache
+          --secret-key traincache-probe
+          --bucket traincache
+      - name: go test ./objectstore -run TestS3
+        working-directory: core
+        env:
+          TC_S3_ENDPOINT: 127.0.0.1:9000
+          TC_S3_ACCESS_KEY: traincache
+          TC_S3_SECRET_KEY: traincache-probe
+          TC_S3_BUCKET: traincache
+        run: go test ./objectstore -run TestS3 -count=1
+
   render:
     name: kustomize render
     runs-on: ubuntu-latest
@@ -49,13 +93,13 @@ jobs:
   # 门禁只认这一个名字：以后往 matrix 加模块，GitHub 保护规则不用改。
   gate:
     name: verify gate
-    needs: [unit, render, metadata]
+    needs: [unit, s3-integration, render, metadata]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: aggregate
         run: |
           set -euo pipefail
-          for r in '${{ needs.unit.result }}' '${{ needs.render.result }}' '${{ needs.metadata.result }}'; do
+          for r in '${{ needs.unit.result }}' '${{ needs.s3-integration.result }}' '${{ needs.render.result }}' '${{ needs.metadata.result }}'; do
             [[ "$r" == success || "$r" == skipped ]] || { echo "上游 $r，不放行" >&2; exit 1; }
           done
