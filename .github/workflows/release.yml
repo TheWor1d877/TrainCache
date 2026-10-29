@@ -1,7 +1,8 @@
 name: release
 
-# 发版构建入口：push vX.Y.Z tag。推四个镜像、渲染 digest、建 draft Release。
-# 不自动转正，转正由人工点 Publish；发布物验证由 release-smoke 接手。
+# 发版入口：push vX.Y.Z tag。不重建镜像，只把候选 digest 晋升成 :vX.Y.Z，
+# 再把候选的 install.yaml、两个 CLI 与镜像 tar 组成 draft Release。
+# 不自动转正，转正由人工点 Publish；发布物验证由 release-smoke 在候选阶段完成。
 # CI 不创建 tag，版本号只来自 tag。
 on:
   push:
@@ -9,31 +10,57 @@ on:
 
 permissions:
   contents: write    # 建 draft Release、传附件
-  packages: write    # 推 GHCR
+  packages: write    # 推送晋升后的 tag
+  actions: read      # 查候选 run、下候选 artifact
 
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: build, render, draft release
+  promote:
+    name: promote candidate, draft release
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      TAG: ${{ github.ref_name }}
+      REG: ghcr.io/thewor1d877/traincache
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # 版本检查要读 tag
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: agent/go.mod
-          cache-dependency-path: '**/go.sum'
-
       - name: verify versions
-        env:
-          TAG: ${{ github.ref_name }}
         run: make verify-metadata
+
+      - name: locate candidate
+        run: |
+          set -euo pipefail
+          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >>"$GITHUB_ENV"
+          run_id="$(gh run list --workflow release-candidate.yml \
+            --commit "$GITHUB_SHA" --status success --limit 1 \
+            --json databaseId --jq '.[0].databaseId')"
+          if [[ -z "$run_id" || "$run_id" == "null" ]]; then
+            echo "该提交没有成功的候选构建：先跑 release-candidate（version=$TAG）再打 tag" >&2
+            exit 1
+          fi
+          echo "候选 run $run_id"
+          gh run download "$run_id" -n "release-candidate-$SHORT_SHA" -D .candidate
+
+      - name: check candidate
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version .candidate/candidate.json)"
+          sha="$(jq -r .sha .candidate/candidate.json)"
+          if [[ "$version" != "$TAG" ]]; then
+            echo "候选是用 $version 构建的，用 $TAG 重建候选" >&2
+            exit 1
+          fi
+          if [[ "$sha" != "$GITHUB_SHA" ]]; then
+            echo "候选取自 $sha，与 tag 指向的 $GITHUB_SHA 不一致" >&2
+            exit 1
+          fi
 
       - uses: docker/login-action@v4
         with:
@@ -41,62 +68,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build and push images
-        env:
-          TAG: ${{ github.ref_name }}
+      - name: promote tags
         run: |
           set -euo pipefail
-          REG=ghcr.io/thewor1d877/traincache
-          while IFS='|' read -r comp dockerfile var; do
-            img="$REG/$comp"
-            docker build -f "$dockerfile" --build-arg VERSION="$TAG" -t "$img:$TAG" .
-            docker push "$img:$TAG"
-            digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$img:$TAG" | sed 's/.*@//')"
-            [[ "$digest" == sha256:* ]] || { echo "no digest for $img" >&2; exit 1; }
-            echo "$var=$digest" >>"$GITHUB_ENV"
-            echo "$img:$TAG -> $digest"
-          done <<'IMAGES'
-          controller-manager|controller/deploy/manager/Dockerfile|D_MANAGER
-          webhook|controller/deploy/webhook/Dockerfile|D_WEBHOOK
-          kube-scheduler|controller/deploy/scheduler/Dockerfile|D_SCHEDULER
-          traincache-agentd|agent/Dockerfile|D_AGENT
-          IMAGES
-
-      - name: render install.yaml
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          ./hack/render-install.sh "$TAG" \
-            "$D_MANAGER" "$D_WEBHOOK" "$D_SCHEDULER" "$D_AGENT" install.yaml
-
-      - name: build cli
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -trimpath -ldflags "-s -w" -o ../traincache-linux-amd64 ./cmd/traincache)
-          (cd core && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -trimpath -ldflags "-s -w" -o ../trainpublish-linux-amd64 ./cmd/trainpublish)
-          file traincache-linux-amd64 trainpublish-linux-amd64
+          for comp in controller-manager webhook kube-scheduler traincache-agentd; do
+            digest="$(jq -r --arg c "$comp" '.images[$c]' .candidate/candidate.json)"
+            [[ "$digest" == sha256:* ]] || { echo "$comp 的候选 digest 非法: $digest" >&2; exit 1; }
+            docker buildx imagetools create -t "$REG/$comp:$TAG" "$REG/$comp@$digest"
+            got="$(docker buildx imagetools inspect "$REG/$comp:$TAG" \
+              --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            [[ "$got" == "$digest" ]] || {
+              echo "$comp:$TAG 的 digest 是 $got，与候选 $digest 不一致" >&2
+              exit 1
+            }
+            echo "$REG/$comp:$TAG -> $digest"
+          done
 
       - name: pack images
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          REG=ghcr.io/thewor1d877/traincache
+          for comp in controller-manager webhook kube-scheduler traincache-agentd; do
+            docker pull "$REG/$comp:$TAG"
+          done
           docker save -o "traincache-${TAG}-images.tar" \
             "$REG/controller-manager:$TAG" \
             "$REG/webhook:$TAG" \
             "$REG/kube-scheduler:$TAG" \
             "$REG/traincache-agentd:$TAG"
+
+      - name: collect assets
+        run: |
+          set -euo pipefail
+          cp .candidate/install.yaml .candidate/traincache-linux-amd64 \
+            .candidate/trainpublish-linux-amd64 .
           sha256sum install.yaml "traincache-${TAG}-images.tar" \
             traincache-linux-amd64 trainpublish-linux-amd64 >SHA256SUMS
 
       - name: release notes
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           awk -v tag="$TAG" '
             index($0, "## [" tag "]") == 1 { on = 1; next }
@@ -106,9 +114,6 @@ jobs:
           [[ -s release-notes.md ]] || { echo "CHANGELOG 没有 $TAG 正文" >&2; exit 1; }
 
       - name: create release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" \
             --draft \

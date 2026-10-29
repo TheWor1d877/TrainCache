@@ -1,0 +1,130 @@
+name: release-candidate
+
+# 候选构建：按 commit 产出可验证的发布候选物。
+# 镜像推 :sha-<7 位短 sha>，VERSION 在这里烤进二进制与清单；
+# 产物（install.yaml、两个 CLI、candidate.json、SHA256SUMS）作为 artifact 上传，
+# 供 release-smoke 装机验证与 release.yml 晋升 tag 使用。
+# CI 不创建 tag，版本号仍只来自 tag。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 目标版本号，如 v0.2.0
+        required: true
+        type: string
+      sha:
+        description: 候选提交的完整 sha；留空用触发时的 commit
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-candidate-${{ inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: build candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: '**/go.sum'
+
+      - name: check inputs
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version 不是 vX.Y.Z: $VERSION" >&2; exit 1; }
+          echo "SHA=$(git rev-parse HEAD)" >>"$GITHUB_ENV"
+          echo "SHORT_SHA=$(git rev-parse --short=7 HEAD)" >>"$GITHUB_ENV"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push images
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          REG=ghcr.io/thewor1d877/traincache
+          while IFS='|' read -r comp dockerfile var; do
+            img="$REG/$comp"
+            docker build -f "$dockerfile" --build-arg VERSION="$VERSION" -t "$img:sha-$SHORT_SHA" .
+            docker push "$img:sha-$SHORT_SHA"
+            digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$img:sha-$SHORT_SHA" | sed 's/.*@//')"
+            [[ "$digest" == sha256:* ]] || { echo "no digest for $img" >&2; exit 1; }
+            echo "$var=$digest" >>"$GITHUB_ENV"
+            echo "$img:sha-$SHORT_SHA -> $digest"
+          done <<'IMAGES'
+          controller-manager|controller/deploy/manager/Dockerfile|D_MANAGER
+          webhook|controller/deploy/webhook/Dockerfile|D_WEBHOOK
+          kube-scheduler|controller/deploy/scheduler/Dockerfile|D_SCHEDULER
+          traincache-agentd|agent/Dockerfile|D_AGENT
+          IMAGES
+
+      - name: render install.yaml
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          ./hack/render-install.sh "$VERSION" \
+            "$D_MANAGER" "$D_WEBHOOK" "$D_SCHEDULER" "$D_AGENT" install.yaml
+
+      - name: build cli
+        run: |
+          set -euo pipefail
+          (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o ../traincache-linux-amd64 ./cmd/traincache)
+          (cd core && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o ../trainpublish-linux-amd64 ./cmd/trainpublish)
+          file traincache-linux-amd64 trainpublish-linux-amd64
+
+      - name: candidate metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg sha "$SHA" --arg short "$SHORT_SHA" --arg version "$VERSION" \
+            --arg dm "$D_MANAGER" --arg dw "$D_WEBHOOK" \
+            --arg ds "$D_SCHEDULER" --arg da "$D_AGENT" \
+            --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{sha: $sha, short_sha: $short, version: $version,
+              images: {
+                "controller-manager": $dm,
+                "webhook": $dw,
+                "kube-scheduler": $ds,
+                "traincache-agentd": $da
+              },
+              created_at: $created}' >candidate.json
+          jq -e '.images | length == 4' candidate.json >/dev/null
+          sha256sum install.yaml traincache-linux-amd64 trainpublish-linux-amd64 \
+            candidate.json >SHA256SUMS
+
+      - name: upload candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate-${{ env.SHORT_SHA }}
+          path: |
+            install.yaml
+            traincache-linux-amd64
+            trainpublish-linux-amd64
+            candidate.json
+            SHA256SUMS
+          retention-days: 14
+          if-no-files-found: error
