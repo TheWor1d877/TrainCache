@@ -129,6 +129,9 @@ func TestPreheatUpdateReplacesWindowAndBitOrder(t *testing.T) {
 	if len(st.GetReadyBitmap()) != 1 || !m3Bit(st.GetReadyBitmap(), 0) || !m3Bit(st.GetReadyBitmap(), 1) {
 		t.Fatalf("初始位图 = %v, want bit0/bit1 置位", st.GetReadyBitmap())
 	}
+	if st.GetWindowBlocks() != 2 {
+		t.Fatalf("初始 window_blocks = %d, want 2", st.GetWindowBlocks())
+	}
 
 	// 全量替换为 [missing, a]:旧的 a@0 位失效,a 的新位序为 1;missing 失败位保持 0。
 	upd, err := fx.tasks.Update(ctx, m3Update("t-upd", 2,
@@ -139,6 +142,9 @@ func TestPreheatUpdateReplacesWindowAndBitOrder(t *testing.T) {
 	st = waitTaskState(t, fx.tasks, "t-upd", agentpb.PreheatStatus_ERROR)
 	if len(st.GetReadyBitmap()) != 1 {
 		t.Fatalf("位图长度 = %d, want ceil(2/8)=1", len(st.GetReadyBitmap()))
+	}
+	if st.GetWindowBlocks() != 2 {
+		t.Fatalf("Update 后 window_blocks = %d, want 2", st.GetWindowBlocks())
 	}
 	if m3Bit(st.GetReadyBitmap(), 0) {
 		t.Error("bit0 对应 missing,失败位必须保持 0")
@@ -157,8 +163,9 @@ func TestPreheatUpdateReplacesWindowAndBitOrder(t *testing.T) {
 		t.Fatalf("空窗口 Update = %+v, err=%v", empty, err)
 	}
 	st = waitTaskState(t, fx.tasks, "t-upd", agentpb.PreheatStatus_DONE)
-	if len(st.GetReadyBitmap()) != 0 || st.GetTotalBlocks() != 0 {
-		t.Errorf("清空后 = bitmap %v total %d, want 空位图/0", st.GetReadyBitmap(), st.GetTotalBlocks())
+	if len(st.GetReadyBitmap()) != 0 || st.GetTotalBlocks() != 0 || st.GetWindowBlocks() != 0 {
+		t.Errorf("清空后 = bitmap %v total %d window %d, want 空位图/0/0",
+			st.GetReadyBitmap(), st.GetTotalBlocks(), st.GetWindowBlocks())
 	}
 }
 
@@ -352,6 +359,7 @@ func TestPreheatProtoFrozenFieldNumbers(t *testing.T) {
 		{"PreheatStatus", "generation", 12},
 		{"PreheatStatus", "seq", 13},
 		{"PreheatStatus", "ready_bitmap", 14},
+		{"PreheatStatus", "window_blocks", 16},
 	} {
 		m := fd.Messages().ByName(protoreflect.Name(tt.msg))
 		if m == nil {

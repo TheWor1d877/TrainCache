@@ -562,7 +562,8 @@ type PreheatStatus struct {
 	ReadyBitmap []byte `protobuf:"bytes,14,opt,name=ready_bitmap,json=readyBitmap,proto3" json:"ready_bitmap,omitempty"` // 位 i 对应请求 chunks 第 i 项；1=已落盘且校验通过
 	// Cancel 只标记取消、不删除任务，因此「我持有」不等于「还在干活」。
 	// Controller 的分配差异据此判断被重新选中的节点需要重新 Submit。
-	Canceled      bool `protobuf:"varint,15,opt,name=canceled,proto3" json:"canceled,omitempty"` // 已收到 CancelPreheat 且未被重新 Submit
+	Canceled      bool   `protobuf:"varint,15,opt,name=canceled,proto3" json:"canceled,omitempty"`                             // 已收到 CancelPreheat 且未被重新 Submit
+	WindowBlocks  uint32 `protobuf:"varint,16,opt,name=window_blocks,json=windowBlocks,proto3" json:"window_blocks,omitempty"` // 当前窗口块数 = len(chunks)；Controller 据此判定窗口未变化
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -700,6 +701,13 @@ func (x *PreheatStatus) GetCanceled() bool {
 		return x.Canceled
 	}
 	return false
+}
+
+func (x *PreheatStatus) GetWindowBlocks() uint32 {
+	if x != nil {
+		return x.WindowBlocks
+	}
+	return 0
 }
 
 // 8.x 增量:窗口全量更新(chunks 全量替换并重定义位序)。
@@ -1542,7 +1550,7 @@ const file_agent_proto_rawDesc = "" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\"2\n" +
 	"\x17GetPreheatStatusRequest\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\xde\x04\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\x83\x05\n" +
 	"\rPreheatStatus\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\x12\x18\n" +
@@ -1564,7 +1572,8 @@ const file_agent_proto_rawDesc = "" +
 	"generation\x12\x10\n" +
 	"\x03seq\x18\r \x01(\x04R\x03seq\x12!\n" +
 	"\fready_bitmap\x18\x0e \x01(\fR\vreadyBitmap\x12\x1a\n" +
-	"\bcanceled\x18\x0f \x01(\bR\bcanceled\"5\n" +
+	"\bcanceled\x18\x0f \x01(\bR\bcanceled\x12#\n" +
+	"\rwindow_blocks\x18\x10 \x01(\rR\fwindowBlocks\"5\n" +
 	"\x05State\x12\n" +
 	"\n" +
 	"\x06QUEUED\x10\x00\x12\v\n" +

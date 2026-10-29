@@ -229,8 +229,8 @@ func submittedLedger(
 			continue
 		}
 		previous[PreheatPair{PodIndex: key.podIndex, Node: key.node}] = ExistingPreheat{
-			Generation:  observation.Generation,
-			BitmapBytes: observation.BitmapBytes,
+			Generation:   observation.Generation,
+			WindowBlocks: observation.WindowBlocks,
 		}
 	}
 	if !initial {
@@ -249,8 +249,8 @@ func submittedLedger(
 				continue
 			}
 			previous[pair] = ExistingPreheat{
-				Generation:  uint64(task.Generation),
-				BitmapBytes: bitmapBytes(len(window)),
+				Generation:   uint64(task.Generation),
+				WindowBlocks: uint32(len(window)),
 			}
 		}
 	}

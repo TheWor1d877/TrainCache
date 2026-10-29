@@ -82,10 +82,10 @@ func TestSubmittedLedgerOnlyCountsHeldTasks(t *testing.T) {
 	windows := [][]*agentpb.ChunkRef{testChunks("a", "b")}
 	candidates := []string{"n1", "n2", "n3"}
 	observations := map[readinessKey]AgentTaskObservation{
-		{podIndex: 0, node: "n1"}: {Held: true, Generation: 7, BitmapBytes: 1},
+		{podIndex: 0, node: "n1"}: {Held: true, Generation: 7, WindowBlocks: 2},
 		// Cancel marks a task without deleting it; the Agent still answers, but
 		// it is not holding anything (docs/6.3 D55).
-		{podIndex: 0, node: "n2"}: {Generation: 7, BitmapBytes: 1},
+		{podIndex: 0, node: "n2"}: {Generation: 7, WindowBlocks: 2},
 		// n3 answered nothing, so it is absent from the map.
 	}
 
@@ -93,13 +93,13 @@ func TestSubmittedLedgerOnlyCountsHeldTasks(t *testing.T) {
 	if len(ledger) != 1 {
 		t.Fatalf("ledger = %#v, want only the held pair", ledger)
 	}
-	if got := ledger[PreheatPair{PodIndex: 0, Node: "n1"}]; got != (ExistingPreheat{Generation: 7, BitmapBytes: 1}) {
+	if got := ledger[PreheatPair{PodIndex: 0, Node: "n1"}]; got != (ExistingPreheat{Generation: 7, WindowBlocks: 2}) {
 		t.Fatalf("held pair = %#v, want generation 7 and one bitmap byte", got)
 	}
 	if !anyTaskHeld(observations) {
 		t.Fatal("anyTaskHeld = false, want true: the wide fan-out already ran")
 	}
-	if anyTaskHeld(map[readinessKey]AgentTaskObservation{{podIndex: 0, node: "n2"}: {Generation: 7, BitmapBytes: 1}}) {
+	if anyTaskHeld(map[readinessKey]AgentTaskObservation{{podIndex: 0, node: "n2"}: {Generation: 7, WindowBlocks: 2}}) {
 		t.Fatal("a cancelled task alone must not count as held, or the broadcast never runs again")
 	}
 

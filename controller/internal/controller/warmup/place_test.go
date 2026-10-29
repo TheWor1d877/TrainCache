@@ -81,14 +81,14 @@ func testPlacementInput() PlacementApplyInput {
 			testChunks("c"),
 			testChunks("d"),
 			// Pod 4's window grew to 9 chunks while the Agent still reports the
-			// 1-byte bitmap it accepted for the previous (<=8 chunk) window.
+			// 8-chunk window it accepted before.
 			testChunks("new", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9"),
 		},
 		Previous: map[PreheatPair]ExistingPreheat{
-			{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 1}, // unchanged
-			{PodIndex: 1, Node: "n1"}: {Generation: 7, BitmapBytes: 1}, // moved to n3
-			{PodIndex: 2, Node: "n2"}: {Generation: 7, BitmapBytes: 1}, // unassigned
-			{PodIndex: 4, Node: "n0"}: {Generation: 7, BitmapBytes: 1}, // same pair, window grew -> Update
+			{PodIndex: 0, Node: "n0"}: {Generation: 7, WindowBlocks: 1}, // unchanged
+			{PodIndex: 1, Node: "n1"}: {Generation: 7, WindowBlocks: 1}, // moved to n3
+			{PodIndex: 2, Node: "n2"}: {Generation: 7, WindowBlocks: 1}, // unassigned
+			{PodIndex: 4, Node: "n0"}: {Generation: 7, WindowBlocks: 8}, // same pair, 8 -> 9 blocks -> Update
 		},
 		Placement: gwaa.Output{
 			Assignment: map[int32][]string{
@@ -133,8 +133,8 @@ func TestPlacementActionsUnknownGenerationForcesUpdate(t *testing.T) {
 	in.Placement.Assignment = map[int32][]string{0: {"n0"}}
 	in.Previous = map[PreheatPair]ExistingPreheat{
 		{PodIndex: 0, Node: "n0"}: {
-			Generation:  0,
-			BitmapBytes: bitmapBytes(len(in.Windows[0])),
+			Generation:   0,
+			WindowBlocks: uint32(len(in.Windows[0])),
 		},
 	}
 	actions, err := PlacementActions(in)
@@ -175,8 +175,8 @@ func TestApplyPlacementOnlyDiffRPC(t *testing.T) {
 	for index, nodes := range in.Placement.Assignment {
 		for _, node := range nodes {
 			previous[PreheatPair{PodIndex: index, Node: node}] = ExistingPreheat{
-				Generation:  uint64(in.Task.Generation),
-				BitmapBytes: bitmapBytes(len(in.Windows[index])),
+				Generation:   uint64(in.Task.Generation),
+				WindowBlocks: uint32(len(in.Windows[index])),
 			}
 		}
 	}
@@ -319,16 +319,23 @@ func TestPlacementActionsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestBitmapBytes(t *testing.T) {
-	if got := bitmapBytes(0); got != 0 {
-		t.Fatalf("bitmapBytes(0) = %d, want 0", got)
+// A window that grows from 7 to 8 chunks keeps the same ready_bitmap length
+// (1 byte), so only the reported window block count can detect it (D47).
+func TestPlacementActionsDetectsWindowChangeWithinSameBitmapByte(t *testing.T) {
+	in := testPlacementInput()
+	in.Windows = [][]*agentpb.ChunkRef{
+		testChunks("c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"),
 	}
-	for n := 1; n <= 8; n++ {
-		if got := bitmapBytes(n); got != 1 {
-			t.Fatalf("bitmapBytes(%d) = %d, want 1", n, got)
-		}
+	in.Previous = map[PreheatPair]ExistingPreheat{
+		{PodIndex: 0, Node: "n0"}: {Generation: uint64(in.Task.Generation), WindowBlocks: 7},
 	}
-	if got := bitmapBytes(9); got != 2 {
-		t.Fatalf("bitmapBytes(9) = %d, want 2", got)
+	in.Placement = gwaa.Output{Assignment: map[int32][]string{0: {"n0"}}}
+
+	actions, err := PlacementActions(in)
+	if err != nil {
+		t.Fatalf("PlacementActions: %v", err)
+	}
+	if len(actions) != 1 || actions[0].Kind != ActionUpdate || len(actions[0].Chunks) != 8 {
+		t.Fatalf("actions = %+v, want one Update carrying the 8-chunk window", actions)
 	}
 }

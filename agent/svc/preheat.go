@@ -600,6 +600,7 @@ func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.Preh
 		Generation:      tk.generation.Load(),
 		Seq:             tk.seq.Load(),
 		ReadyBitmap:     readyBitmap,
+		WindowBlocks:    uint32(chunkCount),
 	}, nil
 }
 

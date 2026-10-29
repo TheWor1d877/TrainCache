@@ -185,7 +185,7 @@ func TestM12ProgressPollLogFields(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 2, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 2, 2, []byte{0xFF})})
 	buf, log := m12JSONLog(t)
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	r := &Reconciler{Client: c, Agents: pool, Log: log}
@@ -237,7 +237,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 				in := testPlacementInput()
 				in.Previous = map[PreheatPair]ExistingPreheat{
 					// Agent holds a stale (larger) window bitmap -> Update.
-					{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 2},
+					{PodIndex: 0, Node: "n0"}: {Generation: 7, WindowBlocks: 2},
 				}
 				in.Placement = gwaa.Output{Assignment: map[int32][]string{0: {"n0"}}}
 				return in
@@ -249,7 +249,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 			in: func() PlacementApplyInput {
 				in := testPlacementInput()
 				in.Previous = map[PreheatPair]ExistingPreheat{
-					{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 1},
+					{PodIndex: 0, Node: "n0"}: {Generation: 7, WindowBlocks: 1},
 				}
 				in.Placement = gwaa.Output{}
 				return in
