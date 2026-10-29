@@ -75,10 +75,13 @@ jobs:
             digest="$(jq -r --arg c "$comp" '.images[$c]' .candidate/candidate.json)"
             [[ "$digest" == sha256:* ]] || { echo "$comp 的候选 digest 非法: $digest" >&2; exit 1; }
             docker buildx imagetools create -t "$REG/$comp:$TAG" "$REG/$comp@$digest"
-            got="$(docker buildx imagetools inspect "$REG/$comp:$TAG" \
-              --format '{{json .Manifest.Digest}}' | tr -d '"')"
-            [[ "$got" == "$digest" ]] || {
-              echo "$comp:$TAG 的 digest 是 $got，与候选 $digest 不一致" >&2
+            # 晋升后 tag 可能指向候选清单本身，也可能指向包住它的 manifest list，
+            # 两种形态都算同一个镜像内容，所以要求候选 digest 出现在其中。
+            refs="$(docker buildx imagetools inspect "$REG/$comp:$TAG" \
+              --format '{{json .Manifest}}' \
+              | jq -r '[.digest] + [.manifests[]?.digest] | join(" ")')"
+            [[ " $refs " == *" $digest "* ]] || {
+              echo "$comp:$TAG 指向 $refs，不含候选 $digest" >&2
               exit 1
             }
             echo "$REG/$comp:$TAG -> $digest"
