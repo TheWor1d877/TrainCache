@@ -754,13 +754,23 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	return nil
 }
 
+// PreheatScope 结一个显式预热的下载作用域(D62):派生自预取管理器自身的 ctx,所以 Agent
+// 关停连带取消,而任务自己能在 CancelPreheat 时提前把尚未完成的块从 core fetch 的准入
+// 排队里叫醒。调用方须在任务出表时调用返回的 cancel,否则 ctx 泄漏。
+func (m *PrefetchManager) PreheatScope() (context.Context, context.CancelFunc) {
+	return context.WithCancel(m.baseCtx)
+}
+
 // ForPreheat 是预热入队入口(SubmitPreheat 的 P0 入队):取/建 bundle → 未绑定 dataset 时
 // 以最小订单(dataset-only)播种——P0 抓取键(D25)的 dataset 取最近一次 ConsumeOrder 的
 // 绑定,预热先于订单到达时由播种补齐(真实首个订单随后覆盖;播种订单无 chunks,不影响
 // 阶段语义;副作用:产生一次 0 值字段的 stage_switch_eta 样本)→ 按需启动调度(生命周期 =
 // 管理器 ctx,先于订单到达也能推进)→ EnqueueP0(先于 Start 入队的块在 Start 后出队)。
 // refs 为空时无操作。
-func (m *PrefetchManager) ForPreheat(ctx context.Context, dataset string, refs []prefetch.ChunkRef) error {
+//
+// ctx 是本次请求的生存期(取消则拒绝入队);work 是这批块的下载作用域,取消 work 即撤回
+// 尚未完成的块(D62),须来自 PreheatScope。阶段绑定与在途保护按 work 走。
+func (m *PrefetchManager) ForPreheat(ctx, work context.Context, dataset string, refs []prefetch.ChunkRef) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -768,7 +778,7 @@ func (m *PrefetchManager) ForPreheat(ctx context.Context, dataset string, refs [
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.stageSeen {
-		if _, err := b.prefetcher.OnStageSwitch(ctx, ordersource.ConsumeOrder{Dataset: dataset}); err != nil {
+		if _, err := b.prefetcher.OnStageSwitch(work, ordersource.ConsumeOrder{Dataset: dataset}); err != nil {
 			return err
 		}
 		b.stageSeen = true
@@ -777,7 +787,7 @@ func (m *PrefetchManager) ForPreheat(ctx context.Context, dataset string, refs [
 		b.started = true
 		b.prefetcher.Start(m.baseCtx)
 	}
-	if err := b.prefetcher.EnqueueP0(ctx, refs); err != nil {
+	if err := b.prefetcher.EnqueueP0Scoped(ctx, work, refs); err != nil {
 		return err
 	}
 	// 入队成功即登记 P0 在途硬保护(§7.6;完成回调移出)。

@@ -78,7 +78,7 @@ type preheatTask struct {
 
 	generation atomic.Uint64 // 已接受的任务代际(单调不减)
 	seq        atomic.Uint64 // 位图变更序号(置位/重置时递增)
-	canceled   atomic.Bool   // Cancel 标记(不取消在途 P0)
+	canceled   atomic.Bool   // Cancel 标记(受理校验与 Status 回报;下载撤回见 dlCancel)
 
 	total     atomic.Int64 // 块总数(登记时定盘;Status 读取无锁)
 	completed atomic.Int64
@@ -86,7 +86,28 @@ type preheatTask struct {
 	state     atomic.Int32 // agentpb.PreheatStatus_State
 	updatedAt atomic.Int64 // UnixNano(每次计数/状态变更刷新)
 
+	// dlCtx/dlCancel 是本任务下载的生存期作用域(D62,Submit 受理时结,任务出表或
+	// CancelPreheat 时取消;pm 为 nil 的单测装配里保持零值)。
+	dlCtx    context.Context
+	dlCancel context.CancelFunc
+
 	startedAt time.Time // 任务创建时刻(只读)
+}
+
+// attachScope 结本任务的下载作用域(D62);无预取管理器(仅测试装配)时不结。
+func (t *preheatTask) attachScope(pm *PrefetchManager) {
+	if pm == nil {
+		return
+	}
+	t.dlCtx, t.dlCancel = pm.PreheatScope()
+}
+
+// cancelDownloads 撤回本任务尚未完成的下载(D62):取消作用域后,卡在 core fetch
+// 准入排队里的块在各自的 ctx 边界退出。未结作用域时是空操作。
+func (t *preheatTask) cancelDownloads() {
+	if t.dlCancel != nil {
+		t.dlCancel()
+	}
 }
 
 // newPreheatTask 构造 QUEUED 任务(clone 摘要切片防调用方别名)。
@@ -143,6 +164,26 @@ func (t *preheatTask) claim(ref prefetch.ChunkRef, err error) bool {
 		t.finish()
 	}
 	return true
+}
+
+// unfinishedRefs 返回窗口里尚未收到完成回调的唯一块(D62 撤回入参;保持窗口顺序,
+// 重复 ref 只出一份)。取消作用域后这些块在各自的 ctx 边界退出;已完成的块不在其中。
+func (t *preheatTask) unfinishedRefs() []prefetch.ChunkRef {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	refs := make([]prefetch.ChunkRef, 0, len(t.chunks))
+	seen := make(map[prefetch.ChunkRef]struct{}, len(t.chunks))
+	for _, ref := range t.chunks {
+		if t.pending[ref] <= 0 {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 // bitmapLen 返回 chunks 数 n 对应的位图字节数(ceil(n/8);D56)。
@@ -339,6 +380,10 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 		}, nil
 	}
 
+	// 3.5) 结本任务的下载作用域(D62):此后入队的块都挂在它下面,CancelPreheat 或
+	//      任务出表都能把它们从 core fetch 的准入排队里叫醒。
+	tk.attachScope(t.pm)
+
 	// 4) 解析块列表(只读查询,不切换 catalog 内存映射;ErrNoCurrent 视作空列表)。
 	//    ordered 保留请求 chunks 顺序(含重复项,定义位序);enq 去重保序(下载侧)。
 	ordered, enq, err := t.resolveRefs(ctx, dataset, prefixes, chunks)
@@ -362,7 +407,7 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}
 
 	// 6) P0 入队;失败置 ERROR(任务不撤销:状态查询可见失败原因)。
-	if err := t.pm.ForPreheat(ctx, dataset, enq); err != nil {
+	if err := t.pm.ForPreheat(ctx, tk.dlCtx, dataset, enq); err != nil {
 		tk.markError(fmt.Sprintf("P0 入队失败: %v", err))
 	} else {
 		tk.markRunning()
@@ -428,7 +473,7 @@ func (t *PreheatTasks) Update(ctx context.Context, req *agentpb.UpdatePreheatReq
 	}
 	if t.pm == nil {
 		tk.markError("预取管理器未装配")
-	} else if err := t.pm.ForPreheat(ctx, tk.req.dataset, enq); err != nil {
+	} else if err := t.pm.ForPreheat(ctx, tk.dlCtx, tk.req.dataset, enq); err != nil {
 		tk.markError(fmt.Sprintf("P0 入队失败: %v", err))
 	} else {
 		tk.markRunning()
@@ -439,7 +484,8 @@ func (t *PreheatTasks) Update(ctx context.Context, req *agentpb.UpdatePreheatReq
 	}, nil
 }
 
-// Cancel 处理 CancelPreheat(8.x D55):仅标记取消并停止调度新块,不取消在途 P0;
+// Cancel 处理 CancelPreheat(8.x D55 + D62):标记取消并撤回本任务尚未完成的下载
+// (取消任务级作用域 ctx,准入排队与在途块一并退出);已完成的块数保留。
 // 幂等(重复 Cancel/任务不存在均 accepted=true)。低 generation → FailedPrecondition。
 func (t *PreheatTasks) Cancel(ctx context.Context, req *agentpb.CancelPreheatRequest) (*agentpb.CancelPreheatResponse, error) {
 	t.expireTasks()
@@ -469,8 +515,13 @@ func (t *PreheatTasks) Cancel(ctx context.Context, req *agentpb.CancelPreheatReq
 	}
 	tk.advanceGeneration(req.GetGeneration())
 	tk.canceled.Store(true)
-	slog.Info("preheat: 任务取消(在途 P0 不取消)",
-		"task_id", taskID, "generation", tk.generation.Load(), "state", tk.stateNow().String())
+	// 「停止调度新块」(6.1 §CancelPreheat,D62):撤回=取消本任务的下载生存期 ctx,
+	// 卡在 core fetch 准入门口的块立刻退出;已在途的块不保证跑完。
+	pending := len(tk.unfinishedRefs())
+	tk.cancelDownloads()
+	slog.Info("preheat: 任务取消(撤回未完成的下载,D62)",
+		"task_id", taskID, "generation", tk.generation.Load(), "state", tk.stateNow().String(),
+		"withdrawn_blocks", pending)
 	return &agentpb.CancelPreheatResponse{Accepted: true}, nil
 }
 
@@ -590,6 +641,7 @@ func (t *PreheatTasks) expireLocked(now time.Time) {
 			}
 			expired[tk] = struct{}{}
 			delete(t.tasks, id)
+			tk.cancelDownloads() // 出表连带撤回残留下载、释放作用域(D62)
 			slog.Info("preheat: 任务记录过 TTL 清理", "task_id", id, "dataset", tk.req.dataset,
 				"state", tk.stateNow().String(), "ttl", taskTTL)
 		}
@@ -701,6 +753,7 @@ func (t *PreheatTasks) removeDatasetLocked(tk *preheatTask) {
 
 // drop 撤销登记(块列表解析失败:不留半成品任务,客户端可原样重试同一 task_id)。
 func (t *PreheatTasks) drop(taskID string, tk *preheatTask) {
+	tk.cancelDownloads() // 出表即撤回残留下载,同时释放作用域(D62)
 	t.mu.Lock()
 	if cur, ok := t.tasks[taskID]; ok && cur == tk {
 		delete(t.tasks, taskID)
