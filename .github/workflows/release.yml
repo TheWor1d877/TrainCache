@@ -37,7 +37,7 @@ jobs:
       - name: locate candidate
         run: |
           set -euo pipefail
-          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >>"$GITHUB_ENV"
+          short="${GITHUB_SHA:0:7}"
           run_id="$(gh run list --workflow release-candidate.yml \
             --commit "$GITHUB_SHA" --status success --limit 1 \
             --json databaseId --jq '.[0].databaseId')"
@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
           echo "候选 run $run_id"
-          gh run download "$run_id" -n "release-candidate-$SHORT_SHA" -D .candidate
+          gh run download "$run_id" -n "release-candidate-$short" -D .candidate
 
       - name: check candidate
         run: |
