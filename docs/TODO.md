@@ -7,7 +7,7 @@
 | 出处 | 事项 | 不做的后果 |
 |------|------|------------|
 | 8.1 §4.3；8.2 P2 | 训练侧钩子（DataLoader 适配器）生产实现与日志契约落地：包 Dataset/IterableDataset，发 advance/stage_switch/open_report/read_miss/read_stall，并按 8.1 §4.3 字段打日志；v0.1.0 至少交付参考适配器 | 真实训练没有客户端接 `agent.sock`；bench 用自己的 PyTorch loader，不影响 9.x 实验 |
-| 6.1 §5.9；6.3 D50 | 快照发布方落地：由产生新 entries 的组件调用 `index.Writer.Commit` 并推进 CURRENT；Controller 现有职责不产生索引，Agent 不发布 | 新索引无法发布，只能读既有 CURRENT；发布链路的自开观测防护也无从验证 |
+| 6.1 §5.9；6.3 D50 | 快照自动发布方落地：`index.Writer.Commit` 与 CURRENT 推进目前只有 `trainpublish` CLI 在调（e2e 与 bench 用它手动发布），生产链路上还没有组件在产生新 entries 后提交；Controller 现有职责不产生索引，Agent 不发布 | 索引不会随上传自动前进，只能读既有 CURRENT 或人工跑 CLI；发布链路的自开观测防护也无从验证 |
 | 5.1 §11.1；`core/cmd/traincacheds/main.go` | 交付 `rm`/`gc` 子命令 | 数据集不能删、不能手动回收；CLI 明确报 `not implemented`，不会静默错删 |
 | 5.1 §10.7；5.3 D31 ⑤ | 远端孤儿块清理策略 | 发布/Commit 失败后远端块只增不减；不影响读正确性，但存储持续涨 |
 | 6.1 §8；`agent/deploy/agentd.yaml`、`controller/deploy/agent/daemonset.yaml` | 统一两份 Agent DaemonSet 清单 | 同名 `traincache-agentd` 两套 request/limit，部署结果取决于用哪份 |
@@ -20,7 +20,7 @@
 |------|------|------------|
 | 6.2 §13 登记（M7）；6.3 D43；`agent/e2e/run-local.sh` | 4.2/4.3 带 MinIO 跑并转硬断言（MinIO 由 e2e 自带还是外部提供待定） | 没起 MinIO 时记 GAP 且最终 PASS，对象存储回归会被记成已知缺口 |
 | 5.4 test.md；`core/objectstore/s3_integration_test.go` | S3 集成测试进 CI：起 MinIO、注入 `TC_S3_*` | 只有 mock 测试，真实 S3 分页与条件写回归发现不了 |
-| 6.3 Q15 | `read_stall` 阈值（默认 100ms）、关联窗口（ts±5s）与上报频率标定；按 `(path,chunk)` 去重与全局令牌桶 | 默认值未验证，stall 归因可能偏 |
+| 6.3 Q15 | `read_stall` 的关联窗口与上报频率标定：阈值已可配（`TRAINCACHE_READ_STALL_MIN_WAIT_MS`，默认 100ms），关联窗口还是 `agent/svc/stallattr.go:25` 的固定 ±5s 常量；按 `(path,chunk)` 去重与全局令牌桶都没有 | 窗口与频率仍是未验证值，stall 归因可能偏；高并发读下同一块的 stall 重复上报 |
 | 6.1 §8 | Agent 资源数值按 bench 校准 | 示例值可能过紧或过松，影响 OOM、成本与调度 |
 | 8.1 §5 | gRPC metadata 三键 `x-traincache-request-id`/`x-traincache-task`/`x-traincache-generation`：Controller 客户端注入，Agent 拦截器写 context logger | controller 与 Agent 日志串不起来，排障靠 `task_id` 手工对 |
 | 8.1 §5；6.1 §5.4；8.2 P2 | 钩子帧携带任务身份（`task_id`/`pod`/`dataset`/`generation`），与 gRPC metadata 三键一起把 controller → Agent → 训练侧三段日志串起来 | 同一次任务在训练侧日志里没有归属，只能按时间猜；三段日志对不上号 |
@@ -28,8 +28,8 @@
 | 8.1 §4.2 | Agent 逐块下载/校验的 60s 汇总日志 | 逐块明细只有指标与 Debug 日志，排障要自己聚合 |
 | 8.1 §4.2；`agent/svc/hooksock.go`、`backfill.go` | 缓存命中/未命中/`read_miss` 的汇总日志（Debug 明细采样可后置） | 命中率只有指标，单任务归因要手工对照 |
 | 8.1 §3.1；8.5 §三 | 契约字段接线：`err_class` 与 `sampled`/`sample_rate` 由生产代码发射，`err` 与 `err_class` 成对 | 告警与聚合只能靠 `err` 原文匹配，采样比例无法核对 |
-| 8.2 P3；8.1 §6/附录 A | 告警规则 + Grafana 三层看板 + runbook 链接：门控 Hold 超时、Agent 不可达、read stall 超阈值、磁盘危险线、日志采集断流 | 出问题只能人肉查，没有阈值与处置入口 |
-| 7.0 inotify「辅助预热」 | 冷启动按 `heatmap.json` 预热历史热块；手动入口为 `traincache prefetch`，排期待裁决 | 冷启动命中率低、首 epoch 慢；功能不坏 |
+| 8.2 P3；8.1 §6/附录 A | 告警规则 + Grafana 三层看板 + runbook 链接：门控 Hold 超时、Agent 不可达、read stall 超阈值、磁盘危险线、日志采集断流。`controller/deploy/observability/` 已起 Prometheus/Loki/Grafana/fluent-bit 与 scrape，但 Prometheus 配置没有 `rule_files`，Grafana 只配了数据源 | 出问题只能人肉查，没有阈值与处置入口 |
+| 7.0 inotify「辅助预热」 | 冷启动按 `heatmap.json` 预热历史热块：`traincache prefetch` 手动入口已交付，heatmap 的 Dump/Load 与启动恢复已就绪，缺的是冷启动读 heatmap 决定预热哪些块的那条路径（inotify 只推进消费位点与统计，D49），排期待裁决 | 冷启动命中率低、首 epoch 慢；功能不坏 |
 全局e2e的位置问题
 
 # 附加
