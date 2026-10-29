@@ -1,6 +1,6 @@
 # Changelog说明
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。版本号与 git tag 逐字一致，带 `v`；最新版本在最上面。
-只在发版时更新：`dev` 的日常提交不改本文件；`dev` 合并到 `main`、打 `vX.Y.Z` 之前，补该版本条目并填发布日期。
+每完成一项用户可见的改动就补一条，写在 `## [Unreleased]` 下，先不写版本号；发版时把该节标题改成 `[vX.Y.Z] - 日期`。
 ## 写法示例
 下面的代码块只演示格式，不是发布记录。分组按改动性质从 Added / Changed / Deprecated / Removed / Fixed / Security 中选，没有就不写该组。
 ```markdown
@@ -17,6 +17,21 @@
 ```
 
 # Changelog正文
+
+## [Unreleased]
+
+### Added
+
+- Agent 新增订单通道观测指标：`traincache_agent_ordersources{node,state}` 给出每路订单源处于 discovered / healthy / stalled，`traincache_agent_ordersource_ended_total{node,reason}` 记录订单源被收回（`missing_ttl` / `stale_file`），`traincache_orders_dropped_total{reason}` 记录跳读、损坏槽与空订单（`resync` / `corrupt` / `invalid`）。契约见 `docs/6.3 decisions.md` D63。
+
+### Changed
+
+- 订单通道降级改为观测语义：`traincache_agent_degraded{node}` 只在全部订单源都 stalled 时为 1，不再表示「停止推送订单」，降级期间订单照常下发；sidecar 退出或 ring 停止推进 30 秒后该路标 stalled，任一路恢复推进自动解除。inotify 只做统计，不计入恢复。
+
+### Fixed
+
+- 宽预热在训练 Pod 尚未创建时把 `PodSetMismatch` 置为 True，日志与告警被刷屏；现在 Pod 集为空只记 Debug 并清除该条件，只有部分不匹配才 Warn。
+- 窗口是否变化改按 `window_blocks` 判定，不再比较 bitmap 字节数，字节数相同的不同窗口不再被当成同一窗口。
 
 ## [v0.2.0] - 2026-10-29
 
