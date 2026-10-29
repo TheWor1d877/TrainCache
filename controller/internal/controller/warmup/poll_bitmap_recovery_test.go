@@ -16,8 +16,8 @@ func TestPollBitmapMismatchKeepsPollingAndRecovers(t *testing.T) {
 	ds := fixtureDataSet(9, singleShardLayout(9), []string{"n1"})
 	pool := newFakeProgressPool()
 	pool.set("train/t1/p0", "n1",
-		progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})},
-		progressResponse{status: bitmapResponse(3, 2, []byte{0xFF, 0x01})},
+		progressResponse{status: bitmapResponse(3, 1, 9, []byte{0xFF})},
+		progressResponse{status: bitmapResponse(3, 2, 9, []byte{0xFF, 0x01})},
 	)
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	buf, log := m12JSONLog(t)

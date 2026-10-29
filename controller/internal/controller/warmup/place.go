@@ -24,13 +24,13 @@ type PreheatPair struct {
 }
 
 // ExistingPreheat is one task an Agent confirmed it holds, the generation it
-// accepted and the ready_bitmap length that bounds its window. It is built
-// from the Agent's own GetPreheatStatus reply, never from what this Controller
-// meant to send: an unconfirmed pair is absent, so the diff cannot cancel or
-// re-submit a task it has not seen.
+// accepted and the window block count it is running. It is built from the
+// Agent's own GetPreheatStatus reply, never from what this Controller meant to
+// send: an unconfirmed pair is absent, so the diff cannot cancel or re-submit
+// a task it has not seen.
 type ExistingPreheat struct {
-	Generation  uint64
-	BitmapBytes int32
+	Generation   uint64
+	WindowBlocks uint32
 }
 
 // PlacementApplyInput feeds one GWAA result into the diff/RPC orchestration.
@@ -125,7 +125,7 @@ func PlacementActions(in PlacementApplyInput) ([]PlacementAction, error) {
 			desired[pair] = struct{}{}
 			if previous, ok := in.Previous[pair]; ok {
 				if previous.Generation == uint64(in.Task.Generation) &&
-					previous.BitmapBytes == bitmapBytes(len(chunks)) {
+					previous.WindowBlocks == uint32(len(chunks)) {
 					continue
 				}
 				actions = append(actions, PlacementAction{
@@ -331,12 +331,6 @@ func placementWindow(windows [][]*agentpb.ChunkRef, index int32) ([]*agentpb.Chu
 		return nil, fmt.Errorf("warmup: no window for pod index %d", index)
 	}
 	return windows[index], nil
-}
-
-// bitmapBytes is the ready_bitmap length an Agent reports for an n-chunk
-// window: ceil(n/8), with bit i bound to chunks[i] (docs/6.3 D56).
-func bitmapBytes(n int) int32 {
-	return int32((n + 7) / 8)
 }
 
 // logPlacementChange records the M6/M13/M14 log points: top-K assignment

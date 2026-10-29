@@ -299,7 +299,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if int32(matchedPods) != task.Spec.PodCount {
+	// M4 wide preheat runs before the training Pods exist, so an empty match is
+	// the expected pre-creation state (D48). PodSetMismatch describes a partial
+	// set only; keeping it true through preheat floods logs and alerts.
+	if matchedPods == 0 {
+		log.Debug("target Pod set empty", "pods", matchedPods)
+		meta.RemoveStatusCondition(&task.Status.Conditions, ConditionPodSetMismatch)
+	} else if int32(matchedPods) != task.Spec.PodCount {
 		message := fmt.Sprintf("target Pod set has %d Pods, spec.podCount is %d", matchedPods, task.Spec.PodCount)
 		log.Warn("target Pod set mismatch", "reason", reasonPodSetMismatch, "pods", matchedPods)
 		if r.setCondition(task, ConditionPodSetMismatch, metav1.ConditionFalse, reasonPodSetMismatch, message) {

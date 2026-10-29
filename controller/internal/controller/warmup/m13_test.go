@@ -67,7 +67,7 @@ func statusPairsForSeed(t *testing.T, seed int64) {
 	pool := newFakeProgressPool()
 	for _, node := range []string{"n1", "n2", "n3", "n4"} {
 		for _, pod := range []string{"train/t1/p0", "train/t1/p1"} {
-			pool.set(pod, node, progressResponse{status: bitmapResponse(3, 1, []byte{0b00000001})})
+			pool.set(pod, node, progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000001})})
 		}
 	}
 	c := fixtureClient(t, task, ds,
@@ -212,9 +212,9 @@ func TestM13PairDiffSubmitsUpdatesCancels(t *testing.T) {
 		},
 		Previous: map[PreheatPair]ExistingPreheat{
 			// same pair, window shrank past the reported bitmap -> Update
-			{PodIndex: 0, Node: "n0"}: {Generation: 7, BitmapBytes: 2},
-			{PodIndex: 0, Node: "n1"}: {Generation: 7, BitmapBytes: 1}, // removed -> Cancel
-			{PodIndex: 2, Node: "n0"}: {Generation: 7, BitmapBytes: 1}, // removed -> Cancel
+			{PodIndex: 0, Node: "n0"}: {Generation: 7, WindowBlocks: 2},
+			{PodIndex: 0, Node: "n1"}: {Generation: 7, WindowBlocks: 1}, // removed -> Cancel
+			{PodIndex: 2, Node: "n0"}: {Generation: 7, WindowBlocks: 1}, // removed -> Cancel
 		},
 		Placement: gwaa.Output{
 			Assignment: map[int32][]string{

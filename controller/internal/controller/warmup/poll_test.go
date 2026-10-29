@@ -72,11 +72,12 @@ func (p *fakeProgressPool) Progress(_ context.Context, node, taskID string, gene
 	return response.status, response.err
 }
 
-func bitmapResponse(generation, seq uint64, bitmap []byte) *agentpb.PreheatStatus {
+func bitmapResponse(generation, seq uint64, blocks int, bitmap []byte) *agentpb.PreheatStatus {
 	return &agentpb.PreheatStatus{
 		Generation:      generation,
 		Seq:             seq,
 		ReadyBitmap:     bitmap,
+		WindowBlocks:    uint32(blocks),
 		State:           agentpb.PreheatStatus_RUNNING,
 		CompletedBlocks: 0,
 	}
@@ -109,7 +110,7 @@ func TestPollUpdatesReadinessAndRequeues(t *testing.T) {
 	task.Spec.Gate.Threshold = 0.8
 	ds := fixtureDataSet(10, singleShardLayout(10), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000111})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 8, []byte{0b00000111})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	r := &Reconciler{Client: c, Agents: pool, PollInterval: 3 * time.Second}
 
@@ -156,7 +157,7 @@ func TestPollDropsOldGeneration(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1, 2, 3}})
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(2, 9, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(2, 9, 2, []byte{0xFF})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -183,8 +184,8 @@ func TestPollDropsStaleSeq(t *testing.T) {
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1"})
 	pool := newFakeProgressPool()
 	pool.set("train/t1/p0", "n1",
-		progressResponse{status: bitmapResponse(3, 5, []byte{0b00000011})},
-		progressResponse{status: bitmapResponse(3, 4, []byte{0xFF})},
+		progressResponse{status: bitmapResponse(3, 5, 4, []byte{0b00000011})},
+		progressResponse{status: bitmapResponse(3, 4, 4, []byte{0xFF})},
 	)
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	var buf bytes.Buffer
@@ -232,7 +233,7 @@ func TestPollDuplicateSeqIsIdempotent(t *testing.T) {
 	task := fixtureTask(1, 4, [][]int32{{0, 1, 2, 3}})
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 7, []byte{0b00001111})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 7, 4, []byte{0b00001111})})
 	base := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	counting := &patchCountingClient{Client: base}
 	r := &Reconciler{Client: counting, Agents: pool}
@@ -261,7 +262,7 @@ func TestPollBitmapLengthMismatchDoesNotUpdate(t *testing.T) {
 	task := fixtureTask(1, 9, [][]int32{{0, 1, 2, 3, 4, 5, 6, 7, 8}})
 	ds := fixtureDataSet(9, singleShardLayout(9), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 9, []byte{0xFF})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -355,7 +356,7 @@ func TestPollCompletionStopsRequeue(t *testing.T) {
 	task := fixtureTask(1, 4, [][]int32{{0, 1, 2, 3}})
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1"})
 	pool := newFakeProgressPool()
-	done := bitmapResponse(3, 1, []byte{0xFF})
+	done := bitmapResponse(3, 1, 4, []byte{0xFF})
 	done.State = agentpb.PreheatStatus_DONE
 	pool.set("train/t1/p0", "n1", progressResponse{status: done})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
@@ -382,10 +383,10 @@ func TestPollReadinessTableShape(t *testing.T) {
 	task.Spec.Gate.Threshold = 0.5
 	ds := fixtureDataSet(6, singleShardLayout(6), []string{"n2", "n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000001})})
-	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000011})})
-	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000011})})
-	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000000})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000001})})
+	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000011})})
+	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000011})})
+	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000000})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureNode("n2"),
 		fixtureAgentPod("n1"), fixtureAgentPod("n2"), fixtureTargetPod(0), fixtureTargetPod(1))
 	r := &Reconciler{Client: c, Agents: pool}
@@ -483,8 +484,8 @@ func TestPollRateHistoryUsesBestCandidate(t *testing.T) {
 	task.Spec.Gate.MinInterval.Duration = time.Minute
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1", "n2"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000001})})
-	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0b00000011})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000001})})
+	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, 2, []byte{0b00000011})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureNode("n2"),
 		fixtureAgentPod("n1"), fixtureAgentPod("n2"), fixtureTargetPod(0))
 	r := &Reconciler{Client: c, Agents: pool}
@@ -521,7 +522,7 @@ func TestPollLogsRequiredFields(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 2, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 2, 2, []byte{0xFF})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})).
@@ -588,12 +589,12 @@ func TestPollMinUnmetFromGWAA(t *testing.T) {
 	ds := fixtureDataSet(32, singleShardLayout(32), []string{"n0", "n1", "n2"})
 	pool := newFakeProgressPool()
 	// 两个 Pod 在三个节点上都有进度，让 GWAA 看到 conflict 分布。
-	pool.set("train/t1/p0", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p1", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n0", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p1", "n0", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
 	c := fixtureClient(t, task, ds,
 		fixtureNode("n0"), fixtureNode("n1"), fixtureNode("n2"),
 		fixtureAgentPod("n0"), fixtureAgentPod("n1"), fixtureAgentPod("n2"),
@@ -764,7 +765,7 @@ func TestPollMinUnmetFalseHappyPath(t *testing.T) {
 	ds := fixtureDataSet(8, singleShardLayout(8), []string{"n0", "n1", "n2", "n3"})
 	pool := newFakeProgressPool()
 	for _, node := range []string{"n0", "n1", "n2", "n3"} {
-		pool.set("train/t1/p0", node, progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+		pool.set("train/t1/p0", node, progressResponse{status: bitmapResponse(3, 1, 8, []byte{0xFF})})
 	}
 	c := fixtureClient(t, task, ds,
 		fixtureNode("n0"), fixtureNode("n1"), fixtureNode("n2"), fixtureNode("n3"),
@@ -887,12 +888,12 @@ func TestMinUnmetInCRDStatusPatch(t *testing.T) {
 	task.Spec.PreheatFanoutMin = 2
 	ds := fixtureDataSet(32, singleShardLayout(32), []string{"n0", "n1", "n2"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p1", "n0", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
-	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, []byte{0xFF})})
+	pool.set("train/t1/p0", "n0", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p0", "n2", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p1", "n0", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p1", "n1", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
+	pool.set("train/t1/p1", "n2", progressResponse{status: bitmapResponse(3, 1, 16, []byte{0xFF})})
 	c := fixtureClient(t, task, ds,
 		fixtureNode("n0"), fixtureNode("n1"), fixtureNode("n2"),
 		fixtureAgentPod("n0"), fixtureAgentPod("n1"), fixtureAgentPod("n2"),
