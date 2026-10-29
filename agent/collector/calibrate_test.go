@@ -4,10 +4,11 @@ import (
 	"testing"
 
 	"traincache/agent/ordersource"
+	"traincache/core/cas"
 )
 
-// calibrate_test.go:交叉校准(§5.5/D15)——滑动窗口内实际打开顺序与 ring 期望顺序的
-// 匹配率 < 阈值 → 触发 cursor 重对齐(回调收到实际位点)。
+// calibrate_test.go:交叉校准(§5.5/D15)——滑动窗口内实际打开顺序与订单期望顺序的
+// 匹配率 < 阈值 → 触发 cursor 重对齐(回调收到 dataset 与实际 ref)。
 
 // refChunk 构造与 testOrder 同 Path 的块引用(ChunkRef 可比较,Path+Chunk 全等才算命中)。
 func refChunk(c int64) ordersource.ChunkRef {
@@ -100,26 +101,28 @@ func TestCalibrateStageChangeRealigns(t *testing.T) {
 	}
 }
 
-// TestCollectorCalibrationTriggersAdvanceCallback:接线验证——Collector.Open 携带订单引用,
-// 匹配率跌破阈值时经 SetAdvanceCallback 分发实际位点(§5.5;与 advance 事件共用回调)。
+// TestCollectorCalibrationTriggersAdvanceCallback:接线验证——Collector.Open 经 provider
+// 取订单期望顺序,匹配率跌破阈值时以已解析的 dataset 与本次 ref 调重对齐回调。
 func TestCollectorCalibrationTriggersAdvanceCallback(t *testing.T) {
-	w := newTestRing(t, t.TempDir(), 1)
-	w.writeOrder(testOrder("b-track", "epoch-1", 0, 1, 2, 3))
-	ring := newTestReader(t, w.path)
-
-	env := newTestEnv(t, ring, CollectorConfig{CalibrateWindow: 4, CalibrateThreshold: 0.8})
-	mustEventually(t, "ring 订单可见", func() bool {
-		_, ok := ring.CurrentOrder()
-		return ok
+	env := newTestEnv(t, CollectorConfig{CalibrateWindow: 4, CalibrateThreshold: 0.8})
+	order := testOrder("b-track", "epoch-1", 0, 1, 2, 3)
+	env.c.SetOrderContextProvider(func(ref ordersource.ChunkRef, fp cas.Fingerprint) (string, string, ordersource.ConsumeOrder, bool) {
+		return order.Dataset, order.StageID, order, true
 	})
 
-	var got []int64
-	env.c.SetAdvanceCallback(func(chunk int64) { got = append(got, chunk) })
+	type advance struct {
+		dataset string
+		ref     ordersource.ChunkRef
+	}
+	var got []advance
+	env.c.SetAdvanceCallback(func(dataset string, ref ordersource.ChunkRef) {
+		got = append(got, advance{dataset: dataset, ref: ref})
+	})
 	for i := 0; i < 4; i++ { // 期望 0..3,实际全开 chunk 2:全不匹配
 		env.c.Open(testFP(byte(0xe0+i)), refChunk(2))
 	}
-	if len(got) != 1 || got[0] != 2 {
-		t.Errorf("advance 回调收到 %v, want [2](校准重对齐到实际位点)", got)
+	if len(got) != 1 || got[0].dataset != "b-track" || got[0].ref != refChunk(2) {
+		t.Errorf("重对齐回调收到 %+v, want [{b-track %v}](校准重对齐到实际位点)", got, refChunk(2))
 	}
 	if n := env.c.cal.count(); n != 1 {
 		t.Errorf("校准触发次数 = %d, want 1", n)

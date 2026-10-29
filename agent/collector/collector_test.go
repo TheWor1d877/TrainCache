@@ -2,8 +2,6 @@ package collector
 
 import (
 	"context"
-	"encoding/binary"
-	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -72,9 +70,9 @@ type testEnv struct {
 }
 
 // newTestEnv 构造测试环境:blockDir = 临时目录(建 blocks/ 子目录)、白名单 b-track、
-// 注入假时钟并提速各周期。包内周期变量在构造前改小、构造后立即恢复(Collector 构造时
-// 已固化),避免与后台 goroutine 并发读写。
-func newTestEnv(t *testing.T, ring *ordersource.Reader, cfg CollectorConfig) *testEnv {
+// 注入假时钟并提速 inotify 轮询。包内周期变量在构造前改小、构造后立即恢复(Collector
+// 构造时已固化),避免与后台 goroutine 并发读写。
+func newTestEnv(t *testing.T, cfg CollectorConfig) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, blocksDirName), 0o755); err != nil {
@@ -83,10 +81,10 @@ func newTestEnv(t *testing.T, ring *ordersource.Reader, cfg CollectorConfig) *te
 	m := metrics.New(metrics.Config{DatasetWhitelist: []string{"b-track"}, Node: "worker-01"})
 	clk := &fakeClock{now: baseTime}
 
-	oldWatch, oldDegrade := inotifyPollInterval, degradeCheckInterval
-	inotifyPollInterval, degradeCheckInterval = 5*time.Millisecond, 10*time.Millisecond
-	c := NewCollector(dir, ring, m, cfg)
-	inotifyPollInterval, degradeCheckInterval = oldWatch, oldDegrade
+	oldWatch := inotifyPollInterval
+	inotifyPollInterval = 5 * time.Millisecond
+	c := NewCollector(dir, m, cfg)
+	inotifyPollInterval = oldWatch
 
 	c.clock = clk.Now
 	return &testEnv{t: t, c: c, m: m, clock: clk, dir: dir}
@@ -175,7 +173,7 @@ func mustEventually(t *testing.T, what string, cond func() bool) {
 
 // TestOpenHeatBetaIncrement:OPEN 合并 h ← h + (1−h)·β(β 默认 0.15),t_touch 与访问计数同步。
 func TestOpenHeatBetaIncrement(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fp := testFP(0x11)
 
 	for i := 0; i < 3; i++ {
@@ -196,9 +194,9 @@ func TestOpenHeatBetaIncrement(t *testing.T) {
 	}
 }
 
-// TestOpenNoRingNoPanic:nil ring(无 OrderSource)时打开事件仍计入热度与命中率。
-func TestOpenNoRingNoPanic(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+// TestOpenNoProviderNoPanic:未注入订单 provider 时打开事件仍计入热度与命中率。
+func TestOpenNoProviderNoPanic(t *testing.T) {
+	env := newTestEnv(t, CollectorConfig{})
 	fp := testFP(0x12)
 	env.c.Open(fp, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 1})
 	if got := env.c.HitRate(); got != 0 {
@@ -213,7 +211,7 @@ func TestOpenNoRingNoPanic(t *testing.T) {
 
 // TestOpenHitMissCounts:本地块存在 → 命中;不存在 → 未命中;窗口命中率 = 命中占比。
 func TestOpenHitMissCounts(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	present, absent := testFP(0x21), testFP(0x22)
 	writeLocalBlock(t, env.dir, present)
 
@@ -232,17 +230,17 @@ func TestOpenHitMissCounts(t *testing.T) {
 	}
 }
 
-// TestOpenUsesRingDatasetAndStage:有订单时 dataset 走白名单标签,命中率按 StageID 聚合。
-func TestOpenUsesRingDatasetAndStage(t *testing.T) {
-	ring := newTestRingWithOrder(t, testOrder("b-track", "epoch-2", 0))
-	env := newTestEnv(t, ring, CollectorConfig{})
+// TestOpenUsesProviderDatasetAndStage:provider 注入订单时 dataset 走白名单标签,
+// 命中率按 StageID 聚合。
+func TestOpenUsesProviderDatasetAndStage(t *testing.T) {
+	env := newTestEnv(t, CollectorConfig{})
+	order := testOrder("b-track", "epoch-2", 0, 1)
+	env.c.SetOrderContextProvider(func(ref ordersource.ChunkRef, fp cas.Fingerprint) (string, string, ordersource.ConsumeOrder, bool) {
+		return order.Dataset, order.StageID, order, true
+	})
 	present, absent := testFP(0x31), testFP(0x32)
 	writeLocalBlock(t, env.dir, present)
 
-	mustEventually(t, "ring 订单可见", func() bool {
-		_, ok := ring.CurrentOrder()
-		return ok
-	})
 	env.c.Open(present, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 0})
 	env.c.Open(absent, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 1})
 
@@ -257,11 +255,36 @@ func TestOpenUsesRingDatasetAndStage(t *testing.T) {
 	}
 }
 
+// TestOrderProviderNotOK:provider 无上下文(空 dataset/stage、!ok)时:
+// 标签归 other、阶段不聚合、交叉校准不参与。
+func TestOrderProviderNotOK(t *testing.T) {
+	env := newTestEnv(t, CollectorConfig{CalibrateWindow: 2, CalibrateThreshold: 0.8})
+	env.c.SetOrderContextProvider(func(ref ordersource.ChunkRef, fp cas.Fingerprint) (string, string, ordersource.ConsumeOrder, bool) {
+		return "", "", ordersource.ConsumeOrder{}, false
+	})
+	var got []ordersource.ChunkRef
+	env.c.SetAdvanceCallback(func(dataset string, ref ordersource.ChunkRef) { got = append(got, ref) })
+
+	fp := testFP(0x33)
+	env.c.Open(fp, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 0})
+	env.c.Open(fp, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: 0})
+
+	if got := testutil.ToFloat64(env.m.CacheMisses().WithLabelValues("other", "success", metrics.PhaseUnknown)); got != 2 {
+		t.Errorf("cache_misses{other} = %v, want 2(!ok 时标签归 other)", got)
+	}
+	if got := env.c.HitRateForStage("epoch-1"); got != 0 {
+		t.Errorf("!ok 时阶段命中率 = %v, want 0(不聚合)", got)
+	}
+	if len(got) != 0 {
+		t.Errorf("!ok 时校准回调收到 %v, want 空(无期望顺序)", got)
+	}
+}
+
 // ---------------- 声明式接口:Touch / ListForEviction / Score ----------------
 
 // TestTouchIdempotentAndCreates:Touch 幂等(不回退 t_touch);不存在则建 h=0 条目。
 func TestTouchIdempotentAndCreates(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fp := testFP(0x41)
 
 	env.c.Touch(fp, baseTime)
@@ -295,7 +318,7 @@ func TestTouchIdempotentAndCreates(t *testing.T) {
 
 // TestListForEvictionSnapshot:全量快照含 Touch 建的 h=0 条目;调用方排序。
 func TestListForEvictionSnapshot(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	hot, cold := testFP(0x51), testFP(0x52)
 	env.c.Open(hot, ordersource.ChunkRef{})
 	env.c.Touch(cold, baseTime.Add(time.Minute))
@@ -321,7 +344,7 @@ func TestListForEvictionSnapshot(t *testing.T) {
 
 // TestScoreIsMaxOfHeatAndFreshness:S = max(h, R),R = 0.5^(Δt/T_R)(T_R 默认 6h)。
 func TestScoreIsMaxOfHeatAndFreshness(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	hotFP, freshFP, staleFP := testFP(0x61), testFP(0x62), testFP(0x63)
 
 	env.clock.Set(baseTime)
@@ -367,27 +390,25 @@ func TestScoreAtPureFunction(t *testing.T) {
 
 // ---------------- advance 事件:计数 + 回调共用 ----------------
 
-// TestAdvanceDispatchesCallback:advance 事件与校准重对齐共用回调;nil 回调仅统计。
-func TestAdvanceDispatchesCallback(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+// TestAdvanceCountsOnly:Advance 只做推进计数,不分发回调(回调只由交叉校准触发)。
+func TestAdvanceCountsOnly(t *testing.T) {
+	env := newTestEnv(t, CollectorConfig{})
 
-	env.c.Advance(3) // nil 回调:仅统计,不 panic
+	var got []ordersource.ChunkRef
+	env.c.SetAdvanceCallback(func(dataset string, ref ordersource.ChunkRef) { got = append(got, ref) })
+	env.c.Advance(3)
 	env.c.Advance(4)
-
-	var got []int64
-	env.c.SetAdvanceCallback(func(chunk int64) { got = append(got, chunk) })
-	env.c.Advance(5)
 	env.c.SetAdvanceCallback(nil)
-	env.c.Advance(6)
+	env.c.Advance(5)
 
-	if len(got) != 1 || got[0] != 5 {
-		t.Errorf("回调收到 %v, want [5](nil 回调不调用)", got)
+	if len(got) != 0 {
+		t.Errorf("Advance 触发回调 %v, want 空(advance 只计数)", got)
 	}
 	env.c.advMu.Lock()
 	n := env.c.advances
 	env.c.advMu.Unlock()
-	if n != 4 {
-		t.Errorf("advance 计数 = %d, want 4(nil 回调时仍统计)", n)
+	if n != 3 {
+		t.Errorf("advance 计数 = %d, want 3", n)
 	}
 }
 
@@ -396,7 +417,7 @@ func TestAdvanceDispatchesCallback(t *testing.T) {
 // TestInotifyFallbackGatedByHookSilence:钩子窗口内报告过打开事件时,inotify 打开事件不计入;
 // 钩子沉默超过窗口后兜底生效(§5.4"钩子为主,inotify 兜底")。
 func TestInotifyFallbackGatedByHookSilence(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	hookFP, watchFP := testFP(0x71), testFP(0x72)
 
 	env.c.Open(hookFP, ordersource.ChunkRef{}) // 钩子主源活跃
@@ -424,7 +445,7 @@ func TestInotifyFallbackGatedByHookSilence(t *testing.T) {
 // TestOpenCallbackNoDedup:兜底门控通过时每个 OPEN 事件回调一次;同一指纹调用两次
 // 即回调两次(去重不在采集层,由上层消费位点的单调性负责)。
 func TestOpenCallbackNoDedup(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fp := testFP(0x73)
 
 	var got []cas.Fingerprint
@@ -441,7 +462,7 @@ func TestOpenCallbackNoDedup(t *testing.T) {
 // TestOpenCallbackGatedByHookSilence:钩子活跃(沉默窗内)时兜底被抑制,回调不触发;
 // 沉默窗过后兜底生效,回调收到指纹。
 func TestOpenCallbackGatedByHookSilence(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	hookFP, watchFP := testFP(0x74), testFP(0x75)
 
 	var got []cas.Fingerprint
@@ -462,7 +483,7 @@ func TestOpenCallbackGatedByHookSilence(t *testing.T) {
 
 // TestOpenCallbackNilSafe:未注册回调(或显式 nil)时兜底打开事件不 panic。
 func TestOpenCallbackNilSafe(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fp := testFP(0x76)
 
 	env.c.openFromWatch(fp, env.clock.Now()) // 从未注册
@@ -496,84 +517,7 @@ func TestParseBlockName(t *testing.T) {
 	}
 }
 
-// ---------------- ring 测试写端(design §6.2;仅测试用) ----------------
-
-const (
-	testSlotSize  = 4096
-	testSlotCount = 4
-)
-
-// testRing 是模拟 sidecar 的最小 ring 写端:先整槽后推头(write_seq 最后写)。
-type testRing struct {
-	t    *testing.T
-	f    *os.File
-	path string
-	gen  int64
-	seq  int64
-}
-
-// newTestRing 创建 ring 文件并写入初始头(write_seq=0)。
-func newTestRing(t *testing.T, dir string, gen int64) *testRing {
-	t.Helper()
-	path := filepath.Join(dir, "pod-uid.ring")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
-	if err != nil {
-		t.Fatalf("创建测试 ring: %v", err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-	w := &testRing{t: t, f: f, path: path, gen: gen}
-	w.writeHeader()
-	return w
-}
-
-// writeHeader 按当前 gen/seq 重写 64B 头(commit = write_seq 最后写)。
-func (w *testRing) writeHeader() {
-	w.t.Helper()
-	h := make([]byte, 64)
-	copy(h[0:4], "TCO1")
-	binary.LittleEndian.PutUint16(h[4:6], 1)
-	binary.LittleEndian.PutUint64(h[8:16], uint64(w.gen))
-	binary.LittleEndian.PutUint64(h[16:24], uint64(w.seq))
-	binary.LittleEndian.PutUint32(h[24:28], testSlotSize)
-	binary.LittleEndian.PutUint32(h[28:32], testSlotCount)
-	if _, err := w.f.WriteAt(h, 0); err != nil {
-		w.t.Fatalf("写 ring 头: %v", err)
-	}
-}
-
-// writeOrder 追加一份订单(seq+1;先槽后头)并返回 seq。
-func (w *testRing) writeOrder(o ordersource.ConsumeOrder) int64 {
-	w.t.Helper()
-	payload, err := json.Marshal(o)
-	if err != nil {
-		w.t.Fatalf("序列化订单: %v", err)
-	}
-	w.seq++
-	off := int64(64) + ((w.seq-1)%testSlotCount)*testSlotSize
-	if st, err := w.f.Stat(); err != nil {
-		w.t.Fatalf("fstat ring: %v", err)
-	} else if st.Size() < off+testSlotSize {
-		if err := w.f.Truncate(off + testSlotSize); err != nil {
-			w.t.Fatalf("扩展 ring: %v", err)
-		}
-	}
-	buf := make([]byte, 12+len(payload))
-	binary.LittleEndian.PutUint64(buf[0:8], uint64(w.seq))
-	binary.LittleEndian.PutUint32(buf[8:12], uint32(len(payload)))
-	copy(buf[12:], payload)
-	if _, err := w.f.WriteAt(buf, off); err != nil {
-		w.t.Fatalf("写 ring 槽: %v", err)
-	}
-	w.writeHeader()
-	return w.seq
-}
-
-// setGeneration 改代际并立即重写头(模拟 sidecar 重启;write_seq 续增)。
-func (w *testRing) setGeneration(gen int64) {
-	w.t.Helper()
-	w.gen = gen
-	w.writeHeader()
-}
+// ---------------- 订单与 provider 测试辅助 ----------------
 
 // testOrder 构造带 chunks 的订单。
 func testOrder(dataset, stage string, chunks ...int64) ordersource.ConsumeOrder {
@@ -587,20 +531,4 @@ func testOrder(dataset, stage string, chunks ...int64) ordersource.ConsumeOrder 
 		o.Chunks = append(o.Chunks, ordersource.ChunkRef{Path: "shard-000.tar", Chunk: c})
 	}
 	return o
-}
-
-// newTestRingWithOrder 建 ring 并写入首份订单,返回其 Reader(构造时已见订单)。
-func newTestRingWithOrder(t *testing.T, o ordersource.ConsumeOrder) *ordersource.Reader {
-	t.Helper()
-	w := newTestRing(t, t.TempDir(), 1)
-	w.writeOrder(o)
-	return newTestReader(t, w.path)
-}
-
-// newTestReader 构造 Reader 并注册清理(与 ring 同目录作为 watchDir)。
-func newTestReader(t *testing.T, path string) *ordersource.Reader {
-	t.Helper()
-	r := ordersource.NewReader(path, filepath.Dir(path))
-	t.Cleanup(r.Close)
-	return r
 }

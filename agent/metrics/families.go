@@ -64,6 +64,30 @@ const (
 	// R3/R4(6.1 §5.11/§5.12)。
 	indexSweepSkippedName                    = "traincache_index_sweep_skipped_total"
 	objectstoreConditionalWriteSupportedName = "traincache_objectstore_conditional_write_supported"
+	// D63 订单通道(6.1 §7.4)。
+	ordersourceStatesName = "traincache_agent_ordersources"
+	ordersourceEndedName  = "traincache_agent_ordersource_ended_total"
+	ordersDroppedName     = "traincache_orders_dropped_total"
+)
+
+// 订单通道标签词汇表(D63/§7.4;编译期固定,集合外忽略)。
+const (
+	OrderSourceDiscovered = "discovered"
+	OrderSourceHealthy    = "healthy"
+	OrderSourceStalled    = "stalled"
+
+	OrderEndedMissingTTL = "missing_ttl"
+	OrderEndedStaleFile  = "stale_file"
+
+	OrderDroppedResync  = "resync"
+	OrderDroppedCorrupt = "corrupt"
+	OrderDroppedInvalid = "invalid"
+)
+
+var (
+	orderSourceLabels = [...]string{OrderSourceDiscovered, OrderSourceHealthy, OrderSourceStalled}
+	orderEndedLabels  = [...]string{OrderEndedMissingTTL, OrderEndedStaleFile}
+	orderDroppedLabel = [...]string{OrderDroppedResync, OrderDroppedCorrupt, OrderDroppedInvalid}
 )
 
 // GC 跳过原因词汇表(6.1 §5.11:protected 快照 manifest 缺失/损坏;集合外归一 other)。
@@ -538,6 +562,55 @@ func (r *Registry) SetAgentUp(v float64) {
 func (r *Registry) SetAgentDegraded(v float64) {
 	r.agentDegraded.WithLabelValues(r.node).Set(v)
 }
+
+// SetOrdersourceStates 设置订单通道各状态的路数(D63/§7.4;负数按 0 处理)。
+func (r *Registry) SetOrdersourceStates(discovered, healthy, stalled int) {
+	if discovered < 0 {
+		discovered = 0
+	}
+	if healthy < 0 {
+		healthy = 0
+	}
+	if stalled < 0 {
+		stalled = 0
+	}
+	r.ordersourceStates.WithLabelValues(r.node, OrderSourceDiscovered).Set(float64(discovered))
+	r.ordersourceStates.WithLabelValues(r.node, OrderSourceHealthy).Set(float64(healthy))
+	r.ordersourceStates.WithLabelValues(r.node, OrderSourceStalled).Set(float64(stalled))
+}
+
+// IncOrdersourceEnded 记一次订单源回收(D63;reason∈{missing_ttl,stale_file},集合外忽略)。
+func (r *Registry) IncOrdersourceEnded(reason string) {
+	for _, v := range orderEndedLabels {
+		if v == reason {
+			r.ordersourceEnded.WithLabelValues(r.node, reason).Inc()
+			return
+		}
+	}
+}
+
+// SyncOrdersDropped 把 ordersource 包级累计丢单数以绝对值同步到 counter(D63;svc 每 tick
+// 调用):内部记录上次同步值,按正增量 Add,重复同步同一值幂等。
+func (r *Registry) SyncOrdersDropped(resync, corrupt, invalid int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur := [3]int64{resync, corrupt, invalid}
+	for i, reason := range orderDroppedLabel {
+		if d := cur[i] - r.droppedSynced[i]; d > 0 {
+			r.ordersDropped.WithLabelValues(reason).Add(float64(d))
+		}
+		r.droppedSynced[i] = cur[i]
+	}
+}
+
+// AgentOrdersources 返回订单通道路数 gauge(测试访问器)。
+func (r *Registry) AgentOrdersources() *prometheus.GaugeVec { return r.ordersourceStates }
+
+// AgentOrdersourceEnded 返回订单源回收 counter(测试访问器)。
+func (r *Registry) AgentOrdersourceEnded() *prometheus.CounterVec { return r.ordersourceEnded }
+
+// OrdersDropped 返回订单丢单 counter(测试访问器)。
+func (r *Registry) OrdersDropped() *prometheus.CounterVec { return r.ordersDropped }
 
 // SetRescanProgress 设置重扫描进度 0..1(traincache_rescan_progress,无标签)。
 func (r *Registry) SetRescanProgress(v float64) {

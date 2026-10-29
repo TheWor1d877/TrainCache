@@ -118,7 +118,7 @@ func TestInotifySelfOpenFilteredEndToEnd(t *testing.T) {
 	selfPath := writeWatchBlock(t, blockDir, fps[chunks[0]])
 	trainPath := writeWatchBlock(t, blockDir, fps[chunks[1]])
 
-	c := collector.NewCollector(blockDir, nil, fx.reg, collector.CollectorConfig{})
+	c := collector.NewCollector(blockDir, fx.reg, collector.CollectorConfig{})
 	c.SetOpenCallback(ag.onInotifyOpen)
 	c.SetOpenFilter(guard.SelfOpened)
 	watchCtx, cancel := context.WithCancel(ctx)

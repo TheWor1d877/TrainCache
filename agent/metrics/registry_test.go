@@ -80,8 +80,8 @@ func TestPrometheusRegistry(t *testing.T) {
 		indexSweepSkippedName:                    "COUNTER",
 		objectstoreConditionalWriteSupportedName: "GAUGE",
 	}
-	if len(families) != 37 {
-		t.Fatalf("注册表应恰有 37 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个),实际 %d 个", len(families))
+	if len(families) != 40 {
+		t.Fatalf("注册表应恰有 40 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个 + D63 订单通道 3 个),实际 %d 个", len(families))
 	}
 	byName := make(map[string]int, len(families))
 	for i, mf := range families {

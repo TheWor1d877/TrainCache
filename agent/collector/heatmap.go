@@ -168,7 +168,7 @@ func (c *Collector) replaceEntries(m map[cas.Fingerprint]*heatEntry) {
 
 // hookSilenceWindow 是"钩子为主,inotify 兜底"的判定窗(§5.4/D15):钩子在该窗内报告过
 // 打开事件时,inotify 打开事件不计入统计(同一打开事件双源只算一次,主源优先);
-// 钩子沉默超过该窗(或从未报告)→ inotify 兜底生效(降级场景)。包内变量,NewCollector
+// 钩子沉默超过该窗(或从未报告)→ inotify 兜底生效。包内变量,NewCollector
 // 构造时固化为 Collector.hookSilence,测试改包变量后构造即可覆盖。
 var hookSilenceWindow = 30 * time.Second
 

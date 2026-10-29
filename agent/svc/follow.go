@@ -152,9 +152,13 @@ func (a *Agent) snapshotSources() []datasetSnapshot {
 	return out
 }
 
-// StartBackground 启动 Agent 的后台跟随循环(R1)与读者心跳(R2);必须在 agentd 的
-// signal ctx 下调用。ctx 取消时停止 Follow,并对已知 dataset best-effort Withdraw。
+// StartBackground 启动 Agent 的后台循环:采集层(inotify/热度,D63 起无 ring 也启动)、
+// 快照跟随(R1)与读者心跳(R2);必须在 agentd 的 signal ctx 下调用。ctx 取消时停止
+// 后台循环,并对已知 dataset best-effort Withdraw。
 func (a *Agent) StartBackground(ctx context.Context) {
+	if a.Collector != nil {
+		a.Collector.Start(ctx)
+	}
 	if a.Prefetch != nil {
 		a.Prefetch.startFollows(ctx)
 	}
