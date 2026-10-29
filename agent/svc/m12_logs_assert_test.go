@@ -316,9 +316,9 @@ func TestM12PreheatCancelLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cancel 存在: %v", err)
 	}
-	recCancel := m12FindLog(t, buf, "preheat: 任务取消(在途 P0 不取消)")
+	recCancel := m12FindLog(t, buf, "preheat: 任务取消(撤回未完成的下载,D62)")
 	m12RequireLevel(t, recCancel, "INFO")
-	m12RequireFields(t, recCancel, "task_id", "generation", "state")
+	m12RequireFields(t, recCancel, "task_id", "generation", "state", "withdrawn_blocks")
 	if recCancel["task_id"] != "task-cancel-exist" {
 		t.Errorf("task_id = %v, want task-cancel-exist", recCancel["task_id"])
 	}

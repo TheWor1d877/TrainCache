@@ -205,6 +205,11 @@ type task struct {
 	// start;骨架阶段由 enqueueLocked 记录)。
 	pri   int
 	start time.Time
+
+	// ctx 是本块的下载生存期上下文(D62 显式预热撤回):nil = 跟随调度协程 ctx。
+	// 预热任务结自己的作用域,CancelPreheat 取消它就把尚未完成的块从 core fetch 的
+	// 准入排队里叫醒;作用域一律由预取器 baseCtx 派生,故 Agent 关停仍然生效。
+	ctx context.Context
 }
 
 // taskResult 是一次抓取结果,回投调度协程:簿记(finishTask)与 P0 完成回调统一在调度
@@ -409,17 +414,25 @@ func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOr
 // 尚无订单则为空——此时未本地命中的块无法构造下载键,以错误回调)。
 // Start 前入队的块在 Start 后出队处理(与 OnStageSwitch 同口径)。
 func (p *PersistentPrefetcher) EnqueueP0(ctx context.Context, refs []ChunkRef) error {
-	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch)
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, nil)
+}
+
+// EnqueueP0Scoped 与 EnqueueP0 完全同语义,区别是每块额外结上调用方的下载作用域 work
+// (D62 显式预热撤回):work 取消后,该块在下一个 ctx 边界(准入门、源站读、写盘)
+// 退出并按失败回调。ctx 仍是本次请求的生存期(取消则拒绝入队,与 EnqueueP0 一致)。
+// work 必须由预取器自身的 ctx 派生,否则 Agent 关停叫不醒它。
+func (p *PersistentPrefetcher) EnqueueP0Scoped(ctx, work context.Context, refs []ChunkRef) error {
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, work)
 }
 
 // EnqueueP0Demand 是 demand(按需补块)的 P0 入队入口:语义与 EnqueueP0 完全一致
 // (严格最高优先级、在途不取消、完成仍经 OnP0Done),仅把回源 reason 标为 demand。
 // 复用同一队列与 pending 去重表,不改变冻结的 pending 语义。
 func (p *PersistentPrefetcher) EnqueueP0Demand(ctx context.Context, refs []ChunkRef) error {
-	return p.enqueueP0(ctx, refs, metrics.FetchReasonDemand)
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonDemand, nil)
 }
 
-func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, reason string) error {
+func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, reason string, work context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -429,7 +442,7 @@ func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, r
 	p.mu.Lock()
 	dataset := p.dataset
 	for _, r := range refs {
-		p.enqueueLocked(&task{idx: -1, ref: r, dataset: dataset, p0: true, reason: reason}, priP0)
+		p.enqueueLocked(&task{idx: -1, ref: r, dataset: dataset, p0: true, reason: reason, ctx: work}, priP0)
 	}
 	p.mu.Unlock()
 	return nil
@@ -680,13 +693,21 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 		ready bool
 		err   error
 	)
+	// grabCtx 是本块的抓取生存期;回投结果的 select 仍用调度协程 ctx(否则被撤回的块
+	// 结果会被丢弃,任务无法收敛到终态)。
+	grabCtx := ctx
+	if t.ctx != nil {
+		// D62:该块结着调用方的下载作用域(显式预热用 CancelPreheat 撤回未完成的块)。
+		// 作用域派生自 Start 传入的 ctx,所以 Agent 关停仍然连带取消。
+		grabCtx = t.ctx
+	}
 	if grab != nil {
-		size, ready = grab(ctx, t.dataset, t.ref)
+		size, ready = grab(grabCtx, t.dataset, t.ref)
 		if !ready {
 			err = errors.New("prefetch: 块未就绪(白盒抓取钩子)")
 		}
 	} else {
-		size, ready, err = p.grabBlock(ctx, t)
+		size, ready, err = p.grabBlock(grabCtx, t)
 	}
 	// D45:task 进入终态(成功或失败终止)后移除去重表(失败重试由 core fetch 在任务内部
 	// 保留;身份安全清理,不误删跨阶段替换后的新 task 键)。
