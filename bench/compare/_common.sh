@@ -19,8 +19,29 @@ BENCH_ROOT="$(cd "$COMPARE_ROOT/.." && pwd)"
 REPO="$(cd "$BENCH_ROOT/.." && pwd)"
 PY="${PY:-$REPO/.venv/bin/python}"
 
+# 解释器不可用是装置坏了,立刻说清楚。`.venv` 在 .gitignore 里,每个 worktree 得自建;
+# 缺它时旧写法会让下面每个 cfg 静默返回空,全部退化到调用点的 fallback 路径,报错落在
+# 离根因最远的那一句上(issue #11)。
+if [ ! -x "$PY" ] && ! command -v "$PY" >/dev/null 2>&1; then
+  {
+    echo "错误: 取配置的 Python 解释器不可用: $PY"
+    echo "      本 worktree 没有 .venv。建一个: python3 -m venv $REPO/.venv"
+    echo "      或临时指定: PY=/usr/bin/python3 <命令>"
+  } >&2
+  exit 1
+fi
+
 # ---- config.py 取值(与 bench/scripts 同口径)----
-cfg() { "$PY" "$BENCH_ROOT/config.py" --sh "$1" 2>/dev/null || true; }
+# cfg <KEY>: 只接受成功取值。config.py 里不存在的键(KeyError)与脚本级失败同样立刻停,
+# 不再吞 stderr —— 静默空串会让调用点的 fallback 顶掉真实配置。
+cfg() {
+  local out
+  if ! out="$("$PY" "$BENCH_ROOT/config.py" --sh "$1")"; then
+    echo "错误: $BENCH_ROOT/config.py 取 $1 失败(退出码非 0,原始报错见上)" >&2
+    exit 1
+  fi
+  printf '%s' "$out"
+}
 
 # 日志落运行时数据层(路径口径由 bench/config.py 定义,repo 内不建日志目录)
 LOG_DIR="$(cfg COMPARE_LOGS_DIR)"

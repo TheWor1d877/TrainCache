@@ -78,6 +78,7 @@ make bench COND=<cond-name>          # 跑一个实验点
 ```bash
 make verify        # build + vet + go test -race + gofmt，三个模块
 make verify-metadata   # 版本口径、镜像名、文档相对链接
+hack/build-images.sh   # 四个开发镜像（:dev），构建前先补基础镜像官方短名
 make e2e           # kind 里的端到端
 ```
 

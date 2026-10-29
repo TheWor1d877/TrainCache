@@ -6,6 +6,8 @@
 #
 #   docker build -f controller/deploy/scheduler/Dockerfile \
 #     -t ghcr.io/thewor1d877/traincache/kube-scheduler:dev .
+# hack/build-images.sh runs this build and first retags locally present base
+# images to their official short names.
 FROM golang:1.26-bookworm AS build
 
 ARG GOPROXY=https://goproxy.cn,direct

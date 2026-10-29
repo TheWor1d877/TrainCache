@@ -5,6 +5,7 @@
 # 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller,
 # 三个模块目录都需入上下文):
 #   docker build -f agent/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-agentd:dev .
+# 本机构建用 hack/build-images.sh:构建前先把基础镜像补成官方短名。
 #
 # 镜像内容:agentd 服务二进制(ENTRYPOINT)+ traincache CLI(探针与运维共用;本机无 grpcurl,
 # liveness/readiness 走 exec 调 CLI,判据见 agent/deploy/agentd.yaml 注释与 DECISIONS)。

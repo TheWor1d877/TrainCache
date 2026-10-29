@@ -280,7 +280,7 @@ func (s *Server) UpdatePreheat(ctx context.Context, req *agentpb.UpdatePreheatRe
 	return s.ag.Preheat.Update(ctx, req)
 }
 
-// CancelPreheat 取消预热任务(8.x D55;幂等,不取消在途 P0)。
+// CancelPreheat 取消预热任务(8.x D55 + D62;幂等),并撤回本任务尚未完成的下载。
 // 延迟线:入口 defer 打点(observeRequest)。
 func (s *Server) CancelPreheat(ctx context.Context, req *agentpb.CancelPreheatRequest) (resp *agentpb.CancelPreheatResponse, err error) {
 	start := time.Now()

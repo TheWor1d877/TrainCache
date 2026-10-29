@@ -831,7 +831,8 @@ func (x *UpdatePreheatResponse) GetMessage() string {
 	return ""
 }
 
-// 8.x 增量:取消任务(幂等;仅停止调度新块,不取消在途 P0)。
+// 8.x 增量:取消任务(幂等)。取消会撤回本任务尚未完成的下载(D62:
+// 取消任务级下载作用域,准入排队与在途块一并退出),已完成块数保留。
 type CancelPreheatRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
