@@ -1,6 +1,6 @@
 # Changelog说明
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。版本号与 git tag 逐字一致，带 `v`；最新版本在最上面。
-每完成一项用户可见的改动就补一条，写在 `## [Unreleased]` 下，先不写版本号；发版时把该节标题改成 `[vX.Y.Z] - 日期`。
+每完成一项用户可见的改动就补一条，写在 `## 未发布` 下，先不写版本号；发版时把该节标题改成 `## [vX.Y.Z] - 日期`。
 ## 写法示例
 下面的代码块只演示格式，不是发布记录。分组按改动性质从 Added / Changed / Deprecated / Removed / Fixed / Security 中选，没有就不写该组。
 ```markdown
@@ -18,7 +18,7 @@
 
 # Changelog正文
 
-## [Unreleased]
+## 未发布
 
 ### Added
 
