@@ -21,8 +21,9 @@ on:
         type: string
 
 permissions:
-  contents: read
-  actions: read      # 下载候选 artifact
+  contents: write
+  actions: write    # 下载候选 artifact
+
 
 concurrency:
   group: release-smoke-${{ inputs.sha || github.event.workflow_run.head_sha }}
