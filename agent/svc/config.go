@@ -4,6 +4,7 @@ package svc
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -44,6 +45,11 @@ const (
 	envIndexRefreshInterval = "TRAINCACHE_INDEX_REFRESH_INTERVAL"
 	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;6.1 §5.12)。
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
+
+	// envDebugAddr 是 /debug/loglevel 的监听地址(只允许回环;空字符串关闭端点)。
+	envDebugAddr = "TRAINCACHE_DEBUG_ADDR"
+	// defaultDebugAddr 与三个控制平面进程一致,便于同一套 port-forward 操作。
+	defaultDebugAddr = "127.0.0.1:6060"
 
 	// envCacheCapacityBytes 是字节维度缓存上限(M-debug-1/§14;默认 0=关闭字节淘汰,
 	// 只走磁盘水位)。
@@ -106,6 +112,8 @@ type Config struct {
 	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(6.1 §5.12;默认 false,
 	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
 	ObjstoreProbeConditionalWrite bool
+	// DebugAddr 是 /debug/loglevel 的监听地址(默认 127.0.0.1:6060,空字符串关闭)。
+	DebugAddr string
 	// CacheCapacityBytes 是字节维度缓存上限(§14;默认 0=关闭,只走磁盘水位)。
 	// TRAINCACHE_CACHE_CAPACITY_BYTES 覆盖;>0 时 evictor 启用双维度淘汰判定。
 	CacheCapacityBytes int64
@@ -153,6 +161,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	debugAddr, err := loadDebugAddr()
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		NodeName:                      node,
@@ -171,8 +183,33 @@ func Load() (*Config, error) {
 		ReadStallMinWaitMS:            readStallMinWaitMS,
 		IndexRefreshInterval:          indexRefreshInterval,
 		ObjstoreProbeConditionalWrite: envBool(envObjstoreProbeConditionalWrite),
+		DebugAddr:                     debugAddr,
 		CacheCapacityBytes:            cacheCapacityBytes,
 	}, nil
+}
+
+// loadDebugAddr 读取 TRAINCACHE_DEBUG_ADDR:未设置 → 默认回环地址;显式设为空
+// (或全空白)→ 关闭端点;其余取值必须是回环 host:port。
+func loadDebugAddr() (string, error) {
+	v, ok := os.LookupEnv(envDebugAddr)
+	if !ok {
+		return defaultDebugAddr, nil
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	host, port, err := net.SplitHostPort(v)
+	if err != nil {
+		return "", fmt.Errorf("svc: %s=%q 非法(需 host:port): %w", envDebugAddr, v, err)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("svc: %s=%q 非法(端口需 1..65535)", envDebugAddr, v)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("svc: %s=%q 非法(需绑回环地址)", envDebugAddr, v)
+	}
+	return v, nil
 }
 
 // defaultHeatConfig 返回 D14/D30 默认十一值。

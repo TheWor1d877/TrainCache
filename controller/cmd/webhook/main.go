@@ -25,6 +25,7 @@ import (
 	"traincache/controller/internal/config"
 	"traincache/controller/internal/logging"
 	tcwebhook "traincache/controller/internal/webhook"
+	corelog "traincache/core/logging"
 )
 
 const component = "webhook"
@@ -60,6 +61,8 @@ func run(ctx context.Context) error {
 }
 
 func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	startDebugServer(ctx, cfg, log)
+
 	opts, err := managerOptions(cfg, newScheme())
 	if err != nil {
 		return err
@@ -90,6 +93,12 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) erro
 		"gate_name", cfg.GateName,
 	)
 	return mgr.Start(ctx)
+}
+
+// startDebugServer 挂载 /debug/loglevel。DebugAddr 为空时不监听;监听失败只记
+// Error,不影响 webhook(见 docs/8.1 §7)。
+func startDebugServer(ctx context.Context, cfg *config.Config, log *slog.Logger) {
+	go corelog.ServeLevel(ctx, cfg.DebugAddr, component, log)
 }
 
 func newScheme() *runtime.Scheme {

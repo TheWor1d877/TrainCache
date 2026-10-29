@@ -26,6 +26,7 @@ import (
 	"traincache/controller/internal/logging"
 	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/scheduler"
+	corelog "traincache/core/logging"
 )
 
 const (
@@ -58,6 +59,8 @@ func run(ctx context.Context) error {
 	}
 	log := logging.New(component, version, cfg.LogLevel)
 	logStartup(log, cfg)
+
+	startDebugServer(ctx, cfg, log)
 
 	// The scheduler is a separate process: it owns an independent registry and
 	// never touches the controller-manager families (docs/7.1 §9.5).
@@ -111,6 +114,12 @@ func run(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// startDebugServer 挂载 /debug/loglevel。DebugAddr 为空时不监听;监听失败只记
+// Error,不影响调度器本体(见 docs/8.1 §7)。
+func startDebugServer(ctx context.Context, cfg *config.Config, log *slog.Logger) {
+	go corelog.ServeLevel(ctx, cfg.DebugAddr, component, log)
 }
 
 // newSchedulerCommand builds the upstream scheduler command with the

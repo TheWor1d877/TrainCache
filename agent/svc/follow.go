@@ -93,6 +93,9 @@ func (m *PrefetchManager) onSnapshotChange(dataset, snapID string) {
 	if m.m != nil {
 		m.m.IncIndexRefresh(dataset, metrics.ResultSuccess)
 	}
+	// 与 onSnapshotError 的 Warn 成对:同带 dataset 与 result,成功另带切到的快照。
+	slog.Info("catalog: 快照切换成功",
+		"dataset", dataset, "snapshot", snapID, "result", metrics.ResultSuccess)
 	reg := m.registry.Load()
 	if reg == nil {
 		return
@@ -121,7 +124,8 @@ func (m *PrefetchManager) onSnapshotError(dataset string, err error) {
 		m.m.IncIndexRefresh(dataset, metrics.ResultError)
 	}
 	if !errors.Is(err, index.ErrNoCurrent) {
-		slog.Warn("catalog: 快照刷新失败(保持旧映射)", "dataset", dataset, "err", err)
+		slog.Warn("catalog: 快照刷新失败(保持旧映射)",
+			"dataset", dataset, "result", metrics.ResultError, "err", err)
 	}
 }
 

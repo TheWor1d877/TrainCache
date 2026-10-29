@@ -34,7 +34,7 @@ kind-up:
 	else \
 		echo "== 创建 kind 集群 =="; \
 		kind create cluster --config $(ROOT)/k8s/kind-config.yaml; \
-		for img in minio/minio:latest busybox:latest; do \
+		for img in pgsty/minio:RELEASE.2026-08-04T00-00-00Z busybox:latest; do \
 			kind load docker-image $$img --name traincache; \
 		done; \
 	fi

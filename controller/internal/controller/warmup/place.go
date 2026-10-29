@@ -266,7 +266,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 			in.Metrics.ObservePreheatRPC(op, metrics.RPCUnavailable)
 		}
 
-		fields = append(fields, "attempt", 1, "err", callErr)
+		fields = append(fields, "err", callErr)
 		failed[action.Node] = struct{}{}
 		if errors.Is(callErr, agentclient.ErrPermanent) {
 			result.Permanent[action.Node] = callErr
@@ -281,6 +281,26 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 		return result, fmt.Errorf("%w: %d node(s) failed", agentclient.ErrAgentUnavailable, len(result.Unavailable))
 	}
 	return result, nil
+}
+
+// dropResubmittedMarks clears the poll seq high-water mark of every pair this
+// round (re)created or resized a task on, as long as the RPC reached the Agent.
+// A resubmit makes the Agent restart the task with seq 1; without the reset the
+// mark keeps discarding that node's reports as stale and the gate stops seeing
+// progress it is really making (docs/7.1 §7.4, D46).
+func (r *Reconciler) dropResubmittedMarks(task *traincachev1alpha1.WarmupTask, applied PlacementApplyResult) {
+	for _, action := range applied.Actions {
+		if action.Kind != ActionSubmit && action.Kind != ActionUpdate {
+			continue
+		}
+		if _, failed := applied.Unavailable[action.Node]; failed {
+			continue
+		}
+		if _, rejected := applied.Permanent[action.Node]; rejected {
+			continue
+		}
+		r.progress.forget(string(task.UID), action.PodIndex, action.Node)
+	}
 }
 
 func preheatOp(kind PlacementActionKind) (metrics.PreheatOp, bool) {
@@ -323,7 +343,7 @@ func bitmapBytes(n int) int32 {
 // changes, rounds, per-Pod warm-node counts, the adaptive fanout decisions and
 // the non-convergence fallback reason (docs/7.1 §6.5, §9.3, D39).
 func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, fanoutMax, fanoutMin int32, actions []PlacementAction) {
-	assign := formatAssignment(placement.Assignment)
+	assign := assignmentView(placement.Assignment)
 	warmCounts := formatWarmNodeCounts(placement.Assignment)
 	summary := summarizeFanout(placement, actions)
 	base := []any{
@@ -353,20 +373,16 @@ func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output,
 	}
 }
 
-func formatAssignment(assign map[int32][]string) string {
-	if len(assign) == 0 {
-		return "none"
+// assignmentView renders the GWAA assignment as a structured log value:
+// one group per Pod holding its node names, e.g. {"p0":["n0","n1"],"p1":["n2"]}.
+// Pod index and node stay addressable on their own, so a query can read one
+// Pod's nodes or count Pods per node without splitting a formatted string.
+func assignmentView(assign map[int32][]string) map[string][]string {
+	out := make(map[string][]string, len(assign))
+	for index, nodes := range assign {
+		out[fmt.Sprintf("p%d", index)] = nodes
 	}
-	pods := make([]int32, 0, len(assign))
-	for index := range assign {
-		pods = append(pods, index)
-	}
-	sort.Slice(pods, func(i, j int) bool { return pods[i] < pods[j] })
-	parts := make([]string, 0, len(pods))
-	for _, index := range pods {
-		parts = append(parts, fmt.Sprintf("p%d=%s", index, strings.Join(assign[index], "+")))
-	}
-	return strings.Join(parts, ",")
+	return out
 }
 
 // formatWarmNodeCounts renders the per-Pod warm-node count for logs, e.g.

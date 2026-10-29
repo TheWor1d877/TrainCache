@@ -75,7 +75,7 @@ func TestM14AdaptiveTargetFromDistribution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			task := m14PlacementTask(16, []int32{12, 1, 0, 0, 0}, nodes, 3, tc.min)
 			r := &Reconciler{}
-			placement := r.computePlacement(task, nodes, nil)
+			placement := r.computePlacement(task, nodes, nil, nil)
 			if placement.Err != nil {
 				t.Fatalf("computePlacement: %v", placement.Err)
 			}
@@ -152,7 +152,7 @@ func TestM14LowSignalTakesUpperBound(t *testing.T) {
 	nodes := m14Nodes(5)
 	task := m14PlacementTask(16, []int32{1, 1, 0, 0, 0}, nodes, 3, 1)
 	r := &Reconciler{}
-	placement := r.computePlacement(task, nodes, nil)
+	placement := r.computePlacement(task, nodes, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}
@@ -171,7 +171,7 @@ func TestM14RetentionLineKeepsTwo(t *testing.T) {
 	nodes := m14Nodes(5)
 	task := m14PlacementTask(16, []int32{11, 7, 3, 0, 0}, nodes, 3, 1)
 	r := &Reconciler{}
-	placement := r.computePlacement(task, nodes, nil)
+	placement := r.computePlacement(task, nodes, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}
@@ -189,7 +189,7 @@ func TestM14FanoutOneRegression(t *testing.T) {
 	nodes := m14Nodes(4)
 	task := m14PlacementTask(16, []int32{12, 1, 0, 0}, nodes, 1, 1)
 	r := &Reconciler{}
-	placement := r.computePlacement(task, nodes, nil)
+	placement := r.computePlacement(task, nodes, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}
@@ -209,7 +209,7 @@ func TestM14MinAboveFeasibleSetsMinUnmet(t *testing.T) {
 	nodes := m14Nodes(2)
 	task := m14PlacementTask(16, []int32{12, 1}, nodes, 3, 3)
 	r := &Reconciler{}
-	placement := r.computePlacement(task, nodes, nil)
+	placement := r.computePlacement(task, nodes, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}
@@ -262,7 +262,7 @@ func TestM14OutOfTargetFallback(t *testing.T) {
 	task.Status.CandidateNodes = append([]string(nil), nodes...)
 	task.Status.ReadinessTable = [][]int32{{12, 1, 0}, {12, 1, 0}}
 	r := &Reconciler{Rand: rand.New(rand.NewSource(7))}
-	placement := r.computePlacement(task, nodes, nil)
+	placement := r.computePlacement(task, nodes, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}
@@ -340,7 +340,7 @@ func TestM14MinUnmetFollowsActualAssignment(t *testing.T) {
 	var lowPod int32
 	for seed := int64(0); seed < 64 && chosenSeed < 0; seed++ {
 		r := &Reconciler{Rand: rand.New(rand.NewSource(seed))}
-		probe := r.computePlacement(task, nodes, nil)
+		probe := r.computePlacement(task, nodes, nil, nil)
 		if probe.Err != nil {
 			t.Fatalf("computePlacement: %v", probe.Err)
 		}
@@ -355,7 +355,7 @@ func TestM14MinUnmetFollowsActualAssignment(t *testing.T) {
 		t.Fatal("no seed produced a single-node out-of-target fallback")
 	}
 	r := &Reconciler{Rand: rand.New(rand.NewSource(chosenSeed))}
-	placement := r.computePlacement(task, nodes, nil)
+	placement := r.computePlacement(task, nodes, nil, nil)
 	if placement.Err != nil {
 		t.Fatalf("computePlacement: %v", placement.Err)
 	}

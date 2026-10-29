@@ -5,7 +5,9 @@ package svc
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -153,6 +155,92 @@ func TestFollowFailureKeepsOldMappingAndCountsError(t *testing.T) {
 	}
 	if _, ok, err := b.catalog.Lookup(ctx, "a.tar", 0); err != nil || !ok {
 		t.Fatalf("失败后旧映射丢失: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestFollowSnapshotLogsPaired:同一 dataset 上快照切换成功打 Info、加载失败打 Warn,
+// 两条都带 dataset 与 result,成功那条另带切到的快照(8.1 §4.2 策略/快照刷新)。
+func TestFollowSnapshotLogsPaired(t *testing.T) {
+	const interval = 20 * time.Millisecond
+	old := slog.Default()
+	buf := m12CaptureLogsTS(t)
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	ag := newFollowAgent(t, interval, false)
+	const ds = "follow-log"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	commitFollowEntries(t, ag, ds, "a.tar")
+	b := ag.Prefetch.bundleFor(ds, nil)
+	b.mu.Lock()
+	b.lastOrder = ordersource.ConsumeOrder{
+		Dataset: ds, StageID: "s1",
+		Chunks: []ordersource.ChunkRef{{Path: "a.tar", Chunk: 0}},
+	}
+	b.hasOrder = true
+	b.mu.Unlock()
+	ag.StartBackground(ctx)
+	waitFor(t, "初始映射加载", func() bool {
+		_, ok, err := b.catalog.Lookup(ctx, "a.tar", 0)
+		return err == nil && ok
+	})
+
+	snap2 := commitFollowEntries(t, ag, ds, "a.tar", "b.tar")
+	waitFor(t, "切换到新快照", func() bool { return b.catalog.SnapID() == snap2 })
+
+	var switched, failed map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			t.Fatalf("invalid log line %q: %v", raw, err)
+		}
+		switch rec["msg"] {
+		case "catalog: 快照切换成功":
+			if rec["snapshot"] == snap2 {
+				switched = rec
+			}
+		case "catalog: 快照刷新失败(保持旧映射)":
+			failed = rec
+		}
+	}
+	if switched == nil {
+		t.Fatalf("缺少切到 %q 的成功 Info: %s", snap2, buf.String())
+	}
+	m12RequireLevel(t, switched, "INFO")
+	m12RequireFields(t, switched, "dataset", "snapshot", "result")
+	if switched["dataset"] != ds || switched["result"] != metrics.ResultSuccess {
+		t.Fatalf("成功 Info dataset/result = %v/%v, want %q/success",
+			switched["dataset"], switched["result"], ds)
+	}
+
+	// 指向不存在的 manifest,触发同一 dataset 的单轮加载失败。
+	bad := "snap-bad 0000000000000000"
+	if _, err := ag.ObjectStore.Put(ctx, index.CurrentKey(ds), strings.NewReader(bad), int64(len(bad))); err != nil {
+		t.Fatalf("Put CURRENT: %v", err)
+	}
+	label := ag.Metrics.DatasetLabel(ds)
+	waitFor(t, "error 指标递增", func() bool {
+		return testutil.ToFloat64(ag.Metrics.IndexRefresh().WithLabelValues(label, metrics.ResultError)) >= 1
+	})
+
+	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			t.Fatalf("invalid log line %q: %v", raw, err)
+		}
+		if rec["msg"] == "catalog: 快照刷新失败(保持旧映射)" {
+			failed = rec
+		}
+	}
+	if failed == nil {
+		t.Fatalf("缺少失败 Warn: %s", buf.String())
+	}
+	m12RequireLevel(t, failed, "WARN")
+	m12RequireFields(t, failed, "dataset", "result", "err")
+	if failed["dataset"] != ds || failed["result"] != metrics.ResultError {
+		t.Fatalf("失败 Warn dataset/result = %v/%v, want %q/error",
+			failed["dataset"], failed["result"], ds)
 	}
 }
 

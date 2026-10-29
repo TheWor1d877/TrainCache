@@ -34,6 +34,7 @@ func TestLoadDefaults(t *testing.T) {
 		LeaderElection:        false,
 		MaxChunks:             10_000_000,
 		LogLevel:              "info",
+		DebugAddr:             "127.0.0.1:6060",
 		CacheCapacityBytes:    0,
 		StartupWindowBytes:    536870912,
 		MaxFillFraction:       0.125,
@@ -59,6 +60,7 @@ func TestLoadCustomValues(t *testing.T) {
 		EnvLeaderElection:     "true",
 		EnvMaxChunks:          "42",
 		EnvLogLevel:           "DEBUG",
+		EnvDebugAddr:          "127.0.0.1:16060",
 		EnvCacheCapacityBytes: "1073741824",
 		EnvStartupWindowBytes: "268435456",
 		EnvMaxFillFraction:    "0.25",
@@ -77,6 +79,9 @@ func TestLoadCustomValues(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Fatalf("LogLevel = %q, want debug", cfg.LogLevel)
+	}
+	if cfg.DebugAddr != "127.0.0.1:16060" {
+		t.Fatalf("DebugAddr = %q, want 127.0.0.1:16060", cfg.DebugAddr)
 	}
 	if cfg.CacheCapacityBytes != 1073741824 || cfg.StartupWindowBytes != 268435456 || cfg.MaxFillFraction != 0.25 {
 		t.Fatalf("K inputs not parsed: %#v", cfg)
@@ -110,6 +115,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"zero fill fraction", map[string]string{EnvMaxFillFraction: "0"}, EnvMaxFillFraction},
 		{"fill fraction too high", map[string]string{EnvMaxFillFraction: "0.26"}, EnvMaxFillFraction},
 		{"bad fill fraction", map[string]string{EnvMaxFillFraction: "eighth"}, EnvMaxFillFraction},
+		{"debug addr without host", map[string]string{EnvDebugAddr: ":6060"}, EnvDebugAddr},
+		{"debug addr not loopback", map[string]string{EnvDebugAddr: "0.0.0.0:6060"}, EnvDebugAddr},
+		{"debug addr not host port", map[string]string{EnvDebugAddr: "6060"}, EnvDebugAddr},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,5 +129,16 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("error = %q, want it to mention %s", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLoadDebugAddrEmptyDisables 显式设空字符串表示关闭 /debug/loglevel。
+func TestLoadDebugAddrEmptyDisables(t *testing.T) {
+	cfg, err := load(lookupFrom(map[string]string{EnvDebugAddr: ""}))
+	if err != nil {
+		t.Fatalf("load() error = %v", err)
+	}
+	if cfg.DebugAddr != "" {
+		t.Fatalf("DebugAddr = %q, want empty (endpoint disabled)", cfg.DebugAddr)
 	}
 }

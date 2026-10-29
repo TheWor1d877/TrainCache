@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"traincache/controller/internal/config"
 )
@@ -54,5 +56,19 @@ func assertField(t *testing.T, m map[string]any, key, want string) {
 	t.Helper()
 	if got, _ := m[key].(string); got != want {
 		t.Fatalf("%s = %q, want %q (line %#v)", key, got, want, m)
+	}
+}
+
+// TestStartDebugServerDisabled:DebugAddr 为空时端点不启动,调用立刻返回。
+func TestStartDebugServerDisabled(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		startDebugServer(context.Background(), &config.Config{}, slog.Default())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("startDebugServer blocked with empty DebugAddr; the endpoint must stay off")
 	}
 }

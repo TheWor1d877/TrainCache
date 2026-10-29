@@ -281,7 +281,8 @@ func TestApplyPlacementLogsFallback(t *testing.T) {
 				record["rounds"] == float64(4) &&
 				record["warmup_task"] == "train/task"
 		case "gwaa assignment changed":
-			foundChange = record["rounds"] == float64(4) && record["assign"] == "p0=n0"
+			foundChange = record["rounds"] == float64(4) &&
+				reflect.DeepEqual(m12AssignNodes(t, record), map[string][]string{"p0": {"n0"}})
 		}
 	}
 	if !foundWarn {

@@ -94,6 +94,17 @@ func (t *pollTracker) record(key progressKey, generation, seq uint64) {
 	t.marks[key] = progressMark{generation: generation, seq: seq, seen: true}
 }
 
+// forget drops one pair's seq high-water mark so its next reply is accepted
+// whatever its seq. Placement calls it after it (re)created a task on the
+// Agent: the Agent treats a resubmitted cancelled task as a new task and
+// restarts seq at 1, and keeping the old mark would discard every later report
+// as stale (docs/7.1 §7.4, D46).
+func (t *pollTracker) forget(taskUID string, podIndex int32, node string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.marks, progressKey{taskUID: taskUID, podIndex: podIndex, node: node})
+}
+
 func (t *pollTracker) fail(key failureKey) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

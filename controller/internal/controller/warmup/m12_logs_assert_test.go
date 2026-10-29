@@ -68,6 +68,33 @@ func m12RequireFields(t *testing.T, rec map[string]any, fields ...string) {
 	}
 }
 
+// m12AssignNodes decodes the structured assign value: one key per Pod, each
+// holding that Pod's node names.
+func m12AssignNodes(t *testing.T, rec map[string]any) map[string][]string {
+	t.Helper()
+	raw, ok := rec["assign"].(map[string]any)
+	if !ok {
+		t.Fatalf("log %q assign = %#v, want a Pod-keyed object", rec["msg"], rec["assign"])
+	}
+	out := make(map[string][]string, len(raw))
+	for pod, value := range raw {
+		items, ok := value.([]any)
+		if !ok {
+			t.Fatalf("log %q assign[%s] = %#v, want a node array", rec["msg"], pod, value)
+		}
+		nodes := make([]string, 0, len(items))
+		for _, item := range items {
+			node, ok := item.(string)
+			if !ok {
+				t.Fatalf("log %q assign[%s] holds %#v, want a node name", rec["msg"], pod, item)
+			}
+			nodes = append(nodes, node)
+		}
+		out[pod] = nodes
+	}
+	return out
+}
+
 func m12RequireLevel(t *testing.T, rec map[string]any, want string) {
 	t.Helper()
 	if rec["level"] != want {
@@ -239,7 +266,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 			}
 			rec := m12FindLog(t, buf, tc.msg)
 			m12RequireLevel(t, rec, "WARN")
-			m12RequireFields(t, rec, "warmup_task", "task_id", "pod", "node", "generation", "attempt", "err")
+			m12RequireFields(t, rec, "warmup_task", "task_id", "pod", "node", "generation", "err")
 		})
 	}
 }
