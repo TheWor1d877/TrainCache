@@ -46,7 +46,10 @@ ok "集群可达"
 
 # ---- 1. 幂等部署 ----
 say "-- [1/7] 幂等 apply 部署清单"
-kubectl apply -f "$REPO_ROOT/agent/deploy/agentd.yaml"  >>"$RAW_LOG" 2>&1 || fail "apply agentd.yaml 失败"
+kubectl apply -f "$REPO_ROOT/controller/deploy/namespace.yaml" >>"$RAW_LOG" 2>&1 || fail "apply namespace.yaml 失败"
+kubectl apply -f "$REPO_ROOT/controller/deploy/agent/daemonset.yaml" >>"$RAW_LOG" 2>&1 || fail "apply agent daemonset 失败"
+# 演练用本地构建的镜像：清单里写的是推送后的 ghcr 引用，这里替换成 kind load 的名字。
+kubectl -n "$NS" set image ds/"$DS" agentd=traincache-agentd:dev >>"$RAW_LOG" 2>&1 || fail "set image 失败"
 kubectl apply -f "$REPO_ROOT/agent/deploy/train-pod.yaml" >>"$RAW_LOG" 2>&1 || fail "apply train-pod.yaml 失败"
 kubectl -n "$NS" rollout status ds/"$DS" --timeout=120s >>"$RAW_LOG" 2>&1 && ok "DaemonSet $DS ready" || fail "DaemonSet 未在 120s 内 ready"
 kubectl -n "$NS" wait --for=condition=Ready pod/"$TRAIN_POD" --timeout=120s >>"$RAW_LOG" 2>&1 && ok "Pod $TRAIN_POD ready" || fail "train pod 未 ready"

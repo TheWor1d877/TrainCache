@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Mock 是 Store 的内存实现，用于单元测试（decisions.md D12）。
@@ -16,8 +17,9 @@ import (
 // 方法可并发调用；PutIfMatch 的“比较 + 写入”在同一把锁内完成，可模拟真实竞争。
 // 零值 Mock 可直接使用（等价于空存储），也可经 NewMock 构造。
 type Mock struct {
-	mu   sync.RWMutex
-	objs map[string][]byte
+	mu       sync.RWMutex
+	objs     map[string][]byte
+	modTimes map[string]time.Time
 }
 
 var _ Store = (*Mock)(nil)
@@ -63,8 +65,17 @@ func (m *Mock) Put(ctx context.Context, key string, r io.Reader, size int64) (st
 		m.objs = make(map[string][]byte)
 	}
 	m.objs[key] = content
+	m.touch(key)
 	m.mu.Unlock()
 	return etag, nil
+}
+
+// touch 记录对象的写入时间；调用方须持有写锁。
+func (m *Mock) touch(key string) {
+	if m.modTimes == nil {
+		m.modTimes = make(map[string]time.Time)
+	}
+	m.modTimes[key] = time.Now()
 }
 
 // Delete 实现 Store.Delete；对象不存在不算错误。
@@ -74,6 +85,7 @@ func (m *Mock) Delete(ctx context.Context, key string) error {
 	}
 	m.mu.Lock()
 	delete(m.objs, key)
+	delete(m.modTimes, key)
 	m.mu.Unlock()
 	return nil
 }
@@ -119,6 +131,7 @@ func (m *Mock) PutIfMatch(ctx context.Context, key string, r io.Reader, size int
 		return "", ErrConflict
 	}
 	m.objs[key] = content
+	m.touch(key)
 	return md5hex(content), nil
 }
 

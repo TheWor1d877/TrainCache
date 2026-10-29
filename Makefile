@@ -1,10 +1,10 @@
 # TrainCache 验证入口。CI 跑 verify；PR 到 main 另跑 verify-metadata 与 kind e2e；
 # e2e 需要 docker + kind，也可手动触发。
 
-.PHONY: verify verify-controller verify-core verify-agent verify-metadata e2e \
+.PHONY: verify verify-controller verify-core verify-agent verify-hooklib verify-metadata e2e \
 	release-install release-smoke
 
-verify: verify-controller verify-core verify-agent
+verify: verify-controller verify-core verify-agent verify-hooklib
 
 verify-controller:
 	cd controller && go build ./... && go vet ./... && go test ./... -race -count=1
@@ -19,6 +19,10 @@ verify-core:
 verify-agent:
 	cd agent && go build ./... && go vet ./... && go test ./... -race -count=1
 	cd agent && test -z "$$(gofmt -l .)"
+
+# DataLoader 适配器只有 Python 标准库依赖，不需要 Go 工具链。
+verify-hooklib:
+	cd agent/hooklib && python3 -m unittest discover -s . -p 'test_*.py'
 
 # 版本引用与文档引用的静态检查，不需要 Go 工具链。
 verify-metadata:

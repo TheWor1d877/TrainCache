@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"traincache/core/cas"
 	"traincache/core/index"
@@ -463,6 +464,13 @@ func TestUsageErrors(t *testing.T) {
 		{"unknown flag", []string{"ls", "entries", "ds", "--no-such-flag"}},
 		{"missing flag value", []string{"ls", "entries", "ds", "--prefix"}},
 		{"missing global flag value", []string{"--endpoint"}},
+		{"rm without dataset", []string{"rm"}},
+		{"rm without selector", []string{"rm", "ds"}},
+		{"rm with both selectors", []string{"rm", "ds", "--path", "a.tar", "--prefix", "p/"}},
+		{"rm with empty path list", []string{"rm", "ds", "--path", " , "}},
+		{"gc without dataset", []string{"gc"}},
+		{"gc extra arg", []string{"gc", "ds", "extra"}},
+		{"prefix on gc", []string{"gc", "ds", "--prefix", "p/"}},
 	}
 
 	for _, tc := range cases {
@@ -485,23 +493,134 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
-func TestRmAndGcRejected(t *testing.T) {
+func TestRmDryRunByDefault(t *testing.T) {
 	env := newTestEnv(t)
-	for _, sub := range []string{"rm", "gc"} {
-		c := &capture{}
-		var stdout, stderr bytes.Buffer
-		if got := run([]string{sub, "ds"}, &stdout, &stderr, mockDeps(env.store, c)); got != exitUsageError {
-			t.Fatalf("%s: exit code = %d, want %d (stderr=%q)", sub, got, exitUsageError, stderr.String())
+	const dataset = "rmdry"
+	snapID, _ := seedEntries(t, env, dataset)
+	before := storeContents(t, env.store)
+
+	code, stdout, stderr := runWith(env.store, "rm", dataset, "--path", "data/a.tar")
+	assertResult(t, code, stdout, stderr, exitOK, "would remove entries=2 paths=1 bytes=21\n")
+
+	if after := storeContents(t, env.store); after != before {
+		t.Fatalf("dry-run 改动了对象存储")
+	}
+	if cur, err := readCurrent(context.Background(), env.store, dataset); err != nil || cur != snapID {
+		t.Fatalf("CURRENT = %q (%v), want %q", cur, err, snapID)
+	}
+}
+
+func TestRmDryRunOverridesYes(t *testing.T) {
+	env := newTestEnv(t)
+	const dataset = "rmboth"
+	_, _ = seedEntries(t, env, dataset)
+	before := storeContents(t, env.store)
+
+	code, stdout, stderr := runWith(env.store, "rm", dataset, "--prefix", "logs/", "--yes", "--dry-run")
+	assertResult(t, code, stdout, stderr, exitOK, "would remove entries=2 paths=2 bytes=70\n")
+
+	if after := storeContents(t, env.store); after != before {
+		t.Fatalf("--dry-run 与 --yes 同时给出时仍落盘")
+	}
+}
+
+func TestRmPrefixWithYes(t *testing.T) {
+	env := newTestEnv(t)
+	const dataset = "rmyes"
+	oldSnap, _ := seedEntries(t, env, dataset)
+
+	code, stdout, stderr := runWith(env.store, "rm", dataset, "--prefix", "logs/", "--yes")
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+	if !strings.HasPrefix(stdout, "removed entries=2 paths=2 bytes=70 snapshot=") {
+		t.Fatalf("stdout = %q, want removed 摘要前缀", stdout)
+	}
+	cur, err := readCurrent(context.Background(), env.store, dataset)
+	if err != nil {
+		t.Fatalf("readCurrent: %v", err)
+	}
+	if cur == oldSnap {
+		t.Fatalf("CURRENT 未推进，仍是 %s", oldSnap)
+	}
+
+	entries, err := index.NewCatalog(env.store, dataset, index.Config{}).List(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Catalog.List: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("remaining entries = %d, want 3: %+v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Path, "logs/") {
+			t.Fatalf("logs/ 条目未被删除: %+v", e)
 		}
-		if !strings.Contains(stderr.String(), "not implemented yet") {
-			t.Fatalf("%s: stderr = %q, want not implemented yet", sub, stderr.String())
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("%s: stdout = %q, want empty", sub, stdout.String())
-		}
-		if c.storeCalls != 0 {
-			t.Fatalf("%s: object store constructed %d times, want 0", sub, c.storeCalls)
-		}
+	}
+}
+
+func TestRmNothingToRemove(t *testing.T) {
+	env := newTestEnv(t)
+	const dataset = "rmnoop"
+	snapID, _ := seedEntries(t, env, dataset)
+
+	code, stdout, stderr := runWith(env.store, "rm", dataset, "--path", "nope.tar", "--yes")
+	assertResult(t, code, stdout, stderr, exitOK, "nothing to remove\n")
+
+	if cur, err := readCurrent(context.Background(), env.store, dataset); err != nil || cur != snapID {
+		t.Fatalf("空删除推进了 CURRENT: %q (%v), want %q", cur, err, snapID)
+	}
+}
+
+// seedGcDataset 提交 5 个内容相同的快照：默认保留窗口 3 个，因此最老的 2 个
+// manifest 是可回收对象，分片因被保留快照引用而不会被删。
+func seedGcDataset(t *testing.T, env *testEnv, dataset string) []string {
+	t.Helper()
+	cfg := index.Config{MaxEntriesPerShard: 2}
+	_, entries := seedEntries(t, env, dataset)
+	for i := 0; i < 4; i++ {
+		env.commit(t, dataset, cfg, entries)
+	}
+	keys, err := env.store.List(context.Background(), snapshotsPrefix(dataset))
+	if err != nil {
+		t.Fatalf("List snapshots: %v", err)
+	}
+	return keys
+}
+
+func TestGcDryRunKeepsObjects(t *testing.T) {
+	env := newTestEnv(t)
+	const dataset = "gcdry"
+	keys := seedGcDataset(t, env, dataset)
+	before := storeContents(t, env.store)
+
+	code, stdout, stderr := runWith(env.store, "gc", dataset)
+	assertResult(t, code, stdout, stderr, exitOK, "would remove objects=2 local_blocks=0\n")
+
+	if after := storeContents(t, env.store); after != before {
+		t.Fatalf("gc dry-run 删除了对象")
+	}
+	if got := len(snapshotIDs(snapshotsPrefix(dataset), keys)); got != 5 {
+		t.Fatalf("夹具快照 = %d 个，want 5", got)
+	}
+}
+
+func TestGcWithYesRemovesOldSnapshots(t *testing.T) {
+	env := newTestEnv(t)
+	const dataset = "gcyes"
+	_ = seedGcDataset(t, env, dataset)
+
+	code, stdout, stderr := runWith(env.store, "gc", dataset, "--yes")
+	assertResult(t, code, stdout, stderr, exitOK, "removed objects=2 local_blocks=0\n")
+
+	keys, err := env.store.List(context.Background(), snapshotsPrefix(dataset))
+	if err != nil {
+		t.Fatalf("List snapshots: %v", err)
+	}
+	if got := len(snapshotIDs(snapshotsPrefix(dataset), keys)); got != 3 {
+		t.Fatalf("gc 后快照 = %d 个，want 3（保留窗口）", got)
 	}
 }
 
@@ -797,4 +916,40 @@ func entryLines(entries []index.Entry) []string {
 		lines[i] = entryLine(e)
 	}
 	return lines
+}
+
+func TestGcOrphanBlocks(t *testing.T) {
+	env := newTestEnv(t)
+	const dataset = "gcorp"
+	_, _ = seedEntries(t, env, dataset)
+	orphanKey := objectstore.BlockKey(dataset, "gone.tar", 0)
+	env.put(t, orphanKey, "x")
+	env.store.SetModTime(orphanKey, time.Now().Add(-48*time.Hour))
+
+	code, stdout, stderr := runWith(env.store, "gc", dataset, "--orphan-blocks")
+	assertResult(t, code, stdout, stderr, exitOK, "would remove objects=0 local_blocks=0 orphan_blocks=1 orphan_bytes=1\n")
+	if !objectExists(t, env.store, orphanKey) {
+		t.Fatalf("dry-run 删掉了孤儿块")
+	}
+
+	code, stdout, stderr = runWith(env.store, "gc", dataset, "--orphan-blocks", "--yes")
+	assertResult(t, code, stdout, stderr, exitOK, "removed objects=0 local_blocks=0 orphan_blocks=1 orphan_bytes=1\n")
+	if objectExists(t, env.store, orphanKey) {
+		t.Fatalf("--yes 后孤儿块仍在")
+	}
+}
+
+// objectExists 判断对象键在 Mock 里是否还在。
+func objectExists(t *testing.T, store *objectstore.Mock, key string) bool {
+	t.Helper()
+	keys, err := store.List(context.Background(), key)
+	if err != nil {
+		t.Fatalf("List(%s): %v", key, err)
+	}
+	for _, k := range keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }

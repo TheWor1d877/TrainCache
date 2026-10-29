@@ -1,9 +1,9 @@
-// Command traincacheds 是数据集管理 CLI（design.md §11，M13a 只读半边）。
+// Command traincacheds 是数据集管理 CLI（design.md §11）。
 //
-// 本步只提供查询面：ls datasets / ls snapshots / ls entries / stat，全部只读
-// 索引侧对象（CURRENT、manifest.json、索引分片），绝不构造 cas.Store 或
-// index.Writer，也绝不发出 Put/PutIfMatch/Delete。删除与回收（rm/gc）属后续
-// 里程碑，本 CLI 显式拒绝并把它们当用法错误报出，免得脚本以为已经生效。
+// 查询面（ls datasets / ls snapshots / ls entries / stat）只读索引侧对象
+// （CURRENT、manifest.json、索引分片），不发任何写请求。写面两个命令：
+// rm 经 Writer.CommitChanges 提交一个新快照完成删除；gc 触发一次 Collector.Sweep
+// 回收旧快照，带 --orphan-blocks 时再清远端孤儿块。两者默认只预览，--yes 才落盘。
 //
 // 对象存储参数与 trainpublish 同名同口径：flag 显式值优先，未显式指定时取
 // TRAINCACHE_OBJSTORE_* 环境变量族。退出码：0 成功；1 运行期错误（对象存储、
@@ -21,6 +21,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"traincache/core/index"
 	"traincache/core/objectstore"
@@ -43,11 +44,10 @@ const (
 
 	// 索引侧对象键字面量（design.md §6.1 布局）：CURRENT 键走 index.CurrentKey，
 	// manifest 键走 index.ManifestKey，只有目录级枚举前缀需要自己拼。
-	datasetKeyPrefix  = "dataset/"
-	currentKeySuffix  = "/CURRENT"
-	snapshotsDirName  = "snapshots"
-	manifestFileName  = "manifest.json"
-	notImplementedTip = "not implemented yet (delete/gc land in a later milestone)"
+	datasetKeyPrefix = "dataset/"
+	currentKeySuffix = "/CURRENT"
+	snapshotsDirName = "snapshots"
+	manifestFileName = "manifest.json"
 )
 
 // valueFlagNames 是必须带值的 flag 名表；其余以 "-" 开头的参数按布尔 flag 或未知
@@ -99,6 +99,11 @@ type cli struct {
 	prefix string
 	path   string
 	limit  int
+	yes    bool
+	dryRun bool
+
+	orphanBlocks bool
+	orphanGrace  time.Duration
 }
 
 func main() {
@@ -118,7 +123,11 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	secure := fs.Bool("secure", envBool(envObjstoreSecure), "use TLS for the object store")
 	prefix := fs.String("prefix", "", "ls entries: keep only entries whose path starts with this prefix")
 	limit := fs.Int("limit", 0, "ls entries: keep only the first n entries (0 = unlimited)")
-	path := fs.String("path", "", "stat: report totals over the entries of this path only")
+	path := fs.String("path", "", "stat: report totals over the entries of this path only; rm: comma-separated paths to delete")
+	yes := fs.Bool("yes", false, "rm/gc: apply the change; without it the command only reports what it would do")
+	dryRun := fs.Bool("dry-run", false, "rm/gc: report only, overriding --yes")
+	orphanBlocks := fs.Bool("orphan-blocks", false, "gc: also delete remote blocks that no snapshot references")
+	orphanGrace := fs.Duration("orphan-grace", 24*time.Hour, "gc --orphan-blocks: minimum block age before deletion")
 	c.fs = fs
 	// flag 包在解析失败与 -h 时用它打印用法，保证 stderr 里始终是本 CLI 的命令面。
 	fs.Usage = func() { c.usage() }
@@ -141,6 +150,10 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 	c.prefix = *prefix
 	c.limit = *limit
 	c.path = *path
+	c.yes = *yes
+	c.dryRun = *dryRun
+	c.orphanBlocks = *orphanBlocks
+	c.orphanGrace = *orphanGrace
 	return c.execute(positional)
 }
 
@@ -184,10 +197,10 @@ func (c *cli) execute(positional []string) int {
 		return c.executeLS(positional[1:])
 	case "stat":
 		return c.executeStat(positional[1:])
-	case "rm", "gc":
-		// 写侧命令未交付：必须报错退出，不能让脚本以为删除/回收已生效（§11.1 边界）。
-		reportError(c.stderr, fmt.Errorf("subcommand %q is %s", positional[0], notImplementedTip))
-		return exitUsageError
+	case "rm":
+		return c.executeRm(positional[1:])
+	case "gc":
+		return c.executeGC(positional[1:])
 	default:
 		reportError(c.stderr, fmt.Errorf("unknown command %q", positional[0]))
 		c.usage()
@@ -596,6 +609,8 @@ func (c *cli) usage() {
 	fmt.Fprintln(c.stderr, "  traincacheds ls snapshots <ds>")
 	fmt.Fprintln(c.stderr, "  traincacheds ls entries   <ds> [--prefix p/] [--limit n]")
 	fmt.Fprintln(c.stderr, "  traincacheds stat         <ds> [--path p.tar]")
+	fmt.Fprintln(c.stderr, "  traincacheds rm           <ds> (--path p.tar[,p.tar] | --prefix p/) [--dry-run] [--yes]")
+	fmt.Fprintln(c.stderr, "  traincacheds gc           <ds> [--orphan-blocks] [--orphan-grace 24h] [--dry-run] [--yes]")
 	if c.fs != nil {
 		c.fs.PrintDefaults()
 	}

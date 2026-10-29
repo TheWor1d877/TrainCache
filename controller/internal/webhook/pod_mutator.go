@@ -102,6 +102,10 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 		gateName = warmup.DefaultGateName
 	}
 	changed := warmup.ApplyInjection(pod, task, index, gateName)
+	// DataLoader 契约的环境变量与门控一起注入；两者任一改动都要重新编码 Pod。
+	if warmup.InjectDataloaderEnv(pod, task, index) {
+		changed = true
+	}
 	if !changed {
 		log.Info("gate injection skipped; already injected",
 			"warmup_task", taskKey,

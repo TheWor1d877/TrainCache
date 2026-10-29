@@ -1,6 +1,6 @@
 # train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 6.1 §8)。
 #
-# 用法(kind 本机演练;命名空间由 agentd.yaml 创建,先 apply 它):
+# 用法(kind 本机演练;命名空间由 controller/deploy/namespace.yaml 创建,先 apply 它与 agent 清单):
 #   docker build -f agent/deploy/ordersrc.Dockerfile -t traincache-ordersrc:dev .
 #   kind load docker-image traincache-ordersrc:dev --name traincache
 #   kind load docker-image busybox:latest --name traincache
@@ -51,6 +51,9 @@ spec:
         - name: blocks
           mountPath: /var/cache/traincache/blocks
           readOnly: true
+        # 钩子目录:DataLoader 只往里写 agent.sock,订单 ring 由 sidecar 写,训练侧不碰。
+        - name: run
+          mountPath: /run/traincache
     # ---- OrderSource sidecar:ConsumeOrder 最小写端(agent/ordersrc/ordersrc.py)----
     - name: ordersrc
       image: traincache-ordersrc:dev
@@ -89,8 +92,8 @@ spec:
         - name: run
           mountPath: /run/traincache
   volumes:
-    # 只读挂载:DirectoryOrCreate 由 kubelet 建目录(与 DaemonSet 侧同路径同类型);
-    # 卷本身在所有容器内经 volumeMounts.readOnly 固定只读(验收 3)。
+    # blocks 只读挂载(验收 3);run 目录可写,训练容器写 agent.sock、sidecar 写订单 ring。
+    # 两个 hostPath 都用 DirectoryOrCreate(与 DaemonSet 侧同路径同类型)。
     - name: blocks
       hostPath:
         path: /var/cache/traincache/blocks

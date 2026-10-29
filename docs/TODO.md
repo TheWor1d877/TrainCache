@@ -7,7 +7,6 @@
 | 出处 | 事项 | 不做的后果 |
 |------|------|------------|
 | 8.1 §4.3；8.2 P2 | 训练侧钩子（DataLoader 适配器）生产实现与日志契约落地：包 Dataset/IterableDataset，发 advance/stage_switch/open_report/read_miss/read_stall，并按 8.1 §4.3 字段打日志；v0.1.0 至少交付参考适配器 | 真实训练没有客户端接 `agent.sock`；bench 用自己的 PyTorch loader，不影响 9.x 实验 |
-| 6.1 §5.9；6.3 D50 | 快照自动发布方落地：`index.Writer.Commit` 与 CURRENT 推进目前只有 `trainpublish` CLI 在调（e2e 与 bench 用它手动发布），生产链路上还没有组件在产生新 entries 后提交；Controller 现有职责不产生索引，Agent 不发布 | 索引不会随上传自动前进，只能读既有 CURRENT 或人工跑 CLI；发布链路的自开观测防护也无从验证 |
 | 5.1 §11.1；`core/cmd/traincacheds/main.go` | 交付 `rm`/`gc` 子命令 | 数据集不能删、不能手动回收；CLI 明确报 `not implemented`，不会静默错删 |
 | 5.1 §10.7；5.3 D31 ⑤ | 远端孤儿块清理策略 | 发布/Commit 失败后远端块只增不减；不影响读正确性，但存储持续涨 |
 | 6.1 §8；`agent/deploy/agentd.yaml`、`controller/deploy/agent/daemonset.yaml` | 统一两份 Agent DaemonSet 清单 | 同名 `traincache-agentd` 两套 request/limit，部署结果取决于用哪份 |
