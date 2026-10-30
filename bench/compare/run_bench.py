@@ -2904,7 +2904,7 @@ def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
     """每格写 lock.json：COND 冻结 digest + 本次实际镜像，不一致不阻止跑分。"""
     import lock as lock_mod  # noqa: PLC0415
 
-    cond_name = _cond_name_for_cell(tier, groups, rate_mbit)
+    cond_name = COND_NAME_OVERRIDE or _cond_name_for_cell(tier, groups, rate_mbit)
     if cond_name:
         os.environ["TRAINCACHE_COND"] = cond_name
     else:
