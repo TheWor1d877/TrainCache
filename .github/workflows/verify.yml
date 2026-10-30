@@ -28,16 +28,17 @@ jobs:
   s3-integration:
     name: S3 integration (MinIO)
     runs-on: ubuntu-latest
-    services:
-      minio:
-        image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
-        env:
-          MINIO_ROOT_USER: traincache
-          MINIO_ROOT_PASSWORD: traincache-probe
-        ports:
-          - 127.0.0.1:9000:9000
     steps:
       - uses: actions/checkout@v7
+      # pgsty/minio 的默认命令只打印帮助就退出，不能作为 service 容器；
+      # 显式给 server 子命令，与 e2e 的 MinIO 清单保持一致。
+      - name: start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=traincache \
+            -e MINIO_ROOT_PASSWORD=traincache-probe \
+            docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z server /data
       - uses: actions/setup-go@v7
         with:
           go-version-file: core/go.mod
