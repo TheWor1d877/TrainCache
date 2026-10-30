@@ -1,6 +1,6 @@
 package warmup
 
-// Regression for the cancel loop (docs/TODO.md A): the "already submitted"
+// Regression for the cancel loop: the "already submitted"
 // side of the differential pass used to be guessed from
 // status.podNodeReadiness, so the wide-preheat broadcast stayed "initial"
 // forever. With several candidate nodes every reconcile re-broadcast Submit to
@@ -137,7 +137,7 @@ func contains(values []string, value string) bool {
 // preheat leaves a task on every candidate, their counts advance together, and
 // a strict c_ij argmax handed the slot to whichever node landed a block first.
 // One hand costs a Submit plus a Cancel, and the resubmitted node restarts its
-// window, so the loop never released (docs/TODO.md A, 4 GiB for a 1 GiB task).
+// window, so the loop never released (4 GiB for a 1 GiB task).
 func TestReconcileKeepsIncumbentWhileCandidatesAdvance(t *testing.T) {
 	task := fixtureTask(1, 4, [][]int32{{0, 1, 2, 3}})
 	task.Spec.PreheatFanout = 1
