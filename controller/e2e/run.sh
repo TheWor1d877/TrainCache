@@ -300,6 +300,12 @@ deploy_control_plane() {
   kubectl apply -f "$E2E/manifests/tenant.yaml" >/dev/null || { fail "apply tenant.yaml"; return 1; }
   kubectl apply -k "$DEPLOY" >/dev/null || { fail "kubectl apply -k deploy"; return 1; }
 
+  # assert 5 逐条断言评分决策的 Debug 行，而生产默认只放行 1%
+  # （TRAINCACHE_LOG_DEBUG_SAMPLE_RATE=0.01）；e2e 关掉 Debug 采样。
+  kubectl -n kube-system set env deploy/traincache-scheduler \
+    TRAINCACHE_LOG_DEBUG_SAMPLE_RATE=1 >/dev/null \
+    || { fail "set scheduler TRAINCACHE_LOG_DEBUG_SAMPLE_RATE"; return 1; }
+
   local ca_b64
   ca_b64="$(base64 -w0 "$TLS/ca.crt")"
   kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
