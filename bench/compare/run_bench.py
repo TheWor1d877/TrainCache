@@ -2929,6 +2929,52 @@ def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
           f"实际镜像 {TRAIN_IMAGE} / {JUICEFS_IMAGE}）")
 
 
+def _row_key(row):
+    """样本点身份：同格同组同 rep 是同一物理格子上的同一次，新行顶掉旧行。"""
+    return (row.get("group", ""), _as_int(row.get("rep")))
+
+
+def _as_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return -1
+
+
+def existing_rows(path):
+    """读回同一 CSV 已有的行（§8 第 5 条：产物只追加不覆盖）。"""
+    if not path.is_file():
+        return []
+    try:
+        with open(path, newline="") as f:
+            return list(csv.DictReader(f))
+    except (OSError, csv.Error) as exc:
+        print(f"[csv] 读不回 {path} 的既有行（{exc}），本次只写新行", flush=True)
+        return []
+
+
+def _is_void(row):
+    return str(row.get("void", "")).strip().lower() in ("true", "1")
+
+
+def merge_rows(old, new):
+    """旧行按样本点去留：本次的有效行顶掉同 (group, rep) 的旧行，其余历史行原样保留。
+
+    作废行不顶替有效行——一次失败的补跑不该抹掉上一轮的好数据；它自己留在表里，
+    按 D14 不进汇总。
+    """
+    overwritten = {_row_key(r) for r in new if not _is_void(r)}
+    kept = [r for r in old if _row_key(r) not in overwritten]
+    rows = kept + list(new)
+
+    def sort_key(r):
+        group = r.get("group", "")
+        index = GROUPS.index(group) if group in GROUPS else len(GROUPS)
+        return (index, _as_int(r.get("rep")))
+
+    return sorted(rows, key=sort_key)
+
+
 # summary.csv 的列顺序（模块级：--selftest 也断言这里的列集合）
 CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "baseline_substituted",
@@ -2978,10 +3024,24 @@ def write_csv(path, results):
     fieldnames = CSV_FIELDNAMES
     # 生效 fanout 与本次 measure 实际用到的分片数（N_TARS），逐行同值
     fanout_eff = s3_fanout_count()
+    old = existing_rows(path)
+    rows = merge_rows(old, results)
+    new_keys = {_row_key(r) for r in results if not _is_void(r)}
+    expect = (TIER, rate_label(TC_RATE_EFF))
+    foreign = [r for r in old
+               if (r.get("tier", ""), r.get("rate", "")) != expect
+               and _row_key(r) not in new_keys]
+    if foreign:
+        print(f"[csv] 警告：{path.name} 里 {len(foreign)} 行的档位/带宽与本次 "
+              f"{expect[0]}/{expect[1]} 不同，按只追加口径保留", flush=True)
+    if old:
+        print(f"[csv] 追加写：既有 {len(old)} 行，本次 {len(results)} 行顶掉 "
+              f"{len(new_keys & {_row_key(r) for r in old})} 个样本点，"
+              f"合并后 {len(rows)} 行", flush=True)
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        for r in results:
+        for r in rows:
             row = {k: r.get(k, "") for k in fieldnames}
             row["tier"] = row.get("tier") or TIER
             row["rate"] = row.get("rate") or rate_label(TC_RATE_EFF)
@@ -3019,7 +3079,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查七件事：
+    查八件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3031,7 +3091,8 @@ def selftest():
          stall 样本，避免除零）；快照缺片的作废原因落 read_error；
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
          档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位；
-      7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh。
+      7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh；
+      8. 产物写入的只追加口径：补跑同一张 CSV 不得截断既有行。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -3265,6 +3326,34 @@ def selftest():
         raise AssertionError("自测：group_up 没有把网关开关透传给 up.sh")
     print(f"[selftest] 7) D23 网关开关：gateway 列紧随 gate_mode，"
           f"映射 1/0 正确，GATEWAY_ON={GATEWAY_ON} 已透传到 up.sh")
+
+    # ---- 8) 只追加不覆盖：同格补跑不得截断既有行 ----
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "summary.csv"
+        saved_rate = TC_RATE_EFF
+        globals()["TC_RATE_EFF"] = "100mbit"   # 自检不连 tc，带宽档写死一个合法值
+        try:
+            write_csv(p, [{"group": "direct", "rep": 0, "total_makespan": 1.0},
+                          {"group": "direct", "rep": 1, "total_makespan": 2.0},
+                          {"group": "fluid-cold", "rep": 0, "total_makespan": 3.0}])
+            write_csv(p, [{"group": "direct", "rep": 1, "total_makespan": 9.0},
+                          {"group": "juicefs-cold", "rep": 0, "total_makespan": 8.0,
+                           "void": True}])
+        finally:
+            globals()["TC_RATE_EFF"] = saved_rate
+        back = list(csv.DictReader(open(p, newline="")))
+        good = {(r["group"], r["rep"]): r for r in back if r["void"] != "True"}
+        voids = [r for r in back if r["void"] == "True"]
+        if (good[("direct", "1")]["total_makespan"] != "9.0"
+                or good[("direct", "0")]["total_makespan"] != "1.0"
+                or good[("fluid-cold", "0")]["total_makespan"] != "3.0"
+                or len(voids) != 1 or voids[0]["group"] != "juicefs-cold"
+                or len(back) != 4):
+            raise AssertionError(
+                "自测：补跑没按只追加口径合并——有效行应顶掉同 (group,rep) 的旧"
+                "有效行、其它历史行保留、作废行只追加不顶替有效行")
+    print("[selftest] 8) 只追加不覆盖：同格补跑顶掉同 (group,rep) 有效行，"
+          "保留其余历史行，作废行不顶替有效行")
     print("run_bench selftest: PASS")
 
 
@@ -3281,7 +3370,7 @@ def main():
                              "traincache-cold，L=traincache-cold/fluid-cold）。"
                              "显式指定时与该档求交集，越档的组态会被剔除")
     parser.add_argument("--out", type=str,
-                        default=str(bench_config.RESULTS_DIR / "compare" / "summary.csv"))
+                        default=str(bench_config.SCORES_RESULTS_DIR / "compare" / "summary.csv"))
     parser.add_argument("--selftest", action="store_true",
                         help="离线自检（不连集群、不起 Pod）后退出")
     parser.add_argument("--dry-run", action="store_true",

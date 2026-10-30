@@ -31,7 +31,7 @@ import config as bench_config  # noqa: E402
 
 CONDS_DIR = EXPERIMENTS_DIR / "conds"
 RUNNER = BENCH_ROOT / "compare" / "run_bench.py"
-OUT_ROOT = bench_config.RESULTS_DIR / "m8"
+OUT_ROOT = bench_config.FIGURES_RESULTS_DIR
 LOCK_FILE = Path("/tmp/traincache-figures.lock")
 FIGURES = ("fig1", "fig2", "fig3", "pareto1")
 

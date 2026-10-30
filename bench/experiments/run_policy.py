@@ -37,7 +37,7 @@ sys.path.insert(0, str(BENCH_ROOT))
 import config as bench_config  # noqa: E402
 
 RESULTS_DIR = bench_config.RESULTS_DIR
-POLICY_RESULTS_DIR = RESULTS_DIR / "policy"
+POLICY_RESULTS_DIR = bench_config.POLICY_RESULTS_DIR
 
 BENCH_TRACK_C = SCRIPTS_DIR / "bench_track_c.py"
 RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"

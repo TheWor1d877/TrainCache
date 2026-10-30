@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""五格对照汇总：按 (格子, 组态) 报平均数与 bootstrap 95% CI，并给组间判定。
+"""M7 五格对照汇总：按 (格子, 组态) 报平均数与 bootstrap 95% CI，并给组间判定。
 
 口径来源 docs/9.2：§1.6 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
 §1.7 作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
 
 用法：
-    .venv/bin/python bench/compare/summarize_compare.py [--root DIR] [--fallback DIR]
-    .venv/bin/python bench/compare/summarize_compare.py --selftest
+    .venv/bin/python bench/compare/summarize_m7.py [--root DIR] [--fallback DIR]
+    .venv/bin/python bench/compare/summarize_m7.py --selftest
 
 `--fallback` 只补 root 里缺失的非 traincache 组，合并行标 `source=reused`。
 """
@@ -92,12 +92,7 @@ def _read_root(root: Path) -> dict[tuple[str, str], list[dict]]:
                 continue
             if row.get("group") not in GROUP_ORDER:
                 continue
-            # D23：gateway=1 的行走 +gw 格子，与无网关的同名格子分开统计
-            if (row.get("gateway") or "").strip().lower() in ("1", "true"):
-                cell_key = f"{cell}+gw"
-            else:
-                cell_key = cell
-            cells.setdefault((cell_key, row["group"]), []).append(row)
+            cells.setdefault((cell, row["group"]), []).append(row)
     return cells
 
 
@@ -120,21 +115,14 @@ def read_cells(root: Path, fallback: Path | None = None) -> dict[tuple[str, str]
     return cells
 
 
-def _cell_order(observed) -> list[str]:
-    """CELL_ORDER 在前，其余观测到的格子（如 `S-100+gw`）按字典序追加。"""
-    extra = sorted({c for c in observed if c not in CELL_ORDER})
-    return CELL_ORDER + extra
-
-
 def build_table(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
     rows = []
-    for cell in _cell_order({cell for cell, _g in cells}):
+    for cell in CELL_ORDER:
         for group in GROUP_ORDER:
             picked = cells.get((cell, group))
             if picked is None:
                 continue
             row = {"cell": cell, "group": group,
-                   # `S-100+gw` 与基础格子同规则：L 档仍是探点
                    "status": "exploratory" if cell.startswith("L-") else "ok",
                    "source": "reused" if all(
                        r.get("_source") == "reused" for r in picked) else "new"}
@@ -184,7 +172,7 @@ def _verdict(direction: str, mg: float, mb: float,
 
 def build_verdict(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
     out = []
-    for cell in _cell_order({cell for cell, _g in cells}):
+    for cell in CELL_ORDER:
         if cell.startswith("L-"):
             continue  # 探点不做判定（9.2 §1.9）
         for group, bases in BASELINES.items():
@@ -231,7 +219,7 @@ def _render(rows: list[dict], metrics: list[str], title: str) -> list[str]:
              "| 格子 | 组态 | " + " | ".join(metrics) + " |",
              "|---|---|" + "---|" * len(metrics)]
     index = {(r["cell"], r["group"]): r for r in rows}
-    for cell in _cell_order({r["cell"] for r in rows}):
+    for cell in CELL_ORDER:
         for group in GROUP_ORDER:
             r = index.get((cell, group))
             if not r:
@@ -244,13 +232,10 @@ def _render(rows: list[dict], metrics: list[str], title: str) -> list[str]:
 
 
 def render_markdown(rows: list[dict], verdict: list[dict]) -> str:
-    lines = ["## 五格对照汇总", ""]
+    lines = ["## M7 五格对照汇总", ""]
     if any(r.get("source") == "reused" for r in rows):
-        lines += ["注：`〔沿用〕` 组来自既有对照产物（本轮只重跑 traincache 两组态，"
+        lines += ["注：`〔沿用〕` 组来自既有 m7 产物（本轮只重跑 traincache 两组态，"
                   "direct/juicefs/fluid 不读快照，口径未变）；其余为重跑结果。", ""]
-    if any(str(r.get("cell", "")).endswith("+gw") for r in rows):
-        lines += ["注：格子名带 `+gw` 表示该格有网关（`summary.csv` 的 `gateway=1`），"
-                  "与同名基础格子分别统计、不混在一起。", ""]
     lines += _render(rows, TABLE_A, "makespan 与 stall")
     lines += [""]
     lines += _render(rows, TABLE_B, "命中率与字节成本")
@@ -337,40 +322,15 @@ def selftest() -> None:
         assert tbl[("S-100", "traincache-cold")]["source"] == "new"
         assert tbl[("S-100", "direct")]["source"] == "reused"
         assert abs(tbl[("S-100", "direct")]["startup_makespan_mean"] - 11.0) < 1e-9
-
-        # D23：同一 cell 下 gateway=1 与 0 各自独立成行（+gw 格子），均值不混
-        gw_root = Path(td) / "gw"
-        gp = gw_root / "S-100" / "tag1" / "traincache-cold" / "summary.csv"
-        gp.parent.mkdir(parents=True, exist_ok=True)
-        with open(gp, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["group", "rep", "void", "gateway",
-                                              "startup_makespan"])
-            w.writeheader()
-            for i, v in enumerate(["10", "10"]):
-                w.writerow({"group": "traincache-cold", "rep": i, "void": "false",
-                            "gateway": "0", "startup_makespan": v})
-            for i, v in enumerate(["4", "6"]):
-                w.writerow({"group": "traincache-cold", "rep": i, "void": "false",
-                            "gateway": "1", "startup_makespan": v})
-        gw_cells = _read_root(gw_root)
-        assert set(gw_cells) == {("S-100", "traincache-cold"),
-                                 ("S-100+gw", "traincache-cold")}, gw_cells
-        gw_tbl = {(r["cell"], r["group"]): r for r in build_table(gw_cells)}
-        assert len(gw_tbl) == 2, gw_tbl
-        assert abs(gw_tbl[("S-100", "traincache-cold")]["startup_makespan_mean"]
-                   - 10.0) < 1e-9
-        assert abs(gw_tbl[("S-100+gw", "traincache-cold")]["startup_makespan_mean"]
-                   - 5.0) < 1e-9
-        gw_md = render_markdown(list(gw_tbl.values()), [])
-        assert "S-100+gw" in gw_md and "`+gw`" in gw_md, gw_md
-    print("summarize_compare selftest PASS")
+    print("summarize_m7 selftest PASS")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=Path, default=None, help="本轮结果根目录")
+    ap.add_argument("--root", type=Path, default=None,
+                    help="本轮跑分结果根（默认 results/scores）")
     ap.add_argument("--fallback", type=Path, default=None,
-                    help="非 traincache 组的既有结果根（默认 m7）")
+                    help="非 traincache 组的对照基线根（默认 results/baselines）")
     ap.add_argument("--no-fallback", action="store_true")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--selftest", action="store_true")
@@ -379,13 +339,13 @@ def main() -> int:
         selftest()
         return 0
 
-    root = args.root or config.RESULTS_DIR / "m7r3"
-    out_dir = args.out_dir or root / "_summary"
+    root = args.root or config.SCORES_RESULTS_DIR
+    out_dir = args.out_dir or config.RESULTS_DIR / "summary"
     if not root.is_dir():
         print(f"[err] 结果目录不存在: {root}", file=sys.stderr)
         return 1
     fallback = None if args.no_fallback else (
-        args.fallback or config.RESULTS_DIR / "m7")
+        args.fallback or config.BASELINE_RESULTS_DIR)
     cells = read_cells(root, fallback)
     rows = build_table(cells)
     if not rows:
@@ -394,17 +354,17 @@ def main() -> int:
     verdict = build_verdict(cells)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "m7_baseline.csv", "w", newline="") as f:
+    with open(out_dir / "baseline.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(_flatten(rows)[0].keys()))
         w.writeheader()
         w.writerows(_flatten(rows))
     if verdict:
-        with open(out_dir / "m7_verdict.csv", "w", newline="") as f:
+        with open(out_dir / "verdict.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(verdict[0].keys()))
             w.writeheader()
             w.writerows(verdict)
     md = render_markdown(rows, verdict)
-    (out_dir / "m7_baseline.md").write_text(md)
+    (out_dir / "baseline.md").write_text(md)
     print(md)
     print(f"[out] {out_dir}")
     return 0
