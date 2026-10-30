@@ -165,6 +165,19 @@ func (r *Reader) Missing() bool {
 	return r.missing
 }
 
+// Generation 返回最近观察到的 writer_generation(锁下读取):取自最近一次有效头,
+// 代际变化后随新头更新。未接入有效头(文件缺失 / 头非法)或 Reader 已关闭时返回 0。
+// 0 表示尚无可用代际,写端代际恰为 0 时无法区分。供 svc 按 (generation, payload)
+// 去重与每源状态机使用(design §7.4 / decisions D63)。
+func (r *Reader) Generation() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || !r.attached {
+		return 0
+	}
+	return r.lastGen
+}
+
 // LastAdvance 返回最近一次观察到 write_seq 推进的本地时间(decisions D29:锁下读取;
 // 零值 = 从未推进)。语义:
 //   - 构造时的首次有效快照视为推进(文件不存在 / 头非法 → 保持零值);
@@ -249,6 +262,9 @@ func (r *Reader) pollOnceLocked(suppress bool) {
 	}
 
 	fresh := !r.attached || h.generation != r.lastGen
+	// 已接入且代际变化 = sidecar 重启:清当前订单与去重基线,新代际同载荷订单也重放一次
+	// (design §7.4)。首次接入(suppress=true)不走这里,初始快照仍不投递。
+	genChanged := r.attached && h.generation != r.lastGen
 	if !fresh && h.writeSeq < r.lastReadSeq {
 		// 防御(约定 13):同一代际 write_seq 回退 = 写端 bug → 重置状态跳最新。
 		slog.Warn("ordersource: write_seq 回退(写端 bug),重置状态跳最新",
@@ -257,6 +273,10 @@ func (r *Reader) pollOnceLocked(suppress bool) {
 		fresh = true
 	}
 	if fresh {
+		if genChanged {
+			r.cur, r.hasCur = ConsumeOrder{}, false
+			r.lastEmitted = nil
+		}
 		r.resyncLocked(h, suppress)
 		return
 	}
@@ -265,7 +285,13 @@ func (r *Reader) pollOnceLocked(suppress bool) {
 
 // resyncLocked 丢弃追读位置、跳到最新:首次接入 / 代际变化(约定 6)/ 写端回退后的共同路径。
 // 只读最新槽,按字节去重决定是否推送;suppress 仅用于 NewReader 初始快照。
+// 已接入的跳读按跳过序号数计入包级 resync 丢单计数;首次接入的历史尚无消费者,不计数。
 func (r *Reader) resyncLocked(h ringHeader, suppress bool) {
+	if r.attached {
+		if skipped := h.writeSeq - r.lastReadSeq; skipped > 0 {
+			countDroppedResync(skipped)
+		}
+	}
 	r.attached = true
 	r.lastGen = h.generation
 	r.lastReadSeq = h.writeSeq // 跳过历史:阶段切换只关心最新顺序
@@ -279,7 +305,7 @@ func (r *Reader) resyncLocked(h ringHeader, suppress bool) {
 	case slotOK:
 		r.acceptLocked(order, raw, suppress)
 	case slotCorrupt:
-		// 最新槽载荷损坏:跳过(等后续序号);lastReadSeq 已在最新位。
+		countDroppedCorrupt() // 最新槽载荷损坏:跳过(等后续序号);lastReadSeq 已在最新位。
 	case slotRetry:
 		// 槽暂不可读(映射未覆盖 / seq 未落定):保持"已跳到最新",等后续序号。
 	}
@@ -302,6 +328,7 @@ func (r *Reader) followLocked(h ringHeader) {
 			r.acceptLocked(order, raw, false)
 			r.lastReadSeq = target
 		case slotCorrupt:
+			countDroppedCorrupt()
 			r.lastReadSeq = target // 损坏槽跳过,避免反复重试同一槽
 		case slotRetry:
 			// 保持追读位置,下一轮重试(写端继续推进时最坏自然跳读)。
@@ -315,6 +342,7 @@ func (r *Reader) followLocked(h ringHeader) {
 			r.acceptLocked(order, raw, false)
 			r.lastReadSeq = seq
 		case slotCorrupt:
+			countDroppedCorrupt()
 			r.lastReadSeq = seq // 跳过该槽继续追读
 		default:
 			return // 陈旧 / 未就绪:停止本轮
@@ -362,10 +390,14 @@ func (r *Reader) readSlotLocked(h ringHeader, seq int64) (ConsumeOrder, []byte, 
 }
 
 // acceptLocked 接受一份已解析订单:更新当前订单;suppress(初始快照)只置去重基线不推送;
-// 其余按载荷字节去重(相同不推,约定 7)。
+// 其余按载荷字节去重(相同不推,约定 7)。chunks 为空的订单行为不变(仍更新 cur),只计入
+// 包级 invalid 丢单计数(design §7.4)。
 func (r *Reader) acceptLocked(order ConsumeOrder, raw []byte, suppress bool) {
 	r.cur = order
 	r.hasCur = true
+	if len(order.Chunks) == 0 {
+		countDroppedInvalid()
+	}
 	if suppress {
 		r.lastEmitted = append(r.lastEmitted[:0], raw...)
 		return

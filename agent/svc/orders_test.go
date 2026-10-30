@@ -315,8 +315,8 @@ func TestOrderDiscoveryStopsOnCtxCancel(t *testing.T) {
 	// reader 全 Close:已关闭的 Reader 上再订阅返回 ErrClosed(不新建 goroutine)。
 	d.mu.Lock()
 	readers := make([]*ordersource.Reader, 0, len(d.readers))
-	for _, r := range d.readers {
-		readers = append(readers, r)
+	for _, e := range d.readers {
+		readers = append(readers, e.r)
 	}
 	d.mu.Unlock()
 	if len(readers) != 2 {

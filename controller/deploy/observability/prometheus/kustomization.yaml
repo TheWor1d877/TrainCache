@@ -8,5 +8,6 @@ kind: Kustomization
 resources:
   - rbac.yaml
   - configmap.yaml
+  - rules-configmap.yaml
   - deployment.yaml
   - service.yaml

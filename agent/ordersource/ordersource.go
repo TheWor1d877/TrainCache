@@ -8,7 +8,9 @@
 //   - commit 标记 = 头 write_seq 最后写:reader 只读 seq ≤ 头 write_seq 的槽,半写槽天然不可见;
 //     槽索引 =(seq-1) mod slot_count;write_seq 跨代际续增(sidecar 重启读旧头 +1,新文件从 1 起);
 //   - reader 落后不阻塞 writer:落后超过 slot_count 时直接跳至最新(阶段切换只关心最新顺序);
-//   - writer_generation 变化 → reader 丢弃追读位置重读最新;writer 重启由代际计数检测;
+//   - writer_generation 变化 → reader 清当前订单、丢弃追读位置重读最新,新代际订单即使载荷
+//     字节相同也重放一次;writer 重启由代际计数检测;跳读 / 损坏槽 / 空订单计入包级丢单计数
+//     (design §7.4);
 //   - 格式不符(magic / version / 几何非法)→ 忽略该文件并计入包级错误计数(D23)。
 //
 // Reader 由 svc 装配(发现 = svc 目录轮询 watchDir,见 D22);平台锁定 linux

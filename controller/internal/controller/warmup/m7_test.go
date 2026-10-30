@@ -292,8 +292,8 @@ func TestPlacementGenerationChangeSendsUpdate(t *testing.T) {
 	in.Placement.Assignment = map[int32][]string{0: {"n0"}}
 	in.Previous = map[PreheatPair]ExistingPreheat{
 		{PodIndex: 0, Node: "n0"}: {
-			Generation:  uint64(in.Task.Generation) - 1,
-			BitmapBytes: bitmapBytes(len(in.Windows[0])),
+			Generation:   uint64(in.Task.Generation) - 1,
+			WindowBlocks: uint32(len(in.Windows[0])),
 		},
 	}
 	actions, err := PlacementActions(in)
@@ -305,8 +305,8 @@ func TestPlacementGenerationChangeSendsUpdate(t *testing.T) {
 	}
 
 	in.Previous[PreheatPair{PodIndex: 0, Node: "n0"}] = ExistingPreheat{
-		Generation:  uint64(in.Task.Generation),
-		BitmapBytes: bitmapBytes(len(in.Windows[0])),
+		Generation:   uint64(in.Task.Generation),
+		WindowBlocks: uint32(len(in.Windows[0])),
 	}
 	actions, err = PlacementActions(in)
 	if err != nil {

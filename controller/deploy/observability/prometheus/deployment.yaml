@@ -74,6 +74,10 @@ spec:
             - name: config
               mountPath: /etc/prometheus
               readOnly: true
+            # 告警规则单独挂载,避免 configmap 变更时整目录重新投影。
+            - name: rules
+              mountPath: /etc/prometheus/rules
+              readOnly: true
             - name: data
               mountPath: /prometheus
             - name: tmp
@@ -82,6 +86,9 @@ spec:
         - name: config
           configMap:
             name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-rules
         - name: data
           emptyDir: {}
         - name: tmp

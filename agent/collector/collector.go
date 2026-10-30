@@ -1,32 +1,28 @@
-// Package collector 是 Agent 的采集与降级层。
+// Package collector 是 Agent 的采集层。
 //
-// collector 不产生订单数据，也不直接读写 ring 文件。它接收接线层推入的事件，
-// 主动向 ordersource.Reader 探活，在此基础上完成统计与状态判定，并把热度图持久化。
+// collector 不产生订单数据，也不持有 ring。它接收接线层推入的事件，完成统计并把
+// 热度图持久化；订单上下文（dataset / stage / 期望顺序）由装配层经 provider 注入，
+// 没有订单时统计照常，标签归 unknown。
 //
 // 职责：
 //   - 热度映射与淘汰得分：记录数据块被打开、预取、消费的情况，算出热度与淘汰得分；
 //   - 命中率统计：滚动窗口内统计，并按训练阶段聚合；
-//   - 交叉校准：用不同来源的事件互相校准；
-//   - 30s 降级状态机：订单源超过 30s 未推进则判定停滞并降级；
+//   - 交叉校准：实际打开顺序与订单期望顺序比对，失配时回调重对齐；
 //   - heatmap.json：周期 dump，启动时恢复。
 //
 // 输入事件（由 svc 接线层调用下列方法推入 collector）：
 //   - Open(fp)：打开事件。主源是钩子 open_report，接线层把 (path, chunk) 经索引
 //     解析为指纹后调用；兜底源是 inotify，Start 后监听 blockDir/blocks 下的 IN_OPEN。
 //   - Touch(fp, t)：预取写入与订单刷新事件，t_touch 取三源最大值。
-//   - Advance(chunk)：消费侧推进事件，来自钩子 advance 帧，与校准重对齐共用回调；
-//     用于算命中率、按训练阶段聚合和校准。
-//
-// 主动探活（collector 调 ordersource.Reader，用于降级状态机）：
-//   - LastAdvance() / Missing()：检查 ring 的 write_seq 是否推进、是否有缺失或代际
-//     变化；30s 未推进即判定订单源停滞并触发降级。
+//   - Advance(chunk)：消费侧推进事件，来自钩子 advance 帧，只做推进计数。
 //
 // 装配与边界：
 //   - collector 跑在 Go Agent 进程内，由 svc 创建并接线；
-//   - NewCollector 只接收一个 *ordersource.Reader，即单 collector 只绑一个 ring；
-//   - 多 Pod（多 ring）场景由接线层聚合多个 Reader，collector 本身不管理多 ring。
+//   - 订单通道健康由 svc 聚合，collector 不判定、不写 degraded gauge；
+//   - NewCollector 只接收 blockDir / metrics / 参数；订单上下文经
+//     SetOrderContextProvider 注入，多 Pod（多 ring）的聚合在装配层完成。
 //
-// 覆盖验收 10。设计见 design §5.5/§6.4/§7.4，决策见 D14/D15/D24/D29/D31。
+// 设计见 design §5.5/§6.4/§7.4，决策见 D14/D15/D24/D31/D63。
 
 package collector
 
@@ -40,6 +36,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"traincache/agent/logagg"
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/core/cas"
@@ -94,34 +91,34 @@ type heatEntry struct {
 	accessCount int64
 }
 
-// Collector 是采集层主体:热度表、命中率窗口、校准器与降级状态机由 Start 起的
-// 后台循环驱动(decay/dump/degrade/inotify)。构造后即可用,Start 每实例只生效一次。
+// Collector 是采集层主体:热度表、命中率窗口与校准器由 Start 起的后台循环驱动
+// (decay/dump/inotify)。构造后即可用,Start 每实例只生效一次。
 type Collector struct {
 	blockDir    string
 	blocksDir   string
 	heatmapPath string
 
-	ring *ordersource.Reader
-	m    *metrics.Registry
-	cfg  CollectorConfig
+	m   *metrics.Registry
+	cfg CollectorConfig
 
 	// clock 是时间源(可注入,测试用;生产默认 time.Now)。
 	clock func() time.Time
 
-	// 后台循环周期与判定阈值:构造时从包内变量固化(测试改包变量后构造即可覆盖),
+	// 后台循环周期与门控窗:构造时从包内变量固化(测试改包变量后构造即可覆盖),
 	// 避免运行中并发读写包变量。
-	watchInterval   time.Duration // inotify 读轮询周期
-	degradeInterval time.Duration // 降级判定周期
-	hookSilence     time.Duration // 钩子主源沉默窗(inotify 兜底生效条件)
-	stallThreshold  time.Duration // ring 写入停滞阈值(30s)
+	watchInterval time.Duration // inotify 读轮询周期
+	hookSilence   time.Duration // 钩子主源沉默窗(inotify 兜底生效条件)
 
 	mu         sync.Mutex
 	entries    map[cas.Fingerprint]*heatEntry
 	lastHookOp time.Time // 钩子主源最近一次打开事件(零值 = 从未;inotify 兜底判定用)
 
 	advMu     sync.Mutex
-	advanceCb func(chunk int64)
-	advances  uint64 // advance 事件计数(nil 回调时仅统计)
+	advanceCb func(dataset string, ref ordersource.ChunkRef)
+	advances  uint64 // advance 事件计数
+
+	// orderCtx 是订单上下文来源(装配期写入一次,打开路径并发读;nil = 未注入)。
+	orderCtx atomic.Pointer[orderContextProvider]
 
 	openMu     sync.Mutex
 	openCb     func(fp cas.Fingerprint)      // inotify 兜底打开回调(仅在门控通过后触发)
@@ -130,8 +127,8 @@ type Collector struct {
 	hr  *hitRate
 	cal *calibrator
 
-	degMu    sync.Mutex
-	degraded bool
+	// logAgg 是 60s 汇总聚合器(8.1 §4.2;装配期注入一次,读路径原子读)。nil 安全。
+	logAgg atomic.Pointer[logagg.Aggregator]
 
 	started atomic.Bool // Start 幂等守卫
 }
@@ -172,26 +169,52 @@ func (c *Collector) cacheLabels(dataset string, fp cas.Fingerprint, ref ordersou
 	return source, phase
 }
 
+// orderContextProvider 是装配层注入的订单上下文来源:按本次打开的引用与指纹返回
+// dataset / StageID / 订单期望顺序;ok=false 表示当前没有可用订单。
+type orderContextProvider func(ref ordersource.ChunkRef, fp cas.Fingerprint) (dataset, stage string, order ordersource.ConsumeOrder, ok bool)
+
+// SetOrderContextProvider 注入订单上下文来源(传 nil 解除)。装配期写入一次,
+// 打开路径并发读;未注入时 dataset/stage 为空、无订单,统计照常、标签归 unknown。
+func (c *Collector) SetOrderContextProvider(fn func(ref ordersource.ChunkRef, fp cas.Fingerprint) (dataset, stage string, order ordersource.ConsumeOrder, ok bool)) {
+	if fn == nil {
+		c.orderCtx.Store(nil)
+		return
+	}
+	p := orderContextProvider(fn)
+	c.orderCtx.Store(&p)
+}
+
+// orderInfo 取本次打开的订单上下文(provider 未注入 → 空值与无订单)。provider 返回
+// !ok 时仍保留 dataset/stage(命中标签可用),只把订单视为不可用(不参与交叉校准)。
+func (c *Collector) orderInfo(ref ordersource.ChunkRef, fp cas.Fingerprint) (dataset, stage string, order ordersource.ConsumeOrder, ok bool) {
+	p := c.orderCtx.Load()
+	if p == nil {
+		return "", "", ordersource.ConsumeOrder{}, false
+	}
+	dataset, stage, order, ok = (*p)(ref, fp)
+	if !ok {
+		return dataset, stage, ordersource.ConsumeOrder{}, false
+	}
+	return dataset, stage, order, true
+}
+
 // NewCollector 构造采集层(design §5.5 冻结签名):blockDir = cas 根目录
-// (blocks/ 与 heatmap.json 的父目录,即 svc.Config.CacheRoot);ring 允许为 nil
-// (无 OrderSource:dataset 取空、降级判定恒 degraded);m 允许为 nil(无指标场景)。
-func NewCollector(blockDir string, ring *ordersource.Reader, m *metrics.Registry, cfg CollectorConfig) *Collector {
+// (blocks/ 与 heatmap.json 的父目录,即 svc.Config.CacheRoot);m 允许为 nil(无指标场景)。
+// 订单上下文不在此注入,装配层随后调用 SetOrderContextProvider。
+func NewCollector(blockDir string, m *metrics.Registry, cfg CollectorConfig) *Collector {
 	cfg = cfg.withDefaults()
 	return &Collector{
-		blockDir:        blockDir,
-		blocksDir:       filepath.Join(blockDir, blocksDirName),
-		heatmapPath:     filepath.Join(blockDir, heatmapFileName),
-		ring:            ring,
-		m:               m,
-		cfg:             cfg,
-		clock:           time.Now,
-		watchInterval:   inotifyPollInterval,
-		degradeInterval: degradeCheckInterval,
-		hookSilence:     hookSilenceWindow,
-		stallThreshold:  degradeStallThreshold,
-		entries:         make(map[cas.Fingerprint]*heatEntry),
-		hr:              newHitRate(hitRateWindow),
-		cal:             newCalibrator(cfg.CalibrateWindow, cfg.CalibrateThreshold),
+		blockDir:      blockDir,
+		blocksDir:     filepath.Join(blockDir, blocksDirName),
+		heatmapPath:   filepath.Join(blockDir, heatmapFileName),
+		m:             m,
+		cfg:           cfg,
+		clock:         time.Now,
+		watchInterval: inotifyPollInterval,
+		hookSilence:   hookSilenceWindow,
+		entries:       make(map[cas.Fingerprint]*heatEntry),
+		hr:            newHitRate(hitRateWindow),
+		cal:           newCalibrator(cfg.CalibrateWindow, cfg.CalibrateThreshold),
 	}
 }
 
@@ -224,9 +247,22 @@ func (cfg CollectorConfig) withDefaults() CollectorConfig {
 	return cfg
 }
 
+// SetLogAggregator 注入 60s 汇总聚合器(装配期调用一次;传 nil 解除)。只影响日志
+// 汇总,指标打点与计数源不变(§4.2:不新增重复计数源)。
+func (c *Collector) SetLogAggregator(a *logagg.Aggregator) {
+	if c == nil {
+		return
+	}
+	if a == nil {
+		c.logAgg.Store(nil)
+		return
+	}
+	c.logAgg.Store(a)
+}
+
 // Start 启动采集层后台循环(非阻塞;ctx 取消后各循环退出):
-// 先同步 Load 恢复 heatmap.json(容错,失败仅告警),再起 decay ticker、dump ticker、
-// 降级判定(1s)与 inotify 兜底监听。每实例只生效一次(重复调用仅告警)。
+// 先同步 Load 恢复 heatmap.json(容错,失败仅告警),再起 decay ticker、dump ticker
+// 与 inotify 兜底监听。每实例只生效一次(重复调用仅告警)。
 func (c *Collector) Start(ctx context.Context) {
 	if !c.started.CompareAndSwap(false, true) {
 		slog.Warn("collector: Start 重复调用,忽略", "block_dir", c.blockDir)
@@ -235,10 +271,8 @@ func (c *Collector) Start(ctx context.Context) {
 	if err := c.Load(); err != nil {
 		slog.Warn("collector: 读取 heatmap 失败(以空表继续)", "path", c.heatmapPath, "err", err)
 	}
-	c.checkDegrade() // 启动即判定一次:未推进 / 文件缺失立即降级,不等一个 tick
 	go c.decayLoop(ctx)
 	go c.dumpLoop(ctx)
-	go c.degradeLoop(ctx)
 	go c.watchBlocks(ctx)
 }
 
@@ -356,29 +390,29 @@ func freshness(now, lastTouch time.Time, halfLife time.Duration) float64 {
 	return math.Pow(0.5, dt.Seconds()/halfLife.Seconds())
 }
 
-// Advance 记录一次消费侧推进事件(钩子 advance 帧经接线层注入;主对话裁决:advance 事件
-// 与校准重对齐共用同一回调):计数 + 分发;未注册回调(nil)时仅统计不回调。
+// Advance 记录一次消费侧推进事件(钩子 advance 帧经接线层注入):只做推进计数,
+// 不分发回调;重对齐回调只由交叉校准触发。
 func (c *Collector) Advance(chunk int64) {
 	c.advMu.Lock()
 	c.advances++
 	c.advMu.Unlock()
-	c.fireAdvance(chunk)
 }
 
-// SetAdvanceCallback 注册推进回调(主对话裁决;校准触发重对齐时以实际位点调用;传 nil 解除)。
-func (c *Collector) SetAdvanceCallback(fn func(chunk int64)) {
+// SetAdvanceCallback 注册重对齐回调:交叉校准触发重对齐时,以 noteOpen 已解析的
+// dataset 与本次打开的 ref 调用(传 nil 解除)。
+func (c *Collector) SetAdvanceCallback(fn func(dataset string, ref ordersource.ChunkRef)) {
 	c.advMu.Lock()
 	c.advanceCb = fn
 	c.advMu.Unlock()
 }
 
-// fireAdvance 锁外分发推进动作(回调可安全回溯本对象的读接口)。
-func (c *Collector) fireAdvance(chunk int64) {
+// fireAdvance 锁外分发重对齐动作(回调可安全回溯本对象的读接口)。
+func (c *Collector) fireAdvance(dataset string, ref ordersource.ChunkRef) {
 	c.advMu.Lock()
 	cb := c.advanceCb
 	c.advMu.Unlock()
 	if cb != nil {
-		cb(chunk)
+		cb(dataset, ref)
 	}
 }
 
@@ -417,7 +451,7 @@ func (c *Collector) fireOpen(fp cas.Fingerprint) {
 // noteOpen 是打开事件的统一处理路径(钩子主源与 inotify 兜底共用):
 // 热度 β 增量 + t_touch → 命中率(本地块交集)与指标 → 交叉校准(仅带订单引用的钩子源)。
 func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now time.Time) {
-	dataset, stage, order, hasOrder := c.currentOrderInfo()
+	dataset, stage, order, hasOrder := c.orderInfo(ref, fp)
 
 	// ① 热度(D24:OPEN 合并后 h ← h + (1−h)·β;t_touch = now)。
 	c.mu.Lock()
@@ -433,40 +467,38 @@ func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now t
 
 	// ② 命中率:打开块与本地块求交集(命中 = 本地副本存在)。
 	hit := c.localBlock(fp)
-	if c.m != nil {
+	// 汇总复用同一判定结果:指标仍由 c.m 打点,聚合器只做 60s 日志汇总(不新增计数源)。
+	if agg, m := c.logAgg.Load(), c.m; m != nil || agg != nil {
 		source, phase := c.cacheLabels(dataset, fp, ref)
-		if hit {
-			c.m.ObserveCacheHit(dataset, source, phase)
-		} else {
-			// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按 D36 二元口径记
-			// result=success(正常未命中,消费侧将自行回源);error/refetched 由 fetch/
-			// 修复路径分别计数(接线阶段)。D46:带上 phase。
-			c.m.ObserveCacheMiss(dataset, metrics.ResultSuccess, phase)
+		if m != nil {
+			if hit {
+				m.ObserveCacheHit(dataset, source, phase)
+			} else {
+				// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按 D36 二元口径记
+				// result=success(正常未命中,消费侧将自行回源);error/refetched 由 fetch/
+				// 修复路径分别计数(接线阶段)。D46:带上 phase。
+				m.ObserveCacheMiss(dataset, metrics.ResultSuccess, phase)
+			}
+		}
+		if agg != nil {
+			if hit {
+				agg.ObserveCacheHit(dataset, ref.Chunk, source, phase)
+			} else {
+				agg.ObserveCacheMiss(dataset, ref.Chunk, phase)
+			}
 		}
 	}
 	c.hr.observe(now, stage, hit)
 
-	// ③ 交叉校准(D15):仅带订单引用的钩子源参与(实际顺序 vs ring 期望顺序)。
+	// ③ 交叉校准(D15):仅带订单引用的钩子源参与(实际顺序 vs 订单期望顺序)。
 	if hasOrder && ref.Path != "" {
-		if trigger, chunk := c.cal.observe(order, ref); trigger {
+		if trigger, _ := c.cal.observe(order, ref); trigger {
 			slog.Warn("collector: 交叉校准匹配率低于阈值,cursor 重对齐到实际位点",
-				"block_dir", c.blockDir, "chunk", chunk, "threshold", c.cfg.CalibrateThreshold)
-			c.fireAdvance(chunk)
+				"block_dir", c.blockDir, "dataset", dataset, "chunk", ref.Chunk,
+				"threshold", c.cfg.CalibrateThreshold)
+			c.fireAdvance(dataset, ref)
 		}
 	}
-}
-
-// currentOrderInfo 取 ring 当前订单的 dataset / StageID / 订单(无 ring 或无订单 → 空值)。
-// dataset 空串经 metrics.DatasetLabel 归并为 other(§5.8)。
-func (c *Collector) currentOrderInfo() (dataset, stage string, order ordersource.ConsumeOrder, ok bool) {
-	if c.ring == nil {
-		return "", "", ordersource.ConsumeOrder{}, false
-	}
-	o, ok := c.ring.CurrentOrder()
-	if !ok {
-		return "", "", ordersource.ConsumeOrder{}, false
-	}
-	return o.Dataset, o.StageID, o, true
 }
 
 // localBlock 判定指纹是否有本地副本(cas 布局:blockDir/blocks/<fp[0:2]hex>/<fp hex>.blk)。

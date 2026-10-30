@@ -7,15 +7,16 @@ import (
 )
 
 // calibrate.go:交叉校准(design §5.5、decisions D15):滑动窗口 CalibrateWindow 次打开内,
-// "实际打开顺序 与 ring.CurrentOrder().Chunks 期望顺序"的匹配率 < CalibrateThreshold
+// "实际打开顺序 与 订单期望顺序(ConsumeOrder.Chunks)"的匹配率 < CalibrateThreshold
 // (默认 0.8,即 7.0"默认 20% 偏差"的精确口径)→ 触发 cursor 重对齐到实际位点。
 //
 // 口径:
-//   - 期望顺序 = 最近一次 ring.CurrentOrder().Chunks(每次观测现取,阶段切换自然生效);
+//   - 期望顺序 = provider 在本次打开返回的订单 Chunks(装配层每次现取,阶段切换自然生效);
 //   - 期望位点 expectedIdx 初始为 0,命中期望块则前移;未命中时向后重定位
 //     (跳读)或从头重定位(阶段/顺序整体改变),重定位本身不计为匹配;
 //   - 滑动窗口满员后每次观测都评估:匹配率 < 阈值 → 触发一次(触发后清窗,避免
-//     同一段顺序持续触发形成重对齐风暴),回调(SetAdvanceCallback)收到实际位点 chunk。
+//     同一段顺序持续触发形成重对齐风暴),回调(SetAdvanceCallback)收到订单 dataset
+//     与本次打开的 ref。
 
 // calibrator 是交叉校准窗口状态(独立锁;由 Collector 的打开事件路径调用)。
 type calibrator struct {

@@ -38,6 +38,11 @@ const (
 
 	// envReadStallMinWaitMS 是 read_stall 入直方图最小等待的配置项(D47/Q15;毫秒)。
 	envReadStallMinWaitMS = "TRAINCACHE_READ_STALL_MIN_WAIT_MS"
+	// defaultReadStallWindowMS 是 read_stall 归因关联窗口默认值(C3;毫秒)。
+	defaultReadStallWindowMS = int64(5000)
+	// envReadStallWindowMS 是 read_stall 归因关联窗口的配置项(C3;毫秒,
+	// 以帧 ts 为中心前后各半个窗口)。
+	envReadStallWindowMS = "TRAINCACHE_READ_STALL_WINDOW_MS"
 
 	// defaultIndexRefreshInterval 是前缀感知快照跟随的默认刷新周期(6.1 §5.9)。
 	defaultIndexRefreshInterval = 5 * time.Second
@@ -106,6 +111,9 @@ type Config struct {
 	// ReadStallMinWaitMS 是 read_stall 入直方图的最小等待毫秒(D47/Q15;默认 100,
 	// TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖,需 >0)。
 	ReadStallMinWaitMS int64
+	// ReadStallWindowMS 是 read_stall 归因关联窗口毫秒(C3;默认 5000,
+	// TRAINCACHE_READ_STALL_WINDOW_MS 覆盖,非法取值回退默认且不阻断启动)。
+	ReadStallWindowMS int64
 	// IndexRefreshInterval 是快照跟随刷新周期(6.1 §5.9;默认 5s,
 	// TRAINCACHE_INDEX_REFRESH_INTERVAL 覆盖)。
 	IndexRefreshInterval time.Duration
@@ -153,6 +161,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	readStallWindowMS := envPositiveInt64Lenient(envReadStallWindowMS, defaultReadStallWindowMS)
 	indexRefreshInterval, err := envDuration(envIndexRefreshInterval, defaultIndexRefreshInterval)
 	if err != nil {
 		return nil, err
@@ -181,6 +190,7 @@ func Load() (*Config, error) {
 		ObjstoreSecure:                envBool("TRAINCACHE_OBJSTORE_SECURE"),
 		Heat:                          heat,
 		ReadStallMinWaitMS:            readStallMinWaitMS,
+		ReadStallWindowMS:             readStallWindowMS,
 		IndexRefreshInterval:          indexRefreshInterval,
 		ObjstoreProbeConditionalWrite: envBool(envObjstoreProbeConditionalWrite),
 		DebugAddr:                     debugAddr,
@@ -360,6 +370,16 @@ func envPositiveInt64(key string, def int64) (int64, error) {
 		return 0, fmt.Errorf("svc: %s=%d 非法(需 > 0)", key, n)
 	}
 	return n, nil
+}
+
+// envPositiveInt64Lenient 解析正整数 env,非法取值(非整数或 ≤0)回退默认值而不报错
+// (C3:TRAINCACHE_READ_STALL_WINDOW_MS 容错口径,配置错误不阻断启动)。
+func envPositiveInt64Lenient(key string, def int64) int64 {
+	n, err := envPositiveInt64(key, def)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // envPositiveInt 解析正整数 env(如校准滑动窗口)。

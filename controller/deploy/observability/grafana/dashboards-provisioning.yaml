@@ -1,0 +1,25 @@
+# Grafana 看板 provisioning:provider 指向 /var/lib/grafana/dashboards,
+# 该目录由 grafana-dashboards ConfigMap 挂载。只读,禁止 UI 改盘上文件。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provisioning
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: dashboards
+    app.kubernetes.io/part-of: traincache
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: traincache
+        orgId: 1
+        folder: TrainCache
+        type: file
+        disableDeletion: true
+        allowUiUpdates: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false

@@ -36,6 +36,7 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_HEAT_DISK_DELTA_PERCENT",
 		"TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT",
 		"TRAINCACHE_READ_STALL_MIN_WAIT_MS",
+		"TRAINCACHE_READ_STALL_WINDOW_MS",
 		"TRAINCACHE_INDEX_REFRESH_INTERVAL",
 		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
 	} {
@@ -126,6 +127,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ReadStallMinWaitMS != stallMinWaitMS {
 		t.Errorf("ReadStallMinWaitMS = %d, want %d(D47 默认)", cfg.ReadStallMinWaitMS, stallMinWaitMS)
+	}
+	if cfg.ReadStallWindowMS != defaultReadStallWindowMS {
+		t.Errorf("ReadStallWindowMS = %d, want %d(C3 默认)", cfg.ReadStallWindowMS, defaultReadStallWindowMS)
 	}
 	if cfg.IndexRefreshInterval != defaultIndexRefreshInterval {
 		t.Errorf("IndexRefreshInterval = %v, want %v(6.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
@@ -222,6 +226,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_HEAT_DISK_DELTA_PERCENT", "10")
 	t.Setenv("TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT", "95")
 	t.Setenv("TRAINCACHE_READ_STALL_MIN_WAIT_MS", "50")
+	t.Setenv("TRAINCACHE_READ_STALL_WINDOW_MS", "2500")
 
 	cfg, err := Load()
 	if err != nil {
@@ -279,6 +284,41 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.ReadStallMinWaitMS != 50 {
 		t.Errorf("ReadStallMinWaitMS = %d, want 50(TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖)", cfg.ReadStallMinWaitMS)
+	}
+	if cfg.ReadStallWindowMS != 2500 {
+		t.Errorf("ReadStallWindowMS = %d, want 2500(TRAINCACHE_READ_STALL_WINDOW_MS 覆盖)", cfg.ReadStallWindowMS)
+	}
+}
+
+// TestLoadReadStallWindowMS:C3 关联窗口三种情况——未设置取默认 5000ms、
+// 非法取值(非整数/非正)回退默认且不阻断启动、显式配置生效。
+func TestLoadReadStallWindowMS(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		set   bool
+		want  int64
+	}{
+		{name: "默认", want: defaultReadStallWindowMS},
+		{name: "非法非整数", set: true, value: "abc", want: defaultReadStallWindowMS},
+		{name: "非法非正", set: true, value: "0", want: defaultReadStallWindowMS},
+		{name: "显式配置", set: true, value: "1500", want: 1500},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			if tc.set {
+				t.Setenv("TRAINCACHE_READ_STALL_WINDOW_MS", tc.value)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v(非法窗口不应阻断启动)", err)
+			}
+			if cfg.ReadStallWindowMS != tc.want {
+				t.Fatalf("ReadStallWindowMS = %d, want %d", cfg.ReadStallWindowMS, tc.want)
+			}
+		})
 	}
 }
 

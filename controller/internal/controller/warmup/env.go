@@ -12,6 +12,7 @@ import (
 // webhook 在准入时写入；训练侧只读，缺失即降级为仅本地日志。
 const (
 	EnvTask              = "TRAINCACHE_TASK"                // <namespace>/<warmupTaskName>
+	EnvPod               = "TRAINCACHE_POD"                 // <namespace>/<podName>
 	EnvPodIndex          = "TRAINCACHE_POD_INDEX"           // 训练 Pod 序号
 	EnvDataset           = "TRAINCACHE_DATASET"             // <namespace>/<dataSetName>
 	EnvHookSock          = "TRAINCACHE_HOOK_SOCK"           // agent.sock 绝对路径
@@ -20,20 +21,26 @@ const (
 	DefaultHookSockPath = "/run/traincache/agent.sock"
 )
 
-// InjectDataloaderEnv 给 Pod 内每个容器补 DataLoader 契约要求的 5 个环境变量。
+// InjectDataloaderEnv 给 Pod 内每个容器补 DataLoader 契约要求的 6 个环境变量。
 // generation 取准入时的 task.Generation：Pod 的环境变量不可变，之后任务再更新，
 // 训练侧日志只能记启动值。已存在的同名变量保留原值，返回是否有改动。
+// Pod 名在准入阶段可能还没生成（generateName 场景），此时跳过 TRAINCACHE_POD，
+// 训练侧回退到主机名，其余变量照常注入。
 func InjectDataloaderEnv(pod *corev1.Pod, task *traincachev1alpha1.WarmupTask, index int32) bool {
 	if pod == nil || task == nil {
 		return false
 	}
-	values := []corev1.EnvVar{
-		{Name: EnvTask, Value: TaskKey(task)},
-		{Name: EnvPodIndex, Value: strconv.FormatInt(int64(index), 10)},
-		{Name: EnvDataset, Value: dataSetRefKey(pod.Namespace, task.Spec.DataSetRef.Name)},
-		{Name: EnvHookSock, Value: DefaultHookSockPath},
-		{Name: EnvGenerationAtStart, Value: strconv.FormatInt(task.Generation, 10)},
+	values := make([]corev1.EnvVar, 0, 6)
+	if pod.Name != "" {
+		values = append(values, corev1.EnvVar{Name: EnvPod, Value: dataSetRefKey(pod.Namespace, pod.Name)})
 	}
+	values = append(values,
+		corev1.EnvVar{Name: EnvTask, Value: TaskKey(task)},
+		corev1.EnvVar{Name: EnvPodIndex, Value: strconv.FormatInt(int64(index), 10)},
+		corev1.EnvVar{Name: EnvDataset, Value: dataSetRefKey(pod.Namespace, task.Spec.DataSetRef.Name)},
+		corev1.EnvVar{Name: EnvHookSock, Value: DefaultHookSockPath},
+		corev1.EnvVar{Name: EnvGenerationAtStart, Value: strconv.FormatInt(task.Generation, 10)},
+	)
 	changed := false
 	for i := range pod.Spec.Containers {
 		for _, v := range values {

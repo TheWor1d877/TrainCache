@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	agentpb "traincache/agent/api/agentpb"
+	corelog "traincache/core/logging"
 )
 
 // Error classes separate retryable transport failures from protocol errors
@@ -138,6 +141,7 @@ func (p *GRPCPool) call(ctx context.Context, node string, fn func(context.Contex
 	}
 	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	callCtx = injectRequestMeta(callCtx)
 
 	classified := classify(ctx, fn(callCtx, agentpb.NewPreheatServiceClient(conn)))
 	if errors.Is(classified, ErrAgentUnavailable) {
@@ -146,6 +150,26 @@ func (p *GRPCPool) call(ctx context.Context, node string, fn func(context.Contex
 		p.drop(node)
 	}
 	return classified
+}
+
+// injectRequestMeta 把 ctx 里的请求身份写进 outgoing metadata（docs/8.1 §5）。
+// 空值不写，避免无意义的高基数空串出现在 Agent 侧日志里。
+func injectRequestMeta(ctx context.Context) context.Context {
+	meta := corelog.RequestMetaFrom(ctx)
+	pairs := make([]string, 0, 6)
+	if meta.RequestID != "" {
+		pairs = append(pairs, corelog.MetadataKeyRequestID, meta.RequestID)
+	}
+	if meta.TaskID != "" {
+		pairs = append(pairs, corelog.MetadataKeyTask, meta.TaskID)
+	}
+	if meta.Generation != 0 {
+		pairs = append(pairs, corelog.MetadataKeyGeneration, strconv.FormatUint(meta.Generation, 10))
+	}
+	if len(pairs) == 0 {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, pairs...)
 }
 
 func (p *GRPCPool) conn(ctx context.Context, node string) (*grpc.ClientConn, error) {

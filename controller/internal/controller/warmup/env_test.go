@@ -23,7 +23,7 @@ func TestInjectDataloaderEnvFillsAllContainers(t *testing.T) {
 		Spec:       traincachev1alpha1.WarmupTaskSpec{DataSetRef: corev1.LocalObjectReference{Name: "coco"}},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "train"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "train", Name: "trainer-0"},
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "trainer"}, {Name: "sidecar"}}},
 	}
 
@@ -32,6 +32,7 @@ func TestInjectDataloaderEnvFillsAllContainers(t *testing.T) {
 	}
 	want := map[string]string{
 		EnvTask:              "train/warm",
+		EnvPod:               "train/trainer-0",
 		EnvPodIndex:          "3",
 		EnvDataset:           "train/coco",
 		EnvHookSock:          "/run/traincache/agent.sock",
@@ -66,6 +67,27 @@ func TestInjectDataloaderEnvKeepsExistingValues(t *testing.T) {
 	}
 	if InjectDataloaderEnv(pod, task, 0) {
 		t.Fatalf("重复注入报告了改动")
+	}
+}
+
+// 准入阶段 generateName 还没生成名字：跳过 TRAINCACHE_POD，其余照常注入。
+func TestInjectDataloaderEnvSkipsPodWithoutName(t *testing.T) {
+	task := &traincachev1alpha1.WarmupTask{
+		ObjectMeta: metav1.ObjectMeta{Name: "warm", Namespace: "train", Generation: 1},
+		Spec:       traincachev1alpha1.WarmupTaskSpec{DataSetRef: corev1.LocalObjectReference{Name: "coco"}},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "train", GenerateName: "trainer-"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "trainer"}}},
+	}
+
+	InjectDataloaderEnv(pod, task, 0)
+	got := envMap(pod.Spec.Containers[0].Env)
+	if _, ok := got[EnvPod]; ok {
+		t.Fatalf("Pod 名为空时注入了 %s=%q", EnvPod, got[EnvPod])
+	}
+	if got[EnvTask] != "train/warm" {
+		t.Fatalf("%s = %q, want train/warm", EnvTask, got[EnvTask])
 	}
 }
 

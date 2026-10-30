@@ -8,6 +8,8 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	agentlog "traincache/agent/internal/logging"
 )
 
 // ordersource 格式错误 counter 的固定维度(decisions D23:counter,labels=["reason"]∈{magic,version};
@@ -122,9 +124,16 @@ type Registry struct {
 	// R4(6.1 §5.12):对象存储条件写探测结果(0/1,无标签)。
 	objectstoreConditionalWriteSupported prometheus.Gauge
 
-	// mu 保护 synced:Prometheus counter 只能增,Sync 以"上次同步的绝对值"为基线做增量 Add。
-	mu     sync.Mutex
-	synced [2]int64 // [magic, version] 上次同步的绝对值
+	// D63 订单通道(6.1 §7.4):每源状态计数、源回收与丢单计数。
+	ordersourceStates *prometheus.GaugeVec   // node,state∈{discovered,healthy,stalled}
+	ordersourceEnded  *prometheus.CounterVec // node,reason∈{missing_ttl,stale_file}
+	ordersDropped     *prometheus.CounterVec // reason∈{resync,corrupt,invalid}
+
+	// mu 保护 synced/droppedSynced:Prometheus counter 只能增,Sync 以"上次同步的绝对值"
+	// 为基线做增量 Add。
+	mu            sync.Mutex
+	synced        [2]int64 // [magic, version] 上次同步的绝对值
+	droppedSynced [3]int64 // [resync, corrupt, invalid] 上次同步的绝对值
 
 	// muCacheRatio 保护 cacheRatio:cache_hit_ratio gauge 由 Registry 内部计数
 	// (按归一化 dataset + phase 记 hits/misses)维护,两 Observe 方法每次调用即时更新。
@@ -188,7 +197,41 @@ func New(cfg Config) *Registry {
 	r.initSevenLine()
 	// M8/D44 与 M9/D46~D48 新增 9 个 family。
 	r.initHooksAndEvidence()
+	// D63 订单通道 3 个 family。
+	r.initOrderChannel()
+	// 日志采样/限流丢弃计数(8.1 §3.3):logging.New 已构造进程采样器时才挂
+	// Collector,未初始化(如指标包单测)时注册表不多出空 family。
+	if sampler := agentlog.Sampler(); sampler != nil {
+		r.reg.MustRegister(NewLogDroppedCollector(sampler))
+	}
 	return r
+}
+
+// initOrderChannel 构造并注册订单通道 family(D63/§7.4),三个 state、两个 ended reason
+// 与三个 dropped reason 全部预置为 0(自启动即在 /metrics 可见)。
+func (r *Registry) initOrderChannel() {
+	r.ordersourceStates = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: ordersourceStatesName,
+		Help: "订单通道路数按状态计数(state=discovered|healthy|stalled;design §7.4/D63)",
+	}, []string{"node", "state"})
+	r.ordersourceEnded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ordersourceEndedName,
+		Help: "订单源回收累计次数(reason=missing_ttl|stale_file;design §7.4/D63)",
+	}, []string{"node", "reason"})
+	r.ordersDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: ordersDroppedName,
+		Help: "订单通道丢单累计次数(reason=resync|corrupt|invalid;design §7.4/D63)",
+	}, []string{"reason"})
+	r.reg.MustRegister(r.ordersourceStates, r.ordersourceEnded, r.ordersDropped)
+	for _, state := range orderSourceLabels {
+		r.ordersourceStates.WithLabelValues(r.node, state).Set(0)
+	}
+	for _, reason := range orderEndedLabels {
+		r.ordersourceEnded.WithLabelValues(r.node, reason)
+	}
+	for _, reason := range orderDroppedLabel {
+		r.ordersDropped.WithLabelValues(reason)
+	}
 }
 
 // DatasetLabel 返回 dataset 标签值:白名单命中返回原名,否则 "other"(§5.8/§6.5)。

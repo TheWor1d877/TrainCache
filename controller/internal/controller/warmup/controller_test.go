@@ -116,16 +116,17 @@ func (p *fakeAgentPool) Progress(_ context.Context, node, taskID string, _ uint6
 	if seq == 0 {
 		seq = 1
 	}
-	bitmap := make([]byte, bitmapBytes(task.chunks))
+	bitmap := make([]byte, (task.chunks+7)/8)
 	for i := 0; i < int(task.ready) && i < task.chunks; i++ {
 		bitmap[i/8] |= 1 << uint(i%8)
 	}
 	return &agentpb.PreheatStatus{
-		Generation:  task.generation,
-		Seq:         seq,
-		ReadyBitmap: bitmap,
-		State:       agentpb.PreheatStatus_RUNNING,
-		Canceled:    task.canceled,
+		Generation:   task.generation,
+		Seq:          seq,
+		ReadyBitmap:  bitmap,
+		WindowBlocks: uint32(task.chunks),
+		State:        agentpb.PreheatStatus_RUNNING,
+		Canceled:     task.canceled,
 	}, nil
 }
 
@@ -646,6 +647,29 @@ func TestReconcilePodSetMismatch(t *testing.T) {
 	}
 	if cond := metaCondition(getTask(t, c), ConditionPodSetMismatch); cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("PodSetMismatch condition = %#v", cond)
+	}
+}
+
+// M4 wide preheat runs before the training Pods exist; zero matches is the
+// expected pre-creation state, so the condition must be cleared, not set (D48).
+func TestReconcilePodSetEmptyClearsMismatch(t *testing.T) {
+	task := fixtureTask(2, 1, [][]int32{{0, 1}, {2, 3}})
+	task.Status.Conditions = []metav1.Condition{{
+		Type:               ConditionPodSetMismatch,
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonPodSetMismatch,
+		Message:            "target Pod set has 0 Pods, spec.podCount is 2",
+		LastTransitionTime: metav1.Now(),
+	}}
+	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1"})
+	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"))
+	r := &Reconciler{Client: c, Agents: &fakeAgentPool{}}
+
+	if err := reconcile(t, r); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if cond := metaCondition(getTask(t, c), ConditionPodSetMismatch); cond != nil {
+		t.Fatalf("PodSetMismatch condition = %#v, want removed", cond)
 	}
 }
 

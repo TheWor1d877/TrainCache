@@ -12,6 +12,7 @@ import (
 
 	"traincache/agent/collector"
 	"traincache/agent/evictor"
+	"traincache/agent/logagg"
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/agent/prefetch"
@@ -43,8 +44,8 @@ const defaultEvictPolicy = "heat"
 const selfOpenGuardTTL = 3 * time.Second
 
 // Agent 是 svc 装配产物:持有配置与各子模块实例(design §3:svc 是装配层;D34 导出字段
-// 供接线测试与探针注入)。collector 例外:它绑单个 ring,在首个 ring 被发现时才构造
-// (§5.5;冻结构造签名不允许换绑),构造后经 Collector 字段发布(见 wire.go)。
+// 供接线测试与探针注入)。collector 装配期构造,订单上下文由 provider 注入(D63),
+// 不再绑 ring。
 type Agent struct {
 	Cfg         Config
 	Metrics     *metrics.Registry
@@ -55,9 +56,12 @@ type Agent struct {
 	Fetcher     *fetch.Fetcher       // 回源取数(D34)
 	ObjectStore objectstore.Store    // 对象存储(装配注入点:生产 S3 兼容后端 / 测试 Mock)
 	Rescan      *rescan.Rescanner    // 重扫描与坏块修复(M4/D35)
-	Collector   *collector.Collector // 采集层(M5;首个 ring 发现时绑定,之前为 nil)
+	Collector   *collector.Collector // 采集层(M5/D63;装配期构造,StartBackground 启动)
 	Evictor     *evictor.Evictor     // 磁盘淘汰循环(M6/§7.6)
 	HookSock    *HookSock            // 钩子收端(M5/§5.4)
+	// LogAgg 是 60s 汇总日志聚合器(8.1 §3.3/§4.2):下载与缓存两类汇总共用一条
+	// ticker,由 StartBackground 启动;nil 表示不记汇总(仅测试装配)。
+	LogAgg *logagg.Aggregator
 	// ReaderRegistry 是 R2 读者登记器(6.1 §5.10):声明本节点跟随的 snapID,
 	// 供 GC 按读者确认删除。装配期构造,StartBackground 起心跳。
 	ReaderRegistry *index.ReaderRegistry
@@ -69,11 +73,6 @@ type Agent struct {
 	// M9 阶段/归因骨架(D46/D47;装配期构造,业务逻辑由 M9 填写)。
 	phase *phaseTracker
 	stall *stallAttributor
-
-	// collMu 保护 Collector/ring/ringPod 的懒绑定(collector 与其 ring 同时发布)。
-	collMu  sync.Mutex
-	ring    *ordersource.Reader // collector 所绑 ring(首个发现的;不换绑)
-	ringPod string              // 所绑 ring 的 pod-uid(日志用)
 }
 
 // Assemble 构造并持有子模块实例(依赖方向 cmd → svc → 子模块 → core 单向无环,design §4):
@@ -125,11 +124,15 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		DatasetWhitelist: cfg.DatasetWhitelist,
 		Node:             cfg.NodeName.String(),
 	})
+	// 8.1 §3.3/§4.2:逐块下载与缓存命中共用一个 60s 汇总聚合器(单 ticker);
+	// 逐块明细走 Debug 采样,Info 只留窗口汇总。
+	ag.LogAgg = logagg.New(logagg.Options{Verify: cfg.Verify})
 
 	// M9/D46 阶段跟踪器(窗口 K 取 lookahead)。
 	ag.phase = newPhaseTracker(lookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
 	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
+	ag.Prefetch.SetLogAggregator(ag.LogAgg)   // 8.1 §4.2:逐块下载计入 60s 汇总
 	// R1/R2(6.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
 	// 与 core ReaderGrace 默认口径一致)。Follow/心跳由 StartBackground 注入 ctx 后启动。
 	interval := cfg.indexRefreshInterval()
@@ -154,13 +157,23 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	})
 	// M9/D47 归因依赖:本地存在性 + 预取 pending/当前窗口(桩返回 false,逻辑由 M9 填写)。
 	ag.stall = newStallAttributorWithThreshold(ag.stallLocalExists, ag.stallInflight,
-		ag.stallCurrentWindow, cfg.ReadStallMinWaitMS)
+		ag.stallCurrentWindow, cfg.ReadStallMinWaitMS, cfg.ReadStallWindowMS)
 	ag.Preheat = NewPreheatTasks(cfg, ag.Prefetch)
+	ag.Preheat.SetLogAggregator(ag.LogAgg) // 任务结束提前输出下载汇总
 	// 读时坏块修复(D35)与块完成触达(D24/D28)接线(实现见 wire.go)。
 	ag.Prefetch.SetBlockDoneHook(ag.onBlockDone)
 	ag.Prefetch.SetCorruptRepairHook(ag.repairCorrupt)
 	// 新订单到达 → 刷新订单内块 t_touch(§7.6 任务 4;实现见 instrument.go/wire.go)。
 	ag.Prefetch.SetOrderTouchHook(ag.onOrderTouch)
+
+	// 采集层(D63/§5.5):装配期构造,订单上下文经 provider 注入,不再绑 ring;
+	// Start 由 StartBackground 在 signal ctx 下调用(无 ring 也照常统计)。
+	ag.Collector = collector.NewCollector(cfg.CacheRoot, ag.Metrics, collectorConfig(cfg.Heat))
+	ag.Collector.SetOrderContextProvider(ag.orderContext)
+	ag.Collector.SetAdvanceCallback(ag.onCalibratedAdvance)
+	ag.Collector.SetOpenCallback(ag.onInotifyOpen)
+	ag.Collector.SetOpenFilter(ag.selfOpen.SelfOpened)
+	ag.Collector.SetLogAggregator(ag.LogAgg) // 8.1 §4.2:命中/未命中计入 60s 汇总
 
 	// 重扫描(M4/D35):catalogFor 与预取管理器共用同一 bundle(同一 dataset 一个 Catalog)。
 	ag.Rescan = rescan.New(cs, ag.Fetcher, obj, ag.catalogFor, rescanMetrics{ag.Metrics})
@@ -197,9 +210,8 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	})
 
 	// 发现循环由 agentd 在 signal ctx 下起 goroutine 运行(M2);handler = M2 日志行 + 预取
-	// 接线(M3);首个 ring 发现 → collector 绑定(M5,见 wire.go bindCollector)。
+	// 接线(M3);订单通道状态由发现循环单写者聚合(D63)。
 	ag.Orders = NewOrderDiscovery(cfg.OrdersDir, ag.Metrics, HandleOrder(ag.Prefetch))
-	ag.Orders.SetOnReader(ag.bindCollector)
 	return ag, nil
 }
 
@@ -245,6 +257,7 @@ type PrefetchManager struct {
 	fetcher  *fetch.Fetcher
 	m        *metrics.Registry
 	selfOpen *prefetch.SelfOpenGuard // D49 自打开守卫(SetSelfOpenGuard 注入;m.mu 保护)
+	logAgg   *logagg.Aggregator      // 60s 汇总聚合器(SetLogAggregator 注入;m.mu 保护)
 
 	baseCtx context.Context // 预取器调度生命周期(Close 取消)
 	cancel  context.CancelFunc
@@ -268,6 +281,13 @@ type PrefetchManager struct {
 	// p0Mu/p0Pending 记录 P0 在途块(ForPreheat 入队成功登记、完成回调移出;§7.6 硬保护)。
 	p0Mu      sync.Mutex
 	p0Pending map[p0Ref]int
+
+	// orderMu 保护最近一次成功安装的订单(D63:钩子 stage_switch 帧不带 dataset,
+	// 以其为基底构造下一单;无订单上下文时丢弃帧)。
+	orderMu    sync.Mutex
+	lastPodUID string
+	lastOrder  ordersource.ConsumeOrder
+	hasLast    bool
 
 	// phase 是 M9/D46 阶段跟踪器(装配期注入;各 dataset 的 OnStageSwitch 回调共用)。
 	phase *phaseTracker
@@ -328,6 +348,14 @@ func NewPrefetchManager(store objectstore.Store, cs *cas.Store, f *fetch.Fetcher
 func (m *PrefetchManager) SetSelfOpenGuard(g *prefetch.SelfOpenGuard) {
 	m.mu.Lock()
 	m.selfOpen = g
+	m.mu.Unlock()
+}
+
+// SetLogAggregator 注入 60s 汇总聚合器(装配期在首个 bundle 构造前调用一次)。
+// 传 nil 解除。m.mu 串行化,bundleFor 在同一锁下读取。
+func (m *PrefetchManager) SetLogAggregator(a *logagg.Aggregator) {
+	m.mu.Lock()
+	m.logAgg = a
 	m.mu.Unlock()
 }
 
@@ -486,6 +514,7 @@ func (m *PrefetchManager) bundleFor(dataset string, initialPrefixes []string) *d
 	pf := prefetch.New(cat, m.fetcher, m.cs, m.m, prefetch.Config{
 		Lookahead:     lookahead,
 		SelfOpenGuard: m.selfOpen, // D49:本地命中/读回/ETA 探测打开前 Mark
+		LogAgg:        m.logAgg,   // 8.1 §4.2:逐块下载/校验计入 60s 汇总
 		OnP0Done: func(ref prefetch.ChunkRef, err error) {
 			// 完成即移出 P0 在途保护表(在分发预热状态机之前,保持保护表新鲜)。
 			m.removeP0Ref(dataset, ref)
@@ -535,6 +564,81 @@ func (m *PrefetchManager) bundleNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// orderSnapshot 返回该 dataset 当前订单(无订单/空订单 → false)。
+func (b *datasetBundle) orderSnapshot() (ordersource.ConsumeOrder, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.hasOrder || len(b.lastOrder.Chunks) == 0 {
+		return ordersource.ConsumeOrder{}, false
+	}
+	return b.lastOrder, true
+}
+
+// orderContext 解析打开事件的订单上下文(D63/collector provider):
+//   - ref 非空:按已知 dataset 的 Catalog 查块归属该 dataset,再取该 dataset 当前订单;
+//     索引未命中时回退扫描各 dataset 当前订单的 chunks(订单刚装、分片未加载的窗口);
+//   - ref 为空(inotify):按指纹反查各 dataset 当前订单的候选块引用。
+//
+// 返回 dataset + 该 dataset 的 StageID/订单;有 dataset 但无订单时 ok=false,
+// 完全无归属时 dataset 为空。只走 existingBundle,不触发 bundle 构造(避免采集侧副作用)。
+func (m *PrefetchManager) orderContext(ref ordersource.ChunkRef, fp cas.Fingerprint) (dataset, stage string, order ordersource.ConsumeOrder, ok bool) {
+	if ref.Path != "" {
+		for _, ds := range m.bundleNames() {
+			b, exists := m.existingBundle(ds)
+			if !exists {
+				continue
+			}
+			if _, found, err := b.catalog.Lookup(context.Background(), ref.Path, ref.Chunk); err != nil || !found {
+				continue
+			}
+			if o, has := b.orderSnapshot(); has {
+				return ds, o.StageID, o, true
+			}
+			return ds, "", ordersource.ConsumeOrder{}, false
+		}
+		for _, ds := range m.bundleNames() {
+			b, exists := m.existingBundle(ds)
+			if !exists {
+				continue
+			}
+			if o, has := b.orderSnapshot(); has {
+				for _, c := range o.Chunks {
+					if c == ref {
+						return ds, o.StageID, o, true
+					}
+				}
+			}
+		}
+		return "", "", ordersource.ConsumeOrder{}, false
+	}
+	if fp == (cas.Fingerprint{}) {
+		return "", "", ordersource.ConsumeOrder{}, false
+	}
+	for _, ds := range m.bundleNames() {
+		b, exists := m.existingBundle(ds)
+		if !exists {
+			continue
+		}
+		if refs := b.lookupFingerprint(context.Background(), fp); len(refs) > 0 {
+			if o, has := b.orderSnapshot(); has {
+				return ds, o.StageID, o, true
+			}
+			return ds, "", ordersource.ConsumeOrder{}, false
+		}
+	}
+	return "", "", ordersource.ConsumeOrder{}, false
+}
+
+// lastInstalled 返回最近一次成功安装的订单及其 pod-uid(无 → false)。
+func (m *PrefetchManager) lastInstalled() (podUID string, o ordersource.ConsumeOrder, ok bool) {
+	m.orderMu.Lock()
+	defer m.orderMu.Unlock()
+	if !m.hasLast {
+		return "", ordersource.ConsumeOrder{}, false
+	}
+	return m.lastPodUID, m.lastOrder, true
 }
 
 // lookupRef 在指定 dataset 的 Catalog 中查块(内存查询;映射未加载 → ErrNoCurrent / false)。
@@ -739,6 +843,12 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	if err != nil {
 		return err
 	}
+	// D63:记住最近一次成功安装的非空订单,供钩子 stage_switch 帧做基底(帧不带 dataset)。
+	if len(o.Chunks) > 0 {
+		m.orderMu.Lock()
+		m.lastPodUID, m.lastOrder, m.hasLast = podUID, o, true
+		m.orderMu.Unlock()
+	}
 	// ④ 新 ConsumeOrder 到达:刷新订单内块 t_touch(§7.6 任务 4;消费窗口保护——订单
 	// 安装成功后刷新,空 chunks 跳过;Lookup 未命中/collector 未绑定由钩子内跳过)。
 	if len(o.Chunks) > 0 {
@@ -771,6 +881,12 @@ func (m *PrefetchManager) PreheatScope() (context.Context, context.CancelFunc) {
 // ctx 是本次请求的生存期(取消则拒绝入队);work 是这批块的下载作用域,取消 work 即撤回
 // 尚未完成的块(D62),须来自 PreheatScope。阶段绑定与在途保护按 work 走。
 func (m *PrefetchManager) ForPreheat(ctx, work context.Context, dataset string, refs []prefetch.ChunkRef) error {
+	return m.ForPreheatTask(ctx, work, "", dataset, refs)
+}
+
+// ForPreheatTask 与 ForPreheat 同语义,额外携带预热任务 ID(进 60s 下载汇总的
+// task_id 分组,任务结束可提前输出);空 taskID 与 ForPreheat 完全等价。
+func (m *PrefetchManager) ForPreheatTask(ctx, work context.Context, taskID, dataset string, refs []prefetch.ChunkRef) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -787,7 +903,7 @@ func (m *PrefetchManager) ForPreheat(ctx, work context.Context, dataset string, 
 		b.started = true
 		b.prefetcher.Start(m.baseCtx)
 	}
-	if err := b.prefetcher.EnqueueP0Scoped(ctx, work, refs); err != nil {
+	if err := b.prefetcher.EnqueueP0ScopedTask(ctx, work, taskID, refs); err != nil {
 		return err
 	}
 	// 入队成功即登记 P0 在途硬保护(§7.6;完成回调移出)。

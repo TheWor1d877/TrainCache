@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 
+	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/agent/prefetch"
 	"traincache/core/cas"
@@ -26,22 +27,54 @@ import (
 // (每帧一次;该指标统计的是帧,不是回源路径),demand 补块动作异步执行(不阻塞钩子
 // 读循环)。reason 已由 hooksock 归一为 absent|corrupt。
 func (a *Agent) handleReadMiss(ref ordersource.ChunkRef, reason string) {
+	a.handleReadMissMeta(ref, reason, HookMeta{})
+}
+
+// handleReadMissMeta 是带帧任务身份的读 miss 入口(C6):身份仅进日志,不影响补块语义;
+// 帧缺省字段为零值,与 handleReadMiss 完全等价。
+func (a *Agent) handleReadMissMeta(ref ordersource.ChunkRef, reason string, m HookMeta) {
 	if a.Metrics != nil {
 		a.Metrics.ObserveHookReadMiss(reason)
 	}
-	go a.backfill(ref)
+	// 8.1 §4.2:read_miss 只进 60s 汇总与 Debug 明细,不逐帧写 Info;dataset/phase 与
+	// 命中打点同源(帧身份优先,缺省回退当前订单归属)。
+	if a.LogAgg != nil {
+		dataset := m.Dataset
+		if dataset == "" && a.Prefetch != nil {
+			dataset, _ = a.resolveDataset(ref)
+		}
+		phase := metrics.PhaseUnknown
+		if a.phase != nil {
+			phase = a.phase.Current(dataset)
+		}
+		a.LogAgg.ObserveReadMiss(dataset, ref.Chunk, reason, phase)
+	}
+	go a.backfill(ref, m)
+}
+
+// hookMetaAttrs 返回补块日志的任务身份字段(帧缺省时为零值;task_id 由 Agent 侧反查,
+// 不在帧里)。
+func hookMetaAttrs(m HookMeta) []any {
+	return []any{
+		"warmup_task", m.WarmupTask,
+		"pod", m.Pod,
+		"pod_index", m.PodIndex,
+		"generation", m.Generation,
+	}
 }
 
 // backfill 执行一次 demand 按需补块(后台 goroutine;best-effort)。
-func (a *Agent) backfill(ref ordersource.ChunkRef) {
+func (a *Agent) backfill(ref ordersource.ChunkRef, m HookMeta) {
 	if a.Prefetch == nil || a.CS == nil {
-		slog.Warn("backfill: 装配缺失,跳过补块", "path", ref.Path, "chunk", ref.Chunk)
+		slog.Warn("backfill: 装配缺失,跳过补块",
+			append(hookMetaAttrs(m), "path", ref.Path, "chunk", ref.Chunk)...)
 		return
 	}
 	dataset, ok := a.resolveDataset(ref)
 	if !ok {
 		// 无 ring 订单且无已知 bundle:数据集归属都定不出来,D25 键无从拼接,记日志返回。
-		slog.Warn("backfill: 块引用无已知 dataset 归属,跳过补块", "path", ref.Path, "chunk", ref.Chunk)
+		slog.Warn("backfill: 块引用无已知 dataset 归属,跳过补块",
+			append(hookMetaAttrs(m), "path", ref.Path, "chunk", ref.Chunk)...)
 		return
 	}
 
@@ -61,30 +94,30 @@ func (a *Agent) backfill(ref ordersource.ChunkRef) {
 		_ = br.Close()
 		return // 本地命中:无需补块
 	case errors.Is(err, cas.ErrCorrupt):
-		a.repairBackfillCorrupt(ctx, dataset, entry.Fingerprint, ref)
+		a.repairBackfillCorrupt(ctx, dataset, entry.Fingerprint, ref, m)
 	case errors.Is(err, cas.ErrNotFound):
 		a.enqueueBackfillP0(dataset, ref)
 	default:
 		slog.Warn("backfill: 本地块打开失败,跳过补块",
-			"dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err)
+			append(hookMetaAttrs(m), "dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err, "err_class", errClass(err))...)
 	}
 }
 
 // repairBackfillCorrupt 执行 repair 坏块修复(D44/D35):Quarantine + Rescan.RepairOne。
-func (a *Agent) repairBackfillCorrupt(ctx context.Context, dataset string, fp cas.Fingerprint, ref ordersource.ChunkRef) {
+func (a *Agent) repairBackfillCorrupt(ctx context.Context, dataset string, fp cas.Fingerprint, ref ordersource.ChunkRef, m HookMeta) {
 	if err := a.CS.Quarantine(fp); err != nil {
 		slog.Warn("backfill: 隔离坏块失败",
-			"dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "fp", fp, "err", err)
+			append(hookMetaAttrs(m), "dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "fp", fp, "err", err, "err_class", errClass(err))...)
 		return
 	}
 	if a.Rescan == nil {
 		slog.Warn("backfill: 未装配重扫描修复器,坏块仅隔离",
-			"dataset", dataset, "path", ref.Path, "chunk", ref.Chunk)
+			append(hookMetaAttrs(m), "dataset", dataset, "path", ref.Path, "chunk", ref.Chunk)...)
 		return
 	}
 	if _, err := a.Rescan.RepairOne(ctx, dataset, ref); err != nil {
 		slog.Warn("backfill: 坏块修复失败",
-			"dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err)
+			append(hookMetaAttrs(m), "dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err, "err_class", errClass(err))...)
 	}
 }
 
@@ -99,7 +132,7 @@ func (a *Agent) enqueueBackfillP0(dataset string, ref ordersource.ChunkRef) {
 	if !b.stageSeen {
 		if _, err := b.prefetcher.OnStageSwitch(ctx, ordersource.ConsumeOrder{Dataset: dataset}); err != nil {
 			b.mu.Unlock()
-			slog.Warn("backfill: 绑定 dataset 失败,跳过补块", "dataset", dataset, "err", err)
+			slog.Warn("backfill: 绑定 dataset 失败,跳过补块", "dataset", dataset, "err", err, "err_class", errClass(err))
 			return
 		}
 		b.stageSeen = true
@@ -111,6 +144,6 @@ func (a *Agent) enqueueBackfillP0(dataset string, ref ordersource.ChunkRef) {
 	err := b.prefetcher.EnqueueP0Demand(ctx, []prefetch.ChunkRef{ref})
 	b.mu.Unlock()
 	if err != nil {
-		slog.Warn("backfill: demand P0 入队失败", "dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err)
+		slog.Warn("backfill: demand P0 入队失败", "dataset", dataset, "path", ref.Path, "chunk", ref.Chunk, "err", err, "err_class", errClass(err))
 	}
 }

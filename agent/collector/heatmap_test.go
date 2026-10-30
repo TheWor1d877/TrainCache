@@ -20,7 +20,7 @@ import (
 
 // TestDecayFactorAndAge:周期衰减 h × factor;超过 HeatDecayAge 未 touch 直接置 0。
 func TestDecayFactorAndAge(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fpA, fpB := testFP(0xb1), testFP(0xb2)
 	env.c.Open(fpA, ordersource.ChunkRef{})
 	env.c.Open(fpB, ordersource.ChunkRef{})
@@ -44,7 +44,7 @@ func TestDecayFactorAndAge(t *testing.T) {
 
 // TestDecayCustomConfig:自定义衰减因子与超龄(≤0 取默认;>0 生效)。
 func TestDecayCustomConfig(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{HeatDecayFactor: 0.25, HeatDecayAge: time.Hour})
+	env := newTestEnv(t, CollectorConfig{HeatDecayFactor: 0.25, HeatDecayAge: time.Hour})
 	fp := testFP(0xb3)
 	env.c.Open(fp, ordersource.ChunkRef{})
 
@@ -63,7 +63,7 @@ func TestDecayCustomConfig(t *testing.T) {
 
 // TestDecayLoopWiring:Start 起周期衰减循环(HeatDecayInterval 生效)。
 func TestDecayLoopWiring(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{HeatDecayInterval: 20 * time.Millisecond})
+	env := newTestEnv(t, CollectorConfig{HeatDecayInterval: 20 * time.Millisecond})
 	env.start()
 	fp := testFP(0xb4)
 	env.c.Open(fp, ordersource.ChunkRef{})
@@ -76,7 +76,7 @@ func TestDecayLoopWiring(t *testing.T) {
 
 // TestDumpLoadRoundTrip:dump 原子落盘、JSON 格式(§6.4)与启动恢复(Load 还原热度/计数/t_touch)。
 func TestDumpLoadRoundTrip(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fp1, fp2 := testFP(0xc1), testFP(0xc2)
 	env.c.Open(fp1, ordersource.ChunkRef{})
 	env.c.Open(fp1, ordersource.ChunkRef{}) // access_count = 2
@@ -128,7 +128,7 @@ func TestDumpLoadRoundTrip(t *testing.T) {
 	}
 
 	// 启动恢复:新 Collector.Load 还原(秒级时间戳)。
-	c2 := NewCollector(env.dir, nil, env.m, CollectorConfig{})
+	c2 := NewCollector(env.dir, env.m, CollectorConfig{})
 	if err := c2.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestDumpLoadRoundTrip(t *testing.T) {
 
 // TestLoadMissingFile:文件缺失(首次启动)→ 空表 + nil(容错口径)。
 func TestLoadMissingFile(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	env.c.Open(testFP(0xc3), ordersource.ChunkRef{}) // 内存先有条目
 	if err := env.c.Load(); err != nil {
 		t.Fatalf("缺失文件 Load = %v, want nil", err)
@@ -167,7 +167,7 @@ func TestLoadMissingFile(t *testing.T) {
 // version 非预期告警但按同字段读取。
 func TestLoadCorruptFile(t *testing.T) {
 	t.Run("非法 JSON", func(t *testing.T) {
-		env := newTestEnv(t, nil, CollectorConfig{})
+		env := newTestEnv(t, CollectorConfig{})
 		if err := os.WriteFile(filepath.Join(env.dir, heatmapFileName), []byte("{{{ not json"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +183,7 @@ func TestLoadCorruptFile(t *testing.T) {
 	})
 
 	t.Run("单条非法指纹跳过且 version 宽容", func(t *testing.T) {
-		env := newTestEnv(t, nil, CollectorConfig{})
+		env := newTestEnv(t, CollectorConfig{})
 		fp := testFP(0xc4)
 		body := `{"version":77,"dumped_at":"2026-10-15T00:00:00Z","entries":{` +
 			`"` + strings.Repeat("g", 32) + `":{"heat":0.5},` +
@@ -213,7 +213,7 @@ func TestLoadCorruptFile(t *testing.T) {
 // TestWatchBlocksCountsOpenEvent:inotify 端到端——Start 时既有分片目录的块文件被打开
 // (O_RDONLY) → 兜底打开事件计入热度/命中率;tmp- 临时文件与非法名不计入。
 func TestWatchBlocksCountsOpenEvent(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	fp := testFP(0xd1)
 	path := writeLocalBlock(t, env.dir, fp) // Start 前落盘:分片目录在监听初始化时已存在
 	env.start()
@@ -259,7 +259,7 @@ func TestWatchBlocksCountsOpenEvent(t *testing.T) {
 // TestWatchBlocksNewShardDir:Start 之后新建的分片子目录由其 CREATE 事件补挂 watch,
 // 随后的打开事件被捕获(§5.5 inotify 兜底动态增删 watch)。
 func TestWatchBlocksNewShardDir(t *testing.T) {
-	env := newTestEnv(t, nil, CollectorConfig{})
+	env := newTestEnv(t, CollectorConfig{})
 	env.start()
 	fp := testFP(0xd2)
 	path := writeLocalBlock(t, env.dir, fp) // Start 后:根 watch 收 CREATE → 补挂分片目录

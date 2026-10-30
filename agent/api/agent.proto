@@ -84,6 +84,7 @@ message PreheatStatus {
   // Cancel 只标记取消、不删除任务，因此「我持有」不等于「还在干活」。
   // Controller 的分配差异据此判断被重新选中的节点需要重新 Submit。
   bool canceled = 15;       // 已收到 CancelPreheat 且未被重新 Submit
+  uint32 window_blocks = 16;  // 当前窗口块数 = len(chunks)；Controller 据此判定窗口未变化
 }
 
 // 8.x 增量:窗口全量更新(chunks 全量替换并重定义位序)。

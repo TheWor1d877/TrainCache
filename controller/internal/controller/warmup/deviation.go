@@ -13,6 +13,7 @@ import (
 
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
+	corelog "traincache/core/logging"
 )
 
 // EventNodeDeviation is recorded on the WarmupTask when a released Pod lands
@@ -117,7 +118,8 @@ func (r *Reconciler) reconcileDeviation(ctx context.Context, log *slog.Logger, t
 			Priority:   agentpb.PreheatPriority_P0,
 			Generation: uint64(task.Generation),
 		}
-		if err := r.Agents.Submit(ctx, actual, req); err != nil {
+		callCtx := corelog.WithRequestMeta(ctx, "", req.TaskId, req.Generation)
+		if err := r.Agents.Submit(callCtx, actual, req); err != nil {
 			log.Warn("deviation preheat submit failed",
 				"pod", pod.Name,
 				"pod_index", index,

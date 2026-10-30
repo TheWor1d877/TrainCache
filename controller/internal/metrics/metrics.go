@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	ctrllog "traincache/controller/internal/logging"
 )
 
 // Registry is a controller-owned Prometheus registry. It exposes the
@@ -196,6 +198,12 @@ func newMetrics(schedulerOnly bool) *Metrics {
 			Help: "Number of scheduler score evaluations by result.",
 		}, []string{"result"}),
 		gateStates: map[string]gateEntry{},
+	}
+
+	// 日志采样/限流丢弃计数(8.1 §3.3):logging.New 已构造进程采样器时才挂
+	// Collector,未初始化(如指标包单测)时注册表不多出空 family。
+	if sampler := ctrllog.Sampler(); sampler != nil {
+		registry.MustRegister(NewLogDroppedCollector(sampler))
 	}
 
 	if schedulerOnly {

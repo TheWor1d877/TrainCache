@@ -16,6 +16,7 @@ import (
 	"traincache/controller/internal/agentclient"
 	"traincache/controller/internal/metrics"
 	"traincache/controller/internal/nodescore"
+	corelog "traincache/core/logging"
 )
 
 const (
@@ -219,9 +220,9 @@ type pollOutcome struct {
 // not held. A pair with no answer at all is missing from the map entirely,
 // which places it in no action bucket for this round.
 type AgentTaskObservation struct {
-	Held        bool
-	Generation  uint64
-	BitmapBytes int32
+	Held         bool
+	Generation   uint64
+	WindowBlocks uint32
 }
 
 // readinessFact is one poll round's observation for a (Pod, candidate node).
@@ -289,7 +290,8 @@ func (r *Reconciler) pollReadiness(
 			}
 
 			start := r.now()
-			resp, err := r.Agents.Progress(ctx, node, taskID, generation)
+			callCtx := corelog.WithRequestMeta(ctx, "", taskID, generation)
+			resp, err := r.Agents.Progress(callCtx, node, taskID, generation)
 			duration := r.now().Sub(start).Milliseconds()
 			if err != nil {
 				if errors.Is(err, agentclient.ErrTaskNotFound) {
@@ -308,6 +310,7 @@ func (r *Reconciler) pollReadiness(
 						"attempt", attempt,
 						"duration_ms", duration,
 						"err", err,
+						"err_class", agentclient.ErrClass(err),
 					)
 					if attempt >= unavailableFailureThreshold {
 						facts[pairKey] = readinessFact{
@@ -324,6 +327,7 @@ func (r *Reconciler) pollReadiness(
 					pairLog.Warn("agent progress failed",
 						"duration_ms", duration,
 						"err", err,
+						"err_class", agentclient.ErrClass(err),
 					)
 				}
 				continue
@@ -335,14 +339,14 @@ func (r *Reconciler) pollReadiness(
 				continue
 			}
 
-			// The Agent holds this task; the generation it reports decides
-			// whether placement sends an Update, and the bitmap length bounds
-			// the window it was built for (D56). This is recorded before the
-			// stale-response drops below so a lagging Agent is still seen.
+			// The Agent holds this task; the generation and window block count
+			// it reports decide whether placement sends an Update (D47). This
+			// is recorded before the stale-response drops below so a lagging
+			// Agent is still seen.
 			tasks[pairKey] = AgentTaskObservation{
-				Held:        !resp.GetCanceled(),
-				Generation:  resp.GetGeneration(),
-				BitmapBytes: int32(len(resp.GetReadyBitmap())),
+				Held:         !resp.GetCanceled(),
+				Generation:   resp.GetGeneration(),
+				WindowBlocks: resp.GetWindowBlocks(),
 			}
 
 			if resp.GetGeneration() != generation {
@@ -379,6 +383,7 @@ func (r *Reconciler) pollReadiness(
 					"seq", resp.GetSeq(),
 					"duration_ms", duration,
 					"err", decodeErr,
+					"err_class", corelog.ErrClassInvalidSpec,
 				)
 				continue
 			}

@@ -189,24 +189,31 @@ func TestFollowSnapshotLogsPaired(t *testing.T) {
 	snap2 := commitFollowEntries(t, ag, ds, "a.tar", "b.tar")
 	waitFor(t, "切换到新快照", func() bool { return b.catalog.SnapID() == snap2 })
 
-	var switched, failed map[string]any
-	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
-			t.Fatalf("invalid log line %q: %v", raw, err)
-		}
-		switch rec["msg"] {
-		case "catalog: 快照切换成功":
-			if rec["snapshot"] == snap2 {
-				switched = rec
+	// 指标在 slog 之前累加,按日志等待,不能读一次就断言(CI 慢机上日志可能还没写出)。
+	findLog := func(msg, snapshot string) map[string]any {
+		for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			if raw == "" {
+				continue
 			}
-		case "catalog: 快照刷新失败(保持旧映射)":
-			failed = rec
+			var rec map[string]any
+			if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+				continue // 并发追加时的半行,下一轮再读
+			}
+			if rec["msg"] != msg {
+				continue
+			}
+			if snapshot != "" && rec["snapshot"] != snapshot {
+				continue
+			}
+			return rec
 		}
+		return nil
 	}
-	if switched == nil {
-		t.Fatalf("缺少切到 %q 的成功 Info: %s", snap2, buf.String())
-	}
+	var switched, failed map[string]any
+	waitFor(t, "切到新快照的成功 Info", func() bool {
+		switched = findLog("catalog: 快照切换成功", snap2)
+		return switched != nil
+	})
 	m12RequireLevel(t, switched, "INFO")
 	m12RequireFields(t, switched, "dataset", "snapshot", "result")
 	if switched["dataset"] != ds || switched["result"] != metrics.ResultSuccess {
@@ -224,18 +231,10 @@ func TestFollowSnapshotLogsPaired(t *testing.T) {
 		return testutil.ToFloat64(ag.Metrics.IndexRefresh().WithLabelValues(label, metrics.ResultError)) >= 1
 	})
 
-	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
-			t.Fatalf("invalid log line %q: %v", raw, err)
-		}
-		if rec["msg"] == "catalog: 快照刷新失败(保持旧映射)" {
-			failed = rec
-		}
-	}
-	if failed == nil {
-		t.Fatalf("缺少失败 Warn: %s", buf.String())
-	}
+	waitFor(t, "快照刷新失败 Warn", func() bool {
+		failed = findLog("catalog: 快照刷新失败(保持旧映射)", "")
+		return failed != nil
+	})
 	m12RequireLevel(t, failed, "WARN")
 	m12RequireFields(t, failed, "dataset", "result", "err")
 	if failed["dataset"] != ds || failed["result"] != metrics.ResultError {

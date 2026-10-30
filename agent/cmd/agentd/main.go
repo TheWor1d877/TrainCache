@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 
+	"traincache/agent/internal/grpcmeta"
 	"traincache/agent/internal/logging"
 	"traincache/agent/svc"
 	corelog "traincache/core/logging"
@@ -59,7 +60,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	gs := grpc.NewServer()
+	// 统一拦截器把 Controller 注入的 request_id/task/generation 落进
+	// context logger（docs/8.1 §5）；缺键时行为不变。
+	gs := grpc.NewServer(grpc.ChainUnaryInterceptor(grpcmeta.UnaryServerInterceptor))
 	svc.NewServer(*cfg, ag).Register(gs)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)

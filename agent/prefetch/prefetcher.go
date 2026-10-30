@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"traincache/agent/logagg"
 	"traincache/agent/metrics"
 	"traincache/agent/ordersource"
 	"traincache/core/cas"
@@ -83,6 +84,9 @@ type Config struct {
 	// (跳过下载);nil 回调 / 返回错误 / 重开失败 → 按未命中走下载路径(下载覆盖坏块)。
 	// dataset 取任务归属(Catalog 绑定的数据集);nil 表示不回源修复。
 	OnCorrupt func(ctx context.Context, dataset string, ref ChunkRef) error
+	// LogAgg 是 60s 汇总日志聚合器(8.1 §3.3/§4.2):逐块完成计数只累加、不逐块写 Info,
+	// 窗口到期由聚合器统一输出一条汇总;nil 表示不记汇总(测试/无日志场景)。
+	LogAgg *logagg.Aggregator
 	// OnStageSwitch 是阶段切换通知回调(M9/D46 接线钩子):OnStageSwitch 安装新阶段后
 	// 调用一次(stageID = 新 ConsumeOrder.StageID);供 svc phaseTracker 迁移到 switch。
 	// 在调度/调用方 goroutine 内同步调用,不得阻塞;nil 表示无回调。
@@ -200,6 +204,9 @@ type task struct {
 	// reason 是回源打点 reason(D48):prefetch|demand|repair|other;空值按 prefetch
 	// (P0–P3 常规预取)。Backfill 的 demand 入口显式置 FetchReasonDemand。
 	reason string
+	// taskID 是块归属的预热任务 ID(仅显式预热 P0 由 EnqueueP0ScopedTask 带入;
+	// 其余优先级为空),只用于 60s 下载汇总的 task_id 字段。
+	taskID string
 
 	// pri/start 是 M9/D48 任务耗时打点口径:pri = 最终生效优先级(去重提升不重置
 	// start;骨架阶段由 enqueueLocked 记录)。
@@ -217,8 +224,9 @@ type task struct {
 type taskResult struct {
 	t     *task
 	size  int64
-	ready bool  // 就绪(本地命中或下载成功;true 计吞吐)
-	err   error // 失败原因(P0 回调的 err;就绪为 nil)
+	ready bool          // 就绪(本地命中或下载成功;true 计吞吐)
+	err   error         // 失败原因(P0 回调的 err;就绪为 nil)
+	dur   time.Duration // 单块抓取/校验耗时(60s 汇总的 P50/P99 样本)
 }
 
 // PersistentPrefetcher 是持久预取器(design §5.2)。
@@ -414,7 +422,7 @@ func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOr
 // 尚无订单则为空——此时未本地命中的块无法构造下载键,以错误回调)。
 // Start 前入队的块在 Start 后出队处理(与 OnStageSwitch 同口径)。
 func (p *PersistentPrefetcher) EnqueueP0(ctx context.Context, refs []ChunkRef) error {
-	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, nil)
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, nil, "")
 }
 
 // EnqueueP0Scoped 与 EnqueueP0 完全同语义,区别是每块额外结上调用方的下载作用域 work
@@ -422,17 +430,24 @@ func (p *PersistentPrefetcher) EnqueueP0(ctx context.Context, refs []ChunkRef) e
 // 退出并按失败回调。ctx 仍是本次请求的生存期(取消则拒绝入队,与 EnqueueP0 一致)。
 // work 必须由预取器自身的 ctx 派生,否则 Agent 关停叫不醒它。
 func (p *PersistentPrefetcher) EnqueueP0Scoped(ctx, work context.Context, refs []ChunkRef) error {
-	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, work)
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, work, "")
+}
+
+// EnqueueP0ScopedTask 与 EnqueueP0Scoped 同语义,额外携带预热任务 ID:块完成时进
+// 60s 下载汇总的 task_id 分组,任务结束可由聚合器提前输出该任务汇总。空 taskID 与
+// EnqueueP0Scoped 完全等价。
+func (p *PersistentPrefetcher) EnqueueP0ScopedTask(ctx, work context.Context, taskID string, refs []ChunkRef) error {
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonPrefetch, work, taskID)
 }
 
 // EnqueueP0Demand 是 demand(按需补块)的 P0 入队入口:语义与 EnqueueP0 完全一致
 // (严格最高优先级、在途不取消、完成仍经 OnP0Done),仅把回源 reason 标为 demand。
 // 复用同一队列与 pending 去重表,不改变冻结的 pending 语义。
 func (p *PersistentPrefetcher) EnqueueP0Demand(ctx context.Context, refs []ChunkRef) error {
-	return p.enqueueP0(ctx, refs, metrics.FetchReasonDemand, nil)
+	return p.enqueueP0(ctx, refs, metrics.FetchReasonDemand, nil, "")
 }
 
-func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, reason string, work context.Context) error {
+func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, reason string, work context.Context, taskID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -442,7 +457,7 @@ func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, r
 	p.mu.Lock()
 	dataset := p.dataset
 	for _, r := range refs {
-		p.enqueueLocked(&task{idx: -1, ref: r, dataset: dataset, p0: true, reason: reason, ctx: work}, priP0)
+		p.enqueueLocked(&task{idx: -1, ref: r, dataset: dataset, p0: true, reason: reason, taskID: taskID, ctx: work}, priP0)
 	}
 	p.mu.Unlock()
 	return nil
@@ -692,6 +707,8 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 		size  int64
 		ready bool
 		err   error
+		// 单块耗时只计抓取/校验本身(不含排队等待),窗口汇总据此算 P50/P99。
+		started = p.now()
 	)
 	// grabCtx 是本块的抓取生存期;回投结果的 select 仍用调度协程 ctx(否则被撤回的块
 	// 结果会被丢弃,任务无法收敛到终态)。
@@ -709,13 +726,14 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 	} else {
 		size, ready, err = p.grabBlock(grabCtx, t)
 	}
+	dur := p.now().Sub(started)
 	// D45:task 进入终态(成功或失败终止)后移除去重表(失败重试由 core fetch 在任务内部
 	// 保留;身份安全清理,不误删跨阶段替换后的新 task 键)。
 	p.mu.Lock()
 	p.clearPendingTaskLocked(t)
 	p.mu.Unlock()
 	select {
-	case p.results <- taskResult{t: t, size: size, ready: ready, err: err}:
+	case p.results <- taskResult{t: t, size: size, ready: ready, err: err, dur: dur}:
 	case <-ctx.Done():
 		// 调度协程已随 ctx 退出:结果丢弃(不再记账、不回调)。
 	}
@@ -814,6 +832,20 @@ func (p *PersistentPrefetcher) finishTask(res taskResult) {
 	// 计时源已接通,时长取真实起点)。
 	if p.m != nil && !t.start.IsZero() {
 		p.m.ObservePrefetchTaskDuration(t.dataset, priorityLabel(t.pri), p.now().Sub(t.start).Seconds())
+	}
+	// 60s 汇总(8.1 §4.2):在调度协程内串行累加(完成即记账的现成位置),不逐块写 Info;
+	// 逐块明细由聚合器按 Debug 输出,采样交给 core/logging。
+	if p.cfg.LogAgg != nil {
+		p.cfg.LogAgg.ObserveDownload(logagg.Download{
+			TaskID:   t.taskID,
+			Dataset:  t.dataset,
+			Path:     t.ref.Path,
+			Chunk:    t.ref.Chunk,
+			Reason:   t.fetchReason(),
+			Size:     res.size,
+			Ready:    res.ready,
+			Duration: res.dur,
+		})
 	}
 	var (
 		report bool

@@ -75,6 +75,7 @@ class ContextTest(unittest.TestCase):
     def test_reads_webhook_env(self):
         ctx = HookContext.from_env({
             "TRAINCACHE_TASK": "train/warm",
+            "TRAINCACHE_POD": "train/trainer-0",
             "TRAINCACHE_POD_INDEX": "3",
             "TRAINCACHE_DATASET": "train/coco",
             "TRAINCACHE_HOOK_SOCK": "/run/traincache/agent.sock",
@@ -86,7 +87,15 @@ class ContextTest(unittest.TestCase):
         self.assertEqual(ctx.pod_index, 3)
         self.assertEqual(ctx.dataset, "train/coco")
         self.assertEqual(ctx.generation_at_start, "7")
-        self.assertEqual(ctx.pod, "train-pod-0")
+        self.assertEqual(ctx.pod, "train/trainer-0")
+
+    def test_pod_env_wins_over_hostname(self):
+        ctx = HookContext.from_env({"TRAINCACHE_POD": "train/trainer-7", "HOSTNAME": "trainer-7"})
+        self.assertEqual(ctx.pod, "train/trainer-7")
+
+    def test_pod_falls_back_to_hostname(self):
+        ctx = HookContext.from_env({"HOSTNAME": "trainer-9"})
+        self.assertEqual(ctx.pod, "trainer-9")
 
     def test_missing_env_degrades(self):
         ctx = HookContext.from_env({})

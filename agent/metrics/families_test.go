@@ -48,6 +48,10 @@ const (
 	prefetchLeadBlocksName       = "traincache_prefetch_lead_blocks"
 	consumptionAdvanceName       = "traincache_consumption_advance_total"
 	fetchBandwidthLimitBytesName = "traincache_fetch_bandwidth_limit_bytes"
+	// D63 订单通道(测试侧独立字面量)。
+	ordersourceStatesName = "traincache_agent_ordersources"
+	ordersourceEndedName  = "traincache_agent_ordersource_ended_total"
+	ordersDroppedName     = "traincache_orders_dropped_total"
 )
 
 // sevenLineFamilies 是 36 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil;
@@ -91,6 +95,10 @@ var sevenLineFamilies = map[string][]string{
 	// R3/R4(6.1 §5.11/§5.12)。
 	indexSweepSkippedName:                    {"dataset", "reason"},
 	objectstoreConditionalWriteSupportedName: nil,
+	// D63 订单通道。
+	ordersourceStatesName: {"node", "state"},
+	ordersourceEndedName:  {"node", "reason"},
+	ordersDroppedName:     {"reason"},
 }
 
 // sevenLineTypes 是七线 23 个 family 的类型冻结(Prometheus 文本枚举)。
@@ -129,6 +137,9 @@ var sevenLineTypes = map[string]string{
 	fetchBandwidthLimitBytesName:             "GAUGE",
 	indexSweepSkippedName:                    "COUNTER",
 	objectstoreConditionalWriteSupportedName: "GAUGE",
+	ordersourceStatesName:                    "GAUGE",
+	ordersourceEndedName:                     "COUNTER",
+	ordersDroppedName:                        "COUNTER",
 }
 
 // TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 37 个 family
@@ -140,8 +151,8 @@ func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}, Node: "node-1"})
 	snap := snapshotFamilies(t, r)
 
-	if len(snap) != 37 {
-		t.Fatalf("注册表 family 数 = %d, want 37(七线 23 + D23 + D33 + D44 + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个);实际 %v",
+	if len(snap) != 40 {
+		t.Fatalf("注册表 family 数 = %d, want 40(七线 23 + D23 + D33 + D44 + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个 + D63 订单通道 3 个);实际 %v",
 			len(snap), slices.Sorted(maps.Keys(snap)))
 	}
 	for _, name := range []string{ordersourceFormatErrorsName, hookFormatErrorsName} {

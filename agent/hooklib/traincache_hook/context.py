@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 ENV_TASK = "TRAINCACHE_TASK"
+ENV_POD = "TRAINCACHE_POD"
 ENV_POD_INDEX = "TRAINCACHE_POD_INDEX"
 ENV_DATASET = "TRAINCACHE_DATASET"
 ENV_HOOK_SOCK = "TRAINCACHE_HOOK_SOCK"
@@ -73,5 +74,10 @@ class HookContext:
 
 
 def _pod_name(env: Mapping[str, str]) -> str:
-    """Pod 名：kubelet 把 HOSTNAME 设为 Pod 名；取不到就用主机名，不回退到 IP。"""
-    return _clean(env.get("HOSTNAME")) or socket.gethostname()
+    """Pod 名：优先 webhook 注入的 <namespace>/<name>。
+
+    TRAINCACHE_POD 缺失（准入时 Pod 还没命名，或不经 webhook 起的 Pod）时回退到
+    kubelet 写入的 HOSTNAME——只有名字没有 namespace，够日志按 Pod 聚合，不够跨命名空间
+    唯一定位。两者都取不到就用主机名，不回退到 IP。
+    """
+    return _clean(env.get(ENV_POD)) or _clean(env.get("HOSTNAME")) or socket.gethostname()

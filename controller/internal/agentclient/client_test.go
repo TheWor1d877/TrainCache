@@ -11,10 +11,12 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	agentpb "traincache/agent/api/agentpb"
+	corelog "traincache/core/logging"
 )
 
 const bufTarget = "passthrough:///bufnet"
@@ -29,6 +31,8 @@ type fakePreheatServer struct {
 	updates  map[string]*agentpb.UpdatePreheatRequest
 	cancels  map[string]*agentpb.CancelPreheatRequest
 	statuses int
+	// mds 按调用顺序记录入站 metadata，供关联键注入用例断言。
+	mds []metadata.MD
 }
 
 func newFakePreheatServer() *fakePreheatServer {
@@ -49,6 +53,9 @@ func (s *fakePreheatServer) respond(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		s.mds = append(s.mds, md.Copy())
+	}
 	return s.err
 }
 
@@ -240,5 +247,61 @@ func TestPoolReusesConnectionPerNode(t *testing.T) {
 	}
 	if got := dials.Load(); got != 1 {
 		t.Fatalf("dial calls = %d, want 1 (connection reused)", got)
+	}
+}
+
+// TestPoolInjectsRequestMetadata 断言四个 RPC 都从 ctx 取三键注入 outgoing
+// metadata，且没有身份时不写空键（docs/8.1 §5 第 4 跳）。
+func TestPoolInjectsRequestMetadata(t *testing.T) {
+	fake, lis := startFakeServer(t)
+	pool := testPool(lis, time.Second, nil)
+	defer pool.Close()
+
+	ctx := corelog.WithRequestMeta(context.Background(), "rid-1", "train/t/p0", 7)
+	if err := pool.Submit(ctx, "n1", &agentpb.SubmitPreheatRequest{TaskId: "train/t/p0"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := pool.Update(ctx, "n1", &agentpb.UpdatePreheatRequest{TaskId: "train/t/p0"}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := pool.Cancel(ctx, "n1", &agentpb.CancelPreheatRequest{TaskId: "train/t/p0"}); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := pool.Progress(ctx, "n1", "train/t/p0", 7); err != nil {
+		t.Fatalf("Progress: %v", err)
+	}
+
+	fake.mu.Lock()
+	mds := append([]metadata.MD(nil), fake.mds...)
+	fake.mu.Unlock()
+	if len(mds) != 4 {
+		t.Fatalf("captured metadata = %d, want 4", len(mds))
+	}
+	for _, md := range mds {
+		if got := md.Get(corelog.MetadataKeyRequestID); len(got) != 1 || got[0] != "rid-1" {
+			t.Fatalf("request-id metadata = %v", got)
+		}
+		if got := md.Get(corelog.MetadataKeyTask); len(got) != 1 || got[0] != "train/t/p0" {
+			t.Fatalf("task metadata = %v", got)
+		}
+		if got := md.Get(corelog.MetadataKeyGeneration); len(got) != 1 || got[0] != "7" {
+			t.Fatalf("generation metadata = %v", got)
+		}
+	}
+
+	if err := pool.Submit(context.Background(), "n1", &agentpb.SubmitPreheatRequest{TaskId: "train/t/p0"}); err != nil {
+		t.Fatalf("Submit without meta: %v", err)
+	}
+	fake.mu.Lock()
+	last := fake.mds[len(fake.mds)-1]
+	fake.mu.Unlock()
+	for _, key := range []string{
+		corelog.MetadataKeyRequestID,
+		corelog.MetadataKeyTask,
+		corelog.MetadataKeyGeneration,
+	} {
+		if got := last.Get(key); len(got) != 0 {
+			t.Fatalf("empty identity wrote %s = %v", key, got)
+		}
 	}
 }

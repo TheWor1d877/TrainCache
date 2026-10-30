@@ -45,12 +45,12 @@ for f in controller/cmd/controller-manager/main.go controller/cmd/webhook/main.g
 done
 
 # 5. CHANGELOG 的版本标题：唯一、严格降序、日期为 YYYY-MM-DD。代码块里的示例不参与。
-#    [未发布] 允许存在，但至多一个且必须排在最前——发版时由人把它改成 vX.Y.Z。
+#    未发布小节允许存在（`## 未发布` 或 `## [未发布]`），但至多一个且必须排在最前——发版时由人把它改成 vX.Y.Z。
 [[ -f CHANGELOG.md ]] || fail "缺少 CHANGELOG.md"
 vers="$(awk '
   /^[[:space:]]*```/ { fence = !fence; next }
   fence { next }
-  /^## \[未发布\]$/ { next }
+  /^## (\[未发布\]|未发布)$/ { next }
   /^## \[/ { print }
 ' CHANGELOG.md \
   | sed -nE 's/^## \[(v[0-9]+\.[0-9]+\.[0-9]+)\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$/\1 \2/p')"
@@ -58,7 +58,7 @@ vers="$(awk '
 headings="$(awk '
   /^[[:space:]]*```/ { fence = !fence; next }
   fence { next }
-  /^## \[未发布\]$/ { next }
+  /^## (\[未发布\]|未发布)$/ { next }
   /^## \[/ { print }
 ' CHANGELOG.md | wc -l)"
 [[ "$headings" -eq "$(printf '%s\n' "$vers" | grep -c .)" ]] \
@@ -67,19 +67,21 @@ headings="$(awk '
 unreleased="$(awk '
   /^[[:space:]]*```/ { fence = !fence; next }
   fence { next }
-  /^## \[/ { print }
-' CHANGELOG.md | grep -cx '## \[未发布\]' || true)"
+  /^## (\[未发布\]|未发布)$/ { print }
+' CHANGELOG.md | wc -l)"
 if [[ "$unreleased" -gt 1 ]]; then
-  fail "CHANGELOG 有 $unreleased 个 [未发布] 小节"
+  fail "CHANGELOG 有 $unreleased 个未发布小节"
 fi
 if [[ "$unreleased" -eq 1 ]]; then
   first_heading="$(awk '
     /^[[:space:]]*```/ { fence = !fence; next }
     fence { next }
-    /^## \[/ { print; exit }
+    /^## / { print; exit }
   ' CHANGELOG.md)"
-  [[ "$first_heading" == '## [未发布]' ]] \
-    || fail "[未发布] 必须排在所有版本标题之前"
+  case "$first_heading" in
+    '## [未发布]' | '## 未发布') ;;
+    *) fail "未发布小节必须排在所有版本标题之前" ;;
+  esac
 fi
 
 dups="$(printf '%s\n' "$vers" | awk '{print $1}' | sort | uniq -d)"
