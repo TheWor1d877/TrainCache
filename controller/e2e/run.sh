@@ -68,7 +68,7 @@ TASK=train-task
 DATASET=train-data
 JOB=train-job
 TASK_REF="$TENANT/$TASK"
-SCORE_PREFIX="traincache.io/scores"
+SCORE_ANNOTATION="traincache.io/node-scores"
 GATE="traincache.io/warmup"
 WEBHOOK_SVC="traincache-webhook.$NS.svc"
 
@@ -300,7 +300,7 @@ deploy_control_plane() {
   kubectl apply -f "$E2E/manifests/tenant.yaml" >/dev/null || { fail "apply tenant.yaml"; return 1; }
   kubectl apply -k "$DEPLOY" >/dev/null || { fail "kubectl apply -k deploy"; return 1; }
 
-  # assert 5 逐条断言评分决策的 Debug 行，而生产默认只放行 1%
+  # assert 5 用评分决策的 Debug 行作第一层证据，而生产默认只放行 1%
   # （TRAINCACHE_LOG_DEBUG_SAMPLE_RATE=0.01）；e2e 关掉 Debug 采样。
   kubectl -n kube-system set env deploy/traincache-scheduler \
     TRAINCACHE_LOG_DEBUG_SAMPLE_RATE=1 >/dev/null \
@@ -482,16 +482,6 @@ wait_pods_running() {
   return 1
 }
 
-score_key() {
-  local ns="$1" name="$2"
-  local prefix="$name"
-  if (( ${#prefix} > 32 )); then prefix="${prefix:0:32}"; fi
-  prefix="$(printf '%s' "$prefix" | sed -e 's/[-.]*$//')"
-  local hash
-  hash="$(printf '%s/%s' "$ns" "$name" | sha256sum | cut -c1-12)"
-  printf '%s-%s-%s' "$SCORE_PREFIX" "$prefix" "$hash"
-}
-
 collect_artifacts() {
   mkdir -p "$LOGS"
   kubectl -n "$NS" logs deploy/traincache-controller-manager --tail=5000 >"$LOGS/controller-manager.log" 2>&1 || true
@@ -581,67 +571,93 @@ assert_gates_and_scheduling() {
   done
 }
 
-assert_node_scores() {
-  step "assert 4: per-task Node score annotations"
-  local key nodes n ann pairs
-  key="$(score_key "$TENANT" "$TASK")"
-  info "score annotation key: $key"
-  nodes="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json | jq -r '.status.candidateNodes[]?')"
-  if [[ -z "$nodes" ]]; then fail "candidateNodes is empty"; return; fi
-  # 控制器只为 podNodeReadiness 里真实配过对的 (pod,node) 写条目（docs/7.1 §6.2），
-  # 缺条目是 Scheduler 的取 0 分支（§5.8），不是错误。所以按配对集合逐项核对，
-  # 而不是要求每个候选节点都带齐所有 Pod。
-  pairs="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json \
-    | jq -r '.status.podNodeReadiness[]? | select(.nodeName != null) | "\(.nodeName) \(.podIndex)"')"
-  for n in $nodes; do
-    ann="$(kubectl get node "$n" -o json | jq -r --arg k "$key" '.metadata.annotations[$k] // empty')"
+assert_pod_scores() {
+  step "assert 4: per-Pod node-score annotations"
+  info "score annotation key: $SCORE_ANNOTATION"
+  local p ann index want_nodes got_nodes
+  # 控制器把每个 Pod 的节点分数表写进它自己的注解，并与摘 gate 同一次 patch
+  # （docs/7.1 §6.2/D49）。条目集合必须等于该 Pod 在 podNodeReadiness 里真实
+  # 配过对的节点。
+  for p in $(kubectl -n "$TENANT" get pods -l job-name="$JOB" -o name); do
+    ann="$(kubectl -n "$TENANT" get "$p" -o json | jq -r --arg k "$SCORE_ANNOTATION" '.metadata.annotations[$k] // empty')"
     if [[ -z "$ann" ]]; then
-      fail "node $n missing annotation $key"
+      fail "$p missing annotation $SCORE_ANNOTATION"
       continue
     fi
     if ! jq -e --arg task "$TASK_REF" '
       .v == 1 and .task == $task and (.g >= 1) and
       (.t | type == "string") and
-      (.p | to_entries | all(((.value | type) == "number") and .value >= 0 and .value <= 100)) and
-      (.p | length >= 1)
+      (.s | to_entries | all(((.value | type) == "number") and .value >= 0 and .value <= 100)) and
+      (.s | length >= 1)
     ' >/dev/null 2>&1 <<<"$ann"; then
-      fail "node $n annotation invalid: $ann"
+      fail "$p annotation invalid: $ann"
       continue
     fi
-    local pod node_field missing=""
-    while read -r node_field pod; do
-      [[ -n "$pod" ]] || continue
-      jq -e --arg p "$pod" '(.p[$p] | type) == "number"' >/dev/null 2>&1 <<<"$ann" || missing="$missing $pod"
-    done <<<"$(grep -s "^$n " <<<"$pairs")"
-    if [[ -n "$missing" ]]; then
-      fail "node $n annotation has no score for paired pod(s):$missing (p=$(jq -c '.p' <<<"$ann"))"
+    index="$(kubectl -n "$TENANT" get "$p" -o jsonpath='{.metadata.annotations.traincache\.io/pod-index}')"
+    want_nodes="$(kubectl -n "$TENANT" get warmuptask "$TASK" -o json \
+      | jq -r --argjson i "$index" '[.status.podNodeReadiness[]? | select(.podIndex == $i and .nodeName != null and .nodeName != "") | .nodeName] | sort | join(",")')"
+    got_nodes="$(jq -r '.s | keys | sort | join(",")' <<<"$ann")"
+    if [[ "$got_nodes" != "$want_nodes" ]]; then
+      fail "$p annotation covers [$got_nodes], want its assigned nodes [$want_nodes]"
     else
-      ok "node $n annotation parses; p=$(jq -c '.p' <<<"$ann") g=$(jq -r '.g' <<<"$ann")"
+      ok "$p annotation parses; s=$(jq -c '.s' <<<"$ann") g=$(jq -r '.g' <<<"$ann")"
     fi
   done
 }
 
 assert_scheduler_scored() {
-  step "assert 5: scheduler plugin consumed the annotations"
-  local log="$LOGS/scheduler.log" key
-  key="$(score_key "$TENANT" "$TASK")"
+  step "assert 5: scheduler plugin consumed the Pod annotations"
+  local log="$LOGS/scheduler.log"
   if [[ ! -s "$log" ]]; then fail "scheduler log is empty"; return; fi
-  if grep -q '"msg":"scheduler score"' "$log" && grep -q "$key" "$log"; then
-    ok "scheduler emitted 'scheduler score' for annotation_key=$key"
+  if grep -q '"msg":"scheduler score"' "$log" && grep -q "\"annotation_key\":\"$SCORE_ANNOTATION\"" "$log"; then
+    ok "scheduler emitted 'scheduler score' for annotation_key=$SCORE_ANNOTATION"
   else
-    fail "scheduler log has no TrainCacheScore decision for $key"
+    fail "scheduler log has no TrainCacheScore decision for $SCORE_ANNOTATION"
   fi
-  if grep -Eq '"score":[1-9][0-9]*' "$log"; then
-    ok "scheduler observed a non-zero raw score (NormalizeScore path exercised)"
+
+  # 日志只证明“至少一条决策”可见：采样器按 (message,node) 做 60s 去重，
+  # 同一 Node 上第二个 Pod 的决策行会被吞掉，不能用来统计逐 Pod 的取分。
+  # 计数器不去重，用 result=ok / no_node_entry 证明注解按 Pod 逐条读取。
+  local sched_pod metrics ok_count missing_count
+  sched_pod="$(kubectl -n kube-system get pods -l app.kubernetes.io/name=traincache-scheduler \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  metrics="$LOGS/scheduler-metrics.txt"
+  if [[ -n "$sched_pod" ]] && kubectl get --raw \
+      "/api/v1/namespaces/kube-system/pods/$sched_pod:9412/proxy/metrics/traincache" >"$metrics" 2>/dev/null; then
+    ok_count="$(grep -F 'traincache_scheduler_score_total{result="ok"}' "$metrics" | awk '{print int($2)}')"
+    missing_count="$(grep -F 'traincache_scheduler_score_total{result="no_node_entry"}' "$metrics" | awk '{print int($2)}')"
+    (( ${ok_count:-0} >= 1 )) \
+      && ok "scheduler read a Pod annotation entry (result=ok x$ok_count)" \
+      || fail "scheduler never read a Pod annotation entry (result=ok missing)"
+    (( ${missing_count:-0} >= 1 )) \
+      && ok "scheduler saw a Node absent from the Pod annotation (result=no_node_entry x$missing_count)" \
+      || fail "scheduler never scored a Node absent from the annotation"
   else
-    fail "scheduler never observed a non-zero score"
+    fail "scheduler metrics endpoint unreachable ($metrics)"
   fi
-  # Both training Pods must appear in the plugin's scoring decisions.
-  local p pod_ref
+
+  # 端到端收口：注解里给可调度 Node 打了分的 Pod 必须落到那个 Node。
+  # 偏差 Pod 的分数只覆盖 Job nodeAffinity 之外的 Node，按设计不参与断言。
+  local feasible p index ann actual scored=0
+  feasible=" $(kubectl -n "$TENANT" get job "$JOB" -o json 2>/dev/null \
+    | jq -r '[.spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution
+        .nodeSelectorTerms[]?.matchExpressions[]? | select(.key == "kubernetes.io/hostname") | .values[]] | join(" ")') "
   for p in $(kubectl -n "$TENANT" get pods -l job-name="$JOB" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
-    pod_ref="$TENANT/$p"
-    grep -q "$pod_ref" "$log" && ok "scheduler scored $pod_ref" || fail "scheduler did not log $pod_ref"
+    ann="$(kubectl -n "$TENANT" get pod "$p" -o jsonpath="{.metadata.annotations.traincache\\.io/node-scores}")"
+    actual="$(kubectl -n "$TENANT" get pod "$p" -o jsonpath='{.spec.nodeName}')"
+    local hit=""
+    for index in $(jq -r '.s | keys[]' <<<"$ann" 2>/dev/null); do
+      [[ "$feasible" == *" $index "* ]] && hit="$index"
+    done
+    [[ -z "$hit" ]] && { info "$p: annotation covers no candidate Node (deviation target)"; continue; }
+    if [[ "$actual" == "$hit" ]]; then
+      ok "$p bound to its scored Node $hit"
+      scored=$((scored + 1))
+    else
+      fail "$p bound to $actual, but its annotation scores candidate Node $hit"
+    fi
   done
+  (( scored >= 1 )) || fail "no Pod was bound through a Pod-annotation score"
 }
 
 assert_node_deviation() {
@@ -680,7 +696,7 @@ write_summary() {
     printf -- '- elapsed: %ss\n' "$elapsed"
     printf -- '- failed assertions: %d\n' "$FAILS"
     printf -- '- WarmupTask phase: `%s`, gate: `%s`\n' "$phase" "$gate_state"
-    printf -- '- score key: `%s`\n' "$(score_key "$TENANT" "$TASK")"
+    printf -- '- score annotation: `%s`\n' "$SCORE_ANNOTATION"
     printf -- '- logs: `results/logs/`, state: `results/*.yaml`\n\n'
     printf '## Assertion trail\n\n'
     grep -E '^== |^  \[(OK|FAIL|SKIP|INFO)\]' "$RESULTS/run.log" 2>/dev/null || true
@@ -749,7 +765,7 @@ run_flow() {
 assert_all() {
   assert_preheat_and_release
   assert_gates_and_scheduling
-  assert_node_scores
+  assert_pod_scores
   collect_artifacts
   assert_scheduler_scored
   assert_node_deviation

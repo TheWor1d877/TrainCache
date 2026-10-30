@@ -17,21 +17,17 @@ func TestScoreNodeEmitsSchedulerScoreResults(t *testing.T) {
 	registry := metrics.NewScheduler()
 	p := newTestPlugin(t, Options{Metrics: registry})
 
-	key := scorefmt.KeyWithPrefix(scorefmt.DefaultPrefix, testNamespace, "train-1")
+	ok := freshValue("default/train-1", 7, map[string]int32{"node-1": 87})
+	p.scoreNode(testPod("train-1", &ok), testNode("node-1"), testNow) // ok
 
-	success := testNode(freshValue("default/train-1", 7, map[string]int32{"2": 87}))
-	p.scoreNode(testPod("train-1", 2), success, testNow) // ok
-
-	expiredValue := freshValue("default/train-1", 7, map[string]int32{"2": 87})
+	expiredValue := freshValue("default/train-1", 7, map[string]int32{"node-1": 87})
 	expiredValue.T = testNow.Add(-10 * time.Minute)
-	expired := testNode()
-	expired.Annotations[key] = mustEncode(t, expiredValue)
-	p.scoreNode(testPod("train-1", 2), expired, testNow) // expired
+	p.scoreNode(testPod("train-1", &expiredValue), testNode("node-1"), testNow) // expired
 
-	p.scoreNode(testPod("train-1", 0), testNode(), testNow) // no_annotation
+	p.scoreNode(testPod("train-1", nil), testNode("node-1"), testNow) // no_annotation
 
-	missingEntry := testNode(freshValue("default/train-1", 7, map[string]int32{"0": 1}))
-	p.scoreNode(testPod("train-1", 2), missingEntry, testNow) // no_pod_entry
+	missingEntry := freshValue("default/train-1", 7, map[string]int32{"node-2": 87})
+	p.scoreNode(testPod("train-1", &missingEntry), testNode("node-1"), testNow) // no_node_entry
 
 	invalidTaskRef := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Namespace: testNamespace,
@@ -40,9 +36,9 @@ func TestScoreNodeEmitsSchedulerScoreResults(t *testing.T) {
 			AnnotationWarmupTask: "bogus",
 		},
 	}}
-	p.scoreNode(invalidTaskRef, testNode(), testNow) // invalid_task_ref
+	p.scoreNode(invalidTaskRef, testNode("node-1"), testNow) // invalid_task_ref
 
-	for _, result := range []string{"ok", "expired", "no_annotation", "no_pod_entry", "invalid_task_ref"} {
+	for _, result := range []string{"ok", "expired", "no_annotation", "no_node_entry", "invalid_task_ref"} {
 		if got := schedulerCounter(t, registry, result); got != 1 {
 			t.Errorf("scheduler_score_total{result=%q} = %v, want 1", result, got)
 		}

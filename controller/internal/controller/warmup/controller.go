@@ -91,9 +91,9 @@ type Reconciler struct {
 	Metrics      *metrics.Metrics
 	PollInterval time.Duration
 
-	// ScoreAnnotationPrefix is the configured Node annotation prefix; it must
-	// match the Scheduler's CONTROLLER_SCORE_ANNOTATION (D27).
-	ScoreAnnotationPrefix string
+	// ScoreAnnotation is the Pod score annotation key; it must match the
+	// Scheduler's CONTROLLER_SCORE_ANNOTATION (D49).
+	ScoreAnnotation string
 	// GateName is the scheduling gate removed on release.
 	GateName string
 	// CacheCapacityBytes, StartupWindowBytes and MaxFillFraction feed the

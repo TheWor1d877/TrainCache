@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Environment variable names. See docs/7.1 design.md §8.
@@ -50,20 +52,20 @@ const (
 
 // Config is the shared control-plane configuration.
 type Config struct {
-	MetricsAddr           string
-	HealthAddr            string
-	WebhookAddr           string
-	Namespace             string
-	AgentPort             int
-	AgentTimeout          time.Duration
-	PollInterval          time.Duration
-	ScoreTTL              time.Duration
-	SchedulerScoreTTL     time.Duration
-	ScoreAnnotationPrefix string
-	GateName              string
-	LeaderElection        bool
-	MaxChunks             int64
-	LogLevel              string
+	MetricsAddr       string
+	HealthAddr        string
+	WebhookAddr       string
+	Namespace         string
+	AgentPort         int
+	AgentTimeout      time.Duration
+	PollInterval      time.Duration
+	ScoreTTL          time.Duration
+	SchedulerScoreTTL time.Duration
+	ScoreAnnotation   string
+	GateName          string
+	LeaderElection    bool
+	MaxChunks         int64
+	LogLevel          string
 	// DebugAddr 是 /debug/loglevel 的监听地址，只允许回环；空字符串关闭端点。
 	DebugAddr          string
 	CacheCapacityBytes int64
@@ -78,14 +80,14 @@ func Load() (*Config, error) {
 
 func load(lookup func(string) (string, bool)) (*Config, error) {
 	cfg := &Config{
-		MetricsAddr:           env(lookup, EnvMetricsAddr, ":9412"),
-		HealthAddr:            env(lookup, EnvHealthAddr, ":8081"),
-		WebhookAddr:           env(lookup, EnvWebhookAddr, ":9443"),
-		Namespace:             env(lookup, EnvNamespace, ""),
-		ScoreAnnotationPrefix: env(lookup, EnvScoreAnnotation, "traincache.io/scores"),
-		GateName:              env(lookup, EnvGateName, "traincache.io/warmup"),
-		LogLevel:              strings.ToLower(env(lookup, EnvLogLevel, "info")),
-		DebugAddr:             env(lookup, EnvDebugAddr, DefaultDebugAddr),
+		MetricsAddr:     env(lookup, EnvMetricsAddr, ":9412"),
+		HealthAddr:      env(lookup, EnvHealthAddr, ":8081"),
+		WebhookAddr:     env(lookup, EnvWebhookAddr, ":9443"),
+		Namespace:       env(lookup, EnvNamespace, ""),
+		ScoreAnnotation: env(lookup, EnvScoreAnnotation, "traincache.io/node-scores"),
+		GateName:        env(lookup, EnvGateName, "traincache.io/warmup"),
+		LogLevel:        strings.ToLower(env(lookup, EnvLogLevel, "info")),
+		DebugAddr:       env(lookup, EnvDebugAddr, DefaultDebugAddr),
 	}
 
 	var err error
@@ -178,20 +180,11 @@ func (c *Config) validate() error {
 	if c.Namespace != "" && !validNamespace(c.Namespace) {
 		return fmt.Errorf("config: %s: %q is not a valid namespace", EnvNamespace, c.Namespace)
 	}
-	if c.ScoreAnnotationPrefix == "" {
+	if c.ScoreAnnotation == "" {
 		return fmt.Errorf("config: %s: must not be empty", EnvScoreAnnotation)
 	}
-	if strings.TrimSpace(c.ScoreAnnotationPrefix) != c.ScoreAnnotationPrefix ||
-		strings.HasSuffix(c.ScoreAnnotationPrefix, "-") ||
-		strings.HasSuffix(c.ScoreAnnotationPrefix, ".") {
-		return fmt.Errorf("config: %s: %q must not contain surrounding whitespace or end with '-'/'.'", EnvScoreAnnotation, c.ScoreAnnotationPrefix)
-	}
-	// The generated annotation key is
-	// <prefix>-<namePrefix32>-<hash12>; ensure the part after '/' fits the
-	// Kubernetes 63-character key-name limit even at maximum truncation.
-	namePart := c.ScoreAnnotationPrefix[strings.LastIndex(c.ScoreAnnotationPrefix, "/")+1:]
-	if namePart == "" || len(namePart)+46 > 63 {
-		return fmt.Errorf("config: %s: %q leaves no room for a 63-character annotation key", EnvScoreAnnotation, c.ScoreAnnotationPrefix)
+	if errs := validation.IsQualifiedName(c.ScoreAnnotation); len(errs) > 0 {
+		return fmt.Errorf("config: %s: %q is not a valid annotation key: %s", EnvScoreAnnotation, c.ScoreAnnotation, strings.Join(errs, "; "))
 	}
 	if c.GateName == "" {
 		return fmt.Errorf("config: %s: must not be empty", EnvGateName)

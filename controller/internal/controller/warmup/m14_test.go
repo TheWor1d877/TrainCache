@@ -7,15 +7,14 @@ package warmup
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"math/rand"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
-	"traincache/controller/internal/scorefmt"
 )
 
 // m14PlacementTask builds a one-Pod task whose ReadinessTable row is the cache
@@ -105,42 +104,21 @@ func TestM14AdaptiveTargetFromDistribution(t *testing.T) {
 				t.Fatalf("assigned node set = %v, want %d nodes", assigned, tc.want)
 			}
 
-			// The score annotation covers exactly the assigned pairs, not P*max.
-			c := scoreClient(t, scoreNode("n1", nil), scoreNode("n2", nil), scoreNode("n3", nil),
-				scoreNode("n4", nil), scoreNode("n5", nil))
-			writer := &Reconciler{Client: c, Now: func() time.Time { return time.Unix(100, 0) }}
-			if err := writer.writeScores(context.Background(), nil, task,
-				[][]*agentpb.ChunkRef{m14Window(16)}); err != nil {
-				t.Fatalf("writeScores: %v", err)
+			// The Pod score snapshot covers exactly the assigned nodes, not P*max.
+			snapshot := podScoreSnapshot(task, slog.New(slog.NewTextHandler(io.Discard, nil)),
+				[][]*agentpb.ChunkRef{m14Window(16)}, 0, "trainer-0")
+			if len(snapshot) != tc.want {
+				t.Fatalf("score snapshot = %v, want %d assigned nodes", snapshot, tc.want)
 			}
-			key := scorefmt.Key(task.Namespace, task.Name)
-			pairs := 0
-			for _, node := range nodes {
-				_, wantPair := assigned[node]
-				raw, hasAnnotation := nodeAnnotations(t, c, node)[key]
-				if !hasAnnotation {
-					if wantPair {
-						t.Fatalf("annotation missing on assigned node %s", node)
-					}
-					continue
-				}
-				value, err := scorefmt.DecodeValue(raw)
-				if err != nil {
-					t.Fatalf("decode annotation on %s: %v", node, err)
-				}
-				_, hasPod := value.P["0"]
-				if hasPod && !wantPair {
-					t.Fatalf("annotation on %s covers an unassigned pair: %#v", node, value.P)
-				}
-				if !hasPod && wantPair {
-					t.Fatalf("annotation on assigned node %s missing pod 0", node)
-				}
-				if hasPod {
-					pairs++
+			for node := range snapshot {
+				if _, ok := assigned[node]; !ok {
+					t.Fatalf("score snapshot covers an unassigned node %s: %v", node, snapshot)
 				}
 			}
-			if pairs != tc.want {
-				t.Fatalf("annotation pairs = %d, want actual assignment count %d", pairs, tc.want)
+			for node := range assigned {
+				if _, ok := snapshot[node]; !ok {
+					t.Fatalf("score snapshot missing assigned node %s: %v", node, snapshot)
+				}
 			}
 		})
 	}
@@ -388,30 +366,15 @@ func TestM14MinUnmetFollowsActualAssignment(t *testing.T) {
 		t.Fatalf("high pod %d status entries = %d, want 2", highPod, got)
 	}
 
-	// Score annotations cover exactly the assigned pairs: one for the low Pod.
-	c := scoreClient(t, scoreNode("n1", nil), scoreNode("n2", nil), scoreNode("n3", nil))
-	writer := &Reconciler{Client: c, Now: func() time.Time { return time.Unix(100, 0) }}
-	if err := writer.writeScores(context.Background(), nil, task,
-		[][]*agentpb.ChunkRef{m14Window(16), m14Window(16)}); err != nil {
-		t.Fatalf("writeScores: %v", err)
+	// The Pod score snapshot covers exactly its assigned nodes: one for the low Pod.
+	snapshot := podScoreSnapshot(task, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		[][]*agentpb.ChunkRef{m14Window(16), m14Window(16)}, lowPod, podNames[lowPod])
+	if len(snapshot) != 1 {
+		t.Fatalf("low pod %d score snapshot = %v, want its actual 1 node", lowPod, snapshot)
 	}
-	key := scorefmt.Key(task.Namespace, task.Name)
-	lowPairs := 0
-	for _, node := range nodes {
-		raw, ok := nodeAnnotations(t, c, node)[key]
-		if !ok {
-			continue
-		}
-		value, err := scorefmt.DecodeValue(raw)
-		if err != nil {
-			t.Fatalf("decode annotation on %s: %v", node, err)
-		}
-		if _, ok := value.P[podIndexString(lowPod)]; ok {
-			lowPairs++
-		}
-	}
-	if lowPairs != 1 {
-		t.Fatalf("low pod %d annotation pairs = %d, want actual 1", lowPod, lowPairs)
+	if _, ok := snapshot[placement.Assignment[lowPod][0]]; !ok {
+		t.Fatalf("low pod %d score snapshot = %v, want assigned node %s",
+			lowPod, snapshot, placement.Assignment[lowPod][0])
 	}
 
 	buf, log := m12JSONLog(t)
@@ -452,11 +415,6 @@ func TestM14MinUnmetFollowsActualAssignment(t *testing.T) {
 	if changed["fanout_actual"] != wantActual {
 		t.Fatalf("log fanout_actual = %v, want %s", changed["fanout_actual"], wantActual)
 	}
-}
-
-// podIndexString renders a Pod index the way score annotations key the P map.
-func podIndexString(index int32) string {
-	return strconv.FormatInt(int64(index), 10)
 }
 
 // TestM14ValidateTaskFanoutBounds covers the defensive spec checks: negative

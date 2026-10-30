@@ -91,14 +91,12 @@ const (
 	ScoreOK              ScoreResult = "ok"
 	ScoreNoTaskRef       ScoreResult = "no_task_ref"
 	ScoreInvalidTaskRef  ScoreResult = "invalid_task_ref"
-	ScoreNoPodIndex      ScoreResult = "no_pod_index"
-	ScoreInvalidPodIndex ScoreResult = "invalid_pod_index"
 	ScoreNoAnnotation    ScoreResult = "no_annotation"
 	ScoreInvalidValue    ScoreResult = "invalid_value"
 	ScoreTaskMismatch    ScoreResult = "task_mismatch"
 	ScoreStaleGeneration ScoreResult = "stale_generation"
 	ScoreExpired         ScoreResult = "expired"
-	ScoreNoPodEntry      ScoreResult = "no_pod_entry"
+	ScoreNoNodeEntry     ScoreResult = "no_node_entry"
 )
 
 // gateEntry is the in-memory state used to keep gate_tasks balanced. The task
@@ -393,9 +391,9 @@ func validPollResult(value PollResult) bool {
 
 func validScoreResult(value ScoreResult) bool {
 	switch value {
-	case ScoreOK, ScoreNoTaskRef, ScoreInvalidTaskRef, ScoreNoPodIndex,
-		ScoreInvalidPodIndex, ScoreNoAnnotation, ScoreInvalidValue,
-		ScoreTaskMismatch, ScoreStaleGeneration, ScoreExpired, ScoreNoPodEntry:
+	case ScoreOK, ScoreNoTaskRef, ScoreInvalidTaskRef,
+		ScoreNoAnnotation, ScoreInvalidValue,
+		ScoreTaskMismatch, ScoreStaleGeneration, ScoreExpired, ScoreNoNodeEntry:
 		return true
 	}
 	return false

@@ -55,9 +55,9 @@ var m12AllowedLabelValues = map[string]map[string]map[string]struct{}{
 	"traincache_controller_gwaa_unassigned_pods": {"dataset": nil},
 	"traincache_scheduler_score_total": {
 		"result": m12Set(
-			"ok", "no_task_ref", "invalid_task_ref", "no_pod_index",
-			"invalid_pod_index", "no_annotation", "invalid_value",
-			"task_mismatch", "stale_generation", "expired", "no_pod_entry",
+			"ok", "no_task_ref", "invalid_task_ref", "no_annotation",
+			"invalid_value", "task_mismatch", "stale_generation", "expired",
+			"no_node_entry",
 		),
 	},
 }
@@ -171,9 +171,9 @@ func m12PopulateController(t *testing.T, m *Metrics) {
 func m12PopulateScheduler(t *testing.T, m *Metrics) {
 	t.Helper()
 	for _, result := range []ScoreResult{
-		ScoreOK, ScoreNoTaskRef, ScoreInvalidTaskRef, ScoreNoPodIndex,
-		ScoreInvalidPodIndex, ScoreNoAnnotation, ScoreInvalidValue,
-		ScoreTaskMismatch, ScoreStaleGeneration, ScoreExpired, ScoreNoPodEntry,
+		ScoreOK, ScoreNoTaskRef, ScoreInvalidTaskRef, ScoreNoAnnotation,
+		ScoreInvalidValue, ScoreTaskMismatch, ScoreStaleGeneration,
+		ScoreExpired, ScoreNoNodeEntry,
 	} {
 		m.ObserveSchedulerScore(result)
 	}

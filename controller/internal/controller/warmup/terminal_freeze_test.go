@@ -21,11 +21,11 @@ import (
 )
 
 // staleTaskClient serves one fixed WarmupTask copy on Get, the way a cache that
-// has not observed the release patch does, and counts writes to Node objects.
+// has not observed the release patch does, and counts writes to Nodes and Pods.
 type staleTaskClient struct {
 	client.Client
-	stale      *traincachev1alpha1.WarmupTask
-	nodeWrites int
+	stale        *traincachev1alpha1.WarmupTask
+	objectWrites int
 }
 
 func (c *staleTaskClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -37,15 +37,17 @@ func (c *staleTaskClient) Get(ctx context.Context, key client.ObjectKey, obj cli
 }
 
 func (c *staleTaskClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	if _, ok := obj.(*corev1.Node); ok {
-		c.nodeWrites++
+	switch obj.(type) {
+	case *corev1.Node, *corev1.Pod:
+		c.objectWrites++
 	}
 	return c.Client.Update(ctx, obj, opts...)
 }
 
 func (c *staleTaskClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-	if _, ok := obj.(*corev1.Node); ok {
-		c.nodeWrites++
+	switch obj.(type) {
+	case *corev1.Node, *corev1.Pod:
+		c.objectWrites++
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
@@ -161,8 +163,8 @@ func TestTerminalFreezeBlocksStaleDuplicatePass(t *testing.T) {
 	if got := pool.calls(); got != 0 {
 		t.Fatalf("duplicate pass issued %d placement RPCs, want 0", got)
 	}
-	if stale.nodeWrites != 0 {
-		t.Fatalf("duplicate pass wrote %d Node objects, want 0 score annotations", stale.nodeWrites)
+	if stale.objectWrites != 0 {
+		t.Fatalf("duplicate pass wrote %d Node/Pod objects, want 0 score annotations", stale.objectWrites)
 	}
 	after := getTask(t, c)
 	if got := readinessPairs(after); !reflect.DeepEqual(before, got) {
@@ -191,7 +193,9 @@ func TestStaleDuplicatePassRedrawsWithoutReleaseMemo(t *testing.T) {
 	if pool.calls() == 0 {
 		t.Fatal("stale duplicate pass issued no RPC; the fixture never reaches placement")
 	}
-	if stale.nodeWrites == 0 {
-		t.Fatal("stale duplicate pass wrote no score annotation; placement path not exercised")
+	// The Pods are already ungated, so the re-drawn pass has nothing to patch:
+	// D49 freezes each Pod's annotation once its gate is removed.
+	if stale.objectWrites != 0 {
+		t.Fatalf("stale duplicate pass rewrote %d Node/Pod objects, want 0", stale.objectWrites)
 	}
 }

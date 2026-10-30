@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -154,8 +153,8 @@ func TestM13GateReleasesWhenAnyWarmNodeReachesThreshold(t *testing.T) {
 	}
 }
 
-// TestM13ScoreAnnotationCoversEveryPair covers criteria ④: each node's
-// annotation only lists Pods warmed on that node and the union is P x K.
+// TestM13ScoreAnnotationCoversEveryPair covers criteria ④: each Pod's
+// annotation lists exactly its own assigned nodes, and the union is P x K.
 func TestM13ScoreAnnotationCoversEveryPair(t *testing.T) {
 	task := fanoutTask(t, 2, 2, 2, [][]int32{{0, 1}, {2, 3}})
 	task.Spec.Score = traincachev1alpha1.ScorePolicy{HalfLife: 1, Cutoff: 2}
@@ -166,28 +165,30 @@ func TestM13ScoreAnnotationCoversEveryPair(t *testing.T) {
 		{PodIndex: 1, NodeName: "n3", ReadyBlockBitmap: fullBitmap(2)},
 	}
 	windows := [][]*agentpb.ChunkRef{testChunks("a", "b"), testChunks("a", "b")}
-	c := scoreClient(t, scoreNode("n1", nil), scoreNode("n2", nil), scoreNode("n3", nil))
+	c := scoreClient(t, gatedPod(0), gatedPod(1))
 	r := &Reconciler{Client: c, Now: func() time.Time { return scoreTestNow }}
+	podNames := map[int32]string{0: "trainer-0", 1: "trainer-1"}
 
-	if err := r.writeScores(context.Background(), nil, task, windows); err != nil {
-		t.Fatalf("writeScores: %v", err)
+	removed, skipped, err := r.removeGates(context.Background(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), task, windows, podNames)
+	if err != nil || removed != 2 || skipped != 0 {
+		t.Fatalf("removeGates() = (%d, %d, %v), want (2, 0, nil)", removed, skipped, err)
 	}
 
-	key := scorefmt.Key(task.Namespace, task.Name)
-	want := map[string][]string{
-		"n1": {"0"},
-		"n2": {"0", "1"},
-		"n3": {"1"},
-	}
+	want := map[int32][]string{0: {"n1", "n2"}, 1: {"n2", "n3"}}
 	pairs := 0
-	for node, pods := range want {
-		value := readScoreValue(t, c, node, key)
-		if len(value.P) != len(pods) {
-			t.Fatalf("node %s annotation P = %v, want pods %v", node, value.P, pods)
+	for index, nodes := range want {
+		value := readPodScore(t, c, client.ObjectKey{Namespace: task.Namespace, Name: podNames[index]}, scorefmt.DefaultAnnotation)
+		if value.Task != task.Namespace+"/"+task.Name || value.G != task.Generation {
+			t.Fatalf("pod %d task/generation = %q/%d, want %s/%d",
+				index, value.Task, value.G, task.Namespace+"/"+task.Name, task.Generation)
 		}
-		for _, pod := range pods {
-			if _, ok := value.P[pod]; !ok {
-				t.Fatalf("node %s annotation missing pod %s: %v", node, pod, value.P)
+		if len(value.S) != len(nodes) {
+			t.Fatalf("pod %d annotation S = %v, want nodes %v", index, value.S, nodes)
+		}
+		for _, node := range nodes {
+			if _, ok := value.S[node]; !ok {
+				t.Fatalf("pod %d annotation missing node %s: %v", index, node, value.S)
 			}
 			pairs++
 		}
@@ -386,32 +387,16 @@ func TestM13FanoutOneRegression(t *testing.T) {
 		t.Fatalf("status entries = %d, want one per Pod (2)", got)
 	}
 	pairs := 0
-	key := scorefmt.Key(updated.Namespace, updated.Name)
-	for _, node := range updated.Status.CandidateNodes {
-		found := false
-		for annotation := range nodeAnnotations(t, c, node) {
-			if annotation == key {
-				found = true
-			}
+	for index, name := range []string{"trainer-0", "trainer-1"} {
+		value := readPodScore(t, c, client.ObjectKey{Namespace: "train", Name: name}, scorefmt.DefaultAnnotation)
+		if len(value.S) != 1 {
+			t.Fatalf("pod %d annotation S = %v, want fanout=1 (one node)", index, value.S)
 		}
-		if !found {
-			continue
-		}
-		value := readScoreValue(t, c, node, key)
-		pairs += len(value.P)
+		pairs += len(value.S)
 	}
 	if pairs != 2 {
 		t.Fatalf("fanout=1 annotation pairs = %d, want P x K = 2", pairs)
 	}
-}
-
-func nodeAnnotations(t *testing.T, c client.Client, nodeName string) map[string]string {
-	t.Helper()
-	node := &corev1.Node{}
-	if err := c.Get(context.Background(), client.ObjectKey{Name: nodeName}, node); err != nil {
-		t.Fatalf("get node %s: %v", nodeName, err)
-	}
-	return node.Annotations
 }
 
 // TestM13LogFields asserts the D21 log points: fanout, per-Pod warm-node

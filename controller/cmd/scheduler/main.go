@@ -127,10 +127,10 @@ func startDebugServer(ctx context.Context, cfg *config.Config, log *slog.Logger)
 // wiring without starting the process.
 func newSchedulerCommand(cfg *config.Config, log *slog.Logger, registry *metrics.Metrics) *cobra.Command {
 	return app.NewSchedulerCommand(app.WithPlugin(scheduler.Name, scheduler.Factory(scheduler.Options{
-		Prefix:  cfg.ScoreAnnotationPrefix,
-		TTL:     cfg.SchedulerScoreTTL,
-		Logger:  log,
-		Metrics: registry,
+		Annotation: cfg.ScoreAnnotation,
+		TTL:        cfg.SchedulerScoreTTL,
+		Logger:     log,
+		Metrics:    registry,
 	})))
 }
 
@@ -162,7 +162,7 @@ func logStartup(log *slog.Logger, cfg *config.Config) {
 	log.Info("config loaded",
 		"addr", cfg.HealthAddr,
 		"namespace", cfg.Namespace,
-		"score_prefix", cfg.ScoreAnnotationPrefix,
+		"score_annotation", cfg.ScoreAnnotation,
 		"score_ttl", cfg.SchedulerScoreTTL,
 	)
 	log.Info("starting", "addr", cfg.HealthAddr, "plugin", scheduler.Name)

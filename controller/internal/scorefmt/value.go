@@ -1,3 +1,11 @@
+// Package scorefmt encodes and decodes the Pod score annotation value
+// (docs/7.1 design.md §6.2, D49).
+//
+// The annotation lives on the training Pod itself and is written in the same
+// patch that removes its scheduling gate, so the scheduler reads the snapshot
+// from the Pod object it is already evaluating. The package has no Kubernetes
+// imports so that controller and scheduler binaries share exactly one
+// implementation.
 package scorefmt
 
 import (
@@ -6,30 +14,35 @@ import (
 	"time"
 )
 
-// valueVersion is the only supported annotation value format version.
-const valueVersion = 1
+const (
+	// DefaultAnnotation is the default Pod annotation key.
+	DefaultAnnotation = "traincache.io/node-scores"
 
-// Score bounds for entries in Value.P.
+	// valueVersion is the only supported annotation value format version.
+	valueVersion = 1
+)
+
+// Score bounds for entries in Value.S.
 const (
 	minScore = int32(0)
 	maxScore = int32(100)
 )
 
-// Value is the JSON payload stored in a per-WarmupTask Node annotation.
+// Value is the JSON payload stored in the Pod score annotation.
 //
 // The wire format is frozen by docs/7.1 design.md §6.2:
 //
-//	{"v":1,"task":"default/train-1","g":12,"t":"2026-10-20T08:00:00Z","p":{"0":87}}
+//	{"v":1,"task":"default/train-1","g":12,"t":"2026-10-20T08:00:00Z","s":{"node-a":87}}
 //
 // V is the format version, Task is "<namespace>/<name>", G is the WarmupTask
-// generation at write time, T is the RFC3339 UTC write instant, and P maps
-// decimal pod indexes to scores in [0,100].
+// generation at write time, T is the RFC3339 UTC write instant, and S maps
+// preheat node names to scores in [0,100].
 type Value struct {
 	V    int              `json:"v"`
 	Task string           `json:"task"`
 	G    int64            `json:"g"`
 	T    time.Time        `json:"t"`
-	P    map[string]int32 `json:"p"`
+	S    map[string]int32 `json:"s"`
 }
 
 // EncodeValue validates v and returns its single-line UTF-8 JSON encoding with
@@ -48,8 +61,8 @@ func EncodeValue(v Value) (string, error) {
 }
 
 // DecodeValue parses an annotation value produced by EncodeValue. It rejects
-// empty input, malformed JSON, unsupported versions, an empty task, and scores
-// outside [0,100].
+// empty input, malformed JSON, unsupported versions, an empty task, an empty
+// node name, and scores outside [0,100].
 func DecodeValue(raw string) (Value, error) {
 	if raw == "" {
 		return Value{}, fmt.Errorf("scorefmt: decode value: empty input")
@@ -81,9 +94,12 @@ func (v Value) validate() error {
 	if v.Task == "" {
 		return fmt.Errorf("task must not be empty")
 	}
-	for podIndex, score := range v.P {
+	for node, score := range v.S {
+		if node == "" {
+			return fmt.Errorf("node name must not be empty")
+		}
 		if score < minScore || score > maxScore {
-			return fmt.Errorf("pod %q score %d out of range %d..%d", podIndex, score, minScore, maxScore)
+			return fmt.Errorf("node %q score %d out of range %d..%d", node, score, minScore, maxScore)
 		}
 	}
 	return nil

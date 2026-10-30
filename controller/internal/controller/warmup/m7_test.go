@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -20,7 +21,6 @@ import (
 	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
-	"traincache/controller/internal/logging"
 	"traincache/controller/internal/scorefmt"
 )
 
@@ -57,29 +57,21 @@ func doneResponse(generation uint64, bitmap []byte) progressResponse {
 	return progressResponse{status: status}
 }
 
-// nodeUpdateFailClient fails every Node Update, leaving Pod patches intact.
-type nodeUpdateFailClient struct {
-	client.Client
-}
-
-func (c *nodeUpdateFailClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	if _, ok := obj.(*corev1.Node); ok {
-		return errors.New("node write failed")
-	}
-	return c.Client.Update(ctx, obj, opts...)
-}
-
-func TestReleaseAnnotationFailureKeepsGate(t *testing.T) {
+// TestReleasePodPatchFailureKeepsGateAndAnnotation asserts the per-Pod atomic
+// patch: when the Pod patch fails, the gate stays and no score annotation is
+// written, so the Scheduler never sees half a release (D49).
+func TestReleasePodPatchFailureKeepsGateAndAnnotation(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	pool := newFakeProgressPool()
 	pool.set("train/t1/p0", "n1", doneResponse(3, fullBitmap(2)))
 	base := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), gatedPod(0))
-	c := &nodeUpdateFailClient{Client: base}
+	c := &podPatchFailClient{Client: base, pod: "trainer-0"}
+	c.remaining.Store(100)
 	r := &Reconciler{Client: c, Agents: pool}
 
 	if _, err := reconcileResult(t, r); err == nil {
-		t.Fatal("Reconcile succeeded, want annotation write failure")
+		t.Fatal("Reconcile succeeded, want the Pod patch failure")
 	}
 
 	pod := &corev1.Pod{}
@@ -87,11 +79,14 @@ func TestReleaseAnnotationFailureKeepsGate(t *testing.T) {
 		t.Fatalf("get pod: %v", err)
 	}
 	if !hasWarmupGate(pod) {
-		t.Fatal("gate was removed although the annotation write failed")
+		t.Fatal("gate was removed although the Pod patch failed")
+	}
+	if _, ok := pod.Annotations[scorefmt.DefaultAnnotation]; ok {
+		t.Fatalf("score annotation %q written although the Pod patch failed", scorefmt.DefaultAnnotation)
 	}
 	updated := getTask(t, base)
 	if updated.Status.Phase == traincachev1alpha1.WarmupPhaseReleased {
-		t.Fatal("task was released although the annotation write failed")
+		t.Fatal("task was released although the Pod patch failed")
 	}
 	if updated.Status.GateDecision.State != "" {
 		t.Fatalf("gate decision = %q, want empty", updated.Status.GateDecision.State)
@@ -263,27 +258,34 @@ func TestGateCycleRequeuesAfterTerminalPoll(t *testing.T) {
 	}
 }
 
-func TestScoreWriterPrefixInjection(t *testing.T) {
-	c := scoreClient(t, scoreNode("node-a", nil))
-	w := &ScoreWriter{
-		Client: c,
-		Now:    func() time.Time { return scoreTestNow },
-		Prefix: "example.io/preheat",
+func TestRemoveGatesUsesConfiguredAnnotationKey(t *testing.T) {
+	task := fixtureTask(1, 2, [][]int32{{0, 1}})
+	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
+		{PodIndex: 0, NodeName: "n1", ReadyBlockBitmap: fullBitmap(2)},
 	}
-	task := scoreTestTaskRef("trainer")
-	if err := w.Write(context.Background(), task, "node-a", []ScoreEntry{scoreTestEntry(0, 50)}); err != nil {
-		t.Fatalf("Write: %v", err)
+	c := scoreClient(t, gatedPod(0))
+	r := &Reconciler{
+		Client:          c,
+		Now:             func() time.Time { return scoreTestNow },
+		ScoreAnnotation: "example.io/node-scores",
 	}
-	key := scorefmt.KeyWithPrefix("example.io/preheat", task.Namespace, task.Name)
-	value := readScoreValue(t, c, "node-a", key)
-	if value.P["0"] != 50 {
-		t.Fatalf("P = %v, want pod 0 score", value.P)
+	podNames := map[int32]string{0: "trainer-0"}
+	if _, _, err := r.removeGates(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+		task, [][]*agentpb.ChunkRef{testChunks("a", "b")}, podNames); err != nil {
+		t.Fatalf("removeGates: %v", err)
 	}
-	if _, ok := value.P["0"]; !ok {
-		t.Fatalf("value decoded from injected prefix key missing pod entry: %#v", value)
+
+	value := readPodScore(t, c, types.NamespacedName{Namespace: "train", Name: "trainer-0"}, "example.io/node-scores")
+	if _, ok := value.S["n1"]; !ok {
+		t.Fatalf("S = %v, want the assigned node", value.S)
 	}
-	if strings.HasPrefix(key, scorefmt.DefaultPrefix+"-") {
-		t.Fatalf("key %q used the default prefix, want the injected one", key)
+
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "train", Name: "trainer-0"}, pod); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if _, ok := pod.Annotations[scorefmt.DefaultAnnotation]; ok {
+		t.Fatalf("default annotation %q written, want only the configured key", scorefmt.DefaultAnnotation)
 	}
 }
 
@@ -357,35 +359,4 @@ func TestGwaaAssignmentChangeLogHasReason(t *testing.T) {
 		}
 	}
 	t.Fatalf("missing gwaa assignment changed log: %s", buf.String())
-}
-
-func TestScoreWriterLogFields(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	ctx := logging.Into(context.Background(), logger)
-	c := scoreClient(t, scoreNode("node-a", nil))
-	w := &ScoreWriter{Client: c, Now: func() time.Time { return scoreTestNow }}
-	if err := w.Write(ctx, scoreTestTaskRef("trainer"), "node-a", []ScoreEntry{scoreTestEntry(0, 87)}); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-
-	var debug, info map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		record := map[string]any{}
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("decode log line: %v", err)
-		}
-		switch record["msg"] {
-		case "pod score detail":
-			debug = record
-		case "score annotation written":
-			info = record
-		}
-	}
-	if debug == nil || debug["warmup_task"] != "train/trainer" {
-		t.Fatalf("score detail log missing warmup_task: %#v", debug)
-	}
-	if info == nil || info["warmup_task"] != "train/trainer" || info["entries"] == nil {
-		t.Fatalf("annotation log missing warmup_task/entries: %#v", info)
-	}
 }

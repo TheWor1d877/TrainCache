@@ -15,7 +15,7 @@ import (
 func TestLifecycleLogsStructuredFields(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil)).With("component", component, "version", version)
-	cfg := &config.Config{HealthAddr: ":8081", Namespace: "default", ScoreAnnotationPrefix: "traincache.io/scores"}
+	cfg := &config.Config{HealthAddr: ":8081", Namespace: "default", ScoreAnnotation: "traincache.io/node-scores"}
 
 	logStartup(log, cfg)
 	logShutdown(log, cfg)

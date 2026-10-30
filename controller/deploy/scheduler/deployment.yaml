@@ -127,9 +127,9 @@ spec:
             - --config=/etc/kubernetes/traincache-scheduler.yaml
             - --v=2
           env:
-            # Must match the controller's annotation prefix and TTL.
+            # Must match the controller's score annotation key and TTL.
             - name: CONTROLLER_SCORE_ANNOTATION
-              value: traincache.io/scores
+              value: traincache.io/node-scores
             - name: SCHEDULER_SCORE_TTL
               value: 10m
             - name: CONTROLLER_HEALTH_ADDR

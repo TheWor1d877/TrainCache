@@ -7,7 +7,6 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math/rand"
-	"sort"
 	"strings"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/gate"
 	"traincache/controller/internal/gwaa"
-	"traincache/controller/internal/logging"
 	"traincache/controller/internal/nodescore"
 )
 
@@ -459,8 +457,8 @@ func gateHitNodes(evaluation gateEvaluation) string {
 }
 
 // releaseGate performs the frozen release order from docs/7.1 §7.5:
-// scores → gates → status. A score failure returns before any gate is removed;
-// gate removal is idempotent so a partial failure can be retried next round.
+// scores+gates in one Pod patch, then status. A failed Pod patch leaves that
+// Pod gated and annotation-free; already released Pods are not rolled back.
 func (r *Reconciler) releaseGate(
 	ctx context.Context,
 	log *slog.Logger,
@@ -472,17 +470,7 @@ func (r *Reconciler) releaseGate(
 	decision := evaluation.Decision
 	taskKey := TaskKey(task)
 
-	if err := r.writeScores(ctx, log, task, windows); err != nil {
-		log.Warn("release blocked: score annotation write failed",
-			"warmup_task", taskKey,
-			"state", string(decision.State),
-			"reason", decision.Reason,
-			"err", err,
-		)
-		return ctrl.Result{}, err
-	}
-
-	removed, skipped, err := r.removeGates(ctx, log, task, podNames)
+	removed, skipped, err := r.removeGates(ctx, log, task, windows, podNames)
 	if err != nil {
 		log.Warn("gate removal incomplete",
 			"warmup_task", taskKey,
@@ -548,76 +536,6 @@ func podRates(rates []gate.PodRate) []traincachev1alpha1.PodRate {
 	return out
 }
 
-// writeScores computes S(node) for every (Pod, preheat node) pair and writes
-// the task's own Node annotation key. Each node's annotation only contains the
-// Pods warmed on that node (M13); the union covers all P x K pairs. Any failure
-// aborts the whole release (no gate removal).
-func (r *Reconciler) writeScores(
-	ctx context.Context,
-	log *slog.Logger,
-	task *traincachev1alpha1.WarmupTask,
-	windows [][]*agentpb.ChunkRef,
-) error {
-	writer := &ScoreWriter{
-		Client: r.Client,
-		Now:    r.now,
-		Prefix: r.ScoreAnnotationPrefix,
-	}
-	ref := TaskRef{
-		Namespace:  task.Namespace,
-		Name:       task.Name,
-		Generation: task.Generation,
-	}
-	ctx = logging.Into(ctx, log)
-
-	byNode := make(map[string][]int32, len(task.Status.PodNodeReadiness))
-	for i := range task.Status.PodNodeReadiness {
-		entry := &task.Status.PodNodeReadiness[i]
-		if entry.NodeName == "" {
-			continue
-		}
-		byNode[entry.NodeName] = append(byNode[entry.NodeName], entry.PodIndex)
-	}
-	nodes := make([]string, 0, len(byNode))
-	for node := range byNode {
-		nodes = append(nodes, node)
-	}
-	sort.Strings(nodes)
-
-	for _, node := range nodes {
-		indexes := byNode[node]
-		sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
-		entries := make([]ScoreEntry, 0, len(indexes))
-		for _, index := range indexes {
-			detail, ok := podDetail(task, index)
-			if !ok {
-				continue
-			}
-			requested := int32(0)
-			if int(index) < len(windows) {
-				requested = int32(len(windows[index]))
-			}
-			bits := scoreBits(task, index, node, requested, detail.K)
-			score := nodescore.Compute(bits, nodescore.Params{
-				K: detail.K,
-				H: task.Spec.Score.HalfLife,
-				C: task.Spec.Score.Cutoff,
-			})
-			entries = append(entries, ScoreEntry{
-				PodIndex: index,
-				K:        detail.K,
-				H:        task.Spec.Score.HalfLife,
-				C:        task.Spec.Score.Cutoff,
-				Score:    score.Total,
-			})
-		}
-		if err := writer.Write(ctx, ref, node, entries); err != nil {
-			return fmt.Errorf("write scores on node %q: %w", node, err)
-		}
-	}
-	return nil
-}
-
 // scoreBits decodes the (pod,node) bitmap. Missing or malformed bitmaps score
 // as zeros; release must not be blocked by a missing observation.
 func scoreBits(task *traincachev1alpha1.WarmupTask, pod int32, node string, requested, k int32) []bool {
@@ -632,19 +550,25 @@ func scoreBits(task *traincachev1alpha1.WarmupTask, pod int32, node string, requ
 	return decoded.Bits
 }
 
-// removeGates patches each selected Pod to drop the warmup scheduling gate.
-// Pods whose gate is already absent are skipped; a failure on one Pod does not
-// undo the others, and the next reconcile retries only the remaining gates.
+// removeGates patches each selected Pod once: it drops the warmup scheduling
+// gate and writes this Pod's node→score snapshot in the same object update
+// (D49). The scheduler therefore only sees a schedulable Pod that already
+// carries its scores. Pods whose gate is already absent are skipped and their
+// annotation is left frozen; a failure on one Pod does not undo the others, and
+// the next reconcile retries only the remaining gates.
 func (r *Reconciler) removeGates(
 	ctx context.Context,
 	log *slog.Logger,
 	task *traincachev1alpha1.WarmupTask,
+	windows [][]*agentpb.ChunkRef,
 	podNames map[int32]string,
 ) (removed, skipped int, err error) {
 	gateName := r.GateName
 	if gateName == "" {
 		gateName = DefaultGateName
 	}
+	annotationKey := ScoreAnnotationKey(r.ScoreAnnotation)
+	ref := TaskRef{Namespace: task.Namespace, Name: task.Name, Generation: task.Generation}
 
 	var errs []error
 	for index := int32(0); index < task.Spec.PodCount; index++ {
@@ -675,6 +599,13 @@ func (r *Reconciler) removeGates(
 			continue
 		}
 
+		nodeScores := podScoreSnapshot(task, log, windows, index, name)
+		raw, encodeErr := EncodePodScores(ref, nodeScores, r.now())
+		if encodeErr != nil {
+			errs = append(errs, fmt.Errorf("encode scores for pod %s: %w", name, encodeErr))
+			continue
+		}
+
 		base := pod.DeepCopy()
 		gates := pod.Spec.SchedulingGates[:0]
 		for _, schedulingGate := range pod.Spec.SchedulingGates {
@@ -683,18 +614,31 @@ func (r *Reconciler) removeGates(
 			}
 		}
 		pod.Spec.SchedulingGates = gates
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[annotationKey] = raw
 		if patchErr := r.Patch(ctx, pod, client.MergeFrom(base)); patchErr != nil {
-			errs = append(errs, fmt.Errorf("remove gate from pod %s: %w", name, patchErr))
+			errs = append(errs, fmt.Errorf("release pod %s: %w", name, patchErr))
 			log.Warn("gate removal failed",
 				"warmup_task", TaskKey(task),
 				"pod", name,
 				"pod_index", index,
 				"node", strings.Join(assignedNodes(task, index), ","),
+				"annotation_key", annotationKey,
 				"err", patchErr,
 			)
 			continue
 		}
 		removed++
+		log.Info("score annotation written",
+			"warmup_task", TaskKey(task),
+			"pod", name,
+			"pod_index", index,
+			"annotation_key", annotationKey,
+			"generation", task.Generation,
+			"entries", len(nodeScores),
+		)
 		log.Info("gate removed",
 			"warmup_task", TaskKey(task),
 			"pod", name,
@@ -706,4 +650,45 @@ func (r *Reconciler) removeGates(
 		return removed, skipped, errors.Join(errs...)
 	}
 	return removed, skipped, nil
+}
+
+// podScoreSnapshot computes S(node) for one Pod on each of its assigned preheat
+// nodes. Detail logging stays at Debug; the stored snapshot keeps the integer
+// score only.
+func podScoreSnapshot(
+	task *traincachev1alpha1.WarmupTask,
+	log *slog.Logger,
+	windows [][]*agentpb.ChunkRef,
+	index int32,
+	podName string,
+) map[string]int32 {
+	detail, ok := podDetail(task, index)
+	nodeScores := map[string]int32{}
+	if !ok {
+		return nodeScores
+	}
+	requested := int32(0)
+	if int(index) < len(windows) {
+		requested = int32(len(windows[index]))
+	}
+	for _, node := range assignedNodes(task, index) {
+		bits := scoreBits(task, index, node, requested, detail.K)
+		score := nodescore.Compute(bits, nodescore.Params{
+			K: detail.K,
+			H: task.Spec.Score.HalfLife,
+			C: task.Spec.Score.Cutoff,
+		})
+		nodeScores[node] = score.Total
+		log.Debug("pod score detail",
+			"warmup_task", TaskKey(task),
+			"pod", podName,
+			"pod_index", index,
+			"node", node,
+			"k", detail.K,
+			"h", task.Spec.Score.HalfLife,
+			"c", task.Spec.Score.Cutoff,
+			"score", score.Total,
+		)
+	}
+	return nodeScores
 }

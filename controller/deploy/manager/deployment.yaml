@@ -45,7 +45,7 @@ spec:
             - name: CONTROLLER_SCORE_TTL
               value: 10m
             - name: CONTROLLER_SCORE_ANNOTATION
-              value: traincache.io/scores
+              value: traincache.io/node-scores
             - name: CONTROLLER_GATE_NAME
               value: traincache.io/warmup
             - name: CONTROLLER_LEADER_ELECTION

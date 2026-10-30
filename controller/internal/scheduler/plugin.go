@@ -1,16 +1,15 @@
 // Package scheduler implements the TrainCache kube-scheduler score plugin.
 //
-// The plugin only reads Node annotations written by the controller. It never
-// mutates Nodes, Pods, or any other API object. Every failure mode returns a
-// score of 0 with a nil status so a malformed annotation can never make a Pod
-// unschedulable (docs/7.1 design.md §5.8/D7).
+// The plugin only reads the score annotation written by the controller on the
+// training Pod itself. It never mutates Nodes, Pods, or any other API object.
+// Every failure mode returns a score of 0 with a nil status so a malformed
+// annotation can never make a Pod unschedulable (docs/7.1 design.md §5.8/D18).
 package scheduler
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,18 +29,14 @@ const (
 	// "<namespace>/<name>" (docs/7.1 design.md §6.3).
 	AnnotationWarmupTask = "traincache.io/warmup-task"
 
-	// AnnotationPodIndex is injected by the mutating webhook and holds the
-	// decimal pod index within the WarmupTask.
-	AnnotationPodIndex = "traincache.io/pod-index"
-
 	defaultTTL = 5 * time.Minute
 )
 
 // Options configures the plugin. Zero values fall back to the defaults that
 // match docs/7.1 design.md §8.
 type Options struct {
-	// Prefix is the Node annotation key prefix (CONTROLLER_SCORE_ANNOTATION).
-	Prefix string
+	// Annotation is the Pod score annotation key (CONTROLLER_SCORE_ANNOTATION).
+	Annotation string
 	// TTL is the maximum age of a score entry (SCHEDULER_SCORE_TTL).
 	TTL time.Duration
 	// Logger receives Debug score decisions and Warn parse failures.
@@ -55,11 +50,11 @@ type Options struct {
 
 // Plugin implements framework.ScorePlugin.
 type Plugin struct {
-	prefix  string
-	ttl     time.Duration
-	log     *slog.Logger
-	now     func() time.Time
-	metrics *metrics.Metrics
+	annotation string
+	ttl        time.Duration
+	log        *slog.Logger
+	now        func() time.Time
+	metrics    *metrics.Metrics
 }
 
 var (
@@ -76,8 +71,8 @@ func New(_ context.Context, _ runtime.Object, _ schedframework.Handle) (schedfra
 
 // NewWithOptions builds the plugin and validates its options.
 func NewWithOptions(opts Options) (*Plugin, error) {
-	if opts.Prefix == "" {
-		opts.Prefix = scorefmt.DefaultPrefix
+	if opts.Annotation == "" {
+		opts.Annotation = scorefmt.DefaultAnnotation
 	}
 	if opts.TTL == 0 {
 		opts.TTL = defaultTTL
@@ -85,9 +80,9 @@ func NewWithOptions(opts Options) (*Plugin, error) {
 	if opts.TTL < 0 {
 		return nil, fmt.Errorf("scheduler: TTL must be positive, got %s", opts.TTL)
 	}
-	if opts.Prefix != strings.TrimSpace(opts.Prefix) ||
-		strings.HasSuffix(opts.Prefix, "-") || strings.HasSuffix(opts.Prefix, ".") {
-		return nil, fmt.Errorf("scheduler: invalid annotation prefix %q", opts.Prefix)
+	if opts.Annotation != strings.TrimSpace(opts.Annotation) ||
+		strings.HasSuffix(opts.Annotation, "-") || strings.HasSuffix(opts.Annotation, ".") {
+		return nil, fmt.Errorf("scheduler: invalid annotation key %q", opts.Annotation)
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -96,17 +91,17 @@ func NewWithOptions(opts Options) (*Plugin, error) {
 		opts.Now = time.Now
 	}
 	return &Plugin{
-		prefix:  opts.Prefix,
-		ttl:     opts.TTL,
-		log:     opts.Logger,
-		now:     opts.Now,
-		metrics: opts.Metrics,
+		annotation: opts.Annotation,
+		ttl:        opts.TTL,
+		log:        opts.Logger,
+		now:        opts.Now,
+		metrics:    opts.Metrics,
 	}, nil
 }
 
 // Factory returns a registry factory that is assignable to the scheduler's
 // runtime.PluginFactory. cmd/scheduler passes environment-derived options
-// here so the plugin and controller share one key prefix and TTL.
+// here so the plugin and controller share one annotation key and TTL.
 func Factory(opts Options) func(context.Context, runtime.Object, schedframework.Handle) (schedframework.Plugin, error) {
 	return func(_ context.Context, _ runtime.Object, _ schedframework.Handle) (schedframework.Plugin, error) {
 		return NewWithOptions(opts)
@@ -116,11 +111,11 @@ func Factory(opts Options) func(context.Context, runtime.Object, schedframework.
 // Name returns the plugin name.
 func (p *Plugin) Name() string { return Name }
 
-// Score returns the per-pod score stored by the controller for this Node.
+// Score returns the score the controller wrote on this Pod for this Node.
 //
-// Missing annotations, a mismatched task, an invalid or stale generation,
-// malformed JSON, an expired entry, and a missing pod entry all return 0 with
-// a nil status. Any error is logged but never fails scheduling.
+// A missing annotation, a mismatched task, an invalid generation, malformed
+// JSON, an expired value, and a missing node entry all return 0 with a nil
+// status. Any error is logged but never fails scheduling.
 func (p *Plugin) Score(_ context.Context, _ schedframework.CycleState, pod *corev1.Pod, nodeInfo schedframework.NodeInfo) (int64, *schedframework.Status) {
 	if pod == nil || nodeInfo == nil {
 		return 0, nil
@@ -208,26 +203,16 @@ func (p *Plugin) evaluateResult(pod *corev1.Pod, node *corev1.Node, now time.Tim
 		return 0, "", true, metrics.ScoreNoTaskRef, nil
 	}
 
+	key = p.annotation
 	taskRef := pod.Annotations[AnnotationWarmupTask]
-	namespace, name, ok := splitTaskRef(taskRef)
-	if !ok {
+	if _, _, ok := splitTaskRef(taskRef); !ok {
 		if taskRef == "" {
-			return 0, "", true, metrics.ScoreNoTaskRef, nil
+			return 0, key, true, metrics.ScoreNoTaskRef, nil
 		}
-		return 0, "", true, metrics.ScoreInvalidTaskRef, fmt.Errorf("invalid %s annotation %q", AnnotationWarmupTask, taskRef)
-	}
-	key = scorefmt.KeyWithPrefix(p.prefix, namespace, name)
-
-	indexRaw, ok := pod.Annotations[AnnotationPodIndex]
-	if !ok {
-		return 0, key, true, metrics.ScoreNoPodIndex, nil
-	}
-	index, err := strconv.ParseInt(indexRaw, 10, 32)
-	if err != nil || index < 0 {
-		return 0, key, true, metrics.ScoreInvalidPodIndex, fmt.Errorf("invalid %s annotation %q", AnnotationPodIndex, indexRaw)
+		return 0, key, true, metrics.ScoreInvalidTaskRef, fmt.Errorf("invalid %s annotation %q", AnnotationWarmupTask, taskRef)
 	}
 
-	raw, ok := node.Annotations[key]
+	raw, ok := pod.Annotations[key]
 	if !ok {
 		return 0, key, true, metrics.ScoreNoAnnotation, nil
 	}
@@ -245,11 +230,11 @@ func (p *Plugin) evaluateResult(pod *corev1.Pod, node *corev1.Node, now time.Tim
 		return 0, key, true, metrics.ScoreExpired, nil
 	}
 
-	podScore, ok := value.P[strconv.FormatInt(index, 10)]
+	nodeScore, ok := value.S[node.Name]
 	if !ok {
-		return 0, key, true, metrics.ScoreNoPodEntry, nil
+		return 0, key, true, metrics.ScoreNoNodeEntry, nil
 	}
-	return int64(podScore), key, false, metrics.ScoreOK, nil
+	return int64(nodeScore), key, false, metrics.ScoreOK, nil
 }
 
 // splitTaskRef splits the webhook's "<namespace>/<name>" annotation. Exactly

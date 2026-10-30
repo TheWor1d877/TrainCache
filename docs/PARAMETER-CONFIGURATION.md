@@ -139,6 +139,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 | `CONTROLLER_AGENT_TIMEOUT` | manager Deployment env | `5s` | 单次 Agent 调用超时 |
 | `CONTROLLER_SCORE_TTL` | manager Deployment env | `10m` | 调度分数有效期 |
 | `SCHEDULER_SCORE_TTL` | scheduler Deployment env | `10m` | Scheduler 读取分数的有效期，必须与 Controller 一致 |
+| `CONTROLLER_SCORE_ANNOTATION` | manager / scheduler Deployment env | `traincache.io/node-scores` | 训练 Pod 上的分数注解键，两端必须同值 |
 | `CONTROLLER_MAX_CHUNKS` | manager Deployment env | `10000000` | 单任务块数上限 |
 | `CONTROLLER_LOG_LEVEL` | manager / webhook / scheduler Deployment env | `info` | `debug` / `info` / `warn` / `error` |
 | `CONTROLLER_LEADER_ELECTION` | manager Deployment env | `false` | 多副本时开 |
@@ -296,7 +297,7 @@ spec:
 - 块编号：按 shard 顺序累计，发布后固定。
 - 已发布桶的块大小：写在 `_traincache/format.json`，发布器拒绝改值；只能清空桶重灌或换新桶。
 - 已创建任务的 `dataSetRef` 与 `podCount`：API server 按 `self == oldSelf` 拒绝修改，要改只能删掉重建。
-- gate 名 `traincache.io/warmup`、分数注解 `traincache.io/scores`：webhook、scheduler、训练 Pod 共用。
+- gate 名 `traincache.io/warmup`、训练 Pod 上的分数注解 `traincache.io/node-scores`：webhook、scheduler、训练 Pod 共用。
 - 镜像名与 tag：发布物决定，用户不通过参数改；离线部署用 `docker save` / `kind load`。
 
 ## 6. 改完后的检查

@@ -1,63 +1,83 @@
 package warmup
 
-// M12 log assertions for docs/8.1 design.md §4.1 points 13/14/17: Node
-// annotation write conflict/exhaustion and pod score detail; released Pod
-// landing off its GWAA assignment (Warn log paired with NodeDeviation event).
+// M12 log assertions for docs/8.1 design.md §4.1: the Pod score annotation is
+// written in the same patch that removes the gate, and a failed patch leaves
+// the Pod gated; released Pods landing off their GWAA assignment (Warn log
+// paired with the NodeDeviation event).
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/client-go/tools/record"
 
+	agentpb "traincache/agent/api/agentpb"
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
-	"traincache/controller/internal/logging"
 )
 
-// §4.1 第 13/14 点: pod score detail (Debug), conflict retry (Debug) and the
-// successful annotation write (Info) all carry node/key/generation context.
+// §4.1: pod score detail (Debug) and the successful annotation write (Info)
+// carry the Pod, key and generation context.
 func TestM12ScoreAnnotationLogFields(t *testing.T) {
 	buf, log := m12JSONLog(t)
-	ctx := logging.Into(context.Background(), log)
-	c := &scoreFlakyClient{Client: scoreClient(t, scoreNode("node-a", nil))}
-	c.remaining.Store(2)
-	w := &ScoreWriter{Client: c, Now: func() time.Time { return scoreTestNow }}
+	task := fixtureTask(1, 2, [][]int32{{0, 1}})
+	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
+		{PodIndex: 0, NodeName: "n1", ReadyBlockBitmap: fullBitmap(2)},
+	}
+	c := scoreClient(t, gatedPod(0))
+	r := &Reconciler{Client: c, Now: func() time.Time { return scoreTestNow }}
 
-	if err := w.Write(ctx, scoreTestTaskRef("trainer"), "node-a", []ScoreEntry{scoreTestEntry(0, 42)}); err != nil {
-		t.Fatalf("Write: %v", err)
+	removed, _, err := r.removeGates(context.Background(), log, task,
+		[][]*agentpb.ChunkRef{testChunks("a", "b")}, map[int32]string{0: "trainer-0"})
+	if err != nil || removed != 1 {
+		t.Fatalf("removeGates() = (%d, %v), want one released Pod", removed, err)
 	}
 
 	detail := m12FindLog(t, buf, "pod score detail")
 	m12RequireLevel(t, detail, "DEBUG")
 	m12RequireFields(t, detail, "component", "warmup_task", "pod", "node", "k", "h", "c", "score")
 
-	retry := m12FindLog(t, buf, "score annotation conflict, retrying")
-	m12RequireLevel(t, retry, "DEBUG")
-	m12RequireFields(t, retry, "component", "warmup_task", "node", "annotation_key", "generation", "attempt")
-
 	written := m12FindLog(t, buf, "score annotation written")
 	m12RequireLevel(t, written, "INFO")
-	m12RequireFields(t, written, "component", "warmup_task", "node", "annotation_key", "generation", "entries", "pods")
-}
-
-// §4.1 第 13 点: exhausting scoreWriteAttempts logs ErrScoreConflict at Error.
-func TestM12ScoreAnnotationConflictExhaustedLogFields(t *testing.T) {
-	buf, log := m12JSONLog(t)
-	ctx := logging.Into(context.Background(), log)
-	c := &scoreConflictClient{Client: scoreClient(t, scoreNode("node-a", nil))}
-	w := &ScoreWriter{Client: c, Now: func() time.Time { return scoreTestNow }}
-
-	err := w.Write(ctx, scoreTestTaskRef("trainer"), "node-a", []ScoreEntry{scoreTestEntry(0, 42)})
-	if !errors.Is(err, ErrScoreConflict) {
-		t.Fatalf("Write error = %v, want ErrScoreConflict", err)
+	m12RequireFields(t, written, "component", "warmup_task", "pod", "pod_index",
+		"annotation_key", "generation", "entries")
+	if written["generation"] != float64(task.Generation) {
+		t.Fatalf("generation = %v, want %d", written["generation"], task.Generation)
 	}
 
-	rec := m12FindLog(t, buf, "score annotation conflict exhausted")
-	m12RequireLevel(t, rec, "ERROR")
-	m12RequireFields(t, rec, "component", "warmup_task", "node", "annotation_key", "generation", "attempts", "err")
+	gate := m12FindLog(t, buf, "gate removed")
+	m12RequireLevel(t, gate, "INFO")
+	m12RequireFields(t, gate, "component", "warmup_task", "pod", "pod_index", "node")
+}
+
+// §4.1: a failed Pod patch logs the Warn line and leaves the Pod gated, so the
+// score annotation and the gate stay consistent.
+func TestM12ScoreAnnotationPatchFailureLogFields(t *testing.T) {
+	buf, log := m12JSONLog(t)
+	task := fixtureTask(1, 2, [][]int32{{0, 1}})
+	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
+		{PodIndex: 0, NodeName: "n1", ReadyBlockBitmap: fullBitmap(2)},
+	}
+	c := &podPatchFailClient{Client: scoreClient(t, gatedPod(0)), pod: "trainer-0"}
+	c.remaining.Store(100)
+	r := &Reconciler{Client: c, Now: func() time.Time { return scoreTestNow }}
+
+	if _, _, err := r.removeGates(context.Background(), log, task,
+		[][]*agentpb.ChunkRef{testChunks("a", "b")}, map[int32]string{0: "trainer-0"}); err == nil {
+		t.Fatal("removeGates() succeeded, want a Pod patch failure")
+	}
+
+	rec := m12FindLog(t, buf, "gate removal failed")
+	m12RequireLevel(t, rec, "WARN")
+	m12RequireFields(t, rec, "component", "warmup_task", "pod", "pod_index",
+		"node", "annotation_key", "err")
+
+	for _, rec := range m12LogRecords(t, buf) {
+		if rec["msg"] == "score annotation written" {
+			t.Fatal("failed patch still logged a written annotation")
+		}
+	}
 }
 
 // §4.1 第 5 点: GWAA 分配结果按 reconcile 打出 fanout/assign/unassigned.

@@ -21,42 +21,34 @@ const testNamespace = "default"
 
 var testNow = time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
 
-func testPod(name string, index int32) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      name,
-			Annotations: map[string]string{
-				AnnotationWarmupTask: testNamespace + "/" + name,
-				AnnotationPodIndex:   strconv.FormatInt(int64(index), 10),
-			},
-		},
+// testPod builds a training Pod with the webhook's warmup-task annotation and,
+// when value is non-nil, the controller-written score annotation.
+func testPod(name string, value *scorefmt.Value) *corev1.Pod {
+	annotations := map[string]string{
+		AnnotationWarmupTask: testNamespace + "/" + name,
 	}
-}
-
-func testNode(values ...scorefmt.Value) *corev1.Node {
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "node-1",
-			Annotations: map[string]string{},
-		},
-	}
-	for _, v := range values {
-		raw, err := scorefmt.EncodeValue(v)
+	if value != nil {
+		raw, err := scorefmt.EncodeValue(*value)
 		if err != nil {
 			panic(err)
 		}
-		namespace, name, ok := splitTaskRef(v.Task)
-		if !ok {
-			panic("invalid task in test value: " + v.Task)
-		}
-		node.Annotations[scorefmt.Key(namespace, name)] = raw
+		annotations[scorefmt.DefaultAnnotation] = raw
 	}
-	return node
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   testNamespace,
+			Name:        name,
+			Annotations: annotations,
+		},
+	}
+}
+
+func testNode(name string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
 }
 
 func freshValue(task string, generation int64, scores map[string]int32) scorefmt.Value {
-	return scorefmt.Value{V: 1, Task: task, G: generation, T: testNow.Add(-time.Minute), P: scores}
+	return scorefmt.Value{V: 1, Task: task, G: generation, T: testNow.Add(-time.Minute), S: scores}
 }
 
 func newTestPlugin(t *testing.T, opts Options) *Plugin {
@@ -72,10 +64,11 @@ func newTestPlugin(t *testing.T, opts Options) *Plugin {
 }
 
 func TestEvaluateReturnsScore(t *testing.T) {
-	pod := testPod("train-1", 2)
-	node := testNode(freshValue("default/train-1", 7, map[string]int32{"0": 12, "2": 87}))
+	value := freshValue("default/train-1", 7, map[string]int32{"node-1": 87, "node-2": 12})
+	pod := testPod("train-1", &value)
+	node := testNode("node-1")
 
-	before := node.DeepCopy()
+	before := pod.DeepCopy()
 	score, key, stale, err := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
 
 	if err != nil || stale {
@@ -84,41 +77,37 @@ func TestEvaluateReturnsScore(t *testing.T) {
 	if score != 87 {
 		t.Fatalf("score = %d, want 87", score)
 	}
-	// Cross-package contract check: the annotation key must be exactly the one
-	// the controller writer (scorefmt) produces.
-	if want := scorefmt.KeyWithPrefix(scorefmt.DefaultPrefix, testNamespace, "train-1"); key != want {
-		t.Fatalf("key = %q, want %q", key, want)
+	if key != scorefmt.DefaultAnnotation {
+		t.Fatalf("key = %q, want %q", key, scorefmt.DefaultAnnotation)
 	}
-	if !reflect.DeepEqual(before, node) {
-		t.Fatal("evaluate() mutated the Node")
-	}
-	if !reflect.DeepEqual(pod.Annotations, testPod("train-1", 2).Annotations) {
+	if !reflect.DeepEqual(before, pod) {
 		t.Fatal("evaluate() mutated the Pod")
 	}
 }
 
 func TestEvaluateZeroScore(t *testing.T) {
-	pod := testPod("train-1", 0)
-	node := testNode(freshValue("default/train-1", 3, map[string]int32{"0": 0}))
+	value := freshValue("default/train-1", 3, map[string]int32{"node-1": 0})
+	pod := testPod("train-1", &value)
 
-	score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
+	score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, testNode("node-1"), testNow)
 	if err != nil || stale || score != 0 {
 		t.Fatalf("evaluate() = (%d, %v, %v), want fresh 0", score, stale, err)
 	}
 }
 
 func TestEvaluateMissingInputs(t *testing.T) {
+	value := freshValue("default/train-1", 2, map[string]int32{"node-2": 50})
+	noTaskRef := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "train-1"}}
 	tests := []struct {
 		name string
 		pod  *corev1.Pod
 		node *corev1.Node
 	}{
-		{"nil pod", nil, testNode()},
-		{"nil node", testPod("train-1", 0), nil},
-		{"no warmup-task annotation", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "train-1"}}, testNode()},
-		{"no pod-index annotation", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationWarmupTask: "default/train-1"}}}, testNode()},
-		{"missing node annotation", testPod("train-1", 0), testNode()},
-		{"missing pod entry", testPod("train-1", 4), testNode(freshValue("default/train-1", 2, map[string]int32{"0": 50}))},
+		{"nil pod", nil, testNode("node-1")},
+		{"nil node", testPod("train-1", &value), nil},
+		{"no warmup-task annotation", noTaskRef, testNode("node-1")},
+		{"missing score annotation", testPod("train-1", nil), testNode("node-1")},
+		{"missing node entry", testPod("train-1", &value), testNode("node-1")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -130,46 +119,23 @@ func TestEvaluateMissingInputs(t *testing.T) {
 	}
 }
 
-func TestEvaluateKeyMismatch(t *testing.T) {
-	// The Node carries a valid annotation, but for another task.
-	pod := testPod("train-1", 0)
-	node := testNode(freshValue("default/train-2", 2, map[string]int32{"0": 90}))
-
-	score, key, stale, err := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
-	if score != 0 || !stale || err != nil {
-		t.Fatalf("evaluate() = (%d, %q, stale=%v, err=%v), want missing key -> 0", score, key, stale, err)
-	}
-	if key == "" || !strings.Contains(key, "train-1") {
-		t.Fatalf("key = %q, want the pod task key", key)
-	}
-}
-
 func TestEvaluateTaskFieldMismatch(t *testing.T) {
-	pod := testPod("train-1", 0)
-	// Same key slot but the payload claims another task.
-	node := testNode(freshValue("default/train-2", 2, map[string]int32{"0": 90}))
+	value := freshValue("default/other", 2, map[string]int32{"node-1": 90})
+	pod := testPod("train-1", &value)
 
-	// Rewrite the payload under the pod's key to exercise the task check.
-	raw, err := scorefmt.EncodeValue(freshValue("default/other", 2, map[string]int32{"0": 90}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	node.Annotations[scorefmt.KeyWithPrefix(scorefmt.DefaultPrefix, testNamespace, "train-1")] = raw
-
-	score, _, stale, evalErr := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
+	score, _, stale, evalErr := newTestPlugin(t, Options{}).evaluate(pod, testNode("node-1"), testNow)
 	if score != 0 || !stale || evalErr == nil {
 		t.Fatalf("evaluate() = (%d, stale=%v, err=%v), want task mismatch -> 0", score, stale, evalErr)
 	}
 }
 
 func TestEvaluateExpiredTTL(t *testing.T) {
-	pod := testPod("train-1", 0)
-	value := freshValue("default/train-1", 2, map[string]int32{"0": 90})
+	value := freshValue("default/train-1", 2, map[string]int32{"node-1": 90})
 	value.T = testNow.Add(-10 * time.Minute)
-	node := testNode(value)
+	pod := testPod("train-1", &value)
 
 	p := newTestPlugin(t, Options{TTL: 5 * time.Minute})
-	score, _, stale, err := p.evaluate(pod, node, testNow)
+	score, _, stale, err := p.evaluate(pod, testNode("node-1"), testNow)
 	if score != 0 || !stale || err != nil {
 		t.Fatalf("evaluate() = (%d, stale=%v, err=%v), want expired -> 0", score, stale, err)
 	}
@@ -177,10 +143,10 @@ func TestEvaluateExpiredTTL(t *testing.T) {
 
 func TestEvaluateStaleGeneration(t *testing.T) {
 	for _, generation := range []int64{0, -3} {
-		pod := testPod("train-1", 0)
-		node := testNode(freshValue("default/train-1", generation, map[string]int32{"0": 90}))
+		value := freshValue("default/train-1", generation, map[string]int32{"node-1": 90})
+		pod := testPod("train-1", &value)
 
-		score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
+		score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, testNode("node-1"), testNow)
 		if score != 0 || !stale || err == nil {
 			t.Fatalf("generation %d: evaluate() = (%d, stale=%v, err=%v), want stale -> 0", generation, score, stale, err)
 		}
@@ -188,47 +154,31 @@ func TestEvaluateStaleGeneration(t *testing.T) {
 }
 
 func TestEvaluateInvalidValues(t *testing.T) {
-	taskKey := scorefmt.KeyWithPrefix(scorefmt.DefaultPrefix, testNamespace, "train-1")
 	tests := []struct {
-		name        string
-		annotations map[string]string
-		wantErr     bool
+		name string
+		raw  string
+		ref  string
+		bad  bool
 	}{
-		{"bad json", map[string]string{taskKey: `{"v":1,"task":`}, true},
-		{"unsupported version", map[string]string{taskKey: `{"v":2,"task":"default/train-1","g":1,"t":"2026-10-20T07:59:00Z","p":{"0":50}}`}, true},
-		{"score out of range", map[string]string{taskKey: `{"v":1,"task":"default/train-1","g":1,"t":"2026-10-20T07:59:00Z","p":{"0":101}}`}, true},
-		{"bad task ref", map[string]string{taskKey: `{"v":1,"task":"default","g":1,"t":"2026-10-20T07:59:00Z","p":{"0":50}}`}, true},
+		{"bad json", `{"v":1,"task":`, "default/train-1", true},
+		{"unsupported version", `{"v":2,"task":"default/train-1","g":1,"t":"2026-10-20T07:59:00Z","s":{"node-1":50}}`, "default/train-1", true},
+		{"score out of range", `{"v":1,"task":"default/train-1","g":1,"t":"2026-10-20T07:59:00Z","s":{"node-1":101}}`, "default/train-1", true},
+		{"bad task ref", `{"v":1,"task":"default/train-1","g":1,"t":"2026-10-20T07:59:00Z","s":{"node-1":50}}`, "bad/task/ref", false},
 	}
 	for _, tt := range tests {
-		for _, ref := range []string{"default/train-1", "bad/task/ref", "/train-1", "default/"} {
-			t.Run(tt.name+"_"+ref, func(t *testing.T) {
-				pod := testPod("train-1", 0)
-				pod.Annotations[AnnotationWarmupTask] = ref
-				pod.Annotations[AnnotationPodIndex] = "0"
-				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Annotations: tt.annotations}}
+		t.Run(tt.name, func(t *testing.T) {
+			pod := testPod("train-1", nil)
+			pod.Annotations[AnnotationWarmupTask] = tt.ref
+			pod.Annotations[scorefmt.DefaultAnnotation] = tt.raw
 
-				score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
-				if score != 0 || !stale {
-					t.Fatalf("evaluate() = (%d, stale=%v, err=%v), want 0/stale", score, stale, err)
-				}
-				if ref == "default/train-1" && (err != nil) != tt.wantErr {
-					t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
-				}
-			})
-		}
-	}
-}
-
-func TestEvaluateInvalidPodIndex(t *testing.T) {
-	for _, raw := range []string{"abc", "-1", "1.5", ""} {
-		pod := testPod("train-1", 0)
-		pod.Annotations[AnnotationPodIndex] = raw
-		node := testNode(freshValue("default/train-1", 2, map[string]int32{"0": 50}))
-
-		score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, node, testNow)
-		if score != 0 || !stale || err == nil {
-			t.Fatalf("pod-index %q: evaluate() = (%d, stale=%v, err=%v), want 0", raw, score, stale, err)
-		}
+			score, _, stale, err := newTestPlugin(t, Options{}).evaluate(pod, testNode("node-1"), testNow)
+			if score != 0 || !stale {
+				t.Fatalf("evaluate() = (%d, stale=%v, err=%v), want 0/stale", score, stale, err)
+			}
+			if tt.bad && err == nil {
+				t.Fatal("evaluate() = nil error, want a malformed-value error")
+			}
+		})
 	}
 }
 
@@ -275,8 +225,8 @@ func TestScoreNilInputs(t *testing.T) {
 }
 
 func TestFactoryUsesOptions(t *testing.T) {
-	prefix := "example.io/custom"
-	plugin, err := Factory(Options{Prefix: prefix, TTL: time.Minute, Now: func() time.Time { return testNow }})(context.Background(), nil, nil)
+	custom := "example.io/custom-scores"
+	plugin, err := Factory(Options{Annotation: custom, TTL: time.Minute, Now: func() time.Time { return testNow }})(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("Factory() error: %v", err)
 	}
@@ -288,17 +238,20 @@ func TestFactoryUsesOptions(t *testing.T) {
 		t.Fatal("plugin does not implement the score contract")
 	}
 
-	pod := testPod("train-1", 0)
-	node := testNode(freshValue("default/train-1", 2, map[string]int32{"0": 50}))
-	raw, err := scorefmt.EncodeValue(freshValue("default/train-1", 2, map[string]int32{"0": 50}))
+	value := freshValue("default/train-1", 2, map[string]int32{"node-1": 50})
+	pod := testPod("train-1", nil)
+	raw, err := scorefmt.EncodeValue(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	node.Annotations = map[string]string{scorefmt.KeyWithPrefix(prefix, testNamespace, "train-1"): raw}
+	pod.Annotations[custom] = raw
 
-	score, key, stale, err := p.evaluate(pod, node, testNow)
+	score, key, stale, err := p.evaluate(pod, testNode("node-1"), testNow)
 	if err != nil || stale || score != 50 {
-		t.Fatalf("evaluate() = (%d, %q, stale=%v, err=%v), want custom prefix score 50", score, key, stale, err)
+		t.Fatalf("evaluate() = (%d, %q, stale=%v, err=%v), want custom annotation score 50", score, key, stale, err)
+	}
+	if key != custom {
+		t.Fatalf("key = %q, want %q", key, custom)
 	}
 }
 
@@ -312,10 +265,10 @@ func TestScoreLogsWarnOnParseFailure(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p := newTestPlugin(t, Options{Logger: log})
-	taskKey := scorefmt.KeyWithPrefix(scorefmt.DefaultPrefix, testNamespace, "train-1")
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Annotations: map[string]string{taskKey: `{broken`}}}
+	pod := testPod("train-1", nil)
+	pod.Annotations[scorefmt.DefaultAnnotation] = `{broken`
 
-	if score := p.scoreNode(testPod("train-1", 0), node, testNow); score != 0 {
+	if score := p.scoreNode(pod, testNode("node-1"), testNow); score != 0 {
 		t.Fatalf("scoreNode() = %d, want 0", score)
 	}
 	if got := buf.String(); !strings.Contains(got, `"level":"WARN"`) {
