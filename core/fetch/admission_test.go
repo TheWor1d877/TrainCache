@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// TestLimiterBackgroundQuota：后台额度取全场的一半（任务槽与在途字节各自折半，至少 1）。
-func TestLimiterBackgroundQuota(t *testing.T) {
+// TestLimiterSpeculativeQuota：预铺额度取全场的一半（任务槽与在途字节各自折半，至少 1）。
+func TestLimiterSpeculativeQuota(t *testing.T) {
 	cases := []struct {
 		name      string
 		maxBytes  int64
@@ -25,19 +25,19 @@ func TestLimiterBackgroundQuota(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			l := newLimiter(Options{MaxInflightBytes: c.maxBytes, MaxTasks: c.maxTasks}.withDefaults())
-			if got := l.bgBytes.cap; got != c.wantBytes {
-				t.Fatalf("bgBytes.cap = %d, want %d", got, c.wantBytes)
+			if got := l.specBytes.cap; got != c.wantBytes {
+				t.Fatalf("specBytes.cap = %d, want %d", got, c.wantBytes)
 			}
-			if got := l.bgTasks.max; got != c.wantTasks {
-				t.Fatalf("bgTasks.max = %d, want %d", got, c.wantTasks)
+			if got := l.specTasks.max; got != c.wantTasks {
+				t.Fatalf("specTasks.max = %d, want %d", got, c.wantTasks)
 			}
 		})
 	}
 }
 
-// TestForegroundGateWake：前台在途归零时唤醒后台等待者；promoted 关闭同样立即放行。
-func TestForegroundGateWake(t *testing.T) {
-	g := newForegroundGate()
+// TestReadingGateWake：在读在途归零时唤醒预铺等待者；promoted 关闭同样立即放行。
+func TestReadingGateWake(t *testing.T) {
+	g := newReadingGate()
 	g.enter()
 	g.enter()
 
@@ -77,8 +77,8 @@ func TestForegroundGateWake(t *testing.T) {
 	g.exit()
 }
 
-// TestFetcherBackgroundTaskQuota：后台并发任务数不超过半额任务槽（MaxTasks=4 -> 后台 2）。
-func TestFetcherBackgroundTaskQuota(t *testing.T) {
+// TestFetcherSpeculativeTaskQuota：预铺并发任务数不超过半额任务槽（MaxTasks=4 -> 预铺 2）。
+func TestFetcherSpeculativeTaskQuota(t *testing.T) {
 	const (
 		nKeys   = 5
 		maxTask = 4
@@ -110,7 +110,7 @@ func TestFetcherBackgroundTaskQuota(t *testing.T) {
 	results := make(chan fetchResult, nKeys)
 	for i := 0; i < nKeys; i++ {
 		go func(i int) {
-			fp, err := f.FetchWithPriority(ctx, keys[i], chunk, PriorityBackground)
+			fp, err := f.FetchWithAdmission(ctx, keys[i], chunk, AdmissionSpeculative)
 			results <- fetchResult{fp, err}
 		}(i)
 	}
@@ -128,8 +128,8 @@ func TestFetcherBackgroundTaskQuota(t *testing.T) {
 		t.Fatalf("background task beyond half quota (%d) entered store.Get", want)
 	case <-time.After(100 * time.Millisecond):
 	}
-	if got := f.lim.bgTasks.current(); got != want {
-		t.Fatalf("bgTasks.current() = %d, want %d", got, want)
+	if got := f.lim.specTasks.current(); got != want {
+		t.Fatalf("specTasks.current() = %d, want %d", got, want)
 	}
 
 	close(release)
@@ -143,13 +143,13 @@ func TestFetcherBackgroundTaskQuota(t *testing.T) {
 			t.Fatalf("only %d/%d background Fetch returned", i, nKeys)
 		}
 	}
-	if got := f.lim.bgTasks.current(); got != 0 {
-		t.Fatalf("bgTasks.current() after completion = %d, want 0", got)
+	if got := f.lim.specTasks.current(); got != 0 {
+		t.Fatalf("specTasks.current() after completion = %d, want 0", got)
 	}
 }
 
-// TestFetcherBackgroundYieldsToForeground：前台在途时后台下载不接入，前台结束后才放行。
-func TestFetcherBackgroundYieldsToForeground(t *testing.T) {
+// TestFetcherSpeculativeYieldsToReading：在读在途时预铺下载不接入，在读结束后才放行。
+func TestFetcherSpeculativeYieldsToReading(t *testing.T) {
 	const chunk = 4 << 10
 	ctx := context.Background()
 
@@ -183,7 +183,7 @@ func TestFetcherBackgroundYieldsToForeground(t *testing.T) {
 
 	bgDone := make(chan fetchResult, 1)
 	go func() {
-		fp, err := f.FetchWithPriority(ctx, "obj/bg", chunk, PriorityBackground)
+		fp, err := f.FetchWithAdmission(ctx, "obj/bg", chunk, AdmissionSpeculative)
 		bgDone <- fetchResult{fp, err}
 	}()
 	select {
@@ -211,8 +211,8 @@ func TestFetcherBackgroundYieldsToForeground(t *testing.T) {
 	}
 }
 
-// TestFetcherForegroundBypassesBackgroundQuota：后台占满半额任务槽时，前台仍按全场额度接入。
-func TestFetcherForegroundBypassesBackgroundQuota(t *testing.T) {
+// TestFetcherReadingBypassesSpeculativeQuota：预铺占满半额任务槽时，在读仍按全场额度接入。
+func TestFetcherReadingBypassesSpeculativeQuota(t *testing.T) {
 	const chunk = 4 << 10
 	ctx := context.Background()
 
@@ -232,12 +232,12 @@ func TestFetcherForegroundBypassesBackgroundQuota(t *testing.T) {
 	}
 
 	cs, _ := newTestCAS(t)
-	f := New(ms, cs, Options{MaxTasks: 4, MaxConnsPerHost: 64}) // 后台只有 2 槽
+	f := New(ms, cs, Options{MaxTasks: 4, MaxConnsPerHost: 64}) // 预铺只有 2 槽
 
 	results := make(chan fetchResult, 3)
 	for _, k := range []string{"obj/bg0", "obj/bg1"} {
 		go func(k string) {
-			fp, err := f.FetchWithPriority(ctx, k, chunk, PriorityBackground)
+			fp, err := f.FetchWithAdmission(ctx, k, chunk, AdmissionSpeculative)
 			results <- fetchResult{fp, err}
 		}(k)
 	}
@@ -256,7 +256,7 @@ func TestFetcherForegroundBypassesBackgroundQuota(t *testing.T) {
 	select {
 	case k := <-entered:
 		if k != "obj/fg" {
-			t.Fatalf("third store.Get key = %s, want obj/fg（前台不应排在后台后面）", k)
+			t.Fatalf("third store.Get key = %s, want obj/fg（在读不应排在预铺后面）", k)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("foreground fetch did not enter store.Get while background quota full")
@@ -275,9 +275,9 @@ func TestFetcherForegroundBypassesBackgroundQuota(t *testing.T) {
 	}
 }
 
-// TestFetcherBackgroundPromotedByForegroundMerge：后台下载在让路期间被前台同 key 请求合并时，
-// 立即改按前台准入，前台等待者不必等让路门开启。
-func TestFetcherBackgroundPromotedByForegroundMerge(t *testing.T) {
+// TestFetcherSpeculativePromotedByReadingMerge：预铺下载在让路期间被在读同 key 请求合并时，
+// 立即改按在读准入，在读等待者不必等让路门开启。
+func TestFetcherSpeculativePromotedByReadingMerge(t *testing.T) {
 	const chunk = 4 << 10
 	ctx := context.Background()
 
@@ -314,7 +314,7 @@ func TestFetcherBackgroundPromotedByForegroundMerge(t *testing.T) {
 
 	bg := make(chan fetchResult, 1)
 	go func() {
-		fp, err := f.FetchWithPriority(ctx, "obj/merged", chunk, PriorityBackground)
+		fp, err := f.FetchWithAdmission(ctx, "obj/merged", chunk, AdmissionSpeculative)
 		bg <- fetchResult{fp, err}
 	}()
 	select {
@@ -323,7 +323,7 @@ func TestFetcherBackgroundPromotedByForegroundMerge(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	// 前台请求同一个 key：合并到后台 owner 并把它提升为前台准入，应立刻进入下载。
+	// 在读请求同一个 key：合并到预铺 owner 并把它提升为在读准入，应立刻进入下载。
 	merged := make(chan fetchResult, 1)
 	go func() {
 		fp, err := f.Fetch(ctx, "obj/merged", chunk)
@@ -370,8 +370,8 @@ func TestFetcherBackgroundPromotedByForegroundMerge(t *testing.T) {
 	}
 }
 
-// TestFetcherBackgroundGateCtxCancel：后台在让路门等待时 ctx 取消立即返回，不占任何额度。
-func TestFetcherBackgroundGateCtxCancel(t *testing.T) {
+// TestFetcherSpeculativeGateCtxCancel：预铺在让路门等待时 ctx 取消立即返回，不占任何额度。
+func TestFetcherSpeculativeGateCtxCancel(t *testing.T) {
 	const chunk = 4 << 10
 
 	release := make(chan struct{})
@@ -405,7 +405,7 @@ func TestFetcherBackgroundGateCtxCancel(t *testing.T) {
 	bgCtx, cancel := context.WithCancel(context.Background())
 	bgDone := make(chan error, 1)
 	go func() {
-		_, err := f.FetchWithPriority(bgCtx, "obj/bg", chunk, PriorityBackground)
+		_, err := f.FetchWithAdmission(bgCtx, "obj/bg", chunk, AdmissionSpeculative)
 		bgDone <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -423,11 +423,11 @@ func TestFetcherBackgroundGateCtxCancel(t *testing.T) {
 		t.Fatal("canceled background fetch entered store.Get")
 	default:
 	}
-	if got := f.lim.bgTasks.current(); got != 0 {
-		t.Fatalf("bgTasks.current() = %d, want 0（取消不占额度）", got)
+	if got := f.lim.specTasks.current(); got != 0 {
+		t.Fatalf("specTasks.current() = %d, want 0（取消不占额度）", got)
 	}
-	if got := f.lim.bgBytes.inflight(); got != 0 {
-		t.Fatalf("bgBytes.inflight() = %d, want 0", got)
+	if got := f.lim.specBytes.inflight(); got != 0 {
+		t.Fatalf("specBytes.inflight() = %d, want 0", got)
 	}
 
 	close(release)

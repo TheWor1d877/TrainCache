@@ -8,9 +8,9 @@ import (
 	"traincache/core/fetch"
 )
 
-// TestDemandBypassesBackgroundQuota：需求读补块按前台准入，后台半额任务槽被占满时仍能立刻回源。
-// 取 MaxTasks=2（后台只有 1 槽）：旧口径下两个预取块占满任务额度，P0 demand 只能排队。
-func TestDemandBypassesBackgroundQuota(t *testing.T) {
+// TestDemandBypassesSpeculativeQuota：需求读补块按在读准入，预铺半额任务槽被占满时仍能立刻回源。
+// 取 MaxTasks=2（预铺只有 1 槽）：旧口径下两个预取块占满任务额度，P0 demand 只能排队。
+func TestDemandBypassesSpeculativeQuota(t *testing.T) {
 	refs := []ChunkRef{{Path: "a-00.tar"}, {Path: "a-01.tar"}, {Path: "a-02.tar"}}
 	env := newTestEnv(t, []blockSpec{
 		{path: refs[0].Path, chunk: 0, content: "block-0", source: true},
@@ -35,11 +35,11 @@ func TestDemandBypassesBackgroundQuota(t *testing.T) {
 	}
 	startPrefetcher(t, p, ctx, cancel)
 
-	// 后台额度只放行 1 个块，第二个 P1 块停在后台半额任务槽之外。
+	// 预铺额度只放行 1 个块，第二个 P1 块停在预铺半额任务槽之外。
 	waitBlockGets(t, env, 1)
 	time.Sleep(100 * time.Millisecond)
 	if got := blockGets(env.store); len(got) != 1 {
-		t.Fatalf("后台并发回源块数 = %d，want 1（半额任务槽）: %v", len(got), got)
+		t.Fatalf("预铺并发回源块数 = %d，want 1（半额任务槽）: %v", len(got), got)
 	}
 
 	if err := p.EnqueueP0Demand(ctx, []ChunkRef{refs[2]}); err != nil {
@@ -52,7 +52,7 @@ func TestDemandBypassesBackgroundQuota(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("需求块未进入回源（仍排在后台后面）: %v", blockGets(env.store))
+			t.Fatalf("需求块未进入回源（仍排在预铺后面）: %v", blockGets(env.store))
 		}
 		time.Sleep(time.Millisecond)
 	}

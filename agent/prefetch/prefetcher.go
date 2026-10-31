@@ -758,7 +758,7 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 // reportFetchStart(在途 +1)、下载后 reportFetchEnd(在途 -1),成功计
 // fetch_bytes+fetch_requests{success,reason},失败计 fetch_requests{error,reason}
 // (reason 取 task:常规预取 prefetch、按需补块 demand;见 reportFetch* 注释)。
-// reason 同时决定 fetch 准入等级:demand 走前台,其余(含显式预热)走后台(design 6.1 §5.2)。
+// reason 同时决定 fetch 准入档位:demand 走在读,其余(含显式预热)走预铺(design 6.1 §5.2)。
 func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int64, ready bool, err error) {
 	ref := t.ref
 	var entrySize int64
@@ -803,13 +803,13 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 		return entrySize, false, errors.New("prefetch: dataset 未绑定(尚无 ConsumeOrder),无法构造下载键")
 	}
 	reason := t.fetchReason()
-	prio := fetch.PriorityBackground
+	adm := fetch.AdmissionSpeculative
 	if reason == metrics.FetchReasonDemand {
-		// 需求读补块走前台：不受后台半额额度约束，也不用给预取让路。
-		prio = fetch.PriorityForeground
+		// 需求读补块走在读：不受预铺半额额度约束，也不用给预取让路。
+		adm = fetch.AdmissionReading
 	}
 	p.reportFetchStart(t.dataset)
-	fp, ferr := p.f.FetchWithPriority(ctx, string(blockKey(t.dataset, ref)), entrySize, prio)
+	fp, ferr := p.f.FetchWithAdmission(ctx, string(blockKey(t.dataset, ref)), entrySize, adm)
 	p.reportFetchEnd(t.dataset)
 	if ferr != nil {
 		p.reportFetchError(t.dataset, reason)

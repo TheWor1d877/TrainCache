@@ -11,9 +11,9 @@ import (
 
 // Options 是 Fetcher 的限流与重试参数（默认值见 design.md §8）。
 type Options struct {
-	MaxInflightBytes int64 // 在途下载字节上限（信号量口径，非 goroutine 数），默认 1 GiB；后台最多占一半
+	MaxInflightBytes int64 // 在途下载字节上限（信号量口径，非 goroutine 数），默认 1 GiB；预铺最多占一半
 	MaxConnsPerHost  int   // 单主机连接数上限，默认 64
-	MaxTasks         int   // 最大并发下载任务数，默认 8；后台最多占一半
+	MaxTasks         int   // 最大并发下载任务数，默认 8；预铺最多占一半
 	MaxRetries       int   // 校验失败重下次数，默认 3
 	// OnLocalOpen 在 Put 成功、Open 读回校验之前以块指纹调用一次（可为 nil）。
 	// 通用钩子：core 不依赖 Agent 侧类型；实现不得阻塞（调用方通常仅做内存记账）。
@@ -45,47 +45,48 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Priority 是下载任务在限流层的准入等级（design.md §5.3）。
-// 前台是需求读补块与坏块修复；后台是预取（含显式预热）。
-// 后台额度取全场的一半（任务槽与在途字节各自折半，至少 1），且前台有下载在途时暂停接入；
-// 前台始终按全场额度准入，不与后台共享排队。
-type Priority int
+// Admission 是下载任务在限流层的准入档位（design.md §5.3）。
+// 在读是需求读补块与坏块修复——已经有人等在这次下载上；预铺是预取（含显式预热）。
+// 预铺额度取全场的一半（任务槽与在途字节各自折半，至少 1），且在读有下载在途时暂停接入；
+// 在读始终按全场额度准入，不与预铺共享排队。
+// 排队出队顺序是另一条轴，由 Agent 的 P0~P3 队列决定，与准入档位无关。
+type Admission int
 
 const (
-	// PriorityForeground 前台：按全场额度准入，不受后台额度与让路门约束。
-	PriorityForeground Priority = iota
-	// PriorityBackground 后台：受半额额度约束，前台在途时让路。
-	PriorityBackground
+	// AdmissionReading 在读：按全场额度准入，不受预铺额度与让路门约束。
+	AdmissionReading Admission = iota
+	// AdmissionSpeculative 预铺：受半额额度约束，在读在途时让路。
+	AdmissionSpeculative
 )
 
 // limiter 是 fetch 包内私有限流组件（不导出，design.md §5.3）：三个维度——
 // 并发任务数（MaxTasks）、在途下载字节数（MaxInflightBytes）、单主机连接数（MaxConnsPerHost），
-// 外加前台的让路门（foregroundGate）与后台自己的半额任务/字节额度。
+// 外加在读的让路门（readingGate）与预铺自己的半额任务/字节额度。
 type limiter struct {
 	bytes *byteSem
 	tasks *countSem
 	hosts *hostSem
-	// bgBytes/bgTasks 是后台专项额度：先占这两道，再占全场的 bytes/tasks，
-	// 因此后台在途恒不超过半额，前台随时能用上另一半。
-	bgBytes *byteSem
-	bgTasks *countSem
-	// gate 记录前台下载在途数；后台在接入前等它归零，避免预取占住出口。
-	gate *foregroundGate
+	// specBytes/specTasks 是预铺专项额度：先占这两道，再占全场的 bytes/tasks，
+	// 因此预铺在途恒不超过半额，在读随时能用上另一半。
+	specBytes *byteSem
+	specTasks *countSem
+	// gate 记录在读下载在途数；预铺在接入前等它归零，避免预取占住出口。
+	gate *readingGate
 }
 
 // newLimiter 按已补齐默认值的 Options 构造 limiter。
 func newLimiter(opts Options) *limiter {
 	return &limiter{
-		bytes:   newByteSem(opts.MaxInflightBytes),
-		tasks:   newCountSem(opts.MaxTasks),
-		hosts:   newHostSem(opts.MaxConnsPerHost),
-		bgBytes: newByteSem(halfBytes(opts.MaxInflightBytes)),
-		bgTasks: newCountSem(halfSlots(opts.MaxTasks)),
-		gate:    newForegroundGate(),
+		bytes:     newByteSem(opts.MaxInflightBytes),
+		tasks:     newCountSem(opts.MaxTasks),
+		hosts:     newHostSem(opts.MaxConnsPerHost),
+		specBytes: newByteSem(halfBytes(opts.MaxInflightBytes)),
+		specTasks: newCountSem(halfSlots(opts.MaxTasks)),
+		gate:      newReadingGate(),
 	}
 }
 
-// halfBytes 返回后台字节额度：全场字节上限的一半，至少 1 字节。
+// halfBytes 返回预铺字节额度：全场字节上限的一半，至少 1 字节。
 func halfBytes(n int64) int64 {
 	if h := n / 2; h > 0 {
 		return h
@@ -93,7 +94,7 @@ func halfBytes(n int64) int64 {
 	return 1
 }
 
-// halfSlots 返回后台任务槽数：全场任务数的一半，至少 1 槽。
+// halfSlots 返回预铺任务槽数：全场任务数的一半，至少 1 槽。
 func halfSlots(n int) int {
 	if h := n / 2; h > 0 {
 		return h
@@ -104,28 +105,28 @@ func halfSlots(n int) int {
 // inflightBytes 返回当前在途（已 Acquire 未 Release）字节数；单测观测用。
 func (l *limiter) inflightBytes() int64 { return l.bytes.inflight() }
 
-// foregroundGate 是前台让路门：记录正在进行下载的前台请求数，后台接入前等它归零。
-// 只统计已进入下载路径的前台请求（含排队等额度的），合并到已有下载的等待者不计——
-// 否则后台持有下载被前台等待者挡住，两者互等。
-type foregroundGate struct {
+// readingGate 是在读让路门：记录正在进行下载的在读请求数，预铺接入前等它归零。
+// 只统计已进入下载路径的在读请求（含排队等额度的），合并到已有下载的等待者不计——
+// 否则预铺持有下载被在读等待者挡住，两者互等。
+type readingGate struct {
 	mu      sync.Mutex
 	active  int
 	changed chan struct{}
 }
 
-func newForegroundGate() *foregroundGate {
-	return &foregroundGate{changed: make(chan struct{})}
+func newReadingGate() *readingGate {
+	return &readingGate{changed: make(chan struct{})}
 }
 
-// enter 记一个前台下载开始（排队等额度也算在途）。
-func (g *foregroundGate) enter() {
+// enter 记一个在读下载开始（排队等额度也算在途）。
+func (g *readingGate) enter() {
 	g.mu.Lock()
 	g.active++
 	g.mu.Unlock()
 }
 
-// exit 记一个前台下载结束；归零时唤醒等待的后台请求。
-func (g *foregroundGate) exit() {
+// exit 记一个在读下载结束；归零时唤醒等待的预铺请求。
+func (g *readingGate) exit() {
 	g.mu.Lock()
 	if g.active > 0 {
 		g.active--
@@ -137,9 +138,9 @@ func (g *foregroundGate) exit() {
 	g.mu.Unlock()
 }
 
-// wait 阻塞至前台在途数归零；promoted 关闭（后台下载被前台请求合并）或 ctx 取消时立即返回。
-// 返回后新前台请求仍可能插队，后台只是不再占住出口，不保证严格先后。
-func (g *foregroundGate) wait(ctx context.Context, promoted <-chan struct{}) error {
+// wait 阻塞至在读在途数归零；promoted 关闭（预铺下载被在读请求合并）或 ctx 取消时立即返回。
+// 返回后新在读请求仍可能插队，预铺只是不再占住出口，不保证严格先后。
+func (g *readingGate) wait(ctx context.Context, promoted <-chan struct{}) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -154,15 +155,15 @@ func (g *foregroundGate) wait(ctx context.Context, promoted <-chan struct{}) err
 		select {
 		case <-ch:
 		case <-promoted:
-			return nil // 已被前台合并：改按前台准入，不再让路
+			return nil // 已被在读合并：改按在读准入，不再让路
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
-// activeCount 返回当前前台下载在途数；单测观测用。
-func (g *foregroundGate) activeCount() int {
+// activeCount 返回当前在读下载在途数；单测观测用。
+func (g *readingGate) activeCount() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.active
