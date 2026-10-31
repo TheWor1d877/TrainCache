@@ -4,7 +4,7 @@ package svc
 //
 // 宽预热的落选节点被 Cancel 时,窗口里多数块并不在预取队列里——调度协程出队不设额度
 // 门,瞬间就把它们交给抓取 goroutine;真正的积压在 core fetch 的准入排队 chan 上
-// (MaxTasks=8、后台占半)。所以撤回的落点是任务级下载作用域:Cancel 取消它,卡在
+// (MaxTasks=8、预铺占半)。所以撤回的落点是任务级下载作用域:Cancel 取消它,卡在
 // 门口的块在 ctx 边界退出,一次传输都不该发生。
 //
 // 证伪:去掉 Cancel 里的 tk.cancelDownloads(),6 个等待者会在闸门打开后照常下载,
@@ -66,7 +66,7 @@ func waitGateArrivals(t *testing.T, gate *gateStore, n int) {
 	}
 }
 
-// TestPreheatCancelWithdrawsAdmissionWaiters:8 块窗口只有 2 块能进后台额度,其余 6 块
+// TestPreheatCancelWithdrawsAdmissionWaiters:8 块窗口只有 2 块能进预铺额度,其余 6 块
 // 卡在准入门外;Cancel 之后 8 块全部退出(闸口仍只见过 2 块),任务落 ERROR、
 // completed=0/failed=8、canceled=true。闸门到最后才打开,所以「2 块中止」是确定的。
 func TestPreheatCancelWithdrawsAdmissionWaiters(t *testing.T) {
@@ -89,7 +89,7 @@ func TestPreheatCancelWithdrawsAdmissionWaiters(t *testing.T) {
 	waitGateArrivals(t, gate, 2)
 	time.Sleep(backfillQuietWindow) // 让可能漏网的等待者也走完一轮
 	if n := gate.count(); n != 2 {
-		t.Fatalf("闸口块数 = %d,想要 2(后台额度 = MaxTasks/2,其余应卡在准入门外)", n)
+		t.Fatalf("闸口块数 = %d,想要 2(预铺额度 = MaxTasks/2,其余应卡在准入门外)", n)
 	}
 
 	if _, err := fx.tasks.Cancel(ctx, m3Cancel("t-withdraw", 3)); err != nil {
