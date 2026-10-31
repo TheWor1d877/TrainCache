@@ -18,6 +18,12 @@
 
 # Changelog正文
 
+## [v0.3.2] - 2026-10-31
+
+### Changed
+
+- 下载准入档位改名：`fetch.Priority` → `fetch.Admission`、`FetchWithPriority` → `FetchWithAdmission`、`PriorityForeground`/`PriorityBackground` → `AdmissionReading`（在读：需求读补块与坏块修复）/`AdmissionSpeculative`（预铺：预取含显式预热）。只影响 `traincache/core/fetch` 的导入方；半额额度、让路门、同 key 合并与回源指标口径不变。契约见 `docs/5.1 design.md` §5.3 与 `docs/6.3 decisions.md` D61。
+
 ## [v0.3.1] - 2026-10-30
 
 ### Added
@@ -34,6 +40,7 @@
 
 ### Changed
 
+- 节点分数注解从 Node 迁到训练 Pod，键名由 `traincache.io/scores` 改为 `traincache.io/node-scores`；controller 与 scheduler 的 `CONTROLLER_SCORE_ANNOTATION` 必须同值。放行在同一次 Pod patch 内写分数并摘 gate，Scheduler 不再有读不到分数的窗口。契约见 `docs/7.1 design.md` 与 `docs/PARAMETER-CONFIGURATION.md`（D49 取代 D27）。
 - `read_stall` 归因关联窗口从固定 ±5s 改为可配：`TRAINCACHE_READ_STALL_WINDOW_MS`，默认 `5000`，表示以帧 `ts` 为中心前后各该毫秒数。契约见 `docs/PARAMETER-CONFIGURATION.md`。
 - Agent 的部署清单只剩 `controller/deploy/agent/daemonset.yaml` 一份，kind e2e 改为 apply 该清单后替换镜像引用；`agent/deploy/agentd.yaml` 删除，同名 DaemonSet 两套 request/limit 并存的问题消失。Agent 内存 limit 为 4Gi。
 
