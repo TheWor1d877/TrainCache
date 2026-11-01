@@ -39,6 +39,8 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_READ_STALL_WINDOW_MS",
 		"TRAINCACHE_INDEX_REFRESH_INTERVAL",
 		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
+		"TRAINCACHE_GATEWAY_ENDPOINT",
+		"TRAINCACHE_GATEWAY_SECURE",
 	} {
 		t.Setenv(k, "")
 	}
@@ -137,6 +139,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ObjstoreProbeConditionalWrite {
 		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
 	}
+	if cfg.GatewayEndpoint != "" {
+		t.Errorf("GatewayEndpoint 默认值 = %q, want 空(10.1 §5.3:全部直连)", cfg.GatewayEndpoint)
+	}
+	if cfg.GatewaySecure {
+		t.Error("GatewaySecure 默认值 = true, want false(10.1 §5.3)")
+	}
 	if cfg.DebugAddr != defaultDebugAddr {
 		t.Errorf("DebugAddr = %q, want %q", cfg.DebugAddr, defaultDebugAddr)
 	}
@@ -214,6 +222,8 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_OBJSTORE_SECRET_KEY", "sk-test")
 	t.Setenv("TRAINCACHE_OBJSTORE_BUCKET", "tc-blocks")
 	t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
+	t.Setenv("TRAINCACHE_GATEWAY_ENDPOINT", "gateway.traincache.svc:9413")
+	t.Setenv("TRAINCACHE_GATEWAY_SECURE", "yes")
 	t.Setenv("TRAINCACHE_HEAT_DECAY_AGE", "48h")
 	t.Setenv("TRAINCACHE_HEAT_DUMP_INTERVAL", "1m")
 	t.Setenv("TRAINCACHE_HEAT_DECAY_INTERVAL", "12h")
@@ -265,6 +275,12 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !cfg.ObjstoreSecure {
 		t.Error("ObjstoreSecure = false, want true(TRAINCACHE_OBJSTORE_SECURE=1)")
+	}
+	if cfg.GatewayEndpoint != "gateway.traincache.svc:9413" {
+		t.Errorf("GatewayEndpoint = %q, want gateway.traincache.svc:9413(10.1 §5.3)", cfg.GatewayEndpoint)
+	}
+	if !cfg.GatewaySecure {
+		t.Error("GatewaySecure = false, want true(TRAINCACHE_GATEWAY_SECURE=yes)")
 	}
 	wantHeat := HeatConfig{
 		DecayAge:            48 * time.Hour,
@@ -355,6 +371,83 @@ func TestLoadObjstoreSecureBool(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoadGatewayEnv:网关入口与独立 TLS 开关(10.1 §5.3 / 10.2 D15/D16)。
+// 缺省为空/false;TRAINCACHE_GATEWAY_SECURE 按 envBool 口径(1/true/yes);
+// 两个 secure 互相独立;地址不做 scheme 校验(非法值不阻断启动)。
+func TestLoadGatewayEnv(t *testing.T) {
+	t.Run("默认关闭", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("NODE_NAME", "worker-01")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.GatewayEndpoint != "" || cfg.GatewaySecure {
+			t.Fatalf("GatewayEndpoint=%q GatewaySecure=%v, want 空/false", cfg.GatewayEndpoint, cfg.GatewaySecure)
+		}
+	})
+
+	for _, v := range []string{"1", "true", "TRUE", "yes", " Yes "} {
+		t.Run("secure="+v, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			t.Setenv("TRAINCACHE_GATEWAY_SECURE", v)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !cfg.GatewaySecure {
+				t.Errorf("GatewaySecure = false, want true(env=%q)", v)
+			}
+		})
+	}
+
+	// 两个 secure 互相独立：只开源站 TLS 不影响网关，反之亦然。
+	t.Run("objstore secure 不影响 gateway", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("NODE_NAME", "worker-01")
+		t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.ObjstoreSecure || cfg.GatewaySecure {
+			t.Fatalf("ObjstoreSecure=%v GatewaySecure=%v, want true/false(D16)", cfg.ObjstoreSecure, cfg.GatewaySecure)
+		}
+	})
+	t.Run("gateway secure 不影响 objstore", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("NODE_NAME", "worker-01")
+		t.Setenv("TRAINCACHE_GATEWAY_SECURE", "1")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.ObjstoreSecure || !cfg.GatewaySecure {
+			t.Fatalf("ObjstoreSecure=%v GatewaySecure=%v, want false/true(D16)", cfg.ObjstoreSecure, cfg.GatewaySecure)
+		}
+	})
+
+	// 地址不做 scheme 校验：任意非空串都接受(启用与否由装配层判断)。
+	t.Run("地址不校验 scheme", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("NODE_NAME", "worker-01")
+		t.Setenv("TRAINCACHE_GATEWAY_ENDPOINT", "http://gateway:9413")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v(地址不应做 scheme 校验)", err)
+		}
+		if cfg.GatewayEndpoint != "http://gateway:9413" {
+			t.Errorf("GatewayEndpoint = %q, want 原样保留", cfg.GatewayEndpoint)
+		}
+	})
 }
 
 // TestLoadOrdersDirDefault:未设 TRAINCACHE_ORDERS_DIR → §6.2 默认发现目录。

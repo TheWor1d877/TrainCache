@@ -120,6 +120,12 @@ type Config struct {
 	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(6.1 §5.12;默认 false,
 	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
 	ObjstoreProbeConditionalWrite bool
+	// GatewayEndpoint 是 Agent 到 S3 合并回源网关的地址(10.1 §5.3;默认空=全部直连,
+	// TRAINCACHE_GATEWAY_ENDPOINT 覆盖)。非空即启用,不做 scheme 校验(10.2 D15)。
+	GatewayEndpoint string
+	// GatewaySecure 控制 Agent 到网关是否 TLS(10.1 §5.3;默认 false,
+	// TRAINCACHE_GATEWAY_SECURE 覆盖,口径同 envBool;与 ObjstoreSecure 无关,D16)。
+	GatewaySecure bool
 	// DebugAddr 是 /debug/loglevel 的监听地址(默认 127.0.0.1:6060,空字符串关闭)。
 	DebugAddr string
 	// CacheCapacityBytes 是字节维度缓存上限(§14;默认 0=关闭,只走磁盘水位)。
@@ -193,6 +199,8 @@ func Load() (*Config, error) {
 		ReadStallWindowMS:             readStallWindowMS,
 		IndexRefreshInterval:          indexRefreshInterval,
 		ObjstoreProbeConditionalWrite: envBool(envObjstoreProbeConditionalWrite),
+		GatewayEndpoint:               envOr("TRAINCACHE_GATEWAY_ENDPOINT", ""),
+		GatewaySecure:                 envBool("TRAINCACHE_GATEWAY_SECURE"),
 		DebugAddr:                     debugAddr,
 		CacheCapacityBytes:            cacheCapacityBytes,
 	}, nil

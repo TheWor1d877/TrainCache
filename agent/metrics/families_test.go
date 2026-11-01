@@ -52,11 +52,15 @@ const (
 	ordersourceStatesName = "traincache_agent_ordersources"
 	ordersourceEndedName  = "traincache_agent_ordersource_ended_total"
 	ordersDroppedName     = "traincache_orders_dropped_total"
+	// 10.1 网关线(测试侧独立字面量)。
+	sourceModeName      = "traincache_source_mode"
+	gatewayFallbackName = "traincache_gateway_fallback_total"
 )
 
-// sevenLineFamilies 是 36 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil;
+// sevenLineFamilies 是 39 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil;
 // 含 R3/R4 新增的 2 个;M4 策略相关 3 个死指标已随 D29 删除)。
 // M9/D46 变更 6 个既有 family 的标签(source/phase/reason/dataset),D44+D48 新增 9 个。
+// 10.1 网关线新增 source_mode 与 gateway_fallback_total 2 个(§7.4)。
 var sevenLineFamilies = map[string][]string{
 	cacheHitsName:             {"dataset", "result", "source", "phase"},
 	cacheMissesName:           {"dataset", "result", "phase"},
@@ -99,6 +103,9 @@ var sevenLineFamilies = map[string][]string{
 	ordersourceStatesName: {"node", "state"},
 	ordersourceEndedName:  {"node", "reason"},
 	ordersDroppedName:     {"reason"},
+	// 10.1 网关线(§7.4)。
+	sourceModeName:      nil,
+	gatewayFallbackName: {"reason"},
 }
 
 // sevenLineTypes 是七线 23 个 family 的类型冻结(Prometheus 文本枚举)。
@@ -140,19 +147,22 @@ var sevenLineTypes = map[string]string{
 	ordersourceStatesName:                    "GAUGE",
 	ordersourceEndedName:                     "COUNTER",
 	ordersDroppedName:                        "COUNTER",
+	sourceModeName:                           "GAUGE",
+	gatewayFallbackName:                      "COUNTER",
 }
 
-// TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 37 个 family
+// TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 42 个 family
 // (七线 23 + ordersource 格式错误 counter[D23] + 钩子帧格式错误 counter[D33] + D44 读 miss
-// + M9 的 8 个证据 family + R3/R4 的 2 个 + capacity_bytes 1 个);每个 family 的类型与标签名集合与
+// + M9 的 8 个证据 family + R3/R4 的 2 个 + capacity_bytes 1 个 + D63 订单通道 3 个
+// + 10.1 网关线 2 个);每个 family 的类型与标签名集合与
 // 冻结清单一致,且靠构造预置自启动即有子指标(dataset 类预置值全为归并值 other;
 // agent_up=1 / agent_degraded=0 取 Config.Node)。
 func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}, Node: "node-1"})
 	snap := snapshotFamilies(t, r)
 
-	if len(snap) != 40 {
-		t.Fatalf("注册表 family 数 = %d, want 40(七线 23 + D23 + D33 + D44 + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个 + D63 订单通道 3 个);实际 %v",
+	if len(snap) != 42 {
+		t.Fatalf("注册表 family 数 = %d, want 42(七线 23 + D23 + D33 + D44 + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个 + D63 订单通道 3 个 + 10.1 网关线 2 个);实际 %v",
 			len(snap), slices.Sorted(maps.Keys(snap)))
 	}
 	for _, name := range []string{ordersourceFormatErrorsName, hookFormatErrorsName} {

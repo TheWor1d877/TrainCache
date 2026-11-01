@@ -70,6 +70,28 @@ const (
 	ordersDroppedName     = "traincache_orders_dropped_total"
 )
 
+// 网关线新增 family 名(10.1 design §7.4;逐字冻结):源模式 gauge 与降级计数 counter。
+const (
+	// sourceModeName 取值 0=直连、1=网关(构造时预置 0)。
+	sourceModeName = "traincache_source_mode"
+	// gatewayFallbackName 按 reason 区分的网关降级次数。
+	gatewayFallbackName = "traincache_gateway_fallback_total"
+)
+
+// 网关降级 reason 词汇表(10.1 §7.4;编译期固定,集合外忽略该次打点)。
+const (
+	GatewayReasonUnavailable = "unavailable"
+	GatewayReasonTimeout     = "timeout"
+	GatewayReasonTransport   = "transport"
+)
+
+// gatewayReasons 是全部合法降级 reason(构造时逐一预置为 0)。
+var gatewayReasons = [...]string{
+	GatewayReasonUnavailable,
+	GatewayReasonTimeout,
+	GatewayReasonTransport,
+}
+
 // 订单通道标签词汇表(D63/§7.4;编译期固定,集合外忽略)。
 const (
 	OrderSourceDiscovered = "discovered"
@@ -749,6 +771,26 @@ func (r *Registry) initHooksAndEvidence() {
 	r.objectstoreConditionalWriteSupported.Set(0)
 }
 
+// initGateway 构造并注册网关线两个 family(10.1 §7.4):source_mode 预置 0(直连),
+// gateway_fallback_total 预置三个 reason 子指标为 0(family 自启动即在 /metrics 可见)。
+func (r *Registry) initGateway() {
+	r.sourceMode = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: sourceModeName,
+		Help: "块 GET 的源模式(0=直连,1=网关;10.1 design §7.4)",
+	})
+	r.gatewayFallback = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: gatewayFallbackName,
+		Help: "网关降级到直连的累计次数(reason=unavailable|timeout|transport;10.1 design §7.4)",
+	}, []string{"reason"})
+
+	r.reg.MustRegister(r.sourceMode, r.gatewayFallback)
+
+	r.sourceMode.Set(0)
+	for _, reason := range gatewayReasons {
+		r.gatewayFallback.WithLabelValues(reason)
+	}
+}
+
 // ObserveHookReadMiss 记一次读 miss:traincache_hook_read_miss_total{reason}(D44;
 // reason∈{absent,corrupt},不带 dataset)。集合外忽略该次打点。
 func (r *Registry) ObserveHookReadMiss(reason string) {
@@ -932,3 +974,29 @@ func (r *Registry) DiskUsageRatio() *prometheus.GaugeVec { return r.diskUsageRat
 
 // CapacityBytes 返回字节累计 gauge(测试访问器)。
 func (r *Registry) CapacityBytes() *prometheus.GaugeVec { return r.capacityBytes }
+
+// —— 网关线(10.1 §7.4)——
+
+// SetSourceMode 设置 traincache_source_mode(0=直连、1=网关;10.1 §7.4):只接受 0 与 1,
+// 其他取值忽略该次调用(标签/取值编译期固定,与集合外取值忽略同风格)。
+func (r *Registry) SetSourceMode(mode int) {
+	if mode != 0 && mode != 1 {
+		return
+	}
+	r.sourceMode.Set(float64(mode))
+}
+
+// IncGatewayFallback 记一次网关降级:traincache_gateway_fallback_total{reason}
+// (reason∈{unavailable,timeout,transport},见 GatewayReason* 常量);集合外忽略。
+func (r *Registry) IncGatewayFallback(reason string) {
+	if reason != GatewayReasonUnavailable && reason != GatewayReasonTimeout && reason != GatewayReasonTransport {
+		return
+	}
+	r.gatewayFallback.WithLabelValues(reason).Inc()
+}
+
+// SourceMode 返回源模式 gauge(测试访问器)。
+func (r *Registry) SourceMode() prometheus.Gauge { return r.sourceMode }
+
+// GatewayFallback 返回网关降级 counter(测试访问器)。
+func (r *Registry) GatewayFallback() *prometheus.CounterVec { return r.gatewayFallback }

@@ -73,17 +73,58 @@ type Agent struct {
 	// M9 阶段/归因骨架(D46/D47;装配期构造,业务逻辑由 M9 填写)。
 	phase *phaseTracker
 	stall *stallAttributor
+
+	// sourceState 是网关降级状态机(10.1 §4.3);TRAINCACHE_GATEWAY_ENDPOINT 为空时为 nil
+	// (未启用网关,ObjectStore 即源站 store)。
+	sourceState *sourceState
 }
+
+// gatewayRegion 是网关客户端的固定 SigV4 区域(D17):非空可避免 minio-go 先发
+// GET /<bucket>?location=,网关对外只需处理 GET 与 HEAD 对象请求。
+const gatewayRegion = "us-east-1"
+
+// gatewayMaxRetries 是网关客户端的 SDK 重试次数(10.1 §4.2/§6.5)。网关的 503
+// (XTraincacheGatewayUnavailable / XTraincacheGatewaySlowDown)是控制信号:准入拒绝
+// 应快速回退直连、网关下线应快速降级,不允许 SDK 按默认 10 次指数退避放大重试。
+// minio-go v7.3.0 的该字段语义是「总尝试次数」,1 表示最多 1 次尝试(不重试),
+// 远低于「最多 2 次」的上限。
+const gatewayMaxRetries = 1
 
 // Assemble 构造并持有子模块实例(依赖方向 cmd → svc → 子模块 → core 单向无环,design §4):
 // cas → objectstore(D26 S3 兼容客户端)→ fetch → …(装配序见 assembleWith)。
+//
+// 网关接线(10.1 §4.3/§4.4):GatewayEndpoint 为空时与改动前完全一致,只构造源站 store;
+// 非空时再构造网关 store 并包成 backendStore(Get 走选择器,其余方法直连源站)。
 func Assemble(cfg Config) (*Agent, error) {
 	store, err := objectstore.NewS3Store(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey,
 		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.ObjstoreSecure)
 	if err != nil {
 		return nil, err
 	}
-	return assembleWith(store, cfg)
+	if cfg.GatewayEndpoint == "" {
+		return assembleWith(store, cfg)
+	}
+
+	// 网关与 Agent 共用源站凭证/桶(10.1 §1.4);到网关的 TLS 由 GatewaySecure 独立控制(D16)。
+	gateway, err := objectstore.NewS3StoreWithOptions(cfg.GatewayEndpoint, cfg.ObjstoreAccessKey,
+		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.GatewaySecure,
+		objectstore.Options{Region: gatewayRegion, MaxRetries: gatewayMaxRetries})
+	if err != nil {
+		return nil, err
+	}
+	backend := newBackendStore(store, gateway)
+
+	ag, err := assembleWith(backend, cfg)
+	if err != nil {
+		return nil, err
+	}
+	ag.sourceState = backend.state
+	if ag.Metrics != nil {
+		backend.state.setObservers(ag.Metrics.SetSourceMode, ag.Metrics.IncGatewayFallback)
+		// 启动即把当前模式写进 gauge(配置网关 → 1)。
+		ag.Metrics.SetSourceMode(backend.state.snapshotMode())
+	}
+	return ag, nil
 }
 
 // assembleWith 是 Assemble 的可测内核(objectstore 注入:生产 S3 兼容后端,测试 objectstore.Mock)。
