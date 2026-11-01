@@ -7,7 +7,7 @@ import (
 
 // TestEvaluateMinIntervalBoundary pins both >= boundaries in condition ②: the
 // age of FirstReadyAt and the spacing between slope samples. At exactly
-// MinInterval both sub-conditions hold (docs/8.4 §4).
+// MinInterval both sub-conditions hold (docs/8.3 §4).
 func TestEvaluateMinIntervalBoundary(t *testing.T) {
 	policy := GatePolicy{
 		Threshold:   0.8,

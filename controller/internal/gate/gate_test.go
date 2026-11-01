@@ -57,32 +57,6 @@ func allReadyPods(k int32, count int) []PodGateState {
 	return pods
 }
 
-func TestRequiredReadyMatrix(t *testing.T) {
-	cases := []struct {
-		k         int32
-		threshold float64
-		want      int32
-	}{
-		{1, 0, 0},
-		{1, 0.8, 1},
-		{1, 0.9, 1},
-		{7, 0, 0},
-		{7, 0.8, 5},
-		{7, 0.9, 6},
-		{8, 0, 0},
-		{8, 0.8, 6},
-		{8, 0.9, 7},
-		{9, 0, 0},
-		{9, 0.8, 7},
-		{9, 0.9, 8},
-	}
-	for _, tc := range cases {
-		if got := RequiredReady(tc.threshold, tc.k); got != tc.want {
-			t.Fatalf("RequiredReady(%v, %d) = %d, want %d", tc.threshold, tc.k, got, tc.want)
-		}
-	}
-}
-
 func TestEvaluateMatrixConditionOne(t *testing.T) {
 	for _, k := range []int32{1, 7, 8, 9} {
 		for _, threshold := range []float64{0, 0.8, 0.9} {

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// Deprecated symbols from docs/7.2 plan.md task 12.6. They must not appear in
+// Deprecated symbols. They must not appear in
 // controller/ or agent/ source. Comments and absence-assertion tests may still
 // mention them by name; the scanners below therefore inspect parsed Go
 // identifiers (and comment-stripped proto text) rather than raw lines.
@@ -25,8 +25,8 @@ const (
 	symC = "consume" + "Order" + "Ref"
 )
 
-// TestM12NoDeprecatedSymbols is the repeatable static check for task 12.6.
-func TestM12NoDeprecatedSymbols(t *testing.T) {
+// TestNoDeprecatedSymbols is the repeatable static check for task 12.6.
+func TestNoDeprecatedSymbols(t *testing.T) {
 	root := m12ModuleRoot(t)
 	var hits []string
 
@@ -78,10 +78,10 @@ func TestM12NoDeprecatedSymbols(t *testing.T) {
 	}
 }
 
-// TestM12StaticScannerIsNotVacuous proves the scanners find each symbol in
+// TestStaticScannerIsNotVacuous proves the scanners find each symbol in
 // parsed source and ignore the same text in comments. Without this, a typo in
-// the scanner could make TestM12NoDeprecatedSymbols pass by accident.
-func TestM12StaticScannerIsNotVacuous(t *testing.T) {
+// the scanner could make TestNoDeprecatedSymbols pass by accident.
+func TestStaticScannerIsNotVacuous(t *testing.T) {
 	src := []byte(fmt.Sprintf(`package sample
 
 // %s %s %s stay in comments.

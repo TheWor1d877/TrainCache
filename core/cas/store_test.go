@@ -402,7 +402,7 @@ func TestVerifyFailure(t *testing.T) {
 	})
 }
 
-// Remove 在引用计数/pin 非零时返回 ErrInUse（plan.md §3 判据②）。
+// Remove 在引用计数/pin 非零时返回 ErrInUse。
 func TestRemoveInUse(t *testing.T) {
 	t.Run("reference_count", func(t *testing.T) {
 		s, blocksDir := newTestStore(t, VerifyXXH3)

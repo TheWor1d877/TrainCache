@@ -1,6 +1,6 @@
 package svc
 
-// M12 log assertions for docs/9.1 plan §4.2. These tests drive the
+// Log assertions for docs/8.1 §4.2. These tests drive the
 // production code paths (preheat lifecycle + evictor round + agentd startup)
 // and assert the structured JSON records (message + required fields), so
 // renaming a message or dropping a field fails here.
@@ -8,7 +8,7 @@ package svc
 // Slog usage: production code uses the global slog.Info/Warn/Error. We
 // install a JSON-handler logger via slog.SetDefault at the top of each test
 // so every slog call lands in our capture buffer (same pattern as
-// controller/internal/controller/warmup/m12_logs_assert_test.go).
+// controller/internal/controller/warmup/logs_assert_test.go).
 
 import (
 	"bytes"
@@ -122,9 +122,9 @@ func m12ValidSubmitReq(gen uint64) *agentpb.SubmitPreheatRequest {
 // 1. Submit 生命周期 → "任务结束" Info
 // ————————————————————————————————————————————————————
 
-// TestM12PreheatSubmitLifecycleLogs: 手工登记任务 + 置位完成计数 → finish()
+// TestPreheatSubmitLifecycleLogs: 手工登记任务 + 置位完成计数 → finish()
 // 触发 "preheat: 任务结束" Info，7 字段齐全。
-func TestM12PreheatSubmitLifecycleLogs(t *testing.T) {
+func TestPreheatSubmitLifecycleLogs(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	tasks := NewPreheatTasks(m12PreheatCfg(), nil)
@@ -176,9 +176,9 @@ func TestM12PreheatSubmitLifecycleLogs(t *testing.T) {
 // 2. 陈旧 generation 三处 Warn
 // ————————————————————————————————————————————————————
 
-// TestM12PreheatRejectStaleGenerationLogs: 先后三次陈旧 generation 触发点
+// TestPreheatRejectStaleGenerationLogs: 先后三次陈旧 generation 触发点
 // （Submit 重复 / Update 低代 / Cancel 低代）各自打一条 Warn，四字段齐全。
-func TestM12PreheatRejectStaleGenerationLogs(t *testing.T) {
+func TestPreheatRejectStaleGenerationLogs(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	tasks := NewPreheatTasks(m12PreheatCfg(), nil)
@@ -246,9 +246,9 @@ func TestM12PreheatRejectStaleGenerationLogs(t *testing.T) {
 // 3. Update 窗口全量更新 Info
 // ————————————————————————————————————————————————————
 
-// TestM12PreheatUpdateWindowLogs: Submit 受理后 Update 新 generation + chunks
+// TestPreheatUpdateWindowLogs: Submit 受理后 Update 新 generation + chunks
 // → "任务窗口全量更新" Info，四字段齐全。
-func TestM12PreheatUpdateWindowLogs(t *testing.T) {
+func TestPreheatUpdateWindowLogs(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	tasks := NewPreheatTasks(m12PreheatCfg(), nil)
@@ -292,9 +292,9 @@ func TestM12PreheatUpdateWindowLogs(t *testing.T) {
 // 4. Cancel 存在 + 不存在 两种路径
 // ————————————————————————————————————————————————————
 
-// TestM12PreheatCancelLogs: Cancel 存在的任务 → "任务取消(撤回未完成的下载,D62)" Info；
+// TestPreheatCancelLogs: Cancel 存在的任务 → "任务取消(撤回未完成的下载,D62)" Info；
 // Cancel 不存在的 task_id → "取消不存在的任务(幂等空操作)" Info。
-func TestM12PreheatCancelLogs(t *testing.T) {
+func TestPreheatCancelLogs(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	tasks := NewPreheatTasks(m12PreheatCfg(), nil)
@@ -344,9 +344,9 @@ func TestM12PreheatCancelLogs(t *testing.T) {
 // 5. Cancel 后再 Submit → "已取消任务重新提交视为新任务"
 // ————————————————————————————————————————————————————
 
-// TestM12PreheatCancelResubmitLogs: 先 Cancel 一个任务，再 Submit 同一 task_id
+// TestPreheatCancelResubmitLogs: 先 Cancel 一个任务，再 Submit 同一 task_id
 // → 命中 "已取消任务重新提交视为新任务" Info。
-func TestM12PreheatCancelResubmitLogs(t *testing.T) {
+func TestPreheatCancelResubmitLogs(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	tasks := NewPreheatTasks(m12PreheatCfg(), nil)
@@ -419,7 +419,7 @@ type m12EvictFixture struct {
 	ev    *evictor.Evictor
 }
 
-func newM12EvictFixture(t *testing.T, usageValues ...float64) *m12EvictFixture {
+func newEvictFixture(t *testing.T, usageValues ...float64) *m12EvictFixture {
 	t.Helper()
 	cs, err := cas.New(t.TempDir(), cas.VerifyXXH3)
 	if err != nil {
@@ -455,13 +455,13 @@ func putEvictBlock(t *testing.T, cs *cas.Store, content string) evictor.Eviction
 // 6. RunOnce → "淘汰轮结束" Info + 6 字段
 // ————————————————————————————————————————————————————
 
-// TestM12EvictorRoundEndLog: util 超触发线 (85%) → RunOnce → 触发淘汰 →
+// TestEvictorRoundEndLog: util 超触发线 (85%) → RunOnce → 触发淘汰 →
 // "evictor: 淘汰轮结束" Info，6 字段齐全。
-func TestM12EvictorRoundEndLog(t *testing.T) {
+func TestEvictorRoundEndLog(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	// 利用率 0.85 触发；淘汰一块后降到 0.74 ≤ k-Δ=0.75，停止。
-	fx := newM12EvictFixture(t, 0.85, 0.74)
+	fx := newEvictFixture(t, 0.85, 0.74)
 
 	e1 := putEvictBlock(t, fx.cs, "m12-round-block-1")
 	e2 := putEvictBlock(t, fx.cs, "m12-round-block-2")
@@ -491,13 +491,13 @@ func TestM12EvictorRoundEndLog(t *testing.T) {
 // 7. RunOnce → 危险线 Error + 7 字段
 // ————————————————————————————————————————————————————
 
-// TestM12EvictorDangerLineLog: util 超 M (95%) → RunOnce 先打
+// TestEvictorDangerLineLog: util 超 M (95%) → RunOnce 先打
 // "evictor: 超危险线,激进淘汰" Error，再打 "淘汰轮结束" Info。
-func TestM12EvictorDangerLineLog(t *testing.T) {
+func TestEvictorDangerLineLog(t *testing.T) {
 	buf := m12CaptureLogs(t)
 
 	// 0.95 超 M(90%) → danger；淘汰 3 块后降到 0.70 ≤ k-2Δ=0.70，停止。
-	fx := newM12EvictFixture(t, 0.95, 0.85, 0.78, 0.70)
+	fx := newEvictFixture(t, 0.95, 0.85, 0.78, 0.70)
 
 	fx.heat.entries = []evictor.EvictionEntry{
 		putEvictBlock(t, fx.cs, "m12-danger-block-1"),
@@ -602,10 +602,10 @@ func m12WaitForLogTS(t *testing.T, buf *m12threadSafeBuf, msg string, timeout ti
 	return nil
 }
 
-// TestM12HookSockReadyAndFrameErrors:启动收端 → 断言 "hooksock: 钩子收端就绪" Info;
+// TestHookSockReadyAndFrameErrorLogs:启动收端 → 断言 "hooksock: 钩子收端就绪" Info;
 // 依次直写三种坏帧（超 4 KiB / 非法 JSON / 未知类型）→ 断言对应 Warn,path 字段等于
 // 临时套接字路径,size/err/type 字段齐全。
-func TestM12HookSockReadyAndFrameErrors(t *testing.T) {
+func TestHookSockReadyAndFrameErrorLogs(t *testing.T) {
 	buf := m12CaptureLogsTS(t)
 
 	path := hookPath(t)

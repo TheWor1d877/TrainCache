@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// TestM12S19RequiredReadyMatrix pins the K x threshold matrix from S19 and
+// TestRequiredReadyMatrix pins the K x threshold matrix from S19 and
 // asserts the invariant required <= K for every cell.
-func TestM12S19RequiredReadyMatrix(t *testing.T) {
+func TestRequiredReadyMatrix(t *testing.T) {
 	cases := []struct {
 		k         int32
 		threshold float64
@@ -35,9 +35,9 @@ func TestM12S19RequiredReadyMatrix(t *testing.T) {
 	}
 }
 
-// TestM12S19RequiredReadyFloorProperty checks the floor formula over a wider
+// TestRequiredReadyFloorProperty checks the floor formula over a wider
 // grid and the required <= K clamp.
-func TestM12S19RequiredReadyFloorProperty(t *testing.T) {
+func TestRequiredReadyFloorProperty(t *testing.T) {
 	ks := []int32{1, 2, 7, 8, 9, 16, 64, 256}
 	for _, k := range ks {
 		for step := 0; step <= 20; step++ {

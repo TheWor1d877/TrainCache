@@ -4,7 +4,7 @@ package warmup
 // pinned to one WarmupTask generation. With a fresh random draw per poll, an
 // all-zero readiness table reshuffles the preference order every reconcile, so
 // the target set flips and the previous submits are cancelled as target_shrink
-// until t_max expires (docs/7.3 D32).
+// until t_max expires (docs/7.2 D32).
 
 import (
 	"math/rand"

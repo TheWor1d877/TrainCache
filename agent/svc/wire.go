@@ -2,7 +2,7 @@ package svc
 
 // wire.go:M4/M5/M6 组件与装配层的接线胶水(collector 懒绑定、钩子三型 handler、淘汰
 // HeatSource/ProtectedSource 适配、GC Sweep 闭包、rescan 指标适配、读时坏块修复)。
-// 冻结:各子模块导出签名与语义不变(6.3 D28~D37),全部语义映射集中在本文件与 assemble.go。
+// 冻结:各子模块导出签名与语义不变(6.2 D28~D37),全部语义映射集中在本文件与 assemble.go。
 
 import (
 	"context"

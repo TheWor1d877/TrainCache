@@ -1,6 +1,6 @@
 // Package warmup contains the WarmupTask control-plane logic. This file owns
 // the M9 Pod association contract shared with the mutating webhook and the
-// GateInjectionDegraded condition (docs/7.1 design.md §5.7, docs/7.3 D8-D10).
+// GateInjectionDegraded condition (docs/7.1 design.md §5.7, docs/7.2 D8-D10).
 package warmup
 
 import (
@@ -29,7 +29,7 @@ import (
 )
 
 // Pod association and injection keys frozen by docs/7.1 §5.7/§6.3 and
-// docs/7.3 D8-D10.
+// docs/7.2 D8-D10.
 const (
 	WarmupEnabledLabel      = "traincache.io/warmup"
 	WarmupEnabledValue      = "enabled"

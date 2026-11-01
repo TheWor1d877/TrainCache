@@ -1,6 +1,6 @@
 # controller-manager RBAC.
 #
-# Secrets are intentionally NOT granted cluster-wide (docs/7.3 Q9). The manager
+# Secrets are intentionally NOT granted cluster-wide (docs/7.2 Q9). The manager
 # only reads the object-store credential Secret referenced by a DataSet, so a
 # namespaced Role is bound per tenant namespace. The shipped Role covers the
 # traincache namespace; every additional DataSet namespace needs its own

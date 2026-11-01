@@ -8,7 +8,7 @@
 //
 // M14 splits placement into two steps. First each unit gets a deterministic
 // target set within [FanoutMin, Fanout], chosen from the window cache
-// distribution (docs/7.3 D39). Then claims, conflict adjudication, top-up and
+// distribution (docs/7.2 D39). Then claims, conflict adjudication, top-up and
 // out-of-target fallback run only inside that target set. Target-set ordering
 // is deterministic (c_ij descending, node name ascending); ties during
 // assignment are still broken through the injected *rand.Rand, so a fixed seed

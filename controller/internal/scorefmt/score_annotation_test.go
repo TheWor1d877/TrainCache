@@ -7,18 +7,18 @@ import (
 	"time"
 )
 
-// TestM12S18DefaultAnnotation pins the Pod score annotation key that both the
+// TestDefaultAnnotation pins the Pod score annotation key that both the
 // controller-manager and the scheduler default to (docs/7.1 design.md §6.2).
-func TestM12S18DefaultAnnotation(t *testing.T) {
+func TestDefaultAnnotation(t *testing.T) {
 	if DefaultAnnotation != "traincache.io/node-scores" {
 		t.Fatalf("DefaultAnnotation = %q, want traincache.io/node-scores", DefaultAnnotation)
 	}
 }
 
-// TestM12S18EncodeDeterministic asserts encoding is a pure function even though
+// TestEncodeDeterministic asserts encoding is a pure function even though
 // S is a map: repeated calls return byte-identical values, because encoding/json
 // sorts map keys.
-func TestM12S18EncodeDeterministic(t *testing.T) {
+func TestEncodeDeterministic(t *testing.T) {
 	value := Value{
 		V:    valueVersion,
 		Task: "default/train-1",
@@ -34,9 +34,9 @@ func TestM12S18EncodeDeterministic(t *testing.T) {
 	}
 }
 
-// TestM12S18NodeNamesPreserved asserts node names of any length round-trip
+// TestNodeNamesPreserved asserts node names of any length round-trip
 // unchanged: the annotation value has no key-size budget to truncate against.
-func TestM12S18NodeNamesPreserved(t *testing.T) {
+func TestNodeNamesPreserved(t *testing.T) {
 	for _, n := range []int{1, 32, 33, 64, 200, 253} {
 		name := strings.Repeat("a", n)
 		value := Value{

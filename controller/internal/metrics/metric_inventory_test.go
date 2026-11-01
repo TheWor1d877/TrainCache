@@ -85,10 +85,10 @@ var m12ForbiddenLabelNames = map[string]struct{}{
 	"warmup_task": {},
 }
 
-// TestM12ControllerMetricFamilyAndLabelInventory gathers the populated
+// TestControllerMetricFamilyAndLabelInventory gathers the populated
 // controller registry and checks the exact family set, every label name and
 // every label value against the frozen enums.
-func TestM12ControllerMetricFamilyAndLabelInventory(t *testing.T) {
+func TestControllerMetricFamilyAndLabelInventory(t *testing.T) {
 	m := New()
 	m12PopulateController(t, m)
 	families := m12Gather(t, m)
@@ -99,9 +99,9 @@ func TestM12ControllerMetricFamilyAndLabelInventory(t *testing.T) {
 	m12CheckFamilies(t, families, m12ControllerInventory)
 }
 
-// TestM12SchedulerMetricFamilyAndLabelInventory does the same for the separate
+// TestSchedulerMetricFamilyAndLabelInventory does the same for the separate
 // scheduler registry: it must expose exactly one family.
-func TestM12SchedulerMetricFamilyAndLabelInventory(t *testing.T) {
+func TestSchedulerMetricFamilyAndLabelInventory(t *testing.T) {
 	m := NewScheduler()
 	m12PopulateScheduler(t, m)
 	families := m12Gather(t, m)
@@ -112,9 +112,9 @@ func TestM12SchedulerMetricFamilyAndLabelInventory(t *testing.T) {
 	m12CheckFamilies(t, families, m12SchedulerInventory)
 }
 
-// TestM12InvalidEnumValuesAreDropped proves the enum guard is not vacuous: an
+// TestInvalidEnumValuesAreDropped proves the enum guard is not vacuous: an
 // out-of-enum value never creates a series.
-func TestM12InvalidEnumValuesAreDropped(t *testing.T) {
+func TestInvalidEnumValuesAreDropped(t *testing.T) {
 	m := New()
 	m.ObserveReconcile(Controller("bogus"), nil, 0, time.Second)
 	m.ObserveCandidateNodes("", 3)
@@ -234,8 +234,8 @@ func m12CheckLabelValue(t *testing.T, family, label, value string) {
 	}
 }
 
-// TestM12LabelCheckerRejectsUnboundedLabels proves the guard is not vacuous.
-func TestM12LabelCheckerRejectsUnboundedLabels(t *testing.T) {
+// TestLabelCheckerRejectsUnboundedLabels proves the guard is not vacuous.
+func TestLabelCheckerRejectsUnboundedLabels(t *testing.T) {
 	for _, allowed := range [][]string{
 		{"controller", "result"},
 		{"op", "dataset"},

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// realprocess_test.go covers the writer-crash recovery case from docs/7.4
+// realprocess_test.go covers the writer-crash recovery case from docs/7.3
 // 后续覆盖计划: a real ordersrc.py process writes generation 1, is killed with
 // SIGKILL, and a fresh process writes generation 2. The Reader must notice the
 // generation change, drop the old order, and deliver the new subscription.

@@ -1,6 +1,6 @@
 package dataset
 
-// M12 log assertions for docs/7.1 design.md §9.3/§9.4. The tests assert
+// Log assertions for docs/7.1 design.md §9.3/§9.4. The tests assert
 // structured JSON output from the real reconcile path, including the rule
 // that Secret credential values never reach the log stream.
 
@@ -20,7 +20,7 @@ import (
 )
 
 // §9.3 快照/存储校验失败: storage factory failure is Warn with dataset/err.
-func TestM12DatasetStorageUnavailableLogFields(t *testing.T) {
+func TestDatasetStorageUnavailableLogFields(t *testing.T) {
 	ds := newDataSet()
 	env := newTestEnv(t, []client.Object{ds}, &fakeFactory{err: storage.ErrSecretNotFound}, nil)
 
@@ -66,10 +66,10 @@ func (f *m12CredentialFactory) Store(
 func (f *m12CredentialFactory) Close() error { return nil }
 
 // §9.4 脱敏: Secret/accessKey/secretKey values never appear in controller logs.
-func TestM12DatasetLogsRedactSecretCredentials(t *testing.T) {
+func TestDatasetLogsRedactSecretCredentials(t *testing.T) {
 	const (
-		accessKey = "M12-ACCESS-KEY-SENTINEL"
-		secretKey = "M12-SECRET-KEY-SENTINEL"
+		accessKey = "ACCESS-KEY-SENTINEL"
+		secretKey = "SECRET-KEY-SENTINEL"
 	)
 	ds := newDataSet()
 	secret := &corev1.Secret{

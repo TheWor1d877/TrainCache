@@ -11,11 +11,11 @@ import (
 	"traincache/core/objectstore"
 )
 
-// TestM12StoreCacheInvalidatesOnSecretDeletion fills the gap left by the M2
+// TestStoreCacheInvalidatesOnSecretDeletion fills the gap left by the M2
 // tests: a cached Store must not outlive its Secret. The factory re-reads the
 // Secret on every call, so deletion surfaces as ErrSecretNotFound instead of a
 // stale store.
-func TestM12StoreCacheInvalidatesOnSecretDeletion(t *testing.T) {
+func TestStoreCacheInvalidatesOnSecretDeletion(t *testing.T) {
 	ctx := context.Background()
 	secret := validSecret("default", "creds", "1")
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(secret).Build()
@@ -48,9 +48,9 @@ func TestM12StoreCacheInvalidatesOnSecretDeletion(t *testing.T) {
 	}
 }
 
-// TestM12StoreCacheRebuildsOnBucketChange covers the invalidation key that the
+// TestStoreCacheRebuildsOnBucketChange covers the invalidation key that the
 // M2 tests do not: endpoint changes are tested, bucket changes are not.
-func TestM12StoreCacheRebuildsOnBucketChange(t *testing.T) {
+func TestStoreCacheRebuildsOnBucketChange(t *testing.T) {
 	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
 		WithObjects(validSecret("default", "creds", "1")).Build()
@@ -82,9 +82,9 @@ func TestM12StoreCacheRebuildsOnBucketChange(t *testing.T) {
 	}
 }
 
-// TestM12StoreCacheSeparatesNamespaces guards the namespace/name cache key: the
+// TestStoreCacheSeparatesNamespaces guards the namespace/name cache key: the
 // same Secret name in two namespaces must not share a Store.
-func TestM12StoreCacheSeparatesNamespaces(t *testing.T) {
+func TestStoreCacheSeparatesNamespaces(t *testing.T) {
 	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(
 		validSecret("default", "creds", "1"),

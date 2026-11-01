@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M7 五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
+"""五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
 
 七组态各跑 N 次（次数按 9.1 D19/D32 分档：S=3（@100 与 @1000 各 3 次）
 / M=3 / L=1 探点，--reps 可显式覆盖；GROUPS 是五个受试者展开的七个组态），
@@ -36,7 +36,7 @@
 6.15 stall_ratio 改造（2026-10-24）：
   旧版 measure 是串行"读整片 tar → matmul"，读比算慢两个数量级，
   stall_ratio = wait_s/step_s 恒≈0.98，没有判别力——旧串行版本产物的
-  stall_ratio 一律作废（docs/9.1 §8/6.15、docs/4 §10），需按本口径重跑。
+  stall_ratio 一律作废（docs/4 §10），需按本口径重跑。
   新版用 COMPUTE_MS=200ms 控制每步算力，读与计算并行（后台 reader 线程
   模拟 DataLoader 异步预取，把接下来若干分片读进内存队列，主循环从队头
   取数据 + 做固定算力）：预取有效（热缓存/预取跟上）→ stall_ratio 趋 0；
@@ -117,7 +117,7 @@ D30/D32 接线（2026-10-25）：
                          数据按轨迹顺序恰好过一遍）
   CHUNK_SIZE             实验块大小，默认 8388608（8MiB，9.1 D20；
                          生产默认 64MiB 不变）
-  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（9.1 Q12；
+  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（9.1 D41；
                          MinIO 内该快照由 trainpublish -chunk-size 8388608
                          发布属后续动作，本脚本只按新名引用）
   TRAINCACHE_CACHE_CAPACITY_BYTES  统一缓存容量，默认 1GiB
@@ -268,8 +268,8 @@ EVICT_POLICY = os.environ.get("TRAINCACHE_EVICT_POLICY", "heat").strip().lower()
 # 不叫 compare-*，_cond_name_for_cell 匹配不到）。
 COND_NAME_OVERRIDE = os.environ.get("TRAINCACHE_COND_NAME", "").strip()
 # 图系列(fig1/2/3、pareto1)由 run_figures.py 按 COND 驱动。它们的组态、
-# 次数与带宽档不受 M7 的 D30/D31/D32 档位约束,所以显式关掉越组过滤与
-# 次数白名单;M7 与冒烟保持默认 0,行为不变。
+# 次数与带宽档不受 D30/D31/D32 档位约束,所以显式关掉越组过滤与
+# 次数白名单;对照跑分与冒烟保持默认 0,行为不变。
 FIGURE_MODE = os.environ.get("TRAINCACHE_FIGURE_MODE", "").strip() == "1"
 # M5：倾斜双 Job（跑在同一个 measure Pod 里），只用于 pareto2/policy。
 TILT = os.environ.get("TRAINCACHE_TILT", "").strip() == "1"
@@ -297,7 +297,7 @@ SAMPLE_INTERVAL_S = float(os.environ.get("COMPARE_SAMPLE_INTERVAL_S", "5"))
 SAMPLE_JOIN_TIMEOUT_S = float(os.environ.get("COMPARE_SAMPLE_JOIN_TIMEOUT_S", "30"))
 AGENT_NS = "traincache"
 AGENT_LABEL = "app=traincache-agentd"
-AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/8.4：TRAINCACHE_METRICS_ADDR=":9411"）
+AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/8.3：TRAINCACHE_METRICS_ADDR=":9411"）
 AGENT_DEGRADED_SAMPLE_S = 5  # 测量期间降级采样间隔
 AGENTD_HIDE_TIMEOUT_S = 120  # 缩到 0 后等 Pod 全消失
 AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
@@ -1142,7 +1142,7 @@ def read_shard(shard, phase):
     """traincache 读取路径：逐块读本地缓存，缺块等待 agentd 预取，超时兜底回源。
     返回本片字节数（累加各块长度，不把整片拼起来留在内存里）。
     注意：hits/misses 只是块级诊断(block_hit_rate_diag 列)——"块在磁盘存在即
-    hit"口径会虚高(agent 运行期悄悄回源补块)，2026-10-24 已作废(9.1 6.16/D25)；
+    hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(9.1 D25)；
     正式命中率由 runner 侧用 open-time 的 demand_miss 字节账计算。
     分阶段字节（9.2）：每个块都计入 read_bytes_phase[phase]；块不存在、走
     等待/回源分支时另计入 demand_miss_phase[phase]（按块 size 计）。"""
@@ -1203,7 +1203,7 @@ READ_TIMEOUT_S = float(os.environ.get("READ_TIMEOUT_S", "300"))   # 队头等待
 # 真实加载器会持有的字节数(≈(深度+线程数+1)×分片大小)改用纯计数
 # logical_resident_bytes 跟踪（不真持有 bytes），峰值见 RESULT 的
 # peak_resident_bytes。旧串行版产物的 stall_ratio 口径作废
-# （docs/9.1 §8 6.15、docs/4 §10）
+# （docs/4 §10）
 # 口径(9.2)：
 #   wait_s = 主循环从队列取"已读好分片"的阻塞等待(真 stall);
 #   work_s = 墙钟算力(compute_work 循环 matmul 直到实测 >= COMPUTE_MS，取实测长度);
@@ -3235,7 +3235,7 @@ def selftest():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="M7 五组对照跑分")
+    parser = argparse.ArgumentParser(description="五组对照跑分")
     parser.add_argument("--reps", type=int, default=None,
                         help="每点采样次数；缺省按档位取 D19/D32 值（S=3/M=3/L=1）")
     parser.add_argument("--tier", choices=("S", "M", "L"), default=TIER,
@@ -3339,7 +3339,7 @@ def main():
     out_path = resolve_out_path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # 图系列的缓存容量与策略逐 COND 变化：先把 ConfigMap 对齐，再起组。
-    # M7 三档参数与默认值相同，这里是空操作。
+    # 三档参数与默认值相同，这里是空操作。
     ensure_agent_config()
     write_cell_lock(out_path, tier, picked, rate_mbit, TC_RATE_EFF)
 

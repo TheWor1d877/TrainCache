@@ -60,13 +60,13 @@ func (p *m12RestartPool) Progress(_ context.Context, node, taskID string, _ uint
 	return nil, agentclient.ErrTaskNotFound
 }
 
-// TestM12RestartRebuildsStateFromStatus simulates a controller process restart:
+// TestRestartRebuildsStateFromStatus simulates a controller process restart:
 // a brand-new Reconciler (empty in-memory tracker) reconciles a WarmupTask that
 // already carries a P×N table and per-Pod GWAA assignments. The Agents still
 // hold the assigned tasks, so the pass must not fan out Submit again, must
 // Update the held tasks to the new generation and must preserve the
 // assigned-node readiness facts.
-func TestM12RestartRebuildsStateFromStatus(t *testing.T) {
+func TestRestartRebuildsStateFromStatus(t *testing.T) {
 	task := fixtureTask(2, 4, [][]int32{{0, 1, 2, 3}, {4, 5, 6, 7}})
 	task.Generation = 3
 	started := metav1.NewTime(time.Unix(100, 0))

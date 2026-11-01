@@ -1,6 +1,6 @@
 package scheduler
 
-// M12 log assertions for docs/7.1 design.md §9.3 (Scheduler 打分).
+// Log assertions for docs/7.1 design.md §9.3 (Scheduler 打分).
 
 import (
 	"bytes"
@@ -36,7 +36,7 @@ func m12SchedulerFind(t *testing.T, buf *bytes.Buffer, msg string) map[string]an
 	return nil
 }
 
-func TestM12SchedulerScoreLogFields(t *testing.T) {
+func TestSchedulerScoreLogFields(t *testing.T) {
 	buf, log := m12SchedulerLog(t)
 	p := newTestPlugin(t, Options{Logger: log})
 	value := freshValue("default/train-1", 7, map[string]int32{"node-1": 87})
@@ -65,7 +65,7 @@ func TestM12SchedulerScoreLogFields(t *testing.T) {
 	}
 }
 
-func TestM12SchedulerScoreRejectedLogFields(t *testing.T) {
+func TestSchedulerScoreRejectedLogFields(t *testing.T) {
 	buf, log := m12SchedulerLog(t)
 	p := newTestPlugin(t, Options{Logger: log})
 	pod := testPod("train-1", nil)

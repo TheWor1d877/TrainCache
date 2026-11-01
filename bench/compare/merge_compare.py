@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""把 m7 各档的主 summary.csv 与补跑子目录合并成 summary.all.csv。
+"""把五格对照各档的主 summary.csv 与补跑子目录合并成 summary.all.csv。
 
-run_m7.sh 每格只写主 summary.csv；补跑的组落在 <格>/_topup*/、_v010r2/、
+run_compare.sh 每格只写主 summary.csv；补跑的组落在 <格>/_topup*/、_v010r2/、
 _rerun*/ 下。补跑行的 rep 号与主表重叠(都是 0..n-1)，直接拼接会造成
 "同组同 rep 两条"，所以这里按 run 重新编号：主表行在前，子目录行按路径
 排序追加，同组内 rep 从 0 连续编号。
@@ -12,8 +12,8 @@ _rerun*/ 下。补跑行的 rep 号与主表重叠(都是 0..n-1)，直接拼接
 输出不覆盖任何现有文件：目标已存在时直接报错，需显式 --force。
 
 用法:
-  python3 bench/compare/merge_m7.py            # 五档全部
-  python3 bench/compare/merge_m7.py --cells S-100 M-1000
+  python3 bench/compare/merge_compare.py            # 五档全部
+  python3 bench/compare/merge_compare.py --cells S-100 M-1000
 """
 import argparse
 import csv
@@ -25,7 +25,7 @@ BENCH_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BENCH_ROOT))
 import config as bench_config  # noqa: E402
 
-M7_ROOT = bench_config.RESULTS_DIR / "m7"
+COMPARE_ROOT = bench_config.RESULTS_DIR / "m7"
 CELLS = ["S-100", "S-300", "S-1000", "M-1000", "L-1000"]
 # 补跑目录;其余子目录(故障批、冒烟)不参与合并
 TOUP_DIR_GLOBS = ["_topup", "_topup2", "_topup3", "_v010", "_v010r2",
@@ -114,13 +114,13 @@ def merge_cell(cell_dir: Path) -> tuple[int, int, Path]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="合并 m7 主表与补跑产物")
+    ap = argparse.ArgumentParser(description="合并五格对照主表与补跑产物")
     ap.add_argument("--cells", nargs="+", default=CELLS, choices=CELLS)
     ap.add_argument("--force", action="store_true", help="允许覆盖已有 summary.all.csv")
     args = ap.parse_args()
 
     for name in args.cells:
-        cell_dir = M7_ROOT / name
+        cell_dir = COMPARE_ROOT / name
         n_main, n_all, out, fields, rows = merge_cell(cell_dir)
         if out.exists() and not args.force:
             print(f"[skip] {out} 已存在(加 --force 覆盖)")

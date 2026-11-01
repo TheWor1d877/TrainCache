@@ -1,17 +1,17 @@
 package svc
 
-// 本文件是 M3 阶段 D 的 svc 集成测试(7.0 验收 1/5/8/9;docs/6.2 plan.md §5 任务 5):
+// 本文件是 svc 集成测试(7.0 验收 1/5/8/9):
 // 在 svc 装配层把真实 core 组合(objectstore.Mock 的计数/门闩包装 + 临时 CAS +
 // fetch.Fetcher + index.Writer/Catalog)与 svc 组件(OrderDiscovery/HandleOrder/
 // PrefetchManager/PreheatTasks/Server)端到端串起来,覆盖:
 //
-//	验收 1(TestM3Acceptance1PreheatRPCProgress):bufconn 全链路上 SubmitPreheat →
+//	验收 1(TestPreheatRPCProgress):bufconn 全链路上 SubmitPreheat →
 //	  GetPreheatStatus 轮询:下载门闩期观察到 RUNNING(0/3),放行后 DONE(3/3);
-//	验收 5(TestM3Acceptance5ScopedPreheatDownloads):路径预热只加载所需索引分片、
+//	验收 5(TestScopedPreheatDownloads):路径预热只加载所需索引分片、
 //	  指定块预热只下载选中块(计数 store 断言未选中分片/块的 Get 次数为 0);
-//	验收 8(TestM3Acceptance8OrderStartsPrefetcher):发现循环收到 ConsumeOrder →
+//	验收 8(TestOrderStartsPrefetcher):发现循环收到 ConsumeOrder →
 //	  ForOrder 启动 PersistentPrefetcher、安装首个阶段、块就绪推进游标;
-//	验收 9(TestM3Acceptance9StageSwitchKWindow):阶段切换 → 新阶段开头 K 块在"零完成"
+//	验收 9(TestStageSwitchKWindow):阶段切换 → 新阶段开头 K 块在"零完成"
 //	  前提下即刻进入启动窗口并拉起下载,K 之外的块待 K 块就绪后才入 P2 邻域。
 //
 // 等待一律有界轮询(复用 orders_test 的 waitFor / preheat_test 的 waitTaskState);
@@ -40,7 +40,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// M3 集成用例的数据集名(各场景相互隔离;每用例独立 fixture,dataset 名不共享)。
+// 集成用例的数据集名(各场景相互隔离;每用例独立 fixture,dataset 名不共享)。
 const (
 	m3PrefixDataset = "m3-prefix" // 验收 5:路径选择预热
 	m3ChunkDataset  = "m3-chunk"  // 验收 5:指定块预热
@@ -69,8 +69,8 @@ type m3CountingStore struct {
 	gates map[string]chan struct{} // 键 → 放行信号(release 关闭);nil = 无门闩
 }
 
-// newM3CountingStore 构造空计数/门闩源站。
-func newM3CountingStore() *m3CountingStore {
+// newIntegrationCountingStore 构造空计数/门闩源站。
+func newIntegrationCountingStore() *m3CountingStore {
 	return &m3CountingStore{Mock: objectstore.NewMock(), gets: make(map[string]int)}
 }
 
@@ -145,10 +145,10 @@ type m3Fixture struct {
 	store *m3CountingStore
 }
 
-// newM3Fixture 构造装置(源站 = 计数/门闩包装的 Mock;其余装配同 newSvcFixture)。
-func newM3Fixture(t *testing.T) *m3Fixture {
+// newIntegrationFixture 构造装置(源站 = 计数/门闩包装的 Mock;其余装配同 newSvcFixture)。
+func newIntegrationFixture(t *testing.T) *m3Fixture {
 	t.Helper()
-	store := newM3CountingStore()
+	store := newIntegrationCountingStore()
 	return &m3Fixture{fx: newSvcFixtureWithStore(t, store), store: store}
 }
 
@@ -256,9 +256,9 @@ type m3RingWriter struct {
 	slotCount int32
 }
 
-// newM3RingWriter 建 ring 文件并写初始头(write_seq=0,generation 恒 1),ftruncate 到
+// newIntegrationRingWriter 建 ring 文件并写初始头(write_seq=0,generation 恒 1),ftruncate 到
 // 64+slot_size(写端"只增不缩"的起点)。文件随即对发现循环可见(合法头,无订单)。
-func newM3RingWriter(t *testing.T, path string, slotSize, slotCount int32) *m3RingWriter {
+func newIntegrationRingWriter(t *testing.T, path string, slotSize, slotCount int32) *m3RingWriter {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -367,11 +367,11 @@ func m3WaitDone(t *testing.T, pc agentpb.PreheatServiceClient, taskID string) *a
 	}
 }
 
-// TestM3Acceptance1PreheatRPCProgress(验收 1:"手动调用 gRPC 接口能够下发预热任务并查询
+// TestPreheatRPCProgress(验收 1:"手动调用 gRPC 接口能够下发预热任务并查询
 // 进度"):bufconn 全链路上 SubmitPreheat 受理 → GetPreheatStatus 轮询到 RUNNING(0/3,
 // 三块下载被门闩停在在途)→ 放行 → DONE(3/3)→ 块真实落本地。
-func TestM3Acceptance1PreheatRPCProgress(t *testing.T) {
-	env := newM3Fixture(t)
+func TestPreheatRPCProgress(t *testing.T) {
+	env := newIntegrationFixture(t)
 	specs := []svcBlockSpec{
 		{path: "rpc-000.tar", chunk: 0, content: "m3-rpc-0", source: true},
 		{path: "rpc-001.tar", chunk: 0, content: "m3-rpc-1", source: true},
@@ -423,13 +423,13 @@ func TestM3Acceptance1PreheatRPCProgress(t *testing.T) {
 	}
 }
 
-// TestM3Acceptance5ScopedPreheatDownloads(验收 5:"路径预热只加载所需的 Manifest 分片,
+// TestScopedPreheatDownloads(验收 5:"路径预热只加载所需的 Manifest 分片,
 // 不要求加载整个 Manifest;指定块预热不会意外下载未选中的数据块"):
 //   - 两个路径前缀(train-data / val-data)各 2 块、分片粒度 2 → 前缀各自成片;
 //   - 路径预热:仅所需分片被加载(未选中分片 Get 次数为零增量),选中块本地命中零下载;
 //   - 指定块预热:恰选中块被下载(D25 键),同前缀邻居与另一前缀块一律零下载。
-func TestM3Acceptance5ScopedPreheatDownloads(t *testing.T) {
-	env := newM3Fixture(t)
+func TestScopedPreheatDownloads(t *testing.T) {
+	env := newIntegrationFixture(t)
 
 	// 路径用例与块用例各建独立 dataset(共享 fixture,状态互不串扰)。
 	env.commit(t, m3PrefixDataset, []svcBlockSpec{
@@ -531,12 +531,12 @@ func TestM3Acceptance5ScopedPreheatDownloads(t *testing.T) {
 	})
 }
 
-// TestM3Acceptance8OrderStartsPrefetcher(验收 8:"启动最小训练 Pod 和 OrderSource sidecar
+// TestOrderStartsPrefetcher(验收 8:"启动最小训练 Pod 和 OrderSource sidecar
 // 后,Agent 能够接收 ConsumeOrder 并启动 PersistentPrefetcher"):发现循环轮询 orders 目录
 // 发现 ring → 读端解析 ConsumeOrder → HandleOrder → ForOrder(LoadPrefixes + Start +
 // OnStageSwitch)→ 阶段就位、块就绪、游标推进;全部块本地命中 → 零数据块下载。
-func TestM3Acceptance8OrderStartsPrefetcher(t *testing.T) {
-	env := newM3Fixture(t)
+func TestOrderStartsPrefetcher(t *testing.T) {
+	env := newIntegrationFixture(t)
 	env.commit(t, m3OrderDataset, []svcBlockSpec{
 		{path: "stage1/c-000.tar", chunk: 0, content: "m3-s1-0", local: true},
 		{path: "stage1/c-001.tar", chunk: 0, content: "m3-s1-1", local: true},
@@ -546,7 +546,7 @@ func TestM3Acceptance8OrderStartsPrefetcher(t *testing.T) {
 	setScanInterval(t, 10*time.Millisecond)
 	dir := t.TempDir()
 	env.startDiscoveryLoop(t, dir)
-	w := newM3RingWriter(t, filepath.Join(dir, "pod-m3.ring"), 4096, 8)
+	w := newIntegrationRingWriter(t, filepath.Join(dir, "pod-m3.ring"), 4096, 8)
 
 	chunks := []ordersource.ChunkRef{
 		{Path: "stage1/c-000.tar", Chunk: 0},
@@ -573,7 +573,7 @@ func TestM3Acceptance8OrderStartsPrefetcher(t *testing.T) {
 	}
 }
 
-// TestM3Acceptance9StageSwitchKWindow(验收 9:"阶段切换事件到达后,Agent 能够及时将新阶段
+// TestStageSwitchKWindow(验收 9:"阶段切换事件到达后,Agent 能够及时将新阶段
 // 开头 K 个块加入高优先级预取队列"):同一 ring 追读第二份 ConsumeOrder(新 StageID、
 // prefetch_chunks=K、chunks 顺序重排)。
 //
@@ -585,8 +585,8 @@ func TestM3Acceptance8OrderStartsPrefetcher(t *testing.T) {
 //
 // (P1 队列深度的字面量断言由 prefetch 单测 TestStageSwitchEnqueuesKWindowAsP1 覆盖;
 // 本用例覆盖其端到端可观察后果。)
-func TestM3Acceptance9StageSwitchKWindow(t *testing.T) {
-	env := newM3Fixture(t)
+func TestStageSwitchKWindow(t *testing.T) {
+	env := newIntegrationFixture(t)
 	env.commit(t, m3OrderDataset, []svcBlockSpec{
 		{path: "stage1/c-000.tar", chunk: 0, content: "m3-s1-a", local: true},
 		{path: "stage1/c-001.tar", chunk: 0, content: "m3-s1-b", local: true},
@@ -599,7 +599,7 @@ func TestM3Acceptance9StageSwitchKWindow(t *testing.T) {
 	setScanInterval(t, 10*time.Millisecond)
 	dir := t.TempDir()
 	env.startDiscoveryLoop(t, dir)
-	w := newM3RingWriter(t, filepath.Join(dir, "pod-m3.ring"), 4096, 8)
+	w := newIntegrationRingWriter(t, filepath.Join(dir, "pod-m3.ring"), 4096, 8)
 
 	// 第一份订单(阶段一):两块本地命中,完成后再做阶段切换(稳定态切换)。
 	stage1 := []ordersource.ChunkRef{{Path: "stage1/c-000.tar"}, {Path: "stage1/c-001.tar"}}

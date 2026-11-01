@@ -32,7 +32,7 @@ stringData:
   secretKey: traincache-probe
 ---
 # The manager reads the DataSet credential Secret from the DataSet's own
-# namespace (docs/7.3 Q9), so this tenant namespace needs its own get grant.
+# namespace (docs/7.2 Q9), so this tenant namespace needs its own get grant.
 # The shipped Role in controller/deploy/manager/rbac.yaml covers traincache only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

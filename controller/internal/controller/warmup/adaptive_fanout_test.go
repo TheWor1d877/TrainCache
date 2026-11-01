@@ -1,6 +1,6 @@
 package warmup
 
-// M14 adaptive fanout acceptance tests (docs/7.2 plan.md §20, docs/7.3 D39):
+// Adaptive fanout acceptance tests (docs/7.2 D39):
 // the controller passes both bounds to GWAA, then drives status, score
 // annotations, gate inputs and logs from the actual Assignment instead of the
 // fanout maximum.
@@ -53,11 +53,11 @@ func m14AssignmentNodes(assignment map[int32][]string, pod int32) map[string]str
 	return out
 }
 
-// TestM14AdaptiveTargetFromDistribution covers plan criteria ② and ⑧:
+// TestAdaptiveTargetFromDistribution covers:
 // 12,1,0,0,0 with K=16 keeps only the node above the 0.5*best line unless the
 // minimum forces more; min=3 also sets ForcedByMin. Status and the score
 // annotation follow the actual pair count.
-func TestM14AdaptiveTargetFromDistribution(t *testing.T) {
+func TestAdaptiveTargetFromDistribution(t *testing.T) {
 	nodes := m14Nodes(5)
 	cases := []struct {
 		name   string
@@ -124,9 +124,9 @@ func TestM14AdaptiveTargetFromDistribution(t *testing.T) {
 	}
 }
 
-// TestM14LowSignalTakesUpperBound covers plan criterion ③: with K=16 the
+// TestLowSignalTakesUpperBound covers: with K=16 the
 // low-signal line is ceil(0.25*16)=4, so 1,1,0,0,0 takes max=3 even at min=1.
-func TestM14LowSignalTakesUpperBound(t *testing.T) {
+func TestLowSignalTakesUpperBound(t *testing.T) {
 	nodes := m14Nodes(5)
 	task := m14PlacementTask(16, []int32{1, 1, 0, 0, 0}, nodes, 3, 1)
 	r := &Reconciler{}
@@ -143,9 +143,9 @@ func TestM14LowSignalTakesUpperBound(t *testing.T) {
 	}
 }
 
-// TestM14RetentionLineKeepsTwo covers plan criterion ④: best=11>4 and the
+// TestRetentionLineKeepsTwo covers: best=11>4 and the
 // 0.5*best=5.5 line keeps 11 and 7, so the target is 2.
-func TestM14RetentionLineKeepsTwo(t *testing.T) {
+func TestRetentionLineKeepsTwo(t *testing.T) {
 	nodes := m14Nodes(5)
 	task := m14PlacementTask(16, []int32{11, 7, 3, 0, 0}, nodes, 3, 1)
 	r := &Reconciler{}
@@ -161,9 +161,9 @@ func TestM14RetentionLineKeepsTwo(t *testing.T) {
 	}
 }
 
-// TestM14FanoutOneRegression covers plan criterion ⑧: fanout=1,min=1 keeps the
-// M13 single-node behaviour for status and annotations.
-func TestM14FanoutOneRegression(t *testing.T) {
+// TestFanoutOneKeepsSingleNode covers: fanout=1,min=1 keeps the
+// single-node behaviour for status and annotations.
+func TestFanoutOneKeepsSingleNode(t *testing.T) {
 	nodes := m14Nodes(4)
 	task := m14PlacementTask(16, []int32{12, 1, 0, 0}, nodes, 1, 1)
 	r := &Reconciler{}
@@ -180,10 +180,10 @@ func TestM14FanoutOneRegression(t *testing.T) {
 	}
 }
 
-// TestM14MinAboveFeasibleSetsMinUnmet covers plan criterion ⑦: min=3 with only
+// TestMinAboveFeasibleSetsMinUnmet covers: min=3 with only
 // two feasible nodes caps the target at 2 and reports MinUnmet in the placement
-// log together with the rest of the M14 fields.
-func TestM14MinAboveFeasibleSetsMinUnmet(t *testing.T) {
+// log together with the rest of the fanout decision fields.
+func TestMinAboveFeasibleSetsMinUnmet(t *testing.T) {
 	nodes := m14Nodes(2)
 	task := m14PlacementTask(16, []int32{12, 1}, nodes, 3, 3)
 	r := &Reconciler{}
@@ -229,10 +229,10 @@ func TestM14MinAboveFeasibleSetsMinUnmet(t *testing.T) {
 	}
 }
 
-// TestM14OutOfTargetFallback covers the documented multi-Pod case: identical
+// TestOutOfTargetFallback covers the documented multi-Pod case: identical
 // distributions and allowMultiPodPerNode=false leave one Pod on the single
 // fallback node outside its deterministic target set.
-func TestM14OutOfTargetFallback(t *testing.T) {
+func TestOutOfTargetFallback(t *testing.T) {
 	nodes := m14Nodes(3)
 	task := fixtureTask(2, 16, [][]int32{{0, 1}, {0, 1}})
 	task.Spec.PreheatFanout = 2
@@ -298,12 +298,12 @@ func TestM14OutOfTargetFallback(t *testing.T) {
 	}
 }
 
-// TestM14MinUnmetFollowsActualAssignment covers the follow-up contract: both
+// TestMinUnmetFollowsActualAssignment covers the follow-up contract: both
 // Pods plan a two-node target from the same 11,7,3 distribution, but
 // allowMultiPodPerNode=false forces one of them down to a single node after
 // conflict adjudication and fallback. MinUnmet, the placement log, status
 // entries and score annotations all follow the actual Assignment.
-func TestM14MinUnmetFollowsActualAssignment(t *testing.T) {
+func TestMinUnmetFollowsActualAssignment(t *testing.T) {
 	nodes := m14Nodes(3)
 	task := fixtureTask(2, 16, [][]int32{{0, 1}, {0, 1}})
 	task.Spec.PreheatFanout = 2
@@ -417,9 +417,9 @@ func TestM14MinUnmetFollowsActualAssignment(t *testing.T) {
 	}
 }
 
-// TestM14ValidateTaskFanoutBounds covers the defensive spec checks: negative
+// TestValidateTaskFanoutBounds covers the defensive spec checks: negative
 // bounds are rejected and an effective minimum above the maximum is rejected.
-func TestM14ValidateTaskFanoutBounds(t *testing.T) {
+func TestValidateTaskFanoutBounds(t *testing.T) {
 	base := fileTask([][]string{{"a.tar"}}, 2)
 	cases := []struct {
 		name      string
@@ -449,9 +449,9 @@ func TestM14ValidateTaskFanoutBounds(t *testing.T) {
 	}
 }
 
-// TestM14MinAboveMaxClampWarning covers the controller-side defensive clamp
+// TestMinAboveMaxClampWarning covers the controller-side defensive clamp
 // that runs when an object bypassed the CRD CEL rule.
-func TestM14MinAboveMaxClampWarning(t *testing.T) {
+func TestMinAboveMaxClampWarning(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	task.Spec.PreheatFanout = 1
 	task.Spec.PreheatFanoutMin = 3

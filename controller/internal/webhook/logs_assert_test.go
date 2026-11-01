@@ -1,6 +1,6 @@
 package webhook
 
-// M12 log assertions for docs/7.1 design.md §9.3 (Webhook 拒绝/跳过).
+// Log assertions for docs/7.1 design.md §9.3 (Webhook 拒绝/跳过).
 
 import (
 	"bytes"
@@ -50,7 +50,7 @@ func m12WebhookAssertSkipped(t *testing.T, buf *bytes.Buffer, wantReason string)
 	}
 }
 
-func TestM12WebhookSkipLogFields(t *testing.T) {
+func TestWebhookSkipLogFields(t *testing.T) {
 	t.Run("unselected pod", func(t *testing.T) {
 		m, _ := newMutator(t, trainTask())
 		buf := &bytes.Buffer{}

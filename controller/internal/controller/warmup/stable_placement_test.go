@@ -84,7 +84,7 @@ func TestSubmittedLedgerOnlyCountsHeldTasks(t *testing.T) {
 	observations := map[readinessKey]AgentTaskObservation{
 		{podIndex: 0, node: "n1"}: {Held: true, Generation: 7, WindowBlocks: 2},
 		// Cancel marks a task without deleting it; the Agent still answers, but
-		// it is not holding anything (docs/6.3 D55).
+		// it is not holding anything (docs/6.2 D55).
 		{podIndex: 0, node: "n2"}: {Generation: 7, WindowBlocks: 2},
 		// n3 answered nothing, so it is absent from the map.
 	}

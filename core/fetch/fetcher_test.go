@@ -217,7 +217,7 @@ func waitNoLeak(t *testing.T, before int) {
 }
 
 // TestInflightByteLimit：并发下载多个大对象，实测（store 侧独立观测 + limiter 仪表）
-// 峰值在途字节不超过 MaxInflightBytes（design.md §5.3、plan.md §4）。
+// 峰值在途字节不超过 MaxInflightBytes（design.md §5.3）。
 func TestInflightByteLimit(t *testing.T) {
 	const (
 		objSize = 16 << 10 // 每个对象 16 KiB
@@ -494,7 +494,7 @@ func TestRetryExhausted(t *testing.T) {
 }
 
 // TestFetcherMaxTasksLimit：从 Fetcher.Fetch 入口验证 MaxTasks 任务数上限语义
-// （docs/5.4 §5）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
+// （docs/5.3 §5）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
 // （每个在途任务上报进入/离开并记录峰值并发），断言峰值恰为 2（既不超过 MaxTasks，
 // 也确实制造了并发）；放行后 5 个 key 全部落盘成功、任务额度全部归还、无死锁。
 // ctx 取消路径已由 TestCtxCancel 与 TestLimiterTaskSemaphore 覆盖，本用例不重复。
@@ -609,7 +609,7 @@ func TestFetcherMaxTasksLimit(t *testing.T) {
 }
 
 // TestCtxCancel：ctx 取消可打断字节信号量等待与下载中途；退出后无信号量泄漏、
-// 无残留块/临时文件、无 goroutine 泄漏（plan.md §4）。
+// 无残留块/临时文件、无 goroutine 泄漏。
 func TestCtxCancel(t *testing.T) {
 	before := runtime.NumGoroutine()
 	ctx := context.Background()

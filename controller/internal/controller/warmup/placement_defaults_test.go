@@ -22,10 +22,10 @@ func m12Layout() []traincachev1alpha1.BlockLayout {
 	}
 }
 
-// TestM12S17AnyInvalidPodDefaultsWholeGroup mutates exactly one Pod at every
+// TestAnyInvalidPodDefaultsWholeGroup mutates exactly one Pod at every
 // position and asserts that the entire group is replaced by DefaultSplit, not
 // merely the offending Pod.
-func TestM12S17AnyInvalidPodDefaultsWholeGroup(t *testing.T) {
+func TestAnyInvalidPodDefaultsWholeGroup(t *testing.T) {
 	const (
 		total = int32(7)
 		pods  = int32(3)

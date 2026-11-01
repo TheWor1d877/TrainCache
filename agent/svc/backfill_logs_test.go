@@ -8,7 +8,7 @@ import (
 )
 
 // backfill_logs_test.go asserts the corrupt-block isolation log record keeps
-// its structured fields (docs/9.1 §4.2, docs/9.4 §3 item 4).
+// its structured fields (docs/8.1 §4.2).
 func TestBackfillQuarantineLogFields(t *testing.T) {
 	buf := m12CaptureLogsTS(t)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-local.sh — TrainCache Agent 服务化「本机端到端」演练(M7c)。
+# run-local.sh — TrainCache Agent 服务化「本机端到端」演练。
 #
 # 目标(闭合 M6 遗留「agentd 动态判据环境受限」):
 #   在本机用 TRAINCACHE_CACHE_ROOT 指向可写临时目录启动真实 agentd,走完

@@ -1,6 +1,6 @@
 package warmup
 
-// M12 log assertions for docs/7.1 design.md §9.3. These tests drive the
+// Log assertions for docs/7.1 design.md §9.3. These tests drive the
 // production code paths and assert the structured JSON records (message +
 // required fields), so renaming a message or dropping a field fails here.
 
@@ -103,7 +103,7 @@ func m12RequireLevel(t *testing.T, rec map[string]any, want string) {
 }
 
 // §9.3 每个 Reconcile 入口/出口 + 候选筛选结果 + 消费顺序解析.
-func TestM12WarmupReconcileLifecycleAndSummaryLogs(t *testing.T) {
+func TestWarmupReconcileLifecycleAndSummaryLogs(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	buf, log := m12JSONLog(t)
@@ -132,7 +132,7 @@ func TestM12WarmupReconcileLifecycleAndSummaryLogs(t *testing.T) {
 }
 
 // §9.3 spec 校验失败.
-func TestM12WarmupSpecInvalidLogFields(t *testing.T) {
+func TestWarmupSpecInvalidLogFields(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	task.Spec.PodDetails[0].Index = 5 // fails ValidateTask
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
@@ -152,7 +152,7 @@ func TestM12WarmupSpecInvalidLogFields(t *testing.T) {
 }
 
 // §9.3 消费顺序默认切分：日志 + ConsumeOrderDefaulted 事件.
-func TestM12ConsumeOrderDefaultSplitLogAndEvent(t *testing.T) {
+func TestConsumeOrderDefaultSplitLogAndEvent(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{99}}) // out of range => default split
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	buf, log := m12JSONLog(t)
@@ -181,7 +181,7 @@ func TestM12ConsumeOrderDefaultSplitLogAndEvent(t *testing.T) {
 }
 
 // §9.3 进度轮询结果变化.
-func TestM12ProgressPollLogFields(t *testing.T) {
+func TestProgressPollLogFields(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	pool := newFakeProgressPool()
@@ -200,7 +200,7 @@ func TestM12ProgressPollLogFields(t *testing.T) {
 }
 
 // §9.3 gRPC Submit/Update/Cancel.
-func TestM12AgentPlacementRPCLogs(t *testing.T) {
+func TestAgentPlacementRPCLogs(t *testing.T) {
 	buf, log := m12JSONLog(t)
 	if _, err := ApplyPlacement(context.Background(), &fakePlacementRPC{}, log, testPlacementInput()); err != nil {
 		t.Fatalf("ApplyPlacement: %v", err)
@@ -214,7 +214,7 @@ func TestM12AgentPlacementRPCLogs(t *testing.T) {
 }
 
 // §9.3 gRPC 失败/重试: each operation logs attempt/err at Warn.
-func TestM12AgentPlacementFailureLogs(t *testing.T) {
+func TestAgentPlacementFailureLogs(t *testing.T) {
 	down := fmt.Errorf("%w: down", agentclient.ErrAgentUnavailable)
 	cases := []struct {
 		name string
@@ -272,7 +272,7 @@ func TestM12AgentPlacementFailureLogs(t *testing.T) {
 }
 
 // §9.3 Gate 注入/摘除: release path emits gate released + per-Pod gate removed.
-func TestM12GateReleaseAndRemovalLogs(t *testing.T) {
+func TestGateReleaseAndRemovalLogs(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
 	pool := newFakeProgressPool()
@@ -302,7 +302,7 @@ func TestM12GateReleaseAndRemovalLogs(t *testing.T) {
 }
 
 // §9.3 降级/故障恢复.
-func TestM12DegradedConditionLogs(t *testing.T) {
+func TestDegradedConditionLogs(t *testing.T) {
 	task := testTask("t1", traincachev1alpha1.TargetRef{Kind: "Job", Name: "trainer"})
 	pod := selectedPod("trainer-0")
 	pod.Labels["batch.kubernetes.io/job-name"] = "trainer"

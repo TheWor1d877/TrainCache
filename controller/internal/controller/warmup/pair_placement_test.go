@@ -1,6 +1,6 @@
 package warmup
 
-// M13 fanout acceptance tests (docs/7.2 plan.md §19, docs/7.3 D38):
+// Fanout acceptance tests (docs/7.2 D38):
 // per-Pod top-K placement, pair-level RPC diff, P x K status, existential
 // gate, P x K score annotation, landing deviation and fanout=1 regression.
 
@@ -48,10 +48,10 @@ func podEntries(task *traincachev1alpha1.WarmupTask, pod int32) []traincachev1al
 	return out
 }
 
-// TestM13StatusHasOneEntryPerPodNodePair covers plan criterion ⑤: status has
+// TestStatusHasOneEntryPerPodNodePair covers: status has
 // exactly P x K entries, each Pod has K distinct preheat nodes and every
 // entry's window count matches the ReadinessTable cell for its pair.
-func TestM13StatusHasOneEntryPerPodNodePair(t *testing.T) {
+func TestStatusHasOneEntryPerPodNodePair(t *testing.T) {
 	for _, seed := range m13Seeds {
 		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
 			statusPairsForSeed(t, seed)
@@ -79,7 +79,7 @@ func statusPairsForSeed(t *testing.T, seed int64) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	updated := readyTask(t, c)
-	// M14 no longer pins the per-Pod count to fanout: the adaptive target can be
+	// The adaptive target no longer pins the per-Pod count to fanout: the adaptive target can be
 	// smaller, and identical distributions with allowMultiPodPerNode=false can
 	// leave one Pod with a single out-of-target fallback. The invariant is one
 	// entry per actual (Pod, node) pair within [min, max].
@@ -119,9 +119,9 @@ func statusPairsForSeed(t *testing.T, seed int64) {
 	}
 }
 
-// TestM13GateReleasesWhenAnyWarmNodeReachesThreshold covers criterion ③: one
+// TestGateReleasesWhenAnyWarmNodeReachesThreshold covers: one
 // ready preheat node is enough for the Pod; all nodes below threshold hold.
-func TestM13GateReleasesWhenAnyWarmNodeReachesThreshold(t *testing.T) {
+func TestGateReleasesWhenAnyWarmNodeReachesThreshold(t *testing.T) {
 	now := time.Unix(100, 0)
 	r := &Reconciler{Now: func() time.Time { return now }}
 
@@ -153,9 +153,9 @@ func TestM13GateReleasesWhenAnyWarmNodeReachesThreshold(t *testing.T) {
 	}
 }
 
-// TestM13ScoreAnnotationCoversEveryPair covers criteria ④: each Pod's
+// TestScoreAnnotationCoversEveryPair covers criteria ④: each Pod's
 // annotation lists exactly its own assigned nodes, and the union is P x K.
-func TestM13ScoreAnnotationCoversEveryPair(t *testing.T) {
+func TestScoreAnnotationCoversEveryPair(t *testing.T) {
 	task := fanoutTask(t, 2, 2, 2, [][]int32{{0, 1}, {2, 3}})
 	task.Spec.Score = traincachev1alpha1.ScorePolicy{HalfLife: 1, Cutoff: 2}
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
@@ -198,9 +198,9 @@ func TestM13ScoreAnnotationCoversEveryPair(t *testing.T) {
 	}
 }
 
-// TestM13PairDiffSubmitsUpdatesCancels covers criterion ⑧: only changed pairs
+// TestPairDiffSubmitsUpdatesCancels covers: only changed pairs
 // issue RPCs; removed pairs are cancelled and unchanged pairs are untouched.
-func TestM13PairDiffSubmitsUpdatesCancels(t *testing.T) {
+func TestPairDiffSubmitsUpdatesCancels(t *testing.T) {
 	task := testTask("task", traincachev1alpha1.TargetRef{})
 	task.Generation = 7
 	in := PlacementApplyInput{
@@ -281,9 +281,9 @@ func (p *m13DeviationPool) Progress(context.Context, string, string, uint64) (*a
 	return nil, nil
 }
 
-// TestM13DeviationInsideWarmSetOnlyBackfills covers criterion ⑦ (inside): a
+// TestDeviationInsideWarmSetOnlyBackfills covers criterion ⑦ (inside): a
 // landing on one of the Pod's warm nodes only records ActualNode.
-func TestM13DeviationInsideWarmSetOnlyBackfills(t *testing.T) {
+func TestDeviationInsideWarmSetOnlyBackfills(t *testing.T) {
 	task := fanoutTask(t, 1, 1, 2, [][]int32{{0}})
 	task.Status.Phase = traincachev1alpha1.WarmupPhaseReleased
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
@@ -315,10 +315,10 @@ func TestM13DeviationInsideWarmSetOnlyBackfills(t *testing.T) {
 	}
 }
 
-// TestM13DeviationOutsideWarmSetSubmitsActualNode covers criterion ⑦
+// TestDeviationOutsideWarmSetSubmitsActualNode covers criterion ⑦
 // (outside): record NodeDeviation, submit the actual node and never cancel the
 // original warm nodes.
-func TestM13DeviationOutsideWarmSetSubmitsActualNode(t *testing.T) {
+func TestDeviationOutsideWarmSetSubmitsActualNode(t *testing.T) {
 	task := fanoutTask(t, 1, 1, 2, [][]int32{{0}})
 	task.Status.Phase = traincachev1alpha1.WarmupPhaseReleased
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
@@ -356,9 +356,9 @@ func TestM13DeviationOutsideWarmSetSubmitsActualNode(t *testing.T) {
 	}
 }
 
-// TestM13FanoutOneRegression covers criterion ⑦: fanout=1 keeps one status
+// TestFanoutOneKeepsSingleEntry covers: fanout=1 keeps one status
 // entry per Pod and one annotation pair per Pod.
-func TestM13FanoutOneRegression(t *testing.T) {
+func TestFanoutOneKeepsSingleEntry(t *testing.T) {
 	task := fixtureTask(2, 2, [][]int32{{0, 1}, {0, 1}})
 	task.Spec.PreheatFanout = 1
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1", "n2"})
@@ -399,9 +399,9 @@ func TestM13FanoutOneRegression(t *testing.T) {
 	}
 }
 
-// TestM13LogFields asserts the D21 log points: fanout, per-Pod warm-node
+// TestLogFields asserts the D21 log points: fanout, per-Pod warm-node
 // counts, top-K assignment and status entry count.
-func TestM13LogFields(t *testing.T) {
+func TestLogFields(t *testing.T) {
 	for _, seed := range m13Seeds {
 		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
 			logFieldsForSeed(t, seed)
@@ -494,9 +494,9 @@ func m12JSONLogInto(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-// TestM13PodsPerNodeCountsPairs covers criterion 10: the metric observes one
+// TestPodsPerNodeCountsPairs covers: the metric observes one
 // sample per node of the pair set, so its sum is P x K.
-func TestM13PodsPerNodeCountsPairs(t *testing.T) {
+func TestPodsPerNodeCountsPairs(t *testing.T) {
 	for _, seed := range m13Seeds {
 		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
 			podsPerNodePairsForSeed(t, seed)
@@ -522,7 +522,7 @@ func podsPerNodePairsForSeed(t *testing.T, seed int64) {
 	actual := 0
 	for pod := int32(0); pod < 2; pod++ {
 		got := len(placement.Assignment[pod])
-		// M14 chooses the actual count adaptively: 1 represents the single
+		// The adaptive target chooses the actual count: 1 represents the single
 		// out-of-target fallback when both Pods share a target set.
 		if got < 1 || got > 2 {
 			t.Fatalf("pod %d warm nodes = %d, want within [min,max] = [1,2]: %#v",
