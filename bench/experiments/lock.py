@@ -169,7 +169,7 @@ def snapshot() -> dict:
     - docker_repo_digests: docker 侧 RepoDigests,仅交叉核对用
     - tc: 当前 tc 档位(从 COND 记录)
     - seed: 随机种子(从 COND 记录)
-    - chunk_size_bytes: 实验块大小(从 COND 记录,M9 9.2 补)
+    - chunk_size_bytes: 实验块大小(从 COND 记录)
     - dataset_name: TrainCache 快照名(环境变量 DATASET_NAME)
     - git_commit: git rev-parse HEAD
     - collected_at: 采集时刻(RFC3339)
