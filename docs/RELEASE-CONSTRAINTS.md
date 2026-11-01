@@ -17,6 +17,7 @@
 | webhook            | `controller/deploy/webhook/Dockerfile`   | `ghcr.io/thewor1d877/traincache/webhook`            |
 | kube-scheduler     | `controller/deploy/scheduler/Dockerfile` | `ghcr.io/thewor1d877/traincache/kube-scheduler`     |
 | traincache-agentd  | `agent/Dockerfile`                       | `ghcr.io/thewor1d877/traincache/traincache-agentd`  |
+| traincache-gateway | `gateway/Dockerfile`                     | `ghcr.io/thewor1d877/traincache/traincache-gateway` |
 
 镜像名固定，不带镜像站前缀。仓库内任何文件不写私有 registry 域名。
 
@@ -32,12 +33,12 @@ docker build -f agent/Dockerfile \
 
 基础镜像从 docker.io 拉取，走宿主 docker daemon 的 `registry-mirrors`，构建命令不带 registry 参数。
 
-四个镜像的本机构建用 `hack/build-images.sh`：`TAG` 默认 `dev`，参数给组件名只构建子集。脚本先把基础镜像准备成官方短名，本机只有带镜像站前缀的同名副本时执行 `docker tag` 复用，不产生网络访问；两种名字都不在本机时立即报错，并给出 `docker pull` 与 `docker tag` 两条处理命令。
+五个镜像的本机构建用 `hack/build-images.sh`：`TAG` 默认 `dev`，参数给组件名只构建子集。脚本先把基础镜像准备成官方短名，本机只有带镜像站前缀的同名副本时执行 `docker tag` 复用，不产生网络访问；两种名字都不在本机时立即报错，并给出 `docker pull` 与 `docker tag` 两条处理命令。
 
 ### 2.3 清单
 
 - 仓库内清单写 `:dev`，用 `kustomize build controller/deploy` 渲染。
-- 发布清单由 kustomize `images:` 把四个镜像改成 `@sha256:<digest>`，不手改组件 YAML。
+- 发布清单由 kustomize `images:` 把五个镜像改成 `@sha256:<digest>`，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `kind load docker-image` 导入同名镜像，清单的 `imagePullPolicy` 是 `IfNotPresent`。
 
@@ -51,7 +52,7 @@ docker build -f agent/Dockerfile \
 
 ### 3.2 产物
 
-- 四个镜像 `docker save` 进同一个 tar，共享基础层只存一份。
+- 五个镜像 `docker save` 进同一个 tar，共享基础层只存一份。
 - tar 保留 GHCR 全名，导入后与清单引用逐字相同，不需要 retag。
 - 只发 linux/amd64。
 - 清单用 digest（`@sha256:`）引用。tag 配 `IfNotPresent` 时节点不会重拉同名旧镜像，digest 可以。
@@ -69,14 +70,14 @@ PR（dev→main）
 
 main 上手动触发 release-candidate（version=vX.Y.Z）
   └─ release-candidate.yml
-       ├─ 构建四个镜像 → 推 :sha-<7 位短 sha>（VERSION 烤进二进制）
+       ├─ 构建五个镜像 → 推 :sha-<7 位短 sha>（VERSION 烤进二进制）
        ├─ 渲染 install.yaml
        ├─ 编译两个 CLI
        └─ 上传 artifact release-candidate-<短 sha>（含 candidate.json）
 
 候选构建完成
   └─ release-smoke.yml 触发（workflow_run 监听 release-candidate 成功）
-       └─ 验证：候选文件齐全、四个 digest 可解析、装机链路通
+       └─ 验证：候选文件齐全、五个 digest 可解析、装机链路通
             ├─ 通过 → 进入下一步
             └─ 失败 → 没改代码就重跑同一 sha 的候选与 smoke
 
@@ -106,8 +107,8 @@ main 上打 tag vX.Y.Z 并推送
 | push `dev` / 任意 PR     | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染                      | 必须过           |
 | PR `dev`→`main`          | 同上 + 版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 对齐）+ 文档引用完整性 | 必须过           |
 | PR `dev`→`main`          | kind e2e                                                                                                | 必须过，合并门禁 |
-| 手动 `release-candidate` | 四个镜像推 `:sha-<7 位短 sha>` → 渲染 `install.yaml` → 编译 CLI → 上传候选 artifact                     | 发版前置         |
-| 候选构建成功             | release-smoke：候选文件齐全且哈希对得上、四个 digest 可解析、临时 kind 装机链路通                       | 由 `release.yml` 断言 |
+| 手动 `release-candidate` | 五个镜像推 `:sha-<7 位短 sha>` → 渲染 `install.yaml` → 编译 CLI → 上传候选 artifact                     | 发版前置         |
+| 候选构建成功             | release-smoke：候选文件齐全且哈希对得上、五个 digest 可解析、临时 kind 装机链路通                       | 由 `release.yml` 断言 |
 | push tag `v*`            | 断言候选 version 与 tag 一致 → 断言同 sha 有成功 smoke → 候选 digest 晋升 `:vX.Y.Z` → 打单 tar → 建 draft Release | 发布本身         |
 
 ### 4.2 纪律
@@ -123,10 +124,10 @@ main 上打 tag vX.Y.Z 并推送
 
 - `make verify-<module>` 依次跑 build、vet、`go test -race`、gofmt；controller 的 job 另查禁用符号（`GetPreheatProgress`、`ScorePolicy.Window`、`consumeOrderRef`）。
 - `make verify-metadata` 跑 `hack/verify-release-metadata.sh`（版本、镜像名、CHANGELOG 与 tag）和 `hack/verify-doc-refs.sh`（文档相对链接）。
-- `release-candidate.yml` 推四个 `:sha-<7 位短 sha>` 镜像，产出 `install.yaml`、两个 CLI、`candidate.json` 与 `SHA256SUMS`，作为 artifact `release-candidate-<短 sha>` 保留 14 天。`candidate.json` 记 `sha`、`short_sha`、`version`、`images` 下四个组件的 digest(值带 `sha256:` 前缀)与 `created_at`。
-- `release.yml` 只在 tag 上跑：按 commit 找成功的候选 run，校验 version 与 tag 逐字相等、候选 sha 与 tag 指向的提交相同，再断言同一 sha 有成功的 release-smoke 运行（缺了就停在这一步，不晋升、不建 Release），然后用 `docker buildx imagetools create` 把候选 digest 晋升成 `:vX.Y.Z`，再回查 `:vX.Y.Z` 指向的清单中含候选 digest —— 晋升会把单平台的 image manifest 包进一层 manifest list，tag 摘要与候选摘要不相等是正常现象，两者指同一个镜像内容；随后 `docker pull` 四个镜像、`docker save` 成单 tar，连同候选的 `install.yaml`、两个 CLI 与 `SHA256SUMS` 挂到 draft Release。
+- `release-candidate.yml` 推五个 `:sha-<7 位短 sha>` 镜像，产出 `install.yaml`、两个 CLI、`candidate.json` 与 `SHA256SUMS`，作为 artifact `release-candidate-<短 sha>` 保留 14 天。`candidate.json` 记 `sha`、`short_sha`、`version`、`images` 下五个组件的 digest(值带 `sha256:` 前缀)与 `created_at`。
+- `release.yml` 只在 tag 上跑：按 commit 找成功的候选 run，校验 version 与 tag 逐字相等、候选 sha 与 tag 指向的提交相同，再断言同一 sha 有成功的 release-smoke 运行（缺了就停在这一步，不晋升、不建 Release），然后用 `docker buildx imagetools create` 把候选 digest 晋升成 `:vX.Y.Z`，再回查 `:vX.Y.Z` 指向的清单中含候选 digest —— 晋升会把单平台的 image manifest 包进一层 manifest list，tag 摘要与候选摘要不相等是正常现象，两者指同一个镜像内容；随后 `docker pull` 五个镜像、`docker save` 成单 tar，连同候选的 `install.yaml`、两个 CLI 与 `SHA256SUMS` 挂到 draft Release。
 - draft 转正由人工在 Release 页面点 Publish，CI 不自动发布。要改成自动，在 `release.yml` 建完 draft 后追加 `gh release edit <tag> --draft=false`，该步已具备 `contents: write` 权限。
-- `release-smoke.yml` 由 `workflow_run` 在 `release-candidate` 成功后触发，也可以手动输入 sha；该文件要先合入 `main`，`workflow_run` 才会注册。它先跑 `hack/verify-release-assets.sh <候选目录>`：`install.yaml` 恰好四个 `@sha256:` 引用、`SHA256SUMS` 覆盖目录内每个文件且哈希对得上、四个 digest 在 GHCR 可解析（`docker manifest inspect`，只看 manifest，不下载层）。层数据的真拉由紧随其后的装机段完成：kind 节点按清单里的 digest 从 GHCR 匿名拉取，包不是 Public 就在这一步起不来。装机段检查四个组件 Ready、CRD Established、Pod 用的是 GHCR 镜像。它不跑业务闭环，闭环由 e2e 覆盖。
+- `release-smoke.yml` 由 `workflow_run` 在 `release-candidate` 成功后触发，也可以手动输入 sha；该文件要先合入 `main`，`workflow_run` 才会注册。它先跑 `hack/verify-release-assets.sh <候选目录>`：`install.yaml` 恰好五个 `@sha256:` 引用、`SHA256SUMS` 覆盖目录内每个文件且哈希对得上、五个 digest 在 GHCR 可解析（`docker manifest inspect`，只看 manifest，不下载层）。层数据的真拉由紧随其后的装机段完成：kind 节点按清单里的 digest 从 GHCR 匿名拉取，包不是 Public 就在这一步起不来。装机段检查五个组件 Ready、CRD Established、Pod 用的是 GHCR 镜像。它不跑业务闭环，闭环由 e2e 覆盖。
 - e2e 与 smoke 的节点镜像由 `NODE_IMAGE` 指定，默认 `docker.io/kindest/node:v1.37.0`；产物分别写到 `TRAINCACHE_DATA_ROOT/controller/e2e/results/` 与 `TRAINCACHE_DATA_ROOT/hack/release-smoke/`。
 
 ## 5. 用户自备
@@ -165,7 +166,7 @@ main 上打 tag vX.Y.Z 并推送
 
 ### 5.3 运行时参数
 
-运行时参数集中在 `traincache` namespace 的 ConfigMap `traincache-config`（`controller/deploy/agent/configmap.yaml`），共 13 个配置项。Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction` 三个算 K，另读 `controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`。改值只需编辑 ConfigMap 并重启对应工作负载，不必改清单；`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者。四份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
+运行时参数集中在 `traincache` namespace 的 ConfigMap `traincache-config`（`controller/deploy/agent/configmap.yaml`），共 17 个配置项。Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction` 三个算 K，另读 `controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。改值只需编辑 ConfigMap 并重启对应工作负载，不必改清单；`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者；`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment。五份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
 
 | key | 默认值 | 归属 | 说明 |
 |---|---|---|---|
@@ -178,6 +179,10 @@ main 上打 tag vX.Y.Z 并推送
 | `objstoreEndpoint` | `minio.minio.svc.cluster.local:9000` | Agent | 源站端点，不带 scheme；接 COS/OSS/S3 时改这一处 |
 | `objstoreBucket` | `traincache` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`；`SubmitPreheat` 不带桶名，不一致时每个块读取都失败 |
 | `objstoreSecure` | `false` | Agent | `true`/`1`/`yes` 时用 HTTPS 连源站 |
+| `gatewayEndpoint` | 空（`""`） | Agent | 合并回源网关地址，不带 scheme；空表示全部直连。非空时只有块 GET 走网关 |
+| `gatewaySecure` | `false` | Agent | Agent 到网关是否 TLS；与 `objstoreSecure` 无关 |
+| `gatewayBucketConcurrency` | `32` | 网关 | 到源站的并发下载上限，正整数；非法值使网关拒绝启动 |
+| `gatewayBlockBufferBytes` | `10485760`（10MiB） | 网关 | 每个在途块环形缓冲的字节数，正整数；非法值使网关拒绝启动 |
 | `controllerPollInterval` | `1s` | Controller | 轮询 Agent 进度的间隔，代码默认 2s |
 | `controllerScoreTTL` | `10m` | Controller | 节点分数有效期，代码默认 5m |
 | `schedulerScoreTTL` | `10m` | Scheduler | 分数过期判定，必须与 `controllerScoreTTL` 同值 |
@@ -187,7 +192,7 @@ main 上打 tag vX.Y.Z 并推送
 
 指标口径：`dataset` 标签只对白名单内的 DataSet 取原名，其余一律归并 `other`，用来把标签基数钉死（D35）。**清空白名单后所有带 `dataset` 标签的指标都归并到 `other`**，此时按 dataset 拆分的看板看不出数据集差异，排查单数据集时再把名字加回白名单。
 
-ConfigMap 的配置项用 camelCase。Agent 的七项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`。Controller 的五项、scheduler 的两项同样由各自 Deployment 用 `configMapKeyRef` 注入。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。完整参数表（集群、数据集、训练任务）见 [参数配置](PARAMETER-CONFIGURATION.md)。
+ConfigMap 的配置项用 camelCase。Agent 的九项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_GATEWAY_ENDPOINT`、`TRAINCACHE_GATEWAY_SECURE`。Controller 的五项、scheduler 的两项同样由各自 Deployment 用 `configMapKeyRef` 注入。网关的五项由 `controller/deploy/gateway/deployment.yaml` 用 `configMapKeyRef` 注入：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY`、`TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES`；AK/SK 另走 Secret `traincache-objstore`。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。完整参数表（集群、数据集、训练任务）见 [参数配置](PARAMETER-CONFIGURATION.md)。
 
 ## 6. CLI 下发
 

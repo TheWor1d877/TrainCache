@@ -92,6 +92,8 @@ kubectl -n kube-system rollout status deploy/traincache-scheduler --timeout=300s
   && ok "scheduler" || fail "scheduler rollout"
 kubectl -n "$NS" rollout status ds/traincache-agentd --timeout=300s >/dev/null \
   && ok "agentd" || fail "agentd rollout"
+kubectl -n "$NS" rollout status deploy/traincache-gateway --timeout=300s >/dev/null \
+  && ok "gateway" || fail "gateway rollout"
 
 printf '\n== image and endpoint\n'
 imgs="$(kubectl -n "$NS" get pods -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}' 2>/dev/null)"

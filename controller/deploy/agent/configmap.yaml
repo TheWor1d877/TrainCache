@@ -1,4 +1,5 @@
-# Runtime parameters shared by the Agent, controller-manager and scheduler.
+# Runtime parameters shared by the Agent, gateway, controller-manager and
+# scheduler.
 #
 # Placement rule for every TrainCache setting (docs/PARAMETER-CONFIGURATION.md):
 #
@@ -36,6 +37,18 @@
 #                              read. The bench harness rewrites it per dataset.
 #   objstoreSecure           — "true"/"1"/"yes" enables TLS to the origin;
 #                              anything else, including "", means plain HTTP.
+#   gatewayEndpoint          — S3 gateway the Agent routes block GETs to. ""
+#                              means every block GET goes straight to the
+#                              origin; "<host>:<port>" routes them through the
+#                              gateway.
+#   gatewaySecure            — "true"/"1"/"yes" enables TLS from the Agent to
+#                              the gateway; independent of objstoreSecure.
+#   gatewayBucketConcurrency — Gateway-only cap on concurrent downloads from
+#                              the origin for the bucket; positive integer.
+#                              Changing it restarts the gateway Deployment.
+#   gatewayBlockBufferBytes  — Gateway-only size in bytes of the ring buffer
+#                              held per in-flight block; positive integer.
+#                              Changing it restarts the gateway Deployment.
 #   controllerPollInterval   — WarmupTask progress poll interval. The code
 #                              default is 2s; 1s keeps gate release latency
 #                              inside the bench measurement window.
@@ -63,6 +76,10 @@ data:
   objstoreEndpoint: "minio.minio.svc.cluster.local:9000"
   objstoreBucket: "traincache"
   objstoreSecure: "false"
+  gatewayEndpoint: ""
+  gatewaySecure: "false"
+  gatewayBucketConcurrency: "32"
+  gatewayBlockBufferBytes: "10485760"
   controllerPollInterval: "1s"
   controllerScoreTTL: "10m"
   schedulerScoreTTL: "10m"

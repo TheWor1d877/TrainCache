@@ -1,10 +1,10 @@
 # TrainCache 验证入口。CI 跑 verify；PR 到 main 另跑 verify-metadata 与 kind e2e；
 # e2e 需要 docker + kind，也可手动触发。
 
-.PHONY: verify verify-controller verify-core verify-agent verify-hooklib verify-metadata e2e \
+.PHONY: verify verify-controller verify-core verify-agent verify-gateway verify-hooklib verify-metadata e2e \
 	release-install release-smoke
 
-verify: verify-controller verify-core verify-agent verify-hooklib
+verify: verify-controller verify-core verify-agent verify-gateway verify-hooklib
 
 verify-controller:
 	cd controller && go build ./... && go vet ./... && go test ./... -race -count=1
@@ -19,6 +19,10 @@ verify-core:
 verify-agent:
 	cd agent && go build ./... && go vet ./... && go test ./... -race -count=1
 	cd agent && test -z "$$(gofmt -l .)"
+
+verify-gateway:
+	cd gateway && go build ./... && go vet ./... && go test ./... -race -count=1
+	cd gateway && test -z "$$(gofmt -l .)"
 
 # DataLoader 适配器只有 Python 标准库依赖，不需要 Go 工具链。
 verify-hooklib:
@@ -35,10 +39,10 @@ verify-metadata:
 e2e:
 	cd controller && ./e2e/run.sh
 
-# 发布清单：把四个镜像换成 digest 后渲染 install.yaml。
-# 用法: make release-install VERSION=v0.1.0 D_MANAGER=sha256:... (四个 digest 都要给)
+# 发布清单：把五个镜像换成 digest 后渲染 install.yaml。
+# 用法: make release-install VERSION=v0.1.0 D_MANAGER=sha256:... (五个 digest 都要给)
 release-install:
-	./hack/render-install.sh $(VERSION) $(D_MANAGER) $(D_WEBHOOK) $(D_SCHEDULER) $(D_AGENT)
+	./hack/render-install.sh $(VERSION) $(D_MANAGER) $(D_WEBHOOK) $(D_SCHEDULER) $(D_AGENT) $(D_GATEWAY)
 
 # 发布后冒烟：在临时 kind 里装已经发布的 install.yaml。
 # 用法: make release-smoke TAG=v0.1.0 INSTALL=install.yaml

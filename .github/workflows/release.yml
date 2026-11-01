@@ -85,7 +85,7 @@ jobs:
       - name: promote tags
         run: |
           set -euo pipefail
-          for comp in controller-manager webhook kube-scheduler traincache-agentd; do
+          for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
             digest="$(jq -r --arg c "$comp" '.images[$c]' .candidate/candidate.json)"
             [[ "$digest" == sha256:* ]] || { echo "$comp 的候选 digest 非法: $digest" >&2; exit 1; }
             docker buildx imagetools create -t "$REG/$comp:$TAG" "$REG/$comp@$digest"
@@ -104,14 +104,15 @@ jobs:
       - name: pack images
         run: |
           set -euo pipefail
-          for comp in controller-manager webhook kube-scheduler traincache-agentd; do
+          for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
             docker pull "$REG/$comp:$TAG"
           done
           docker save -o "traincache-${TAG}-images.tar" \
             "$REG/controller-manager:$TAG" \
             "$REG/webhook:$TAG" \
             "$REG/kube-scheduler:$TAG" \
-            "$REG/traincache-agentd:$TAG"
+            "$REG/traincache-agentd:$TAG" \
+            "$REG/traincache-gateway:$TAG"
 
       - name: collect assets
         run: |

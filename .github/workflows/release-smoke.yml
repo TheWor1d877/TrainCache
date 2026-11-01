@@ -1,7 +1,7 @@
 name: release-smoke
 
 # 只验证候选产物，不构建、不发布：文件齐全、SHA256SUMS 对得上、
-# 四个 GHCR digest 可解析、临时 kind 装机链路通。
+# 五个 GHCR digest 可解析、临时 kind 装机链路通。
 # 候选构建成功后自动触发，也可手动给 sha（必要时给候选 run_id）复跑。
 # 版本号取自候选的 candidate.json；draft 转正由人工执行，本工作流不改 Release 状态。
 on:

@@ -1,0 +1,19 @@
+# Agent-facing S3 endpoint. Cluster IP only: the gateway sits on the in-cluster
+# path between the Agent and the origin, and /debug/loglevel is not exposed
+# here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: traincache-gateway
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-gateway
+    app.kubernetes.io/part-of: traincache
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: traincache-gateway
+  ports:
+    - name: s3
+      port: 9413
+      targetPort: 9413

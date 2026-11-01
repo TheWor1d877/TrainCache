@@ -90,6 +90,16 @@ spec:
                 secretKeyRef:
                   name: traincache-objstore
                   key: secretKey
+            - name: TRAINCACHE_GATEWAY_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayEndpoint
+            - name: TRAINCACHE_GATEWAY_SECURE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewaySecure
           ports:
             - name: grpc
               containerPort: 9410

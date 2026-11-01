@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 配置落位门禁:防止四份工作负载清单里再混进字面量 env,也防止 ConfigMap 与清单
+# 配置落位门禁:防止五份工作负载清单里再混进字面量 env,也防止 ConfigMap 与清单
 # 引用脱钩。判据正文见 docs/PARAMETER-CONFIGURATION.md 的「落位判据」一节。
 #
 #   1. 凭证 -> Secret;2. 节点身份 -> fieldRef;3. 换集群/换轮次要改 -> ConfigMap;
@@ -15,6 +15,7 @@ WORKLOADS=(
   controller/deploy/manager/deployment.yaml
   controller/deploy/webhook/deployment.yaml
   controller/deploy/scheduler/deployment.yaml
+  controller/deploy/gateway/deployment.yaml
 )
 
 fail=0

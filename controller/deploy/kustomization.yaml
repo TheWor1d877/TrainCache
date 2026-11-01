@@ -14,7 +14,8 @@ resources:
   - webhook
   - agent
   - scheduler
-# Dev builds tag every image `dev`. Release builds rewrite these four entries
+  - gateway
+# Dev builds tag every image `dev`. Release builds rewrite these five entries
 # with `kustomize edit set image <name>=ghcr.io/thewor1d877/traincache/<comp>@sha256:<digest>`,
 # so no tag or digest is ever hand-edited in the per-component manifests.
 images:
@@ -25,4 +26,6 @@ images:
   - name: ghcr.io/thewor1d877/traincache/kube-scheduler
     newTag: dev
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
+    newTag: dev
+  - name: ghcr.io/thewor1d877/traincache/traincache-gateway
     newTag: dev

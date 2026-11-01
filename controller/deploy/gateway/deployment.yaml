@@ -1,0 +1,118 @@
+# S3 merge gateway. Single replica on purpose: in-flight GET coalescing only
+# holds inside one process (K2), so no HPA and `replicas` must stay 1.
+#
+# strategy=Recreate (D14): a single-replica rollout would leave the old and the
+# new Pod behind two different coalescing registries, and a maxSurge Pod would
+# split the fan-out across both. Stopping once is cheaper than a broken
+# in-flight GET. On SIGTERM the process flips /readyz to 503, stops accepting
+# connections and drains in-flight requests for 30s, so
+# terminationGracePeriodSeconds is 40 (design 6.6).
+#
+# S3 and both probes share :9413 (D25). /debug/loglevel is bound to
+# 127.0.0.1:6060 by the process and is deliberately not exposed here or in the
+# Service.
+#
+# Env: no literal env values. Endpoint, bucket, TLS flag, concurrency and
+# ring-buffer size come from traincache-config; credentials come from
+# traincache-objstore.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-gateway
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-gateway
+    app.kubernetes.io/part-of: traincache
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traincache-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traincache-gateway
+    spec:
+      priorityClassName: system-cluster-critical
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: gateway
+          image: ghcr.io/thewor1d877/traincache/traincache-gateway:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TRAINCACHE_OBJSTORE_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreEndpoint
+            - name: TRAINCACHE_OBJSTORE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreBucket
+            - name: TRAINCACHE_OBJSTORE_SECURE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreSecure
+            - name: TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayBucketConcurrency
+            - name: TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayBlockBufferBytes
+            - name: TRAINCACHE_OBJSTORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: traincache-objstore
+                  key: accessKey
+            - name: TRAINCACHE_OBJSTORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: traincache-objstore
+                  key: secretKey
+          ports:
+            - name: s3
+              containerPort: 9413
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: s3
+              scheme: HTTP
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: s3
+              scheme: HTTP
+            initialDelaySeconds: 3
+            # Faster than liveness: /readyz turns 503 the moment SIGTERM lands,
+            # so a 2s period pulls the Pod out of the Service before the drain
+            # window starts.
+            periodSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # 32 concurrent streams x 10MiB ring buffer, plus the per-
+              # subscriber copies still within one buffer of the writer. 1Gi is
+              # the steady-state ceiling for this shape; the gateway keeps no
+              # object content after a request ends.
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534

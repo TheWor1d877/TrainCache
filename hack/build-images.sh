@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# build-images.sh — 构建四个开发镜像（tag 默认 dev）。
+# build-images.sh — 构建五个开发镜像（tag 默认 dev）。
 #
 # 用法:
-#   ./hack/build-images.sh                  # manager webhook scheduler agent
+#   ./hack/build-images.sh                  # manager webhook scheduler agent gateway
 #   ./hack/build-images.sh manager agent    # 只构建指定组件
 #   TAG=v0.1.0 ./hack/build-images.sh
 #   ./hack/build-images.sh --prepare-only   # 只准备基础镜像，不构建（供 e2e 预检）
@@ -22,12 +22,14 @@ declare -A DF=(
   [webhook]="$ROOT/controller/deploy/webhook/Dockerfile"
   [scheduler]="$ROOT/controller/deploy/scheduler/Dockerfile"
   [agent]="$ROOT/agent/Dockerfile"
+  [gateway]="$ROOT/gateway/Dockerfile"
 )
 declare -A IMG=(
   [manager]="$REG/controller-manager"
   [webhook]="$REG/webhook"
   [scheduler]="$REG/kube-scheduler"
   [agent]="$REG/traincache-agentd"
+  [gateway]="$REG/traincache-gateway"
 )
 
 prepare_only=0
@@ -40,12 +42,12 @@ for arg in "$@"; do
       exit 2
       ;;
     *)
-      [[ -n "${DF[$arg]:-}" ]] || { echo "未知组件: $arg（可选 manager webhook scheduler agent）" >&2; exit 2; }
+      [[ -n "${DF[$arg]:-}" ]] || { echo "未知组件: $arg（可选 manager webhook scheduler agent gateway）" >&2; exit 2; }
       components+=("$arg")
       ;;
   esac
 done
-[[ ${#components[@]} -gt 0 ]] || components=(manager webhook scheduler agent)
+[[ ${#components[@]} -gt 0 ]] || components=(manager webhook scheduler agent gateway)
 
 # 取 FROM 行引用的基础镜像，跳过阶段别名（如 FROM build）。
 base_refs() {
@@ -121,10 +123,10 @@ if [[ "$prepare_only" == 1 ]]; then
   exit 0
 fi
 
-# 与 e2e 一致：只把 go.work 与三个模块送进构建上下文，不带 .git/docs/bench。
+# 与 e2e 一致：只把 go.work 与四个模块送进构建上下文，不带 .git/docs/bench。
 stage="$(mktemp -d "${TMPDIR:-/tmp}/traincache-build.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
-cp -a "$ROOT/go.work" "$ROOT/go.work.sum" "$ROOT/agent" "$ROOT/core" "$ROOT/controller" "$stage/"
+cp -a "$ROOT/go.work" "$ROOT/go.work.sum" "$ROOT/agent" "$ROOT/core" "$ROOT/controller" "$ROOT/gateway" "$stage/"
 
 for comp in "${components[@]}"; do
   printf '==> 构建 %s: %s:%s\n' "$comp" "${IMG[$comp]}" "$TAG"
