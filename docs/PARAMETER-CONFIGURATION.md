@@ -4,11 +4,11 @@
 
 ## 修改入口速查
 
-集群运行时配置只有两个入口：ConfigMap `traincache-config`（13 个配置项）与 Secret `traincache-objstore`（`accessKey`、`secretKey` 两把凭证）。除此之外没有第三个可改的地方，下表几项看着像入口，实际各归别处。
+集群运行时配置只有两个入口：ConfigMap `traincache-config`（17 个配置项）与 Secret `traincache-objstore`（`accessKey`、`secretKey` 两把凭证）。除此之外没有第三个可改的地方，下表几项看着像入口，实际各归别处。
 
 | 看起来像入口 | 实际是什么 |
 |---|---|
-| 清单里的 `value:` 字面量 env | 四份工作负载清单（Agent DaemonSet、manager、webhook、scheduler）一条都没有；再写回去被 `hack/verify-config-placement.sh` 判失败 |
+| 清单里的 `value:` 字面量 env | 五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）一条都没有；再写回去被 `hack/verify-config-placement.sh` 判失败 |
 | `kubectl set env`、`kubectl edit` | 改的是集群里的 live 副本，下次 `kubectl apply -k controller/deploy` 盖回仓库清单；只用来临时试一次 |
 | `agent/svc/config.go`、`controller/internal/config/config.go` | 代码默认值。要永久改默认档才动源码，否则等于默认的值哪里都不写 |
 | Downward API `fieldRef`（`NODE_NAME`） | 集群按节点给出的每 Pod 身份，没有可填的值 |
@@ -44,9 +44,9 @@
 | 4 | 值与代码默认不同，但基本不动吗 | 同上，写进 ConfigMap | 同上后四项 |
 | 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go` 与 `controller/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
 
-四份工作负载清单（Agent DaemonSet、manager、webhook、scheduler）里因此没有任何一条 `value:` 字面量 env，全部取值走引用或走代码默认。要覆盖第 5 类默认值：临时一次用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把它盖回仓库清单；长期改在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef` 引用，两处一起提交。
+五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）里因此没有任何一条 `value:` 字面量 env，全部取值走引用或走代码默认。要覆盖第 5 类默认值：临时一次用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把它盖回仓库清单；长期改在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef` 引用，两处一起提交。
 
-ConfigMap 现在装 13 项，见 §2.1；往 ConfigMap 加一项而清单里没有对应引用，进程读不到它。
+ConfigMap 现在装 17 项，见 §2.1；往 ConfigMap 加一项而清单里没有对应引用，进程读不到它。
 
 长期修改要改仓库 YAML 再 apply。`kubectl edit` 只改集群副本，下次 apply 会被覆盖。
 
@@ -62,7 +62,7 @@ ConfigMap 现在装 13 项，见 §2.1；往 ConfigMap 加一项而清单里没�
 
 ### 2.1 ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，13 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，17 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。
 
 | 配置项 | 默认 | 读取方 | 说明 |
 |---|---|---|---|
@@ -75,12 +75,16 @@ ConfigMap 现在装 13 项，见 §2.1；往 ConfigMap 加一项而清单里没�
 | `objstoreEndpoint` | `"minio.minio.svc.cluster.local:9000"` | Agent | 源站端点，不带 scheme。清单里是集群内 MinIO 的 Service 地址；接 COS/OSS/S3 时改这一处 |
 | `objstoreBucket` | `"traincache"` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`：`SubmitPreheat` 不带桶名，不一致时每个块读取都失败。bench 按数据集改写它 |
 | `objstoreSecure` | `"false"` | Agent | `true` / `1` / `yes` 时用 HTTPS 连源站，其余取值（含空）走明文 |
+| `gatewayEndpoint` | `""` | Agent | 合并回源网关地址，形如 `traincache-gateway.traincache.svc.cluster.local:9413`，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关，`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站 |
+| `gatewaySecure` | `"false"` | Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真；与 `objstoreSecure` 无关（源站可以 HTTPS、网关明文，反之亦然） |
+| `gatewayBucketConcurrency` | `"32"` | 网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动。改它会重启网关 Deployment |
+| `gatewayBlockBufferBytes` | `"10485760"` | 网关 | 每个在途块环形缓冲的字节数（默认 10MiB），正整数；非法值使网关拒绝启动。改它会重启网关 Deployment |
 | `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；1s 把门控放行延迟压进 bench 的测量窗口 |
 | `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
 | `schedulerScoreTTL` | `"10m"` | scheduler | scheduler 判定分数过期的有效期，代码默认 5m，必须与 `controllerScoreTTL` 同值 |
 | `schedulerLogLevel` | `"debug"` | scheduler | 只有 scheduler 用 `debug`：每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
 
-`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。改仓库文件后 apply，再重启读取方：
+`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。改仓库文件后 apply，再重启读取方：
 
 ```bash
 kubectl apply -f controller/deploy/agent/configmap.yaml
@@ -107,6 +111,8 @@ Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK �
 | Agent | `TRAINCACHE_OBJSTORE_SECRET_KEY` | Secret `traincache-objstore` 的 `secretKey` | 空 | 静态 SK |
 | Agent | `TRAINCACHE_OBJSTORE_BUCKET` | ConfigMap `objstoreBucket` | `traincache` | 单桶；须等于 `DataSet.spec.bucket`（`SubmitPreheat` 不带桶名，不一致时每个块读取都失败） |
 | Agent | `TRAINCACHE_OBJSTORE_SECURE` | ConfigMap `objstoreSecure` | `false` | `true` 时用 HTTPS |
+| Agent | `TRAINCACHE_GATEWAY_ENDPOINT` | ConfigMap `gatewayEndpoint` | 空 | 合并回源网关地址，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关 |
+| Agent | `TRAINCACHE_GATEWAY_SECURE` | ConfigMap `gatewaySecure` | `false` | `true` 时用 HTTPS 连网关；与 `TRAINCACHE_OBJSTORE_SECURE` 无关 |
 | Agent | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | 清单未设，取代码默认 | `false` | 启动时探测后端条件写；临时开一次用 `kubectl set env`，长期开按 §2.1 的加项做法 |
 | DataSet | `spec.endpoint` / `spec.bucket` / `spec.secretRef` | DataSet YAML | 无 | 控制面读这三个字段；Secret 字段 `accessKey`、`secretKey`，与 DataSet 同 namespace |
 
@@ -116,7 +122,7 @@ Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK �
 
 ### 2.3 资源
 
-四个组件各改自己的清单，按集群规模调整：
+五个组件各改自己的清单，按集群规模调整：
 
 | 组件 | 改哪里 | requests | limits |
 |---|---|---|---|
@@ -124,6 +130,7 @@ Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK �
 | webhook | `controller/deploy/webhook/deployment.yaml` | 50m / 64Mi | 256Mi（无 CPU 上限） |
 | kube-scheduler | `controller/deploy/scheduler/deployment.yaml` | 100m / 128Mi | 512Mi（无 CPU 上限） |
 | traincache-agentd | `controller/deploy/agent/daemonset.yaml` | 100m / 256Mi | 1Gi（无 CPU 上限） |
+| traincache-gateway | `controller/deploy/gateway/deployment.yaml` | 100m / 256Mi | 1Gi（无 CPU 上限） |
 
 Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内存；`limits.memory` 限制的是 Agent 进程本身。缓存大小由 `cacheCapacityBytes` 和磁盘水位控制。
 

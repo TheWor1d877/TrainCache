@@ -286,6 +286,27 @@ CSV 每组跑完重写一次，组内中断只丢当组；日志在 `~/tcd/bench
 
 概述：用 `make bench-compare` 串行跑五格，单格复跑用本节的显式命令，进度看 kubectl 实况。
 
+### 4.5 网关开关（有网关 / 无网关）
+
+`TRAINCACHE_GATEWAY` 是装置级总开关，只影响 traincache 组：direct/juicefs/fluid 四组不读网关，行为与产物不变。
+
+| 取值 | `traincache-config` 的 `gatewayEndpoint` | `deployment/traincache-gateway` | agentd |
+|---|---|---|---|
+| `1` | `traincache-gateway.traincache.svc:9413` | 副本 1，等 rollout 就绪 | `gatewayEndpoint` 变化才滚动重启 |
+| 未设置 / `0` | 空串，块 GET 直连源站 | 副本 0（对象保留，不删 Deployment） | 只在 `gatewayEndpoint` 真的变化时重启 |
+
+```bash
+cd bench
+TRAINCACHE_GATEWAY=1 make ctrl-up                      # 拉起网关，并把 agentd 切过去
+TRAINCACHE_GATEWAY=1 python3 compare/run_bench.py ...  # 跑分：开关透传给 traincache/up.sh
+```
+
+- 开关只切副本数与 ConfigMap 键；两条分支各自幂等，连续两次执行同一分支不会滚动重启 agentd。
+- `run_bench.py` 把开关透传给 `traincache/up.sh`，并给每行 `summary.csv` 落 `gateway` 列（`1`/`0`，紧随 `gate_mode`）。
+- `summarize_compare.py` 把 `gateway=1` 的行的格子名改成 `S-100+gw`，与无网关的同名格子分开统计；`+gw` 表示该格经合并回源网关。
+- 合并效果看网关 Pod 的 60s 汇总日志（`msg="gateway: 60s 汇总"`）：`merged/gets` 是合并命中率，`owners` 是真实回源次数；不为它另建指标端点。
+- 有网关与无网关必须分目录或分 `TAG` 跑，不能让两种装置状态的数据落在同一产物目录。
+
 ## 5. 一键入口
 
 `bench-*` 目标在 `bench/` 下执行；`compare-*` 目标在 `bench/compare/` 下执行。

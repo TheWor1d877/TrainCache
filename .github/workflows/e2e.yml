@@ -36,3 +36,52 @@ jobs:
           name: e2e-results
           path: .traincachedata/controller/e2e/results/
           if-no-files-found: ignore
+
+  # 网关独立演练：自建一个一次性 kind 集群，不依赖 controller e2e 的集群状态。
+  # 覆盖部署、探针、五路并发合并与源站字节比对、rollout 排水。
+  gateway:
+    name: gateway kind e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: install kind
+        run: go install sigs.k8s.io/kind@v0.33.0
+      - name: create cluster
+        run: kind create cluster --name gw-e2e --image docker.io/kindest/node:v1.37.0 --wait 120s
+      - name: build and load gateway image
+        run: |
+          docker build -f gateway/Dockerfile -t traincache-gateway:dev .
+          kind load docker-image traincache-gateway:dev --name gw-e2e
+          kind load docker-image busybox:latest --name gw-e2e
+      - name: prepare namespace, configmap, secret
+        run: |
+          kubectl apply -f controller/e2e/manifests/minio.yaml
+          kubectl -n minio rollout status deploy/minio --timeout=180s
+          kubectl create namespace traincache
+          kubectl apply -f controller/deploy/agent/configmap.yaml
+          kubectl -n traincache create secret generic traincache-objstore \
+            --from-literal=accessKey=traincache --from-literal=secretKey=traincache-probe
+      - name: seed object
+        run: |
+          BUCKET="$(kubectl -n traincache get configmap traincache-config -o jsonpath='{.data.objstoreBucket}')"
+          kubectl -n minio exec deploy/minio -- sh -c \
+            "mc alias set local http://127.0.0.1:9000 traincache traincache-probe >/dev/null && mc mb -p local/$BUCKET || true"
+          kubectl -n minio exec -i deploy/minio -- sh -c \
+            "head -c 2097152 /dev/zero | tr '\\0' 'A' | mc pipe local/$BUCKET/e2e-ds/blocks/part-0000#0"
+      - name: run gateway e2e
+        env:
+          TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
+          E2E_KEY: 'e2e-ds/blocks/part-0000#0'
+        run: bash gateway/e2e/run-k8s.sh
+      - name: upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateway-e2e-results
+          path: .traincachedata/gateway/results/
+          if-no-files-found: ignore

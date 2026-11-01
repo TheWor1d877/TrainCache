@@ -263,6 +263,15 @@ PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
 # SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（9.2 §2.1）。
 GATE_MODE = os.environ.get("TRAINCACHE_GATE_MODE", "gated").strip().lower()
 DATA_SOURCE = os.environ.get("TRAINCACHE_DATA_SOURCE", "minio").strip().lower()
+# 网关开关(D23)：只有 "1" 打开;其余取值（含空串/0/true）一律按无网关处理，
+# 与 bench/scripts/ctrl_up.sh 的归一规则一致。
+GATEWAY_ON = os.environ.get("TRAINCACHE_GATEWAY", "0").strip() == "1"
+
+
+def gateway_flag(on=None):
+    """summary.csv 的 gateway 列：1=经网关，0=agentd 直连源站。"""
+    return "1" if (GATEWAY_ON if on is None else on) else "0"
+
 EVICT_POLICY = os.environ.get("TRAINCACHE_EVICT_POLICY", "heat").strip().lower()
 # 扫点脚本可显式指定本条产物的 COND 名（fig1/fig2/fig3/pareto1 的 COND
 # 不叫 compare-*，_cond_name_for_cell 匹配不到）。
@@ -779,6 +788,8 @@ def group_up(group):
         env["TRAINCACHE_PREHEAT_FANOUT"] = str(PREHEAT_FANOUT)
         env["TRAINCACHE_PREHEAT_FANOUT_MIN"] = str(PREHEAT_FANOUT_MIN)
         env["DATASET"] = DATASET_NAME
+        # D23：网关开关透传到 ctrl_up.sh，决定 gatewayEndpoint 与网关副本数
+        env["TRAINCACHE_GATEWAY"] = "1" if GATEWAY_ON else "0"
     rc, out, err = run_cmd(["bash", str(GROUP_UP[group])], env=env, timeout=3600)
     if rc != 0:
         print(f"[up] {group} 失败(rc={rc}): {err[:800]}")
@@ -2918,11 +2929,8 @@ def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
           f"实际镜像 {TRAIN_IMAGE} / {JUICEFS_IMAGE}）")
 
 
-def write_csv(path, results):
-    # 列：四指标 + warmup_seconds(任务#8) + tier/rate/trace_sha256(6.12/6.13/D31)
-    #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
-    #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
-    fieldnames = ["group", "tier", "rate", "rep", "status", "void", "reason",
+# summary.csv 的列顺序（模块级：--selftest 也断言这里的列集合）
+CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "baseline_substituted",
                   "warmup_seconds", "warmup_time_basis",
                   "startup_makespan", "total_makespan",
@@ -2956,10 +2964,18 @@ def write_csv(path, results):
                   "cond", "run_id", "epochs", "shuffle",
                   "dataset_bytes", "cache_ratio",
                   "prefetch_lookahead", "evict_policy",
-                  "gate_mode", "data_source",
+                  "gate_mode", "gateway", "data_source",
                   # M5 倾斜双 Job：A 命中率/等待占比、B 挤占热块次数
                   "a_hit_ratio", "a_wait_ratio", "b_evictions_of_hot",
                   "a_steps", "b_steps", "tilt_hot_shards"]
+
+
+def write_csv(path, results):
+    # 列：四指标 + warmup_seconds(任务#8) + tier/rate/trace_sha256(6.12/6.13/D31)
+    #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
+    #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
+    #     + gateway(D23：1=经合并回源网关，0=直连源站)
+    fieldnames = CSV_FIELDNAMES
     # 生效 fanout 与本次 measure 实际用到的分片数（N_TARS），逐行同值
     fanout_eff = s3_fanout_count()
     with open(path, "w", newline="") as f:
@@ -2995,6 +3011,7 @@ def write_csv(path, results):
             row["prefetch_lookahead"] = r.get("prefetch_lookahead") or PREFETCH_K
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
+            row["gateway"] = gateway_flag()
             row["data_source"] = r.get("data_source") or DATA_SOURCE
             w.writerow(row)
 
@@ -3002,7 +3019,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查六件事：
+    查七件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3013,7 +3030,8 @@ def selftest():
       5. 读队列超时那一步的 wait 照实计入诊断账、本轮标 void（bad 步不进
          stall 样本，避免除零）；快照缺片的作废原因落 read_error；
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
-         档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位。
+         档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位；
+      7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -3231,6 +3249,22 @@ def selftest():
     print(f"[selftest] 6) D30/D32 接线：M 档跑 {m_pick}（L 档剔除 {l_drop}）；"
           f"status ok/void/exploratory 三态、S/M/L epochs 3/1/1、"
           f"三档 burst 推导、抖动轴已撤、替补全废判据均自洽")
+
+    # ---- 7) D23 网关开关：新列、取值映射与透传 ----
+    if "gateway" not in CSV_FIELDNAMES:
+        raise AssertionError("自测：summary.csv 缺 gateway 列")
+    if CSV_FIELDNAMES.index("gateway") != CSV_FIELDNAMES.index("gate_mode") + 1:
+        raise AssertionError("自测：gateway 列应紧跟 gate_mode")
+    if gateway_flag(True) != "1" or gateway_flag(False) != "0":
+        raise AssertionError(f"自测：gateway_flag 映射不对 "
+                             f"{gateway_flag(True)!r}/{gateway_flag(False)!r}")
+    if gateway_flag() != ("1" if GATEWAY_ON else "0"):
+        raise AssertionError("自测：gateway 列没有跟随 TRAINCACHE_GATEWAY")
+    import inspect  # noqa: PLC0415
+    if 'env["TRAINCACHE_GATEWAY"]' not in inspect.getsource(group_up):
+        raise AssertionError("自测：group_up 没有把网关开关透传给 up.sh")
+    print(f"[selftest] 7) D23 网关开关：gateway 列紧随 gate_mode，"
+          f"映射 1/0 正确，GATEWAY_ON={GATEWAY_ON} 已透传到 up.sh")
     print("run_bench selftest: PASS")
 
 

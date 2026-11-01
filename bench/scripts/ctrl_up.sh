@@ -10,12 +10,16 @@
 #   4. Secret traincache-objstore(MinIO 凭证)
 #   5. webhook TLS Secret(含 ca.crt)+ MutatingWebhookConfiguration caBundle
 #   6. kubectl apply -k controller/deploy(仅清单哈希变化或工作负载缺失时)
-#   7. traincache-config 的 WHITELIST/CACHE_CAPACITY_BYTES/STARTUP_WINDOW_BYTES/MAX_FILL_FRACTION 与 agentd 的 BUCKET
-#   8. 四个工作负载 rollout 就绪,打印 Ready 数与 Pod UID
+#   7. 网关开关(TRAINCACHE_GATEWAY=1):traincache-gateway 副本 1 并等 rollout;
+#      不带或为 0:副本 0(对象保留,不删 Deployment)。见 ensure_gateway
+#   8. traincache-config 的 WHITELIST/CACHE_CAPACITY_BYTES/STARTUP_WINDOW_BYTES/MAX_FILL_FRACTION
+#      与 agentd 的 BUCKET,外加 gatewayEndpoint(开网关指向 traincache-gateway.<NS>.svc:9413,
+#      关网关置空);只有取值真的变化才 patch 并重启一次 agentd
+#   9. 五个工作负载 rollout 就绪(开网关时含网关),打印 Ready 数与 Pod UID
 #
 # 幂等:清单哈希记在 namespace 注解 traincache.io/deploy-hash。哈希未变且
-# controller-manager/webhook/scheduler/agentd 都在时不执行 apply,连续两次
-# 调用不会滚动重启 agentd。
+# controller-manager/webhook/scheduler/agentd/gateway 都在时不执行 apply,
+# 连续两次调用不会滚动重启 agentd;网关只改副本数,同一分支连跑两次不重建 Pod。
 # ============================================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +38,17 @@ MAX_FILL_FRACTION="0.125"
 CLUSTER_NAME="${CLUSTER_NAME:-$(cfg CLUSTER_NAME)}"
 CLUSTER_NAME="${CLUSTER_NAME:-traincache}"
 WEBHOOK_CA_B64=""
+
+# ---- 网关开关:非 1 一律视为 0(无网关,agentd 直连源站)----
+GATEWAY_ON="${TRAINCACHE_GATEWAY:-0}"
+[ "$GATEWAY_ON" = "1" ] || GATEWAY_ON=0
+GATEWAY_PORT="${GATEWAY_PORT:-9413}"
+GATEWAY_ENDPOINT="traincache-gateway.$NS.svc:$GATEWAY_PORT"
+if [ "$GATEWAY_ON" = "1" ]; then
+  WANT_GATEWAY_ENDPOINT="$GATEWAY_ENDPOINT"
+else
+  WANT_GATEWAY_ENDPOINT=""
+fi
 
 # ---- 1. 节点 s3-access 标签(DataSet Ready 前置条件)----
 label_s3_nodes() {
@@ -196,7 +211,8 @@ workloads_present() {
   kubectl -n "$NS" get deployment traincache-controller-manager >/dev/null 2>&1 \
     && kubectl -n "$NS" get deployment traincache-webhook >/dev/null 2>&1 \
     && kubectl -n kube-system get deployment traincache-scheduler >/dev/null 2>&1 \
-    && kubectl -n "$NS" get daemonset traincache-agentd >/dev/null 2>&1
+    && kubectl -n "$NS" get daemonset traincache-agentd >/dev/null 2>&1 \
+    && kubectl -n "$NS" get deployment traincache-gateway >/dev/null 2>&1
 }
 
 ensure_control_plane() {
@@ -205,7 +221,7 @@ ensure_control_plane() {
   cur="$(kubectl -n "$NS" get namespace "$NS" \
     -o jsonpath='{.metadata.annotations.traincache\.io/deploy-hash}' 2>/dev/null || true)"
   if [ "$want" = "$cur" ] && workloads_present; then
-    log_group "$GROUP" "控制面清单未变化且四个工作负载都在,跳过 apply(hash=${want:0:12})"
+    log_group "$GROUP" "控制面清单未变化且五个工作负载都在,跳过 apply(hash=${want:0:12})"
     return 0
   fi
   log_group "$GROUP" "应用控制面清单 kubectl apply -k controller/deploy"
@@ -214,23 +230,46 @@ ensure_control_plane() {
   log_group "$GROUP" "控制面已 apply(hash=${want:0:12})"
 }
 
-# ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数)----
-# 这五处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
+# ---- 网关开关:只切副本数,不动 Deployment 对象 ----
+# off 时保留对象(scale 0),否则下次 `kubectl apply -k` 会把它重新拉到 1 副本。
+ensure_gateway() {
+  local replicas=0
+  if ! kubectl -n "$NS" get deployment traincache-gateway >/dev/null 2>&1; then
+    if [ "$GATEWAY_ON" = "1" ]; then
+      log_group "$GROUP" "错误: deployment/traincache-gateway 不存在,先执行 kubectl apply -k controller/deploy" >&2
+      return 1
+    fi
+    log_group "$GROUP" "WARNING: deployment/traincache-gateway 不存在(旧集群),跳过网关开关" >&2
+    return 0
+  fi
+  if [ "$GATEWAY_ON" = "1" ]; then
+    replicas=1
+  fi
+  kubectl -n "$NS" scale deployment/traincache-gateway --replicas="$replicas" >/dev/null
+  log_group "$GROUP" "网关副本数=$replicas (gatewayEndpoint='$WANT_GATEWAY_ENDPOINT')"
+  if [ "$GATEWAY_ON" = "1" ]; then
+    kubectl -n "$NS" rollout status deployment/traincache-gateway --timeout=120s
+  fi
+}
+
+# ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数/网关端点)----
+# 这六处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
 # 引用,改值不再动工作负载清单。桶以前由 `kubectl set env` 直接覆盖 DaemonSet 的
 # 显式 env,那份覆盖会在下次 `kubectl apply -k` 时被仓库清单盖回去。
 ensure_agent_config() {
-  local cur_wl cur_bucket cur_cap cur_sw cur_mf changed=0
+  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw changed=0
   cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"
   cur_cap="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null || true)"
   cur_sw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
   cur_mf="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.maxFillFraction}' 2>/dev/null || true)"
   cur_bucket="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.objstoreBucket}' 2>/dev/null || true)"
+  cur_gw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gatewayEndpoint}' 2>/dev/null || true)"
   if [ "$cur_wl" != "$DATASET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ] \
      || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ] \
-     || [ "$cur_bucket" != "$MINIO_BUCKET" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION"
+     || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_gw" != "$WANT_GATEWAY_ENDPOINT" ]; then
+    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT'"
     kubectl -n "$NS" patch configmap traincache-config --type merge \
-      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\"}}" >/dev/null
+      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\"}}" >/dev/null
     changed=1
   fi
   if [ "$changed" -eq 1 ]; then
@@ -238,7 +277,7 @@ ensure_agent_config() {
     kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null
     log_group "$GROUP" "agentd 配置已修正并滚动更新完成"
   else
-    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES)"
+    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT')"
   fi
 }
 
@@ -247,17 +286,25 @@ wait_ready() {
   kubectl -n "$NS" rollout status deployment/traincache-webhook --timeout=180s
   kubectl -n kube-system rollout status deployment/traincache-scheduler --timeout=180s
   kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s
+  if [ "$GATEWAY_ON" = "1" ]; then
+    kubectl -n "$NS" rollout status deployment/traincache-gateway --timeout=120s
+  fi
 }
 
 # ---- 6. 结束打印 Ready 数与 Pod UID,供校验无滚动重启 ----
 print_status() {
-  local kind name ns desired ready uids
+  local kind name ns desired ready uids entries
   echo "== 控制面状态 =="
-  for entry in \
-    "deployment traincache-controller-manager $NS" \
-    "deployment traincache-webhook $NS" \
-    "deployment traincache-scheduler kube-system" \
-    "daemonset traincache-agentd $NS"; do
+  entries=(
+    "deployment traincache-controller-manager $NS"
+    "deployment traincache-webhook $NS"
+    "deployment traincache-scheduler kube-system"
+    "daemonset traincache-agentd $NS"
+  )
+  if [ "$GATEWAY_ON" = "1" ]; then
+    entries+=("deployment traincache-gateway $NS")
+  fi
+  for entry in "${entries[@]}"; do
     read -r kind name ns <<<"$entry"
     if [ "$kind" = "daemonset" ]; then
       desired="$(kubectl -n "$ns" get ds "$name" -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || true)"
@@ -278,8 +325,9 @@ check_images
 ensure_objstore_secret
 ensure_webhook_tls
 ensure_control_plane
+ensure_gateway
 ensure_ca_bundle
 ensure_agent_config
 wait_ready
 print_status
-log_group "$GROUP" "TrainCache 控制面就绪"
+log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON)"
