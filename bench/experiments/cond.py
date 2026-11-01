@@ -89,8 +89,8 @@ COMPARE_SHARD_SIZE_BYTES = config.TRACK_B_TAR_BYTES  # 256MiB
 VALID_CAPACITY_RATIOS = {"S", "M", "L"}
 # 数据集规模枚举(D19 三档):S=2GiB / M=8GiB / L=32GiB
 VALID_DATASET_BYTES = {2 << 30, 8 << 30, 32 << 30}
-# epoch 档位枚举:1 / 3 / 10
-VALID_EPOCHS = {1, 3, 10}
+# epoch 档位枚举(9.1 M3):1 / 3 / 6
+VALID_EPOCHS = {1, 3, 6}
 CAPACITY_TIER_RATIO = {"S": 2.0, "M": 8.0, "L": 32.0}   # 数据/缓存容量比(D19)
 CAPACITY_TIER_N_TARS = {
     "S": config.TRACK_B_N_TARS // 4,   # 8  × 256MiB = 2GiB
@@ -108,7 +108,7 @@ CAPACITY_TIER_GROUPS = {
     "L": {"traincache-cold", "fluid-cold"},
 }
 EXPLORATORY_TIERS = {"L"}  # L 档 1 次,低于 3 次硬纪律:标 exploratory,不进正式表
-# 9.1 D32、9.2 §9:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
+# 9.1 D32/§11:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
 # (3 个连续 epoch),M/L 档跑 B 轨符号探点(1 个 epoch)。显式 EPOCHS 环境变量
 # 优先;COND 的 workload.epochs 仍按 figure 校验,两者不一致由 COND 校验器拒收。
 CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
@@ -276,11 +276,11 @@ def validate_cond(cond: dict) -> list[str]:
             v = _require(wl, k, "$.workload", errors)
             if v is not None and (not isinstance(v, int) or v <= 0):
                 errors.append(f"$.workload.{k} 必须是 >0 的整数")
-        # epoch 档位枚举:1 / 3 / 10,不在枚举内的实验点直接拒收
+        # epoch 档位枚举(9.1 M3):1 / 3 / 6,不在枚举内的实验点直接拒收
         ep = wl.get("epochs")
         if isinstance(ep, int) and ep not in VALID_EPOCHS:
             errors.append(
-                f"$.workload.epochs={ep} 不在枚举内(允许 1/3/10)")
+                f"$.workload.epochs={ep} 不在枚举内(允许 1/3/6)")
         shuffle = _require(wl, "shuffle", "$.workload", errors)
         if shuffle is not None and shuffle not in VALID_SHUFFLES:
             errors.append(f"$.workload.shuffle 非法: {shuffle!r}")
@@ -465,14 +465,16 @@ def validate_cond(cond: dict) -> list[str]:
     if isinstance(samp, dict):
         _check_unknown(samp, ALLOWED_SAMPLING, "$.sampling", errors)
         reps = _require(samp, "reps", "$.sampling", errors)
-        # 规则 8:pareto1/pareto2 固定 7;policy 与 fig1/fig2/fig3 固定 3;
+        # 规则 8:pareto1 固定 7;pareto2 固定 2;policy 与 fig1/fig2/fig3 固定 1;
         # compare-* 带 capacity_ratio 时按档位(D32),不带时固定 3
-        if figure in {"pareto1", "pareto2"}:
+        if figure == "pareto1":
             allowed_reps = {7}
+        elif figure == "pareto2":
+            allowed_reps = {2}
         elif figure in {"compare-d", "compare-b"}:
             allowed_reps = CAPACITY_TIER_REPS_ALLOWED[tier] if tier_has_reps else {3}
         else:
-            allowed_reps = {3}
+            allowed_reps = {1}
         if reps is not None and reps not in allowed_reps:
             tier_hint = f",capacity_ratio={tier!r}" if tier_has_reps else ""
             errors.append(

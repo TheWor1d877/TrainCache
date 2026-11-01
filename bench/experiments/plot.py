@@ -5,10 +5,10 @@
 metrics.csv,产出预注册(docs/9.2 §0~§8)定义的五张旗舰图:
 
   fig1  启动阶段盈亏曲面(带宽 × 缓存比 × fanout → 启动 makespan 改善%)
-  fig2  全程 makespan 盈亏曲面(带宽 × 数据集 × epoch → 全程 makespan 差值)
+  fig2  全程 makespan 绝对值(带宽 × epoch,8 GiB 数据集,附计算与传输下界)
   fig3  阶段切换 stall 回落曲线(epoch × shuffle → 回落时间平均数)
   pareto1  启动收益 vs 重复预热字节(fanout 1/2/3)
-  pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat/lru/lfu,
+  pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat,
            纵轴相对自身基线 lookahead=8+heat)
 
 五组对照(summary.csv)额外产出 4 张柱状对比图:
@@ -380,65 +380,71 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# 图二:全程 makespan 盈亏曲面
+# 图二:全程 makespan 绝对值
 # ---------------------------------------------------------------------------
 def plot_fig2(metrics: list[dict], out_dir: Path):
-    """全程 makespan 差值 = TrainCache 平均数 - Fluid 平均数(负=更快)。
+    """全程 makespan 绝对值(s):X=epoch 数,每条线一档带宽。
 
-    X=带宽, Y=epoch 数, Z=差值(s)。数据集 2GiB/8GiB 分两个子图。
+    数据只有 8 GiB 数据集、traincache-cold(协议 §3.1);参考线两条:
+    计算下界 80 s/epoch,传输下界 = 读字节 ÷ 有效带宽。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     rates = [100, 300, 1000]
-    epochs = [1, 3, 10]
-    datasets = [2, 8]  # GiB
+    epochs = [1, 3, 6]
+    # 有效带宽 MB/s,取 9.1 §11.1 的实测口径(100/300/1000 mbit 档)
+    eff_mbps = {100: 13.4, 300: 35.0, 1000: 61.0}
+    compute_s_per_epoch = 80.0
+    colors = {100: "#60a5fa", 300: "#10b981", 1000: "#f59e0b"}
 
-    fig2_rows = [r for r in metrics if r.get("cond", "").startswith("fig2-")]
+    fig2_rows = [r for r in metrics
+                 if r.get("cond", "").startswith("fig2-")
+                 and r.get("group") == "traincache"]
     if not fig2_rows:
         print("  fig2: 无数据,跳过")
         return
 
-    tc_grid = {}
-    fluid_grid = {}
+    grid = {}
+    dataset_bytes = 0.0
     for r in fig2_rows:
         try:
             rate = int(r.get("rate_mbit") or 0)
             ep = int(r.get("epochs") or 0)
-            ds = float(r.get("dataset_gb") or 0)
             fm = float(r.get("full_makespan_s"))
         except (TypeError, ValueError):
             continue
-        key = (rate, ep, ds)
-        if r.get("group") == "traincache":
-            tc_grid.setdefault(key, []).append(fm)
-        elif r.get("group") == "fluid":
-            fluid_grid.setdefault(key, []).append(fm)
+        grid.setdefault((rate, ep), []).append(fm)
+        dataset_bytes = max(dataset_bytes, _num(r.get("dataset_bytes")))
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), subplot_kw={"projection": "3d"})
-    for ax, ds in zip(axes, datasets):
-        X, Y, Z = [], [], []
-        for rate in rates:
-            for ep in epochs:
-                tc_med, _, _ = mean_ci(tc_grid.get((rate, ep, ds), []))
-                fl_med, _, _ = mean_ci(fluid_grid.get((rate, ep, ds), []))
-                diff = tc_med - fl_med if (tc_med and fl_med) else np.nan
-                X.append(rate)
-                Y.append(ep)
-                Z.append(diff)
-        Xa = np.array(X).reshape(3, 3)
-        Ya = np.array(Y).reshape(3, 3)
-        Za = np.array(Z).reshape(3, 3)
-        surf = ax.plot_surface(Xa, Ya, Za, cmap=cm.RdBu, alpha=0.85,
-                               edgecolor="gray", linewidth=0.3)
-        ax.set_xlabel("带宽 (mbit)")
-        ax.set_ylabel("epoch 数")
-        ax.set_zlabel("全程差值 (s)")
-        ax.set_title(f"数据集 {ds}GiB")
-        fig.colorbar(surf, ax=ax, shrink=0.5)
-    fig.suptitle("图二:全程 makespan 盈亏(TrainCache − Fluid,负=更快)", fontsize=12)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for rate in rates:
+        ys = []
+        for ep in epochs:
+            med, _, _ = mean_ci(grid.get((rate, ep), []))
+            ys.append(med if med else np.nan)
+        ax.plot(epochs, ys, marker="o", linewidth=1.8, color=colors[rate],
+                label=f"{rate} mbit")
+        if dataset_bytes:
+            ref = [dataset_bytes * ep * 1.0 / (eff_mbps[rate] * 1e6)
+                   for ep in epochs]
+            ax.plot(epochs, ref, linestyle="--", linewidth=1.0,
+                    color=colors[rate], alpha=0.45)
+
+    ax.plot(epochs, [compute_s_per_epoch * ep for ep in epochs],
+            linestyle=":", linewidth=1.2, color="black", alpha=0.6,
+            label="计算下界 (80 s/epoch)")
+
+    ax.set_xlabel("epoch 数")
+    ax.set_ylabel("全程 makespan (s)")
+    ax.set_title("图二:全程 makespan(8 GiB,traincache-cold)")
+    ax.legend()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(alpha=0.3, linestyle="--")
+    ax.set_xticks(epochs)
     fig.tight_layout()
-    fig.savefig(out_dir / "fig2_total_surface.png", dpi=150)
+    fig.savefig(out_dir / "fig2_total_makespan.png", dpi=150)
     plt.close(fig)
-    print("  saved fig2_total_surface.png")
+    print("  saved fig2_total_makespan.png")
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +600,7 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
         return
 
     lookaheads = [8, 16, 32]
-    policies = ["heat", "lru", "lfu"]
+    policies = ["heat"]
     markers = {"heat": "o", "lru": "s", "lfu": "^"}
     cmap = cm.viridis
     la_colors = {la: cmap(i / (len(lookaheads) - 1)) for i, la in enumerate(lookaheads)}
