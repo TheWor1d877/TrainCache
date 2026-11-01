@@ -127,20 +127,23 @@ spec:
             - --config=/etc/kubernetes/traincache-scheduler.yaml
             - --v=2
           env:
-            # Must match the controller's score annotation key and TTL.
-            - name: CONTROLLER_SCORE_ANNOTATION
-              value: traincache.io/node-scores
+            # Only the two values that differ from the code defaults are set,
+            # and they come from traincache-config: the score TTL must match
+            # the Controller's, and debug emits one "scheduler score" line per
+            # (pod,node) decision. Score annotation (traincache.io/node-scores),
+            # health (:8081) and metrics (:9412, where the independent
+            # traincache_scheduler_score_total registry is served under
+            # /metrics/traincache) all use their defaults.
             - name: SCHEDULER_SCORE_TTL
-              value: 10m
-            - name: CONTROLLER_HEALTH_ADDR
-              value: ":8081"
-            # Independent scheduler registry (traincache_scheduler_score_total)
-            # is served at /metrics/traincache on this address.
-            - name: CONTROLLER_METRICS_ADDR
-              value: ":9412"
-            # Debug emits one "scheduler score" line per (pod,node) decision.
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: schedulerScoreTTL
             - name: CONTROLLER_LOG_LEVEL
-              value: debug
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: schedulerLogLevel
           ports:
             - name: health
               containerPort: 8081

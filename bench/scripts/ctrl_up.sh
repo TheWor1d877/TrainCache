@@ -215,24 +215,22 @@ ensure_control_plane() {
 }
 
 # ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数)----
-# 白名单、容量与自动 K 的两个输入在 traincache-config ConfigMap;桶仍是 DaemonSet 显式 env。
+# 这五处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
+# 引用,改值不再动工作负载清单。桶以前由 `kubectl set env` 直接覆盖 DaemonSet 的
+# 显式 env,那份覆盖会在下次 `kubectl apply -k` 时被仓库清单盖回去。
 ensure_agent_config() {
   local cur_wl cur_bucket cur_cap cur_sw cur_mf changed=0
   cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"
   cur_cap="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null || true)"
   cur_sw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
   cur_mf="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.maxFillFraction}' 2>/dev/null || true)"
-  cur_bucket="$(kubectl -n "$NS" get ds traincache-agentd -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_OBJSTORE_BUCKET")].value}' 2>/dev/null || true)"
+  cur_bucket="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.objstoreBucket}' 2>/dev/null || true)"
   if [ "$cur_wl" != "$DATASET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ] \
-     || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION"
+     || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ] \
+     || [ "$cur_bucket" != "$MINIO_BUCKET" ]; then
+    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION"
     kubectl -n "$NS" patch configmap traincache-config --type merge \
-      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\"}}" >/dev/null
-    changed=1
-  fi
-  if [ "$cur_bucket" != "$MINIO_BUCKET" ]; then
-    log_group "$GROUP" "修正 agentd 桶: BUCKET=$MINIO_BUCKET"
-    kubectl -n "$NS" set env daemonset/traincache-agentd TRAINCACHE_OBJSTORE_BUCKET="$MINIO_BUCKET" >/dev/null
+      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\"}}" >/dev/null
     changed=1
   fi
   if [ "$changed" -eq 1 ]; then

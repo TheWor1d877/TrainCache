@@ -4,6 +4,16 @@
 
 ## 修改入口速查
 
+集群运行时配置只有两个入口：ConfigMap `traincache-config`（13 个配置项）与 Secret `traincache-objstore`（`accessKey`、`secretKey` 两把凭证）。除此之外没有第三个可改的地方，下表几项看着像入口，实际各归别处。
+
+| 看起来像入口 | 实际是什么 |
+|---|---|
+| 清单里的 `value:` 字面量 env | 四份工作负载清单（Agent DaemonSet、manager、webhook、scheduler）一条都没有；再写回去被 `hack/verify-config-placement.sh` 判失败 |
+| `kubectl set env`、`kubectl edit` | 改的是集群里的 live 副本，下次 `kubectl apply -k controller/deploy` 盖回仓库清单；只用来临时试一次 |
+| `agent/svc/config.go`、`controller/internal/config/config.go` | 代码默认值。要永久改默认档才动源码，否则等于默认的值哪里都不写 |
+| Downward API `fieldRef`（`NODE_NAME`） | 集群按节点给出的每 Pod 身份，没有可填的值 |
+| DataSet / WarmupTask 的 `spec`、`trainpublish` 的 flag | 数据集层与训练任务层的参数，见 §3、§4，不进 ConfigMap |
+
 先定改哪里，再看后文取默认值。
 
 | 想改什么                                     | 改哪里                                                                                                                                                                      | 生效方式                                                        |
@@ -12,17 +22,31 @@
 | 预取提前量 `prefetchLookahead`               | 同上                                                                                                                                                                        | 同上                                                            |
 | 淘汰策略 `evictPolicy`                       | 同上                                                                                                                                                                        | 同上                                                            |
 | 指标数据集白名单 `datasetMetricsWhitelist`   | 同上                                                                                                                                                                        | 同上                                                            |
-| 对象存储端点、桶、AK/SK                      | Agent：`controller/deploy/agent/daemonset.yaml` 的 env，AK/SK 引自 Secret `traincache-objstore`；控制面：DataSet YAML 的 `spec.endpoint` / `spec.bucket` / `spec.secretRef` | apply 后 Agent Pod 重建；DataSet 改动对之后创建的任务生效       |
+| 对象存储端点、桶、是否 TLS                   | ConfigMap `traincache-config` 的 `objstoreEndpoint` / `objstoreBucket` / `objstoreSecure`；AK/SK 取自 Secret `traincache-objstore`；控制面：DataSet YAML 的 `spec.endpoint` / `spec.bucket` / `spec.secretRef` | 改 ConfigMap 后滚动重启 Agent；DataSet 改动对之后创建的任务生效       |
 | 组件资源 requests/limits                     | `manager/deployment.yaml`、`webhook/deployment.yaml`、`scheduler/deployment.yaml`、`agent/daemonset.yaml`                                                                   | apply，Pod 重建                                                 |
-| Agent 校验级别、缓存目录、监听端口           | Agent DaemonSet env                                                                                                                                                         | apply，Agent Pod 重建                                           |
-| Agent 热度衰减与磁盘水位                     | Agent DaemonSet env 的 `TRAINCACHE_HEAT_*`                                                                                                                                  | apply，Agent Pod 重建                                           |
-| Controller 与 Scheduler 参数                 | manager / webhook / scheduler 三个 Deployment 的 env                                                                                                                        | apply，Deployment 滚动                                          |
+| Agent 校验级别、缓存目录、监听端口           | 清单里没有这些 env，取 `agent/svc/config.go` 的默认值；临时改一次用 `kubectl set env`，长期改见 §2.4                                                                        | 见 §2.4                                                       |
+| Agent 热度衰减与磁盘水位                     | 同上：11 个 `TRAINCACHE_HEAT_*` 都不在清单里，取 `agent/svc/config.go` 的默认值                                                                                             | 见 §2.4                                                       |
+| Controller 与 Scheduler 参数                 | 等于默认值的不写清单，取 `controller/internal/config/config.go`；`controllerPollInterval`、`controllerScoreTTL`、`schedulerScoreTTL`、`schedulerLogLevel` 在 ConfigMap        | 改 ConfigMap 后滚动重启对应工作负载；见 §2.5                   |
 | 块大小                                       | `trainpublish --chunk-size`，只在空桶首次发布时写入 `_traincache/format.json`                                                                                               | 之后每次发布沿用；改值要清空桶或换新桶                          |
 | DataSet 字段                                 | DataSet YAML                                                                                                                                                                | 重新 apply；发布新快照后同步 `spec.snapshotID` 与 `spec.shards` |
 | 预热任务参数                                 | WarmupTask YAML 的 `spec`                                                                                                                                                   | 重新 apply；`dataSetRef` 与 `podCount` 不可改                   |
 | 发布器并发、临时目录、校验开关               | `trainpublish` 命令行 flag                                                                                                                                                  | 下次发布生效                                                    |
 
-集群运行时只有六个参数在 ConfigMap：`cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`startupWindowBytes`、`maxFillFraction`。其余参数都不在 ConfigMap 里，往 ConfigMap 加 key 不会被读取。
+### 落位判据
+
+一个参数写在哪个对象里，按下面五问从上往下问，问到「是」就停：
+
+| 顺序 | 问 | 落位 | 本项目实例 |
+|---|---|---|---|
+| 1 | 是凭证吗 | Secret + `secretKeyRef` | `accessKey`、`secretKey` |
+| 2 | 是每个 Pod 各不相同的身份信息吗 | Downward API `fieldRef` | `NODE_NAME`（`spec.nodeName`） |
+| 3 | 换集群或换实验轮次要改吗 | ConfigMap `traincache-config` + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入、`controllerPollInterval`、两个 `ScoreTTL`、`schedulerLogLevel` |
+| 4 | 值与代码默认不同，但基本不动吗 | 同上，写进 ConfigMap | 同上后四项 |
+| 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go` 与 `controller/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
+
+四份工作负载清单（Agent DaemonSet、manager、webhook、scheduler）里因此没有任何一条 `value:` 字面量 env，全部取值走引用或走代码默认。要覆盖第 5 类默认值：临时一次用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把它盖回仓库清单；长期改在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef` 引用，两处一起提交。
+
+ConfigMap 现在装 13 项，见 §2.1；往 ConfigMap 加一项而清单里没有对应引用，进程读不到它。
 
 长期修改要改仓库 YAML 再 apply。`kubectl edit` 只改集群副本，下次 apply 会被覆盖。
 
@@ -38,18 +62,25 @@
 
 ### 2.1 ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，13 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`。
 
-| key | 默认 | 说明 |
-|---|---|---|
-| `cacheCapacityBytes` | `"0"` | 本地缓存字节上限，必须 `>=0`。`0` 关闭字节维度，只按磁盘水位（80% 触发、90% 紧急）淘汰；填字节数（1GiB = `"1073741824"`）后，字节占用先到阈值就先淘汰 |
-| `prefetchLookahead` | `"16"` | 节点侧游标之后持续预取的块数。调大提前量，预热流量和缓存占用随之增加。它不是 WarmupTask 的 `podDetails[].k` |
-| `evictPolicy` | `"heat"` | 缓存淘汰顺序，取 `heat`、`lru`、`lfu`。非法值使 Agent 拒绝启动 |
-| `datasetMetricsWhitelist` | `""` | 逗号分隔的 DataSet 名，只决定指标 `dataset` 标签是否保留原名；为空时全部归并 `other`。不影响 Agent 读哪个数据集 |
-| `startupWindowBytes` | `"536870912"` | 启动窗口字节数，默认 512MiB，必须 `>0`。只用于自动算 K：`K_window = ceil(startupWindowBytes / chunkSize)` |
-| `maxFillFraction` | `"0.125"` | 全部 Pod 的预热总量占缓存容量的上限，默认八分之一，取值必须在 `(0,0.25]`。按 `podCount` 均摊：`K_cache = floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`；`cacheCapacityBytes=0` 时不参与计算 |
+| 配置项 | 默认 | 读取方 | 说明 |
+|---|---|---|---|
+| `cacheCapacityBytes` | `"0"` | Agent + manager | 本地缓存字节上限，必须 `>=0`。`0` 关闭字节维度，只按磁盘水位（80% 触发、90% 紧急）淘汰；填字节数（1GiB = `"1073741824"`）后，字节占用先到阈值就先淘汰 |
+| `prefetchLookahead` | `"16"` | Agent | 节点侧游标之后持续预取的块数。调大提前量，预热流量和缓存占用随之增加。它不是 WarmupTask 的 `podDetails[].k` |
+| `evictPolicy` | `"heat"` | Agent | 缓存淘汰顺序，取 `heat`、`lru`、`lfu`。非法值使 Agent 拒绝启动 |
+| `datasetMetricsWhitelist` | `""` | Agent | 逗号分隔的 DataSet 名，只决定指标 `dataset` 标签是否保留原名；为空时全部归并 `other`。不影响 Agent 读哪个数据集 |
+| `startupWindowBytes` | `"536870912"` | manager | 启动窗口字节数，默认 512MiB，必须 `>0`。只用于自动算 K：`K_window = ceil(startupWindowBytes / chunkSize)` |
+| `maxFillFraction` | `"0.125"` | manager | 全部 Pod 的预热总量占缓存容量的上限，默认八分之一，取值必须在 `(0,0.25]`。按 `podCount` 均摊：`K_cache = floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`；`cacheCapacityBytes=0` 时不参与计算 |
+| `objstoreEndpoint` | `"minio.minio.svc.cluster.local:9000"` | Agent | 源站端点，不带 scheme。清单里是集群内 MinIO 的 Service 地址；接 COS/OSS/S3 时改这一处 |
+| `objstoreBucket` | `"traincache"` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`：`SubmitPreheat` 不带桶名，不一致时每个块读取都失败。bench 按数据集改写它 |
+| `objstoreSecure` | `"false"` | Agent | `true` / `1` / `yes` 时用 HTTPS 连源站，其余取值（含空）走明文 |
+| `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；1s 把门控放行延迟压进 bench 的测量窗口 |
+| `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
+| `schedulerScoreTTL` | `"10m"` | scheduler | scheduler 判定分数过期的有效期，代码默认 5m，必须与 `controllerScoreTTL` 同值 |
+| `schedulerLogLevel` | `"debug"` | scheduler | 只有 scheduler 用 `debug`：每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
 
-这个 ConfigMap 只放这六个 key。`cacheCapacityBytes` 由 Agent 与 Controller 共同读取，改它要同时重启两者。改仓库文件后 apply，再重启读取方：
+`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。改仓库文件后 apply，再重启读取方：
 
 ```bash
 kubectl apply -f controller/deploy/agent/configmap.yaml
@@ -61,25 +92,25 @@ kubectl -n traincache rollout status deploy/traincache-controller-manager
 
 只在集群里 `kubectl edit` 也能生效，但下次 apply 会被仓库文件覆盖。
 
-六个 key 都必须存在。缺任一 key，对应读取方 Pod 停在 `CreateContainerConfigError`：Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`，manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`；缺 `cacheCapacityBytes` 时两者都起不来。缺失不回退到默认值。
+被引用的配置项都必须存在。缺任一项，引用它的高负载 Pod 停在 `CreateContainerConfigError`，不回退到默认值。Agent 缺 `objstoreEndpoint` 时连桶都摸不到，manager 缺 `cacheCapacityBytes` 时算不出自动 K，所以先 apply ConfigMap，再 apply 工作负载；`kubectl apply -k controller/deploy` 一次带全，顺序问题只出现在单独 apply `daemonset.yaml` 的场合（`agent/e2e/run-k8s.sh` 为此在缺失时才补 apply 一份 ConfigMap，已存在则不动，免得把 bench 改过的桶和容量盖回默认）。
 
 `datasetMetricsWhitelist` 只控制指标标签。清空后所有带 `dataset` 标签的指标都记到 `other`，按数据集拆的看板看不出差异；排查单个数据集时把名字加回来。
 
 ### 2.2 对象存储
 
-Agent 在 `controller/deploy/agent/daemonset.yaml` 的 env 里配置；控制面在 DataSet CRD 里配置。两边必须指向同一个桶。
+Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK 由 DaemonSet 从 Secret `traincache-objstore` 注入成 env；控制面在 DataSet CRD 里配置。两边必须指向同一个桶。
 
 | 位置 | 参数 | 改哪里 | 默认 | 说明 |
 |---|---|---|---|---|
-| Agent | `TRAINCACHE_OBJSTORE_ENDPOINT` | DaemonSet env | `127.0.0.1:9000` | S3 兼容端点，不带 scheme |
-| Agent | `TRAINCACHE_OBJSTORE_ACCESS_KEY` | DaemonSet env，值取自 Secret `traincache-objstore` 的 `accessKey` | 空 | 静态 AK，生产用 Secret 注入 |
-| Agent | `TRAINCACHE_OBJSTORE_SECRET_KEY` | DaemonSet env，值取自 Secret `traincache-objstore` 的 `secretKey` | 空 | 静态 SK |
-| Agent | `TRAINCACHE_OBJSTORE_BUCKET` | DaemonSet env | `traincache` | 单桶；须等于 `DataSet.spec.bucket`（`SubmitPreheat` 不带桶名，不一致时每个块读取都失败） |
-| Agent | `TRAINCACHE_OBJSTORE_SECURE` | DaemonSet env | `false` | `true` 时用 HTTPS |
-| Agent | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | DaemonSet env | `false` | 启动时探测后端条件写 |
+| Agent | `TRAINCACHE_OBJSTORE_ENDPOINT` | ConfigMap `objstoreEndpoint` | `127.0.0.1:9000` | S3 兼容端点，不带 scheme。ConfigMap 里写的是集群内 MinIO 的 Service 地址 |
+| Agent | `TRAINCACHE_OBJSTORE_ACCESS_KEY` | Secret `traincache-objstore` 的 `accessKey` | 空 | 静态 AK，生产用 Secret 注入 |
+| Agent | `TRAINCACHE_OBJSTORE_SECRET_KEY` | Secret `traincache-objstore` 的 `secretKey` | 空 | 静态 SK |
+| Agent | `TRAINCACHE_OBJSTORE_BUCKET` | ConfigMap `objstoreBucket` | `traincache` | 单桶；须等于 `DataSet.spec.bucket`（`SubmitPreheat` 不带桶名，不一致时每个块读取都失败） |
+| Agent | `TRAINCACHE_OBJSTORE_SECURE` | ConfigMap `objstoreSecure` | `false` | `true` 时用 HTTPS |
+| Agent | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | 清单未设，取代码默认 | `false` | 启动时探测后端条件写；临时开一次用 `kubectl set env`，长期开按 §2.1 的加项做法 |
 | DataSet | `spec.endpoint` / `spec.bucket` / `spec.secretRef` | DataSet YAML | 无 | 控制面读这三个字段；Secret 字段 `accessKey`、`secretKey`，与 DataSet 同 namespace |
 
-默认列是程序内置值。Agent 清单按集群覆盖成实际端点与桶名，以清单为准。
+默认列是程序内置值。`objstoreEndpoint` 与 `objstoreBucket` 在 ConfigMap 里按集群覆盖成实际端点与桶名，以 ConfigMap 为准。
 
 节点要能访问对象存储，并打上 `traincache.io/s3-access=true`。Controller 只在这个标签为 true 的节点里选预热目标，标签由管理员手工维护。
 
@@ -98,55 +129,55 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 
 ### 2.4 Agent 高级参数
 
-这些只写在 Agent DaemonSet env 里，不常用：
+这些参数在清单里不出现，进程取 `agent/svc/config.go` 的默认值，下表「默认」列就是运行值。改法两条：临时一次 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把 DaemonSet 盖回仓库那份；长期改在 ConfigMap 加一项、在 DaemonSet 加一条 `configMapKeyRef`，两处一起提交（§2.1 末尾）。
 
-| 变量 | 改哪里 | 默认 | 说明 |
-|---|---|---|---|
-| `TRAINCACHE_EVICT_POLICY` | DaemonSet env | `heat` | 淘汰策略：`heat` / `lru` / `lfu`；非法值拒绝启动 |
-| `TRAINCACHE_VERIFY` | DaemonSet env | `xxh3` | 校验级别：`xxh3` 或 `xxh3+sha256` |
-| `TRAINCACHE_CACHE_ROOT` | DaemonSet env | `/var/cache/traincache` | 缓存根目录，必须与 DaemonSet 的 hostPath 挂载一致 |
-| `TRAINCACHE_GRPC_ADDR` | DaemonSet env | `:9410` | Agent gRPC 监听地址 |
-| `TRAINCACHE_METRICS_ADDR` | DaemonSet env | `:9411` | 指标监听地址 |
-| `TRAINCACHE_ORDERS_DIR` | DaemonSet env | `/run/traincache/orders` | OrderSource ring 目录 |
-| `TRAINCACHE_INDEX_REFRESH_INTERVAL` | DaemonSet env | `5s` | 快照跟随刷新周期 |
-| `TRAINCACHE_READ_STALL_MIN_WAIT_MS` | DaemonSet env | `100` | `read_stall` 入直方图的最小等待毫秒 |
-| `TRAINCACHE_READ_STALL_WINDOW_MS` | DaemonSet env | `5000` | `read_stall` 归因关联窗口，单位毫秒，以帧 `ts` 为中心前后各该值 |
-
-热度与磁盘水位共 11 个 `TRAINCACHE_HEAT_*`，都改 DaemonSet env。默认值只在需要细调淘汰排序时改：
-
-| 变量 | 改哪里 | 默认 |
+| 变量 | 默认 | 说明 |
 |---|---|---|
-| `TRAINCACHE_HEAT_DECAY_AGE` | DaemonSet env | `24h` |
-| `TRAINCACHE_HEAT_DUMP_INTERVAL` | DaemonSet env | `30m` |
-| `TRAINCACHE_HEAT_DECAY_INTERVAL` | DaemonSet env | `24h` |
-| `TRAINCACHE_HEAT_DECAY_FACTOR` | DaemonSet env | `0.5` |
-| `TRAINCACHE_HEAT_OPEN_BETA` | DaemonSet env | `0.15` |
-| `TRAINCACHE_HEAT_TOUCH_HALF_LIFE` | DaemonSet env | `6h` |
-| `TRAINCACHE_HEAT_CALIBRATE_WINDOW` | DaemonSet env | `100` |
-| `TRAINCACHE_HEAT_CALIBRATE_THRESHOLD` | DaemonSet env | `0.8` |
-| `TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT` | DaemonSet env | `80` |
-| `TRAINCACHE_HEAT_DISK_DELTA_PERCENT` | DaemonSet env | `5` |
-| `TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT` | DaemonSet env | `90` |
+| `TRAINCACHE_EVICT_POLICY` | `heat` | 淘汰策略：`heat` / `lru` / `lfu`；非法值拒绝启动。部署值写在 ConfigMap `evictPolicy`（§2.1） |
+| `TRAINCACHE_VERIFY` | `xxh3` | 校验级别：`xxh3` 或 `xxh3+sha256` |
+| `TRAINCACHE_CACHE_ROOT` | `/var/cache/traincache` | 缓存根目录，必须与 DaemonSet 的 hostPath 挂载一致 |
+| `TRAINCACHE_GRPC_ADDR` | `:9410` | Agent gRPC 监听地址，DaemonSet 的 `hostPort` 同值 |
+| `TRAINCACHE_METRICS_ADDR` | `:9411` | 指标监听地址，DaemonSet 的 `hostPort` 同值 |
+| `TRAINCACHE_ORDERS_DIR` | `/run/traincache/orders` | OrderSource ring 目录 |
+| `TRAINCACHE_INDEX_REFRESH_INTERVAL` | `5s` | 快照跟随刷新周期 |
+| `TRAINCACHE_READ_STALL_MIN_WAIT_MS` | `100` | `read_stall` 入直方图的最小等待毫秒 |
+| `TRAINCACHE_READ_STALL_WINDOW_MS` | `5000` | `read_stall` 归因关联窗口，单位毫秒，以帧 `ts` 为中心前后各该值 |
+
+热度与磁盘水位共 11 个 `TRAINCACHE_HEAT_*`，同样不写清单，只在需要细调淘汰排序时改：
+
+| 变量 | 默认 |
+|---|---|
+| `TRAINCACHE_HEAT_DECAY_AGE` | `24h` |
+| `TRAINCACHE_HEAT_DUMP_INTERVAL` | `30m` |
+| `TRAINCACHE_HEAT_DECAY_INTERVAL` | `24h` |
+| `TRAINCACHE_HEAT_DECAY_FACTOR` | `0.5` |
+| `TRAINCACHE_HEAT_OPEN_BETA` | `0.15` |
+| `TRAINCACHE_HEAT_TOUCH_HALF_LIFE` | `6h` |
+| `TRAINCACHE_HEAT_CALIBRATE_WINDOW` | `100` |
+| `TRAINCACHE_HEAT_CALIBRATE_THRESHOLD` | `0.8` |
+| `TRAINCACHE_HEAT_DISK_TRIGGER_PERCENT` | `80` |
+| `TRAINCACHE_HEAT_DISK_DELTA_PERCENT` | `5` |
+| `TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT` | `90` |
 
 ### 2.5 控制面参数
 
-都在对应 Deployment 的 env 里，改完 apply：
+manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。webhook 六条全部等于默认，env 块已删空。
 
-| 变量 | 改哪里 | 部署清单值 | 说明 |
+| 变量 | 生效值 | 写在哪里 | 说明 |
 |---|---|---|---|
-| `CONTROLLER_POLL_INTERVAL` | manager Deployment env | `1s` | Controller 轮询 Agent 状态的间隔 |
-| `CONTROLLER_AGENT_PORT` | manager Deployment env | `9410` | Controller 连接 Agent 的 gRPC 端口，必须与 Agent 实际监听一致 |
-| `CONTROLLER_AGENT_TIMEOUT` | manager Deployment env | `5s` | 单次 Agent 调用超时 |
-| `CONTROLLER_SCORE_TTL` | manager Deployment env | `10m` | 调度分数有效期 |
-| `SCHEDULER_SCORE_TTL` | scheduler Deployment env | `10m` | Scheduler 读取分数的有效期，必须与 Controller 一致 |
-| `CONTROLLER_SCORE_ANNOTATION` | manager / scheduler Deployment env | `traincache.io/node-scores` | 训练 Pod 上的分数注解键，两端必须同值 |
-| `CONTROLLER_MAX_CHUNKS` | manager Deployment env | `10000000` | 单任务块数上限 |
-| `CONTROLLER_LOG_LEVEL` | manager / webhook / scheduler Deployment env | `info` | `debug` / `info` / `warn` / `error` |
-| `CONTROLLER_LEADER_ELECTION` | manager Deployment env | `false` | 多副本时开 |
-| `CONTROLLER_METRICS_ADDR` | manager / webhook / scheduler Deployment env | `:9412` | Prometheus 指标监听 |
-| `CONTROLLER_HEALTH_ADDR` | manager / webhook / scheduler Deployment env | `:8081` | `healthz` / `readyz` 监听，探针按同名端口引用 |
-| `CONTROLLER_WEBHOOK_ADDR` | webhook Deployment env | `:9443` | webhook server 监听，Service 443 转发到这里 |
-| `CONTROLLER_NAMESPACE` | manager / webhook Deployment env | 空 | 只校验格式并记进启动日志，不改变任何监听范围：manager 始终 watch 全部 namespace，webhook 的准入范围由 `objectSelector` 的 `traincache.io/warmup: enabled` 决定；留空即可 |
+| `CONTROLLER_POLL_INTERVAL` | `1s` | ConfigMap `controllerPollInterval`（代码默认 2s） | Controller 轮询 Agent 状态的间隔 |
+| `CONTROLLER_AGENT_PORT` | `9410` | 代码默认 | Controller 连接 Agent 的 gRPC 端口，必须与 Agent 实际监听一致 |
+| `CONTROLLER_AGENT_TIMEOUT` | `5s` | 代码默认 | 单次 Agent 调用超时 |
+| `CONTROLLER_SCORE_TTL` | `10m` | ConfigMap `controllerScoreTTL`（代码默认 5m） | 调度分数有效期 |
+| `SCHEDULER_SCORE_TTL` | `10m` | ConfigMap `schedulerScoreTTL`（代码默认 5m） | Scheduler 读取分数的有效期，必须与 Controller 一致 |
+| `CONTROLLER_SCORE_ANNOTATION` | `traincache.io/node-scores` | 代码默认 | 训练 Pod 上的分数注解键，三端共用 |
+| `CONTROLLER_MAX_CHUNKS` | `10000000` | 代码默认 | 单任务块数上限 |
+| `CONTROLLER_LOG_LEVEL` | manager / webhook `info`，scheduler `debug` | scheduler 用 ConfigMap `schedulerLogLevel`，其余取代码默认 | `debug` / `info` / `warn` / `error` |
+| `CONTROLLER_LEADER_ELECTION` | `false` | 代码默认 | 多副本时开 |
+| `CONTROLLER_METRICS_ADDR` | `:9412` | 代码默认 | Prometheus 指标监听 |
+| `CONTROLLER_HEALTH_ADDR` | `:8081` | 代码默认 | `healthz` / `readyz` 监听，探针按同名端口引用 |
+| `CONTROLLER_WEBHOOK_ADDR` | `:9443` | 代码默认 | webhook server 监听，Service 443 转发到这里 |
+| `CONTROLLER_NAMESPACE` | 空 | 代码默认 | 只校验格式并记进启动日志，不改变任何监听范围：manager 始终 watch 全部 namespace，webhook 的准入范围由 `objectSelector` 的 `traincache.io/warmup: enabled` 决定；留空即可 |
 
 manager、webhook、scheduler 三个 Deployment 分别在 `controller/deploy/manager/`、`webhook/`、`scheduler/` 下的 `deployment.yaml`。
 

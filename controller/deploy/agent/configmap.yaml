@@ -1,21 +1,50 @@
-# Agent runtime parameters.
+# Runtime parameters shared by the Agent, controller-manager and scheduler.
 #
-# One ConfigMap holds the knobs that used to be inlined as literal env values
-# in the Agent DaemonSet; the DaemonSet now only references these keys, so
-# changing a value is an edit here (no manifest rewrite of the workload).
+# Placement rule for every TrainCache setting (docs/PARAMETER-CONFIGURATION.md):
 #
-#   cacheCapacityBytes      — Agent cache byte cap; "0" disables the byte
-#                             dimension, leaving the disk watermark as the only
-#                             eviction trigger.
-#   prefetchLookahead       — neighbour blocks prefetched ahead of the cursor.
-#   evictPolicy             — eviction order: heat / lru / lfu.
-#   datasetMetricsWhitelist — comma-separated DataSet names that keep their own
-#                             metrics label; "" merges every DataSet into the
-#                             "other" label (bounded cardinality, D35).
-#   startupWindowBytes      — Controller-only startup window used to derive K:
-#                             K_window = ceil(startupWindowBytes / chunkSize).
-#   maxFillFraction         — Controller-only share of cacheCapacityBytes that
-#                             all Pods' preheat windows may occupy (D43).
+#   credentials                 -> Secret traincache-objstore, via secretKeyRef
+#   per-node identity           -> Downward API fieldRef (NODE_NAME)
+#   changes with cluster or run -> this ConfigMap, via configMapKeyRef
+#   overrides a code default, rarely changes -> this ConfigMap too, so that no
+#                                  workload manifest carries a private value
+#   equals the code default     -> written nowhere; the default lives only in
+#                                  agent/svc/config.go and
+#                                  controller/internal/config/config.go
+#
+# Workload manifests therefore hold no literal `value:` env entries at all.
+# Every key referenced by a configMapKeyRef must exist here: a missing key
+# blocks Pod startup (CreateContainerConfigError) instead of silently falling
+# back to a default.
+#
+#   cacheCapacityBytes       — Agent cache byte cap; "0" disables the byte
+#                              dimension, leaving the disk watermark as the only
+#                              eviction trigger. Read by Agent and Controller.
+#   prefetchLookahead        — neighbour blocks prefetched ahead of the cursor.
+#   evictPolicy              — eviction order: heat / lru / lfu.
+#   datasetMetricsWhitelist  — comma-separated DataSet names that keep their own
+#                              metrics label; "" merges every DataSet into the
+#                              "other" label (bounded cardinality, D35).
+#   startupWindowBytes       — Controller-only startup window used to derive K:
+#                              K_window = ceil(startupWindowBytes / chunkSize).
+#   maxFillFraction          — Controller-only share of cacheCapacityBytes that
+#                              all Pods' preheat windows may occupy (D43).
+#   objstoreEndpoint         — S3-compatible origin the Agent dials. Cluster
+#                              local MinIO here; COS/OSS/S3 in a real cluster.
+#   objstoreBucket           — the bucket holding the published datasets. Must
+#                              equal DataSet.spec.bucket: SubmitPreheat carries
+#                              no bucket field, so a mismatch fails every block
+#                              read. The bench harness rewrites it per dataset.
+#   objstoreSecure           — "true"/"1"/"yes" enables TLS to the origin;
+#                              anything else, including "", means plain HTTP.
+#   controllerPollInterval   — WarmupTask progress poll interval. The code
+#                              default is 2s; 1s keeps gate release latency
+#                              inside the bench measurement window.
+#   controllerScoreTTL       — TTL of a node score entry as written by the
+#                              Controller. Must match schedulerScoreTTL.
+#   schedulerScoreTTL        — TTL of a score entry as read by the scheduler
+#                              plugin. Must match controllerScoreTTL.
+#   schedulerLogLevel        — scheduler verbosity; "debug" emits one
+#                              "scheduler score" line per (pod,node) decision.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -31,3 +60,10 @@ data:
   datasetMetricsWhitelist: ""
   startupWindowBytes: "536870912"
   maxFillFraction: "0.125"
+  objstoreEndpoint: "minio.minio.svc.cluster.local:9000"
+  objstoreBucket: "traincache"
+  objstoreSecure: "false"
+  controllerPollInterval: "1s"
+  controllerScoreTTL: "10m"
+  schedulerScoreTTL: "10m"
+  schedulerLogLevel: "debug"

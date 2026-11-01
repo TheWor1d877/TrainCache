@@ -152,7 +152,7 @@ main 上打 tag vX.Y.Z 并推送
 - 控制面：`DataSet.spec.endpoint`（不带 scheme）、`spec.bucket`、`spec.secretRef`。Secret 字段 `accessKey`、`secretKey`，与 DataSet 同 namespace。
 - Agent：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_ACCESS_KEY`、`TRAINCACHE_OBJSTORE_SECRET_KEY`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`。
 
-控制面读凭证按 DataSet 所在 namespace 逐个授权，集群默认只授了 `traincache` 一个 namespace（`controller/deploy/manager/rbac.yaml`）。DataSet 放到别的 namespace，安装方要在该 namespace 补一份 Role + RoleBinding，给 controller-manager 的 ServiceAccount `secrets: get`；写法见 `controller/e2e/manifests/tenant.yaml`。漏授时 DataSet 停在 `Ready=False`，condition 报 `StorageUnreachable: ... secrets "traincache-objstore" is forbidden`。不给集群级 Secret 读权限（7.3 Q9）。
+控制面读凭证按 DataSet 所在 namespace 逐个授权，集群默认只授了 `traincache` 一个 namespace（`controller/deploy/manager/rbac.yaml`）。DataSet 放到别的 namespace，安装方要在该 namespace 补一份 Role + RoleBinding，给 controller-manager 的 ServiceAccount `secrets: get`；写法见 `controller/e2e/manifests/tenant.yaml`。漏授时 DataSet 停在 `Ready=False`，condition 报 `StorageUnreachable: ... secrets "traincache-objstore" is forbidden`。不给集群级 Secret 读权限（7.2 Q9）。
 
 条件写支持用 `trainpublish --probe-conditional-write` 探测。
 
@@ -165,7 +165,7 @@ main 上打 tag vX.Y.Z 并推送
 
 ### 5.3 运行时参数
 
-运行时参数集中在 `traincache` namespace 的 ConfigMap `traincache-config`（`controller/deploy/agent/configmap.yaml`），共六个 key。Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction` 三个算 K。改值只需编辑 ConfigMap 并重启对应工作负载，不必改清单；`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者。
+运行时参数集中在 `traincache` namespace 的 ConfigMap `traincache-config`（`controller/deploy/agent/configmap.yaml`），共 13 个配置项。Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction` 三个算 K，另读 `controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`。改值只需编辑 ConfigMap 并重启对应工作负载，不必改清单；`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者。四份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
 
 | key | 默认值 | 归属 | 说明 |
 |---|---|---|---|
@@ -175,12 +175,19 @@ main 上打 tag vX.Y.Z 并推送
 | `datasetMetricsWhitelist` | 空（`""`） | Agent | 逗号分隔的 DataSet 名。为空时所有 DataSet 的指标 `dataset` 标签全部归并为 `other`；只有白名单内的名字保留原名 |
 | `startupWindowBytes` | `536870912`（512MiB） | Controller | 自动算 K 的启动窗口，必须 `>0`：`K_window = ceil(startupWindowBytes / chunkSize)`；1GiB 写 `1073741824` |
 | `maxFillFraction` | `0.125`（八分之一） | Controller | 全部 Pod 的预热总量占缓存容量的比例，取值 `(0,0.25]`：`K_cache = floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`；`cacheCapacityBytes=0` 时不参与 |
+| `objstoreEndpoint` | `minio.minio.svc.cluster.local:9000` | Agent | 源站端点，不带 scheme；接 COS/OSS/S3 时改这一处 |
+| `objstoreBucket` | `traincache` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`；`SubmitPreheat` 不带桶名，不一致时每个块读取都失败 |
+| `objstoreSecure` | `false` | Agent | `true`/`1`/`yes` 时用 HTTPS 连源站 |
+| `controllerPollInterval` | `1s` | Controller | 轮询 Agent 进度的间隔，代码默认 2s |
+| `controllerScoreTTL` | `10m` | Controller | 节点分数有效期，代码默认 5m |
+| `schedulerScoreTTL` | `10m` | Scheduler | 分数过期判定，必须与 `controllerScoreTTL` 同值 |
+| `schedulerLogLevel` | `debug` | Scheduler | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
 
 `k` 的确定：`k` 为 0 或省略时 Controller 自动计算并写回 `spec`，发 Normal 事件 `KDefaulted`；自动值 `K_i = clamp(min(W_i, K_window, K_cache), 1, W_i)`，`W_i` 是该 Pod 实际分到的块数。显式 `k` 的有效范围是 1..`W_i`；`k > W_i` 置 `Condition InvalidSpec=False` 并拒绝，不钳制、不截断。实际预热块数 = `min(max(K_i, score.cutoff), W_i)`。全部 Pod 的实际请求块数合计超过 `cacheCapacityBytes × maxFillFraction` 时发 Warning 事件 `KExceedsFillLimit`，任务继续执行。
 
 指标口径：`dataset` 标签只对白名单内的 DataSet 取原名，其余一律归并 `other`，用来把标签基数钉死（D35）。**清空白名单后所有带 `dataset` 标签的指标都归并到 `other`**，此时按 dataset 拆分的看板看不出数据集差异，排查单数据集时再把名字加回白名单。
 
-ConfigMap 的 key 用 camelCase。Agent 四个 key 由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`。Controller 的三个 K 参数由 manager Deployment 通过 `configMapKeyRef` 注入。ConfigMap 或任一 key 缺失时读取方报错，不静默回退到内置默认值。完整参数表（集群、数据集、训练任务）见 [参数配置](PARAMETER-CONFIGURATION.md)。
+ConfigMap 的配置项用 camelCase。Agent 的七项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`。Controller 的五项、scheduler 的两项同样由各自 Deployment 用 `configMapKeyRef` 注入。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。完整参数表（集群、数据集、训练任务）见 [参数配置](PARAMETER-CONFIGURATION.md)。
 
 ## 6. CLI 下发
 
