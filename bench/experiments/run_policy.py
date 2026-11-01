@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -273,11 +274,13 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
 # ---------------------------------------------------------------------------
 def run_reps(cond_name: str, reps: int | None = None,
              conds_dir: Path | None = None,
-             selftest: bool = False) -> list[Path]:
+             selftest: bool = False,
+             results_root: Path | None = None) -> list[Path]:
     """跑 reps 轮。cond_name 传给 load_cond。
 
-    reps=None 时取 COND 的 sampling.reps(D18:淘汰矩阵每点 3 次)。
+    reps=None 时取 COND 的 sampling.reps(D18:5.1 每点 1 次、Pareto 二 2 次)。
     selftest=True 时:reps 强制为 1,使用 mock 模式。
+    results_root=selftest 的落点覆盖,自检用它把 mock 产物引离正式分区。
     返回每轮产物目录列表。
     """
     cond = cond_mod.load_cond(cond_name, conds_dir)
@@ -291,7 +294,7 @@ def run_reps(cond_name: str, reps: int | None = None,
     elif reps is None:
         reps = cond["sampling"]["reps"]
 
-    reps_dir = POLICY_RESULTS_DIR / cond_name
+    reps_dir = (results_root or POLICY_RESULTS_DIR) / cond_name
     reps_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[Path] = []
@@ -337,61 +340,66 @@ def selftest(cond_name: str = "policy-heat") -> int:
           f"TRAINCACHE_PREFETCH_LOOKAHEAD={env['TRAINCACHE_PREFETCH_LOOKAHEAD']} "
           f"TRAINCACHE_CACHE_CAPACITY_BYTES={env['TRAINCACHE_CACHE_CAPACITY_BYTES']}")
 
-    # 3. 跑 mock 实验
-    results = run_reps(cond_name, reps=1, selftest=True)
-    assert len(results) == 1
-    run_dir = results[0]
+    # 3. 跑 mock 实验(产物落在临时目录,不进正式分区)
+    with tempfile.TemporaryDirectory(prefix="tc-policy-selftest-") as tmp:
+        results = run_reps(cond_name, reps=1, selftest=True,
+                           results_root=Path(tmp) / "policy")
+        assert len(results) == 1
+        run_dir = results[0]
 
-    # 4. 校验产物文件齐全
-    expected = ["run.json", "per_step_a.jsonl", "per_step_b.jsonl",
-                "eviction_stats.json"]
-    for fname in expected:
-        fpath = run_dir / fname
-        assert fpath.is_file(), f"selftest 失败:缺少产物 {fpath}"
-    print(f"  产物齐全: {', '.join(expected)}")
+        # 4. 校验产物文件齐全
+        expected = ["run.json", "per_step_a.jsonl", "per_step_b.jsonl",
+                    "eviction_stats.json"]
+        for fname in expected:
+            fpath = run_dir / fname
+            assert fpath.is_file(), f"selftest 失败:缺少产物 {fpath}"
+        print(f"  产物齐全: {', '.join(expected)}")
 
-    # 5. 校验产物内容格式
-    run_obj = json.loads((run_dir / "run.json").read_text())
-    assert run_obj["track"] == "C"
-    assert run_obj["cond"] == cond_name
-    assert run_obj["selftest"] is True
-    assert run_obj["evict_policy"] == cond["cache"]["evict_policy"]
+        # 5. 校验产物内容格式
+        run_obj = json.loads((run_dir / "run.json").read_text())
+        assert run_obj["track"] == "C"
+        assert run_obj["cond"] == cond_name
+        assert run_obj["selftest"] is True
+        assert run_obj["evict_policy"] == cond["cache"]["evict_policy"]
 
-    a_recs = [json.loads(ln) for ln
-              in (run_dir / "per_step_a.jsonl").read_text().splitlines()
-              if ln.strip()]
-    assert a_recs, "per_step_a.jsonl 为空"
-    for r in a_recs:
-        assert {"step", "wait_s", "step_s", "shard", "phase", "hit"}.issubset(
-            r.keys()), f"per_step_a 字段缺失: {r.keys()}"
+        a_recs = [json.loads(ln) for ln
+                  in (run_dir / "per_step_a.jsonl").read_text().splitlines()
+                  if ln.strip()]
+        assert a_recs, "per_step_a.jsonl 为空"
+        for r in a_recs:
+            assert {"step", "wait_s", "step_s", "shard", "phase",
+                    "hit"}.issubset(
+                r.keys()), f"per_step_a 字段缺失: {r.keys()}"
 
-    b_recs = [json.loads(ln) for ln
-              in (run_dir / "per_step_b.jsonl").read_text().splitlines()
-              if ln.strip()]
-    assert b_recs, "per_step_b.jsonl 为空"
-    for r in b_recs:
-        assert {"step", "wait_s", "step_s", "shard", "phase"}.issubset(
-            r.keys()), f"per_step_b 字段缺失: {r.keys()}"
+        b_recs = [json.loads(ln) for ln
+                  in (run_dir / "per_step_b.jsonl").read_text().splitlines()
+                  if ln.strip()]
+        assert b_recs, "per_step_b.jsonl 为空"
+        for r in b_recs:
+            assert {"step", "wait_s", "step_s", "shard",
+                    "phase"}.issubset(
+                r.keys()), f"per_step_b 字段缺失: {r.keys()}"
 
-    ev = json.loads((run_dir / "eviction_stats.json").read_text())
-    for k in ("a_hits", "a_misses", "a_hit_ratio", "a_wait_ratio",
-              "b_evictions_of_hot", "hot_shard_count", "full_shard_count"):
-        assert k in ev, f"eviction_stats.json 缺字段 {k}"
-    # selftest 容量仅 3 片、B 扫 8 片,应观测到挤占
-    assert ev["b_evictions_of_hot"] > 0, \
-        "selftest 应观测到挤占(b_evictions_of_hot > 0)"
+        ev = json.loads((run_dir / "eviction_stats.json").read_text())
+        for k in ("a_hits", "a_misses", "a_hit_ratio", "a_wait_ratio",
+                  "b_evictions_of_hot", "hot_shard_count", "full_shard_count"):
+            assert k in ev, f"eviction_stats.json 缺字段 {k}"
+        # selftest 容量仅 3 片、B 扫 8 片,应观测到挤占
+        assert ev["b_evictions_of_hot"] > 0, \
+            "selftest 应观测到挤占(b_evictions_of_hot > 0)"
 
-    print(f"  产物格式正确: A steps={len(a_recs)} B steps={len(b_recs)} "
-          f"evictions={ev['b_evictions_of_hot']} "
-          f"hit_ratio={ev['a_hit_ratio']:.2%}")
+        print(f"  产物格式正确: A steps={len(a_recs)} B steps={len(b_recs)} "
+              f"evictions={ev['b_evictions_of_hot']} "
+              f"hit_ratio={ev['a_hit_ratio']:.2%}")
 
-    # 6. 产物目录隔离:路径包含 policy/<cond_name>/<run_id>
-    assert "policy" in run_dir.parts, f"产物目录未隔离到 policy/: {run_dir}"
-    assert cond_name in run_dir.parts, \
-        f"产物目录未包含 cond_name: {run_dir}"
-    print(f"  产物目录隔离正确: {run_dir}")
+        # 6. 产物目录隔离:路径包含 policy/<cond_name>/<run_id>
+        assert "policy" in run_dir.parts, \
+            f"产物目录未隔离到 policy/: {run_dir}"
+        assert cond_name in run_dir.parts, \
+            f"产物目录未包含 cond_name: {run_dir}"
+        print(f"  产物目录隔离正确: {run_dir}")
 
-    print(f"\nrun_policy selftest: PASS (产物目录: {run_dir})")
+    print("\nrun_policy selftest: PASS (mock 产物在临时目录,不进正式分区)")
     return 0
 
 

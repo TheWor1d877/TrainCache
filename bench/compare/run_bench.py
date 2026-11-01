@@ -1330,10 +1330,19 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                 step_s = wait_s + work_s
                 with _lock:
                     _a["reads"] += 1
+                    _a_n = _a["reads"]
                     _a["wait"] += wait_s
                     _a["step"] += step_s
                     if work_s > 0:
                         _a["samples"].append(wait_s / step_s)
+                print("[STEP-A] " + json.dumps({
+                    "step": _a_n,
+                    "wait_s": round(wait_s, 6),
+                    "step_s": round(step_s, 6),
+                    "shard": "shard-" + str(shard).zfill(5) + ".tar",
+                    "phase": "steady",
+                    "hit": bool(total_chunks and len(present) == total_chunks)},
+                    ensure_ascii=False), flush=True)
                 if t_first_step is None:
                     _set_first_step()
             cycle += 1
@@ -1356,6 +1365,7 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                   " at_step=" + str(ep * steps) + " kind=" +
                   ("epoch" if ep > 0 else "start"), flush=True)
             for shard in _full:
+                _b_t0 = time.perf_counter()
                 try:
                     nb = read_shard(shard, "steady")
                 except Exception as e:
@@ -1368,8 +1378,17 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                     with _lock:
                         read_bytes_total += nb
                         read_done += 1
+                _b_wait = time.perf_counter() - _b_t0
                 with _lock:
                     _b["reads"] += 1
+                    _b_n = _b["reads"]
+                # B 只做背景扫描，不建模算力，所以 step_s 就是 wait_s（9.2 §C3）。
+                print("[STEP-B] " + json.dumps({
+                    "step": _b_n,
+                    "wait_s": round(_b_wait, 6),
+                    "step_s": round(_b_wait, 6),
+                    "shard": "shard-" + str(shard).zfill(5) + ".tar",
+                    "phase": "scan"}, ensure_ascii=False), flush=True)
                 _set_first_step()
                 t_last_step = now_epoch()
         _b_done.set()
@@ -2289,14 +2308,18 @@ def parse_switch_events(logs, steps_per_epoch):
     return events
 
 
-def parse_step_records(logs):
-    """[STEP] 行 → 每步记录；坏行跳过，不中断整轮解析。"""
+def parse_step_records(logs, tag="[STEP]"):
+    """`<tag> ` 行的 JSON → 每步记录；坏行跳过，不中断整轮解析。
+
+    单线程负载打 `[STEP]`，倾斜双 Job 打 `[STEP-A]`/`[STEP-B]`。
+    """
+    prefix = tag + " "
     records = []
     for line in logs.splitlines():
-        if not line.startswith("[STEP] "):
+        if not line.startswith(prefix):
             continue
         try:
-            records.append(json.loads(line[len("[STEP] "):]))
+            records.append(json.loads(line[len(prefix):]))
         except (ValueError, TypeError):
             continue
     return records
@@ -2305,19 +2328,27 @@ def parse_step_records(logs):
 def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
     """把逐步 stall 与切换事件写成 recovery.py 能直接吃的 run 目录。
 
-    目录：<cell>/runs/<group>-r<rep>/per_step_1_w1.jsonl + run.json。
-    与 summary.csv 并列，不覆盖旧产物。写完直接跑 D40 回落判据，
-    有切换事件时落 recovery.json；无事件（1 epoch 或固定 seed 不退化的
-    情况除外）不写。
+    目录：<cell>/runs/<group>-r<rep>/。单线程负载落一份 per_step_1_w1.jsonl；
+    倾斜双 Job（`TRAINCACHE_TILT=1`）落 per_step_a.jsonl + per_step_b.jsonl，
+    且不跑 D40 回落判据——该判据的输入契约是恰好一份 per_step 文件（9.2 §C3）。
+    与 summary.csv 并列，不覆盖旧产物。单线程形态有切换事件时落 recovery.json；
+    无事件（1 epoch 或固定 seed 不退化的情况除外）不写。
     """
     run_dir = out_csv.parent / "runs" / f"{group}-r{rep:02d}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    records = parse_step_records(logs)
-    if records:
-        path = run_dir / "per_step_1_w1.jsonl"
-        with path.open("w", encoding="utf-8") as f:
+    if TILT:
+        streams = (("per_step_a.jsonl", parse_step_records(logs, "[STEP-A]")),
+                   ("per_step_b.jsonl", parse_step_records(logs, "[STEP-B]")))
+    else:
+        streams = (("per_step_1_w1.jsonl", parse_step_records(logs)),)
+    n_steps = 0
+    for step_file, records in streams:
+        if not records:
+            continue
+        with (run_dir / step_file).open("w", encoding="utf-8") as f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n_steps += len(records)
     _rate = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
     cond_name = (COND_NAME_OVERRIDE or
                  _cond_name_for_cell(TIER, [group],
@@ -2336,7 +2367,7 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
     }
     with (run_dir / "run.json").open("w", encoding="utf-8") as f:
         json.dump(run, f, ensure_ascii=False, indent=1)
-    if events:
+    if events and not TILT:
         try:
             import recovery  # noqa: PLC0415
             result = recovery.analyze_run(run_dir)
@@ -2344,7 +2375,7 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
                 json.dump(result, f, ensure_ascii=False, indent=1)
         except Exception as exc:  # noqa: BLE001
             print(f"[run] {group} rep={rep} recovery 分析失败: {exc}", flush=True)
-    return run_dir, len(records)
+    return run_dir, n_steps
 
 
 def _cache_phase_ratio(cache_base, cache_final, phase):
@@ -3079,7 +3110,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查八件事：
+    查九件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3092,7 +3123,9 @@ def selftest():
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
          档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位；
       7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh；
-      8. 产物写入的只追加口径：补跑同一张 CSV 不得截断既有行。
+      8. 产物写入的只追加口径：补跑同一张 CSV 不得截断既有行；
+      9. 逐步打点的两种形态：倾斜双 Job 落 per_step_a/b 两份且不跑 D40 判据，
+         单线程形态仍是一份 per_step_1_w1.jsonl。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -3354,6 +3387,40 @@ def selftest():
                 "有效行、其它历史行保留、作废行只追加不顶替有效行")
     print("[selftest] 8) 只追加不覆盖：同格补跑顶掉同 (group,rep) 有效行，"
           "保留其余历史行，作废行不顶替有效行")
+
+    # ---- 9) 倾斜双 Job 的逐步打点：落 a/b 两份，不进 D40 判据 ----
+    _tilt_logs = (
+        "[EPOCH_BOUNDARY] epoch=0 ts=1000.0 at_step=0 kind=start\n"
+        '[STEP-A] {"step":1,"wait_s":0.5,"step_s":1.5,'
+        '"shard":"shard-00001.tar","phase":"steady","hit":true}\n'
+        '[STEP-B] {"step":1,"wait_s":2.0,"step_s":2.0,'
+        '"shard":"shard-00002.tar","phase":"scan"}\n'
+        "[EPOCH_BOUNDARY] epoch=1 ts=2000.0 at_step=400 kind=epoch\n")
+    with tempfile.TemporaryDirectory() as td:
+        saved_tilt, saved_rate = TILT, TC_RATE_EFF
+        globals()["TILT"] = True
+        globals()["TC_RATE_EFF"] = "100mbit"
+        try:
+            _rd, _n = write_run_artifacts(Path(td) / "summary.csv",
+                                          "traincache-cold", 0, _tilt_logs, "sha")
+        finally:
+            globals()["TILT"], globals()["TC_RATE_EFF"] = saved_tilt, saved_rate
+        _names = sorted(p.name for p in _rd.iterdir())
+        if _names != ["per_step_a.jsonl", "per_step_b.jsonl", "run.json"] or _n != 2:
+            raise AssertionError(
+                "自测：倾斜双 Job 应落 per_step_a.jsonl + per_step_b.jsonl 两份、"
+                "不产 recovery.json（D40 判据的输入契约是恰好一份 per_step 文件）")
+    # 单线程形态不变：一份 per_step_1_w1.jsonl
+    with tempfile.TemporaryDirectory() as td:
+        _rd, _n = write_run_artifacts(
+            Path(td) / "summary.csv", "direct", 0,
+            '[STEP] {"epoch":0,"step_in_epoch":0,"global_step":0,"warmup":true,'
+            '"wait_s":0.1,"step_s":1.0,"phase":"preheat",'
+            '"shard":"shard-00000.tar"}\n', "sha")
+        if sorted(p.name for p in _rd.iterdir()) != ["per_step_1_w1.jsonl", "run.json"]:
+            raise AssertionError("自测：单线程形态的逐步打点文件名被改动")
+    print("[selftest] 9) 倾斜双 Job 落 per_step_a/b 两份且不跑 D40；"
+          "单线程形态仍是一份 per_step_1_w1.jsonl")
     print("run_bench selftest: PASS")
 
 
