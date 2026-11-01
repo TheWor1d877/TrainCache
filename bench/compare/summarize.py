@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""M7 五格对照汇总：按 (格子, 组态) 报平均数与 bootstrap 95% CI，并给组间判定。
+"""五格对照汇总：按 (格子, 组态) 报平均数与 bootstrap 95% CI，并给组间判定。
 
 口径来源 docs/9.2：§1.6 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
 §1.7 作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
 
 用法：
-    .venv/bin/python bench/compare/summarize_m7.py [--root DIR] [--fallback DIR]
-    .venv/bin/python bench/compare/summarize_m7.py --selftest
+    .venv/bin/python bench/compare/summarize.py [--root DIR] [--fallback DIR]
+    .venv/bin/python bench/compare/summarize.py --selftest
 
 `--fallback` 只补 root 里缺失的非 traincache 组，合并行标 `source=reused`。
 """
@@ -232,9 +232,9 @@ def _render(rows: list[dict], metrics: list[str], title: str) -> list[str]:
 
 
 def render_markdown(rows: list[dict], verdict: list[dict]) -> str:
-    lines = ["## M7 五格对照汇总", ""]
+    lines = ["## 五格对照汇总", ""]
     if any(r.get("source") == "reused" for r in rows):
-        lines += ["注：`〔沿用〕` 组来自既有 m7 产物（本轮只重跑 traincache 两组态，"
+        lines += ["注：`〔沿用〕` 组来自既有基线产物 `baselines/`（本轮只重跑 traincache 两组态，"
                   "direct/juicefs/fluid 不读快照，口径未变）；其余为重跑结果。", ""]
     lines += _render(rows, TABLE_A, "makespan 与 stall")
     lines += [""]
@@ -322,7 +322,7 @@ def selftest() -> None:
         assert tbl[("S-100", "traincache-cold")]["source"] == "new"
         assert tbl[("S-100", "direct")]["source"] == "reused"
         assert abs(tbl[("S-100", "direct")]["startup_makespan_mean"] - 11.0) < 1e-9
-    print("summarize_m7 selftest PASS")
+    print("summarize selftest PASS")
 
 
 def main() -> int:
