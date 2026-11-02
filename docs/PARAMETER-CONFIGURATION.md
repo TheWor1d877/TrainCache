@@ -4,7 +4,7 @@
 
 ## 修改入口速查
 
-集群运行时配置只有两个入口：ConfigMap `traincache-config`（17 个配置项）与 Secret `traincache-objstore`（`accessKey`、`secretKey` 两把凭证）。除此之外没有第三个可改的地方，下表几项看着像入口，实际各归别处。
+集群运行时配置只有三个入口：ConfigMap `traincache-config`（namespace `traincache`，15 个配置项）、ConfigMap `traincache-scheduler-config`（namespace `kube-system`，scheduler 的 `schedulerScoreTTL`、`schedulerLogLevel` 两项，同一个对象还挂 `scheduler.yaml` 这份调度器配置）与 Secret `traincache-objstore`（`accessKey`、`secretKey` 两把凭证）。scheduler 单独一份 CM，是因为 `configMapKeyRef` 只在 Pod 自己的 namespace 找对象，而它在 kube-system。除此之外没有第四个可改的地方，下表几项看着像入口，实际各归别处。
 
 | 看起来像入口 | 实际是什么 |
 |---|---|
@@ -26,7 +26,7 @@
 | 组件资源 requests/limits                     | `manager/deployment.yaml`、`webhook/deployment.yaml`、`scheduler/deployment.yaml`、`agent/daemonset.yaml`                                                                   | apply，Pod 重建                                                 |
 | Agent 校验级别、缓存目录、监听端口           | 清单里没有这些 env，取 `agent/svc/config.go` 的默认值；临时改一次用 `kubectl set env`，长期改见 §2.4                                                                        | 见 §2.4                                                       |
 | Agent 热度衰减与磁盘水位                     | 同上：11 个 `TRAINCACHE_HEAT_*` 都不在清单里，取 `agent/svc/config.go` 的默认值                                                                                             | 见 §2.4                                                       |
-| Controller 与 Scheduler 参数                 | 等于默认值的不写清单，取 `controller/internal/config/config.go`；`controllerPollInterval`、`controllerScoreTTL`、`schedulerScoreTTL`、`schedulerLogLevel` 在 ConfigMap        | 改 ConfigMap 后滚动重启对应工作负载；见 §2.5                   |
+| Controller 与 Scheduler 参数                 | 等于默认值的不写清单，取 `controller/internal/config/config.go`；`controllerPollInterval`、`controllerScoreTTL` 在 `traincache-config`，`schedulerScoreTTL`、`schedulerLogLevel` 在 kube-system 的 `traincache-scheduler-config`        | 改 ConfigMap 后滚动重启对应工作负载；见 §2.5                   |
 | 块大小                                       | `trainpublish --chunk-size`，只在空桶首次发布时写入 `_traincache/format.json`                                                                                               | 之后每次发布沿用；改值要清空桶或换新桶                          |
 | DataSet 字段                                 | DataSet YAML                                                                                                                                                                | 重新 apply；发布新快照后同步 `spec.snapshotID` 与 `spec.shards` |
 | 预热任务参数                                 | WarmupTask YAML 的 `spec`                                                                                                                                                   | 重新 apply；`dataSetRef` 与 `podCount` 不可改                   |
@@ -40,13 +40,13 @@
 |---|---|---|---|
 | 1 | 是凭证吗 | Secret + `secretKeyRef` | `accessKey`、`secretKey` |
 | 2 | 是每个 Pod 各不相同的身份信息吗 | Downward API `fieldRef` | `NODE_NAME`（`spec.nodeName`） |
-| 3 | 换集群或换实验轮次要改吗 | ConfigMap `traincache-config` + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入、`controllerPollInterval`、两个 `ScoreTTL`、`schedulerLogLevel` |
+| 3 | 换集群或换实验轮次要改吗 | 该工作负载自己 namespace 里的 ConfigMap + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入在 `traincache-config`；`controllerPollInterval`、`controllerScoreTTL` 同在 `traincache-config`；两个 Scheduler 项在 kube-system 的 `traincache-scheduler-config` |
 | 4 | 值与代码默认不同，但基本不动吗 | 同上，写进 ConfigMap | 同上后四项 |
 | 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go` 与 `controller/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
 
-五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）里因此没有任何一条 `value:` 字面量 env，全部取值走引用或走代码默认。要覆盖第 5 类默认值：临时一次用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把它盖回仓库清单；长期改在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef` 引用，两处一起提交。
+五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）里因此没有任何一条 `value:` 字面量 env，全部取值走引用或走代码默认。引用还有一个方向要守：`configMapKeyRef` 只在本 Pod 的 namespace 里找对象，跨不过去，所以 kube-system 的 scheduler 用不了 `traincache-config`。这条由 `hack/verify-config-placement.sh` 逐条按 namespace 校验，写错即失败。要覆盖第 5 类默认值：临时一次用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把它盖回仓库清单；长期改在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef` 引用，两处一起提交。
 
-ConfigMap 现在装 17 项，见 §2.1；往 ConfigMap 加一项而清单里没有对应引用，进程读不到它。
+ConfigMap `traincache-config` 现在装 15 项，见 §2.1；scheduler 的两项在 `traincache-scheduler-config`，同节末尾。往 ConfigMap 加一项而同 namespace 的清单里没有对应引用，进程读不到它。
 
 长期修改要改仓库 YAML 再 apply。`kubectl edit` 只改集群副本，下次 apply 会被覆盖。
 
@@ -62,7 +62,7 @@ ConfigMap 现在装 17 项，见 §2.1；往 ConfigMap 加一项而清单里没�
 
 ### 2.1 ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，17 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`（它在 `kube-system`，读的是同名 ConfigMap 的镜像，见下）；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，15 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`，见本节末尾。
 
 | 配置项 | 默认 | 读取方 | 说明 |
 |---|---|---|---|
@@ -81,10 +81,6 @@ ConfigMap 现在装 17 项，见 §2.1；往 ConfigMap 加一项而清单里没�
 | `gatewayBlockBufferBytes` | `"10485760"` | 网关 | 每个在途块环形缓冲的字节数（默认 10MiB），正整数；非法值使网关拒绝启动。改它会重启网关 Deployment |
 | `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；1s 把门控放行延迟压进 bench 的测量窗口 |
 | `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
-| `schedulerScoreTTL` | `"10m"` | scheduler | scheduler 判定分数过期的有效期，代码默认 5m，必须与 `controllerScoreTTL` 同值 |
-| `schedulerLogLevel` | `"debug"` | scheduler | 只有 scheduler 用 `debug`：每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
-
-scheduler 的 Pod 在 `kube-system`，而 `configMapKeyRef` 只在 Pod 自己的 namespace 解析，所以 `controller/deploy/scheduler/configmap.yaml` 放了一份同名 `traincache-config` 的镜像，只含 `schedulerScoreTTL` 与 `schedulerLogLevel` 两个键。改值仍然只改 `controller/deploy/agent/configmap.yaml`；`make verify-metadata` 会比较两份，不一致直接失败。
 
 `cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。改仓库文件后 apply，再重启读取方：
 
@@ -101,6 +97,23 @@ kubectl -n traincache rollout status deploy/traincache-controller-manager
 被引用的配置项都必须存在。缺任一项，引用它的高负载 Pod 停在 `CreateContainerConfigError`，不回退到默认值。Agent 缺 `objstoreEndpoint` 时连桶都摸不到，manager 缺 `cacheCapacityBytes` 时算不出自动 K，所以先 apply ConfigMap，再 apply 工作负载；`kubectl apply -k controller/deploy` 一次带全，顺序问题只出现在单独 apply `daemonset.yaml` 的场合（`agent/e2e/run-k8s.sh` 为此在缺失时才补 apply 一份 ConfigMap，已存在则不动，免得把 bench 改过的桶和容量盖回默认）。
 
 `datasetMetricsWhitelist` 只控制指标标签。清空后所有带 `dataset` 标签的指标都记到 `other`，按数据集拆的看板看不出差异；排查单个数据集时把名字加回来。
+
+#### ConfigMap traincache-scheduler-config
+
+位置 `controller/deploy/scheduler/kube-scheduler-config.yaml`，namespace `kube-system`，除 `scheduler.yaml`（挂进 Pod 的 KubeSchedulerConfiguration）外还有 scheduler 读的两个配置项。
+
+| 配置项 | 默认 | 读取方 | 说明 |
+|---|---|---|---|
+| `schedulerScoreTTL` | `"10m"` | scheduler | scheduler 判定分数过期的有效期，代码默认 5m，必须与 `traincache-config` 的 `controllerScoreTTL` 同值 |
+| `schedulerLogLevel` | `"debug"` | scheduler | 只有 scheduler 用 `debug`：每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info`。`controller/e2e/run.sh` 断言这行日志，改成 `info` 会让该项失败 |
+
+这两项为什么不并进 `traincache-config`：`configMapKeyRef` 只在 Pod 自己的 namespace 找对象，scheduler 跑在 kube-system，引用 `traincache` 里的 ConfigMap 取不到值，Pod 停在 `CreateContainerConfigError`。清单哈希不变就不执行 `kubectl apply -k`，一直复用的热集群要把这个缺陷留到第一次全量 apply 才露头；`hack/verify-config-placement.sh` 现在逐条按 namespace 校验引用落点。改值后重启 scheduler：
+
+```bash
+kubectl apply -f controller/deploy/scheduler/kube-scheduler-config.yaml
+kubectl -n kube-system rollout restart deploy/traincache-scheduler
+kubectl -n kube-system rollout status deploy/traincache-scheduler
+```
 
 ### 2.2 对象存储
 
@@ -170,7 +183,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 
 ### 2.5 控制面参数
 
-manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。webhook 六条全部等于默认，env 块已删空。
+manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap——manager 与 webhook 在 `traincache-config`，scheduler 在自己 namespace 的 `traincache-scheduler-config`。webhook 六条全部等于默认，env 块已删空。
 
 | 变量 | 生效值 | 写在哪里 | 说明 |
 |---|---|---|---|
@@ -178,7 +191,7 @@ manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等�
 | `CONTROLLER_AGENT_PORT` | `9410` | 代码默认 | Controller 连接 Agent 的 gRPC 端口，必须与 Agent 实际监听一致 |
 | `CONTROLLER_AGENT_TIMEOUT` | `5s` | 代码默认 | 单次 Agent 调用超时 |
 | `CONTROLLER_SCORE_TTL` | `10m` | ConfigMap `controllerScoreTTL`（代码默认 5m） | 调度分数有效期 |
-| `SCHEDULER_SCORE_TTL` | `10m` | ConfigMap `schedulerScoreTTL`（代码默认 5m） | Scheduler 读取分数的有效期，必须与 Controller 一致 |
+| `SCHEDULER_SCORE_TTL` | `10m` | kube-system 的 ConfigMap `schedulerScoreTTL`（代码默认 5m） | Scheduler 读取分数的有效期，必须与 Controller 一致 |
 | `CONTROLLER_SCORE_ANNOTATION` | `traincache.io/node-scores` | 代码默认 | 训练 Pod 上的分数注解键，三端共用 |
 | `CONTROLLER_MAX_CHUNKS` | `10000000` | 代码默认 | 单任务块数上限 |
 | `CONTROLLER_LOG_LEVEL` | manager / webhook `info`，scheduler `debug` | scheduler 用 ConfigMap `schedulerLogLevel`，其余取代码默认 | `debug` / `info` / `warn` / `error` |

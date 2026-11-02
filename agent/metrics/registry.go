@@ -58,7 +58,7 @@ type Config struct {
 // Registry 持有 dataset 白名单与 Prometheus 注册表(七线 23 个 family 在此挂载;
 // 新增 family 的构造/注册/预置见 families.go 的 initSevenLine / initHooksAndEvidence /
 // initGateway;全量 42 个 family,含 D23/D33 两条格式错误线、D44 读 miss 线、
-// D63 订单通道 3 个与 10.1 网关线 2 个)。
+// D63 订单通道 3 个与 9.1 网关线 2 个)。
 type Registry struct {
 	whitelist map[string]struct{}
 	reg       *prometheus.Registry
@@ -130,7 +130,7 @@ type Registry struct {
 	ordersourceEnded  *prometheus.CounterVec // node,reason∈{missing_ttl,stale_file}
 	ordersDropped     *prometheus.CounterVec // reason∈{resync,corrupt,invalid}
 
-	// 10.1 网关线(§7.4;New 内构造/注册/预置,打点 API 见 families.go)。
+	// 9.1 网关线(§7.4;New 内构造/注册/预置,打点 API 见 families.go)。
 	sourceMode      prometheus.Gauge       // 无标签;0=直连、1=网关,构造时预置 0
 	gatewayFallback *prometheus.CounterVec // reason∈{unavailable,timeout,transport},构造时预置三个子指标为 0
 
@@ -204,7 +204,7 @@ func New(cfg Config) *Registry {
 	r.initHooksAndEvidence()
 	// D63 订单通道 3 个 family。
 	r.initOrderChannel()
-	// 10.1 网关线 2 个 family(source_mode 预置 0,fallback 预置三个 reason)。
+	// 9.1 网关线 2 个 family(source_mode 预置 0,fallback 预置三个 reason)。
 	r.initGateway()
 	// 日志采样/限流丢弃计数(8.1 §3.3):logging.New 已构造进程采样器时才挂
 	// Collector,未初始化(如指标包单测)时注册表不多出空 family。

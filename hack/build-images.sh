@@ -6,6 +6,11 @@
 #   ./hack/build-images.sh manager agent    # 只构建指定组件
 #   TAG=v0.1.0 ./hack/build-images.sh
 #   ./hack/build-images.sh --prepare-only   # 只准备基础镜像，不构建（供 e2e 预检）
+#   ./hack/build-images.sh --print-fp       # 只打印当前源码指纹（不构建，供镜像新鲜度门禁）
+#
+# 每个镜像都打上 io.traincache.src-fp 标签，值是构建时源码指纹。热集群里
+# :dev 标签会被反复复用，容器只比"镜像在不在"就会拿旧二进制参与测量——
+# bench/scripts/ctrl_up.sh 用这个标签判定新鲜度。
 #
 # 构建器按 Dockerfile 里的官方短名解析基础镜像。本机镜像只有带镜像站前缀的
 # 名字时，构建器会改走远端拉取，慢网络下长时间停在拉取上。脚本先用
@@ -33,10 +38,12 @@ declare -A IMG=(
 )
 
 prepare_only=0
+print_fp=0
 components=()
 for arg in "$@"; do
   case "$arg" in
     --prepare-only) prepare_only=1 ;;
+    --print-fp) print_fp=1 ;;
     -*)
       echo "未知参数: $arg" >&2
       exit 2
@@ -48,6 +55,23 @@ for arg in "$@"; do
   esac
 done
 [[ ${#components[@]} -gt 0 ]] || components=(manager webhook scheduler agent gateway)
+
+# 源码指纹：进镜像的那批文件的内容哈希。五个组件共用同一个值——构建上下文
+# 三件套（go.work + agent/core/controller）本来就整份送进每个 Dockerfile，
+# 分组件算指纹只会让门禁漏判（改了 core 却只标 agent 过期）。
+src_fingerprint() {
+  find "$ROOT/go.work" "$ROOT/go.work.sum" \
+       "$ROOT/agent" "$ROOT/core" "$ROOT/controller" "$ROOT/gateway" \
+       -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \
+                  -o -name 'Dockerfile*' -o -name '*.Dockerfile' \) \
+       ! -name '*_test.go' -print0 2>/dev/null \
+    | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+}
+
+if [[ "$print_fp" == 1 ]]; then
+  printf '%s\n' "$(src_fingerprint)"
+  exit 0
+fi
 
 # 取 FROM 行引用的基础镜像，跳过阶段别名（如 FROM build）。
 base_refs() {
@@ -123,7 +147,7 @@ if [[ "$prepare_only" == 1 ]]; then
   exit 0
 fi
 
-# 与 e2e 一致：只把 go.work 与四个模块送进构建上下文，不带 .git/docs/bench。
+# 与 e2e 一致：只把 go.work 与五个模块送进构建上下文，不带 .git/docs/bench。
 stage="$(mktemp -d "${TMPDIR:-/tmp}/traincache-build.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 cp -a "$ROOT/go.work" "$ROOT/go.work.sum" "$ROOT/agent" "$ROOT/core" "$ROOT/controller" "$ROOT/gateway" "$stage/"
@@ -132,5 +156,6 @@ for comp in "${components[@]}"; do
   printf '==> 构建 %s: %s:%s\n' "$comp" "${IMG[$comp]}" "$TAG"
   docker build -f "${DF[$comp]}" \
     --build-arg VERSION="$TAG" \
+    --label "io.traincache.src-fp=$(src_fingerprint)" \
     -t "${IMG[$comp]}:$TAG" "$stage"
 done

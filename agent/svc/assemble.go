@@ -74,7 +74,7 @@ type Agent struct {
 	phase *phaseTracker
 	stall *stallAttributor
 
-	// sourceState 是网关降级状态机(10.1 §4.3);TRAINCACHE_GATEWAY_ENDPOINT 为空时为 nil
+	// sourceState 是网关降级状态机(9.1 §4.3);TRAINCACHE_GATEWAY_ENDPOINT 为空时为 nil
 	// (未启用网关,ObjectStore 即源站 store)。
 	sourceState *sourceState
 }
@@ -83,7 +83,7 @@ type Agent struct {
 // GET /<bucket>?location=,网关对外只需处理 GET 与 HEAD 对象请求。
 const gatewayRegion = "us-east-1"
 
-// gatewayMaxRetries 是网关客户端的 SDK 重试次数(10.1 §4.2/§6.5)。网关的 503
+// gatewayMaxRetries 是网关客户端的 SDK 重试次数(9.1 §4.2/§6.5)。网关的 503
 // (XTraincacheGatewayUnavailable / XTraincacheGatewaySlowDown)是控制信号:准入拒绝
 // 应快速回退直连、网关下线应快速降级,不允许 SDK 按默认 10 次指数退避放大重试。
 // minio-go v7.3.0 的该字段语义是「总尝试次数」,1 表示最多 1 次尝试(不重试),
@@ -93,7 +93,7 @@ const gatewayMaxRetries = 1
 // Assemble 构造并持有子模块实例(依赖方向 cmd → svc → 子模块 → core 单向无环,design §4):
 // cas → objectstore(D26 S3 兼容客户端)→ fetch → …(装配序见 assembleWith)。
 //
-// 网关接线(10.1 §4.3/§4.4):GatewayEndpoint 为空时与改动前完全一致,只构造源站 store;
+// 网关接线(9.1 §4.3/§4.4):GatewayEndpoint 为空时与改动前完全一致,只构造源站 store;
 // 非空时再构造网关 store 并包成 backendStore(Get 走选择器,其余方法直连源站)。
 func Assemble(cfg Config) (*Agent, error) {
 	store, err := objectstore.NewS3Store(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey,
@@ -105,7 +105,7 @@ func Assemble(cfg Config) (*Agent, error) {
 		return assembleWith(store, cfg)
 	}
 
-	// 网关与 Agent 共用源站凭证/桶(10.1 §1.4);到网关的 TLS 由 GatewaySecure 独立控制(D16)。
+	// 网关与 Agent 共用源站凭证/桶(9.1 §1.4);到网关的 TLS 由 GatewaySecure 独立控制(D16)。
 	gateway, err := objectstore.NewS3StoreWithOptions(cfg.GatewayEndpoint, cfg.ObjstoreAccessKey,
 		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.GatewaySecure,
 		objectstore.Options{Region: gatewayRegion, MaxRetries: gatewayMaxRetries})
@@ -237,18 +237,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		CacheCapacityBytes: cfg.CacheCapacityBytes,
 	})
 
-	// 统一注册 Store.Open 前置观察者(单槽 atomic.Pointer,必须合并两个回调):
-	// selfOpen.Mark(D49 自打开守卫) + evictor.OnStoreOpen(字节维度累计,内部 seenFPs 去重)。
-	// evictor.New 不再自动注册 SetOpenObserver,避免覆盖装配层的合并回调。
-	cs.SetOpenObserver(func(fp cas.Fingerprint) {
-		ag.selfOpen.Mark(fp)
-		ag.Evictor.OnStoreOpen(fp)
-	})
-	// Store.Put 后置观察者:evictor.OnStorePut(字节维度累计,直接用 Put 返回的准确 size,
-	// 与 OnStoreOpen 共享 seenFPs 去重表——Put 先于 Open,后续 Open 自动跳过)。
-	cs.SetPutObserver(func(fp cas.Fingerprint, size int64) {
-		ag.Evictor.OnStorePut(fp, size)
-	})
+	// Store.Open/Put 观察者注册(D49 自打开守卫 + §14 D58 字节维度累计;实现见 wiring.go,
+	// 抽成方法是为了让装配级测试覆盖同一处注册)。
+	ag.installStoreObservers(cs)
 
 	// 发现循环由 agentd 在 signal ctx 下起 goroutine 运行(M2);handler = M2 日志行 + 预取
 	// 接线(M3);订单通道状态由发现循环单写者聚合(D63)。

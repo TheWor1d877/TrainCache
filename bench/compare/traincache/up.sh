@@ -44,7 +44,7 @@ CHUNK_BYTES="${CHUNK_BYTES:-8388608}"
 N_TARS="${N_TARS:-$(cfg TRACK_B_N_TARS)}"   # 分片取自 track_b(256MiB/份),不是 D 轨 128MiB 份
 N_TARS="${N_TARS:-32}"                        # M 档全量(8GiB);run_bench 按档位覆盖
 # WarmupTask 预热块数:启动窗口口径=预热 1GiB 字节(=1GiB 缓存容量整档;
-# 对 M 档 8GiB 数据即"预热至多覆盖 1/8"的 9.0/D19 口径,与旧 64MiB×16 块同字节量)。
+# 对 M 档 8GiB 数据即"预热至多覆盖 1/8"的 D19 口径(见 docs/4.4 §1.9),与旧 64MiB×16 块同字节量)。
 # 块大小 8MiB 后 k = 1GiB / 8MiB = 128;块大小改档时按 字节量/CHUNK_BYTES 重算。
 # 0 = bench 冷启动哨兵:跳过 WarmupTask 创建与 gate,不把 0 写进 CRD 的 podDetails[].k。
 # 可用 TRAINCACHE_WARMUP_K 覆盖。
@@ -193,13 +193,14 @@ else
 fi
 
 # ---- 3. ordersrc.py ConfigMap(训练 Pod 用于写消费顺序 ring)----
+# 每次 up 都从源文件重新 apply:ordersrc.py 是代码不是数据,「已存在就跳过」会让集群里
+# 跑着上一版的写端(与静默复用旧镜像同类的陈旧缺陷),改完不生效还看不出来。
 ORDERSRC_SRC="$BENCH_ROOT/../agent/ordersrc/ordersrc.py"
-if resource_exists configmap traincache-ordersrc -n "$NS"; then
-  log_group "$GROUP" "configmap/traincache-ordersrc 已存在,跳过"
-elif [ -f "$ORDERSRC_SRC" ]; then
+if [ -f "$ORDERSRC_SRC" ]; then
   kubectl -n "$NS" create configmap traincache-ordersrc \
-    --from-file=ordersrc.py="$ORDERSRC_SRC"
-  log_group "$GROUP" "configmap/traincache-ordersrc 已创建"
+    --from-file=ordersrc.py="$ORDERSRC_SRC" \
+    --dry-run=client -o yaml | kubectl -n "$NS" apply -f -
+  log_group "$GROUP" "configmap/traincache-ordersrc 已从 $ORDERSRC_SRC 刷新"
 else
   log_group "$GROUP" "WARNING: $ORDERSRC_SRC 不存在,ordersrc ConfigMap 未创建" >&2
 fi
@@ -264,8 +265,9 @@ bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 6. WarmupTask CR(先删后建,不可原地更新)----
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
-# gate 绝对超时。全档统一 5m(单一 MinIO 出站 100mbit × fanout 2,
-# 2GiB 预热约需 172s,5m 留足余量;9.2 §7 撤销了旧的 7m 特例)。
+# gate 绝对超时。全档统一 10m:100mbit × fanout 2 预热 1GiB 实测 332–343s,
+# 原估的 172s 低估了 tc 限速下的实际吞吐,5m 会在半程判 Degraded 废掉整轮
+# (抬档的实测依据见 4.4 §C4 的门控参数行)。
 GATE_TMAX="${TRAINCACHE_GATE_TMAX:-10m}"
 WARM_SECONDS=0
 kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2>/dev/null || true

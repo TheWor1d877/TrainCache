@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B 轨生成器:合成 JPEG → webdataset 百 MB 级 tar 分片(旗舰数字的主力数据)。
+"""B 轨生成器:合成 JPEG → webdataset 百 MB 级 tar 分片(正式数字的主力数据)。
 
 合成纪律(零下载、真解码):
 - 随机像素图 + 真实 JPEG 编码(质量/分辨率参数化),解码成本真实;

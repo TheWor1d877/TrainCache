@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""M8 旗舰绘图脚本。
+"""实验出图脚本。
 
 读取 bench/results/compare/summary.csv 与 bench/results/experiments/ 下的
-metrics.csv,产出预注册(docs/9.2 §0~§8)定义的五张旗舰图:
+metrics.csv,产出预注册(docs/4.4 §2~§5)定义的六张图:
 
   fig1  启动阶段盈亏曲面(带宽 × 缓存比 × fanout → 启动 makespan 改善%)
-  fig2  全程 makespan 盈亏曲面(带宽 × 数据集 × epoch → 全程 makespan 差值)
+  fig2  全程 makespan 绝对值(带宽 × epoch,8 GiB 数据集,附计算与传输下界)
   fig3  阶段切换 stall 回落曲线(epoch × shuffle → 回落时间平均数)
   pareto1  启动收益 vs 重复预热字节(fanout 1/2/3)
-  pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat/lru/lfu,
+  pareto2  全程收益 vs 持续预取字节(lookahead 8/16/32 × 淘汰策略 heat,
            纵轴相对自身基线 lookahead=8+heat)
 
 五组对照(summary.csv)额外产出 4 张柱状对比图:
@@ -77,6 +77,11 @@ def _data_root() -> Path:
 DATA_ROOT = _data_root()
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
 
+# 只有这三个一级目录是七组对照的样本:scores 本轮 TrainCache 行、baselines 既有
+# 对照组行、compare 是旧的单文件产物。其余一级目录(figures/policy/quick/
+# track_d/summary)装的是曲面点、倾斜双 Job 与自检产物,不是对照样本。
+COMPARE_PARTITIONS = ("scores", "baselines", "compare")
+
 
 # ---------------------------------------------------------------------------
 # 数据读取
@@ -100,7 +105,7 @@ def _num(value, default=0.0):
 
 
 def adapt_summary_rows(rows: list[dict]) -> list[dict]:
-    """把 run_bench.py 的 summary.csv 行映射成五张图认的字段名。
+    """把 run_bench.py 的 summary.csv 行映射成六张图认的字段名。
 
     run_bench 写的是 rate/cache_ratio/startup_makespan/total_makespan/
     prefetch_fanout/dataset_bytes；图函数按 rate_mbit/cache_ratio/
@@ -159,7 +164,7 @@ def read_metrics_dir(root: Path) -> list[dict]:
 def read_recovery_runs(root: Path) -> list[dict]:
     """扫描 run_bench 的 runs/*/recovery.json,把每次切换事件摊成一行。
 
-    图三的样本单位是「一次阶段切换」:同一 run 在 epoch 1..N 各切一次,
+    fig3(switch-recovery)的样本单位是「一次阶段切换」:同一 run 在 epoch 1..N 各切一次,
     每次都有自己的回落时间。run.json 提供 cond/epochs/shuffle,recovery.json
     提供每个事件的 status 与 recovery_time_s。
     """
@@ -312,7 +317,7 @@ def plot_compare_all(rows: list[dict], out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# 图一:启动阶段盈亏曲面
+# 启动门控盈亏曲面(startup-surface / fig1)
 # ---------------------------------------------------------------------------
 def plot_fig1(metrics: list[dict], out_dir: Path):
     """启动 makespan 改善% = 100 × (自由调度 - 门控) / 自由调度。
@@ -372,7 +377,7 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
         ax.set_zlabel("启动改善 %")
         ax.set_title(f"fanout={fo}")
         fig.colorbar(surf, ax=ax, shrink=0.5)
-    fig.suptitle("图一:启动阶段盈亏曲面(门控 vs 自由调度)", fontsize=12)
+    fig.suptitle("启动门控盈亏曲面:门控 vs 自由调度(带宽 × 缓存比 × fanout)", fontsize=12)
     fig.tight_layout()
     fig.savefig(out_dir / "fig1_startup_surface.png", dpi=150)
     plt.close(fig)
@@ -380,69 +385,75 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# 图二:全程 makespan 盈亏曲面
+# 全程时长随带宽与 epoch(total-makespan / fig2)
 # ---------------------------------------------------------------------------
 def plot_fig2(metrics: list[dict], out_dir: Path):
-    """全程 makespan 差值 = TrainCache 平均数 - Fluid 平均数(负=更快)。
+    """全程 makespan 绝对值(s):X=epoch 数,每条线一档带宽。
 
-    X=带宽, Y=epoch 数, Z=差值(s)。数据集 2GiB/8GiB 分两个子图。
+    数据只有 8 GiB 数据集、traincache-cold(协议 §3.1);参考线两条:
+    计算下界 80 s/epoch,传输下界 = 读字节 ÷ 有效带宽。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     rates = [100, 300, 1000]
-    epochs = [1, 3, 10]
-    datasets = [2, 8]  # GiB
+    epochs = [1, 3, 6]
+    # 有效带宽 MB/s,取 docs/4.4 实验协议.md §7.4 的实测口径(100/300/1000 mbit 档)
+    eff_mbps = {100: 13.4, 300: 35.0, 1000: 61.0}
+    compute_s_per_epoch = 80.0
+    colors = {100: "#60a5fa", 300: "#10b981", 1000: "#f59e0b"}
 
-    fig2_rows = [r for r in metrics if r.get("cond", "").startswith("fig2-")]
+    fig2_rows = [r for r in metrics
+                 if r.get("cond", "").startswith("fig2-")
+                 and r.get("group") == "traincache"]
     if not fig2_rows:
         print("  fig2: 无数据,跳过")
         return
 
-    tc_grid = {}
-    fluid_grid = {}
+    grid = {}
+    dataset_bytes = 0.0
     for r in fig2_rows:
         try:
             rate = int(r.get("rate_mbit") or 0)
             ep = int(r.get("epochs") or 0)
-            ds = float(r.get("dataset_gb") or 0)
             fm = float(r.get("full_makespan_s"))
         except (TypeError, ValueError):
             continue
-        key = (rate, ep, ds)
-        if r.get("group") == "traincache":
-            tc_grid.setdefault(key, []).append(fm)
-        elif r.get("group") == "fluid":
-            fluid_grid.setdefault(key, []).append(fm)
+        grid.setdefault((rate, ep), []).append(fm)
+        dataset_bytes = max(dataset_bytes, _num(r.get("dataset_bytes")))
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), subplot_kw={"projection": "3d"})
-    for ax, ds in zip(axes, datasets):
-        X, Y, Z = [], [], []
-        for rate in rates:
-            for ep in epochs:
-                tc_med, _, _ = mean_ci(tc_grid.get((rate, ep, ds), []))
-                fl_med, _, _ = mean_ci(fluid_grid.get((rate, ep, ds), []))
-                diff = tc_med - fl_med if (tc_med and fl_med) else np.nan
-                X.append(rate)
-                Y.append(ep)
-                Z.append(diff)
-        Xa = np.array(X).reshape(3, 3)
-        Ya = np.array(Y).reshape(3, 3)
-        Za = np.array(Z).reshape(3, 3)
-        surf = ax.plot_surface(Xa, Ya, Za, cmap=cm.RdBu, alpha=0.85,
-                               edgecolor="gray", linewidth=0.3)
-        ax.set_xlabel("带宽 (mbit)")
-        ax.set_ylabel("epoch 数")
-        ax.set_zlabel("全程差值 (s)")
-        ax.set_title(f"数据集 {ds}GiB")
-        fig.colorbar(surf, ax=ax, shrink=0.5)
-    fig.suptitle("图二:全程 makespan 盈亏(TrainCache − Fluid,负=更快)", fontsize=12)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for rate in rates:
+        ys = []
+        for ep in epochs:
+            med, _, _ = mean_ci(grid.get((rate, ep), []))
+            ys.append(med if med else np.nan)
+        ax.plot(epochs, ys, marker="o", linewidth=1.8, color=colors[rate],
+                label=f"{rate} mbit")
+        if dataset_bytes:
+            ref = [dataset_bytes * ep * 1.0 / (eff_mbps[rate] * 1e6)
+                   for ep in epochs]
+            ax.plot(epochs, ref, linestyle="--", linewidth=1.0,
+                    color=colors[rate], alpha=0.45)
+
+    ax.plot(epochs, [compute_s_per_epoch * ep for ep in epochs],
+            linestyle=":", linewidth=1.2, color="black", alpha=0.6,
+            label="计算下界 (80 s/epoch)")
+
+    ax.set_xlabel("epoch 数")
+    ax.set_ylabel("全程 makespan (s)")
+    ax.set_title("全程 makespan(8 GiB,traincache-cold)")
+    ax.legend()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(alpha=0.3, linestyle="--")
+    ax.set_xticks(epochs)
     fig.tight_layout()
-    fig.savefig(out_dir / "fig2_total_surface.png", dpi=150)
+    fig.savefig(out_dir / "fig2_total_makespan.png", dpi=150)
     plt.close(fig)
-    print("  saved fig2_total_surface.png")
+    print("  saved fig2_total_makespan.png")
 
 
 # ---------------------------------------------------------------------------
-# 图三:阶段切换 stall 回落曲线
+# 阶段切换后的 stall 回落(switch-recovery / fig3)
 # ---------------------------------------------------------------------------
 def plot_fig3(metrics: list[dict], out_dir: Path):
     """回落时间平均数(epoch × shuffle)。三组 shuffle 三条线。"""
@@ -505,7 +516,7 @@ def plot_fig3(metrics: list[dict], out_dir: Path):
                     marker="o", capsize=3, label=sh, color=colors[sh], linewidth=1.5)
     ax.set_xlabel("epoch 数")
     ax.set_ylabel("回落时间 (s)")
-    ax.set_title("图三:阶段切换 stall 回落时间")
+    ax.set_title("阶段切换 stall 回落时间")
     ax.legend(title="shuffle")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -518,7 +529,7 @@ def plot_fig3(metrics: list[dict], out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Pareto 一:启动收益 vs 重复预热字节
+# 启动收益对启动预热字节(pareto-startup / pareto1)
 # ---------------------------------------------------------------------------
 def plot_pareto1(metrics: list[dict], out_dir: Path):
     """X=启动预取总字节(含 fanout 重复), Y=启动 makespan 改善%。"""
@@ -558,7 +569,7 @@ def plot_pareto1(metrics: list[dict], out_dir: Path):
                     textcoords="offset points", xytext=(8, 5), fontsize=9)
     ax.set_xlabel("启动预取字节 (GB)")
     ax.set_ylabel("启动 makespan 改善 (%)")
-    ax.set_title("Pareto 一:启动收益 vs 重复预热字节")
+    ax.set_title("启动收益 vs 重复预热字节")
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -570,7 +581,7 @@ def plot_pareto1(metrics: list[dict], out_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Pareto 二:全程收益 vs 持续预取字节
+# 全程收益对持续预取字节(pareto-sustained / pareto2)
 # ---------------------------------------------------------------------------
 def _prefetch_bytes(r):
     """持续预取总字节:优先 prefetch_bytes_run,退回 sustained_prefetch_bytes。"""
@@ -594,7 +605,7 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
         return
 
     lookaheads = [8, 16, 32]
-    policies = ["heat", "lru", "lfu"]
+    policies = ["heat"]
     markers = {"heat": "o", "lru": "s", "lfu": "^"}
     cmap = cm.viridis
     la_colors = {la: cmap(i / (len(lookaheads) - 1)) for i, la in enumerate(lookaheads)}
@@ -642,7 +653,7 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
 
     ax.set_xlabel("持续预取字节 (GB)")
     ax.set_ylabel("全程 makespan 相对自身基线改善 (%)")
-    ax.set_title("Pareto 二:全程收益 vs 持续预取字节(基线 lookahead=8+heat)")
+    ax.set_title("全程收益 vs 持续预取字节(基线 lookahead=8+heat)")
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -657,7 +668,7 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
 # 主入口
 # ---------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="M8 旗舰绘图")
+    ap = argparse.ArgumentParser(description="实验出图")
     ap.add_argument("--summary", type=Path, default=None,
                     help="五组对照 summary.csv;零参时自动扫描 RESULTS_DIR")
     ap.add_argument("--metrics-dir", type=Path, default=None,
@@ -689,14 +700,12 @@ def main():
         if not path.is_file():
             print(f"[compare] {path} 不存在,跳过")
             continue
-        # quick 是跑分速览,不是对照样本;混进来会让 traincache 两态重复计权。
-        if auto and "quick" in path.parts:
-            print(f"[compare] 跳过 quick 产物 {path.parent}")
-            continue
-        # m8 的图系列产物(fig1-*/fig2-*/fig3-*/pareto*)不是五组对照,
-        # 由下面的曲面/Pareto 函数单独消费。
-        if auto and path.parent.name.startswith(
-                ("fig1-", "fig2-", "fig3-", "pareto1-", "pareto2-")):
+        # 自动扫描时只收对照分区:scores/ 是本轮 TrainCache 行,baselines/ 是既有
+        # 对照组行(4.3 §5)。figures/ 与 policy/ 下的点目录名带 fig*/pareto2-*
+        # 前缀由下面的曲面函数单独消费,而淘汰矩阵的行名是 policy-<策略>-rNN-*;
+        # 按前缀黑名单挡不住它,会把 C 轨样本混进七组对照柱状图。
+        if auto and path.relative_to(RESULTS_DIR).parts[0] not in COMPARE_PARTITIONS:
+            print(f"[compare] 跳过非对照分区 {path.parent}")
             continue
         print(f"[compare] 读取 {path}")
         rows = read_summary(path)
@@ -708,7 +717,7 @@ def main():
     else:
         print("[compare] 没有可读的 summary.csv,跳过五组对照图")
 
-    # 旗舰图(数据来自各结果目录下的 metrics.csv)
+    # 六张图(数据来自各结果目录下的 metrics.csv)
     metrics = []
     seen_sources = set()
     # 图系列产物:每个 COND 一份 summary.csv,cond 列带 fig*/pareto* 前缀
@@ -730,7 +739,7 @@ def main():
                 continue
             seen_sources.add(source)
             metrics.extend(adapt_summary_rows([row]))
-    # 图三的回落时间不在 metrics.csv,来自 runs/*/recovery.json
+    # stall 回落时间不在 metrics.csv,来自 runs/*/recovery.json
     for directory in metrics_dirs:
         for row in read_recovery_runs(directory):
             source = row.get("_source")

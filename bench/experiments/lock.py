@@ -72,13 +72,13 @@ def _docker_image_digest(image_ref: str) -> str | None:
         return digests[0]
     # 本地 build 的镜像没有 RepoDigests。此处绝不能回退去取 Id:Id 是 docker 的
     # config digest,与 `repo:tag@sha256:` 语义要求的 manifest digest 是两个值
-    # (9.2 §8.1 核出)。返回 None 让调用方保留 COND 里记录的真值。
+    # (4.4 §6.1 核出)。返回 None 让调用方保留 COND 里记录的真值。
     return None
 
 
 def _docker_images(cond: dict | None) -> dict[str, str | None]:
     """各镜像的在役标识:主值取 COND `environment.images`(现取自集群
-    containerd 的 manifest digest,见 9.2 §8.1),另附 docker 侧的 RepoDigests
+    containerd 的 manifest digest,见 4.4 §6.1),另附 docker 侧的 RepoDigests
     供交叉核对——两者对不上是预期的(本地 build 的镜像没有 RepoDigests;
     拉下来的镜像 containerd 存的是 kind load 后本地重算的摘要)。"""
     images_cfg = {}
@@ -169,7 +169,7 @@ def snapshot() -> dict:
     - docker_repo_digests: docker 侧 RepoDigests,仅交叉核对用
     - tc: 当前 tc 档位(从 COND 记录)
     - seed: 随机种子(从 COND 记录)
-    - chunk_size_bytes: 实验块大小(从 COND 记录,M9 9.2 补)
+    - chunk_size_bytes: 实验块大小(从 COND 记录)
     - dataset_name: TrainCache 快照名(环境变量 DATASET_NAME)
     - git_commit: git rev-parse HEAD
     - collected_at: 采集时刻(RFC3339)

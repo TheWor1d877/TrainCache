@@ -6,13 +6,13 @@ fluid-warm / traincache-cold / traincache-warm)共用一份 trace.json,保证消
 (分片顺序、seed、每步样本数)逐位一致,否则 makespan 与 stall 不可比。
 
 轨迹语义与 bench/scripts/bench_track_d.py 的 epoch_perm()/stage_of() 逐字对齐
-(docs/9.2 §4.1、§C2.4):
+(docs/4.4 §4.1、§C2.4):
   * fixed:     所有 epoch 用同一个 seed 生成的分片置换;
   * per-epoch: 每个 epoch 用 seed+epoch 生成置换(默认);
   * curriculum:全局置换 P=Random(seed).permutation(n),stage 取嵌套前缀
                P[:ceil(n*fraction)],stage 内顺序固定;stage 归属按 equal-thirds。
 
-口径(docs/9.2 §1.8、docs/4 §2.2,与 run_bench.py 和 D 轨统一):
+口径(docs/4.4 §1.8、docs/4.1 §1,与 run_bench.py 和 D 轨统一):
   * 数据量: 2GiB 级、8MiB 块(D20)、steps_per_epoch=400、batch=32;
   * B 轨 MinIO 分片 ~256MiB/份、images_per_tar=1600 → 每 epoch 恰 400×32/1600=8
     次整片读取,即 S 档(n_tars=8)每 epoch 恰好一轮全量消费;

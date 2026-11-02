@@ -17,9 +17,13 @@ TRACK_A_DIR = DATA_DIR / "track_a" / "files"
 TRACK_B_DIR = DATA_DIR / "track_b" / "tars"
 TRACK_C_DIR = DATA_DIR / "track_c"
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
+# 结果层的分区目录，名字只描述装的是什么，不携带里程碑编号与轮次后缀（docs/4.1 §4）。
+SCORES_RESULTS_DIR = RESULTS_DIR / "scores"      # 五组对照跑分，按容量/带宽格分目录
+BASELINE_RESULTS_DIR = RESULTS_DIR / "baselines" # 对照组既有跑分，只读，汇总层按组态补入
+FIGURES_RESULTS_DIR = RESULTS_DIR / "figures"    # fig1/fig2/fig3/pareto1 逐点产物
+POLICY_RESULTS_DIR = RESULTS_DIR / "policy"      # policy 与 pareto2 族
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
 COMPARE_LOGS_DIR = DATA_ROOT / "bench" / "compare" / "logs"
-PERF_RESULTS_DIR = DATA_ROOT / "bench" / "perf_results"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"
 
 # ---- kind 集群 ----
@@ -39,7 +43,7 @@ TRACK_A_N_FILES = 1_000_000        # 100 万个
 TRACK_A_FILE_KB = 4
 TRACK_A_SUBDIRS = 100              # 每子目录 1 万个文件
 
-# B 轨:真实分片主臂(旗舰数字以此为准)
+# B 轨:真实分片主臂(正式数字以此为准)
 TRACK_B_N_TARS = 32                # 32 × 256MB ≈ 8GB
 TRACK_B_IMGS_PER_TAR = 1600        # 1600 × ~160KB ≈ 256MB/tar
 TRACK_B_IMG_SIZE = 512

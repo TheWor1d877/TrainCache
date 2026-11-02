@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
 
-七组态各跑 N 次（次数按 9.1 D19/D32 分档：S=3（@100 与 @1000 各 3 次）
+七组态各跑 N 次（次数按 4.5 D19/D32 分档：S=3（@100 与 @1000 各 3 次）
 / M=3 / L=1 探点，--reps 可显式覆盖；GROUPS 是五个受试者展开的七个组态），
 收集 makespan / stall / 命中率 / 预热时长 / 三笔字节成本，汇总到 summary.csv。
 
@@ -36,7 +36,7 @@
 6.15 stall_ratio 改造（2026-10-24）：
   旧版 measure 是串行"读整片 tar → matmul"，读比算慢两个数量级，
   stall_ratio = wait_s/step_s 恒≈0.98，没有判别力——旧串行版本产物的
-  stall_ratio 一律作废（docs/4 §10），需按本口径重跑。
+  stall_ratio 一律作废（docs/4.1 §7），需按本口径重跑。
   新版用 COMPUTE_MS=200ms 控制每步算力，读与计算并行（后台 reader 线程
   模拟 DataLoader 异步预取，把接下来若干分片读进内存队列，主循环从队头
   取数据 + 做固定算力）：预取有效（热缓存/预取跟上）→ stall_ratio 趋 0；
@@ -46,7 +46,7 @@
 
 6.16 命中率对账（D25）：
   traincache 组旧口径"块在磁盘存在即 hit"虚高（agent 运行期悄悄回源补块，
-  测量体不知道），已作废。主口径改为训练侧 open-time（9.2 §1.4）：
+  测量体不知道），已作废。主口径改为训练侧 open-time（4.4 §1.4）：
   打开块时本地没有即算未命中，hit_rate = (总读字节 − demand_miss 字节) / 总读字节；
   agent 的 traincache_fetch_bytes_total run 窗口增量单独记 source_saving_ratio
   = (总读字节 − 回源字节) / 总读字节，衡量"省了多少源站流量"，与命中率分开。
@@ -57,7 +57,7 @@
   字节的模型近似，产物 hit_rate_basis 列显式标注近似性。
   summary 产物补三笔字节成本列：启动预热×fanout、持续预取、切换重预取（D5）。
 
-9.2 口径重跑（2026-10-28）：
+4.4 口径重跑（2026-10-28）：
   ① 每步算力改墙钟：compute_work() 循环 matmul 直到实测 >= COMPUTE_MS，
      不再用固定重复次数（不同 Pod 实测 148–396ms，组间差异被算力噪声吃掉）；
      calibrate_compute_reps() 只留作估算值打印。
@@ -110,14 +110,14 @@ D30/D32 接线（2026-10-25）：
                          @1000 各 3 次）、
                          M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点）
   N_TARS                 分片数（缺省按档位：S=8、M=32、L=128；
-                         S 档 8×256MiB≈2GiB，docs/4 §3 对照口径）
+                         S 档 8×256MiB≈2GiB，docs/4.1 §3 对照口径）
   EPOCHS/STEPS_PER_EPOCH/BATCH/IMAGES_PER_TAR/SEED/SHUFFLE
                          统一轨迹参数（默认 3/400/32/1600/20261015/per-epoch，
                          与 bench/config.py D 轨语义对齐：一个 epoch 把全量
                          数据按轨迹顺序恰好过一遍）
-  CHUNK_SIZE             实验块大小，默认 8388608（8MiB，9.1 D20；
+  CHUNK_SIZE             实验块大小，默认 8388608（8MiB，4.5 D20；
                          生产默认 64MiB 不变）
-  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（9.1 D41；
+  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（4.5 D41；
                          MinIO 内该快照由 trainpublish -chunk-size 8388608
                          发布属后续动作，本脚本只按新名引用）
   TRAINCACHE_CACHE_CAPACITY_BYTES  统一缓存容量，默认 1GiB
@@ -125,7 +125,7 @@ D30/D32 接线（2026-10-25）：
                          缓存容量/块大小（1GiB/8MiB=128，D20 重标度）。
                          cold 组用 0 作 bench 哨兵，跳过 WarmupTask；省略 k
                          时由 Controller 自动计算，不属于 bench 口径
-  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4 §3；D21 对照三档统一 16）。
+  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4.1 §3；D21 对照三档统一 16）。
                          agent 侧 lookahead 三档统一 16 块（D21）：8MiB 下
                          窗口 16×8MiB=128MiB≈缓存 1/8，无退化，不需重标度。
   COMPUTE_MS/READ_WORKERS/READ_QUEUE_DEPTH/READ_TIMEOUT_S
@@ -138,6 +138,7 @@ import argparse
 import ast
 import contextlib
 import csv
+import inspect
 import io
 import json
 import os
@@ -207,7 +208,7 @@ MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "bench-b")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "traincache")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "traincache-probe")
 
-# ---- 容量档位（9.1 D19/D32：S=2GiB数据/1GiB缓存×3、M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点；
+# ---- 容量档位（4.5 D19/D32：S=2GiB数据/1GiB缓存×3、M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点；
 #      正式实验各格统一 3 次，L 档 1 次探点）
 # 取值口径由 bench/experiments/cond.py 的 CAPACITY_TIER_* 常量单点定义 ----
 TIER_PRESETS = {
@@ -215,7 +216,7 @@ TIER_PRESETS = {
         "epochs": CAPACITY_TIER_EPOCHS[t], "dataset_bytes": tier_dataset_bytes(t)}
     for t in ("S", "M", "L")
 }
-# L 档 1 次低于 3 次硬纪律：产物标 exploratory，不进正式表（D19/9.0，单点取 cond.py）
+# L 档 1 次低于 3 次硬纪律：产物标 exploratory，不进正式表（D19，口径见 docs/4.4 §1.9；单点取 cond.py）
 TIER_EXPLORATORY = set(EXPLORATORY_TIERS)
 TIER = os.environ.get("CAPACITY_RATIO", "S").strip().upper() or "S"
 if TIER not in TIER_PRESETS:
@@ -253,14 +254,14 @@ WARMUP_K = int(os.environ.get("TRAINCACHE_WARMUP_K",
 # 16×8MiB=128MiB≈缓存 1/8，无退化）；旧默认 8 与 D21 不符，改为 16。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # Agent 侧持续预取窗口。pareto2 的自变量是它，训练侧消费窗口 PREFETCH_K
-# 保持 16 不动（docs/4 §3：两个旋钮）。缺省跟随 PREFETCH_K。
+# 保持 16 不动（docs/4.1 §3：两个旋钮）。缺省跟随 PREFETCH_K。
 AGENT_PREFETCH_K = int(os.environ.get(
     "TRAINCACHE_PREFETCH_LOOKAHEAD", str(PREFETCH_K)))
 # 预热节点数(D26):对照链路固定 2,scheduler 按就绪度选落点;s3-access 节点数只作上限
 PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "2"))
 PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
-# 图一/图三的自变量：门控开关与数据源。gated 是默认形态；free 去掉
-# SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（9.2 §2.1）。
+# fig1/fig3 的自变量：门控开关与数据源。gated 是默认形态；free 去掉
+# SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（4.4 §2.1）。
 GATE_MODE = os.environ.get("TRAINCACHE_GATE_MODE", "gated").strip().lower()
 DATA_SOURCE = os.environ.get("TRAINCACHE_DATA_SOURCE", "minio").strip().lower()
 # 网关开关(D23)：只有 "1" 打开;其余取值（含空串/0/true）一律按无网关处理，
@@ -304,6 +305,9 @@ SWITCH_WINDOW_S = float(os.environ.get("COMPARE_SWITCH_WINDOW_S", "60"))
 # 单次可能超过周期，实际间隔以产物 sample_max_gap_s 为准。
 SAMPLE_INTERVAL_S = float(os.environ.get("COMPARE_SAMPLE_INTERVAL_S", "5"))
 SAMPLE_JOIN_TIMEOUT_S = float(os.environ.get("COMPARE_SAMPLE_JOIN_TIMEOUT_S", "30"))
+# 4.4 §1.7 淘汰证据的判定余量：目录峰值超过容量这个倍数、且 run 窗口淘汰增量
+# 为 0 时才作废。余量给采样间隔内的增长；预取在途的 tmp-* 不在目录峰值里。
+EVICT_GUARD_MARGIN = 1.05
 AGENT_NS = "traincache"
 AGENT_LABEL = "app=traincache-agentd"
 AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/8.3：TRAINCACHE_METRICS_ADDR=":9411"）
@@ -313,9 +317,31 @@ AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
 AGENTD_CLEAN_TIMEOUT_S = 60  # 等 degraded=0 且 fetch 计数停增
 
 POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
+# 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、逐块 0.5s 轮询与 A/B 抢带宽。
+TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
+
+
+def pod_timeout_s() -> int:
+    """等测量 Pod 结束的闸门（秒）。
+
+    倾斜双 Job 的墙钟由字节地板决定：Job B 每 epoch 全量扫一遍，缓存只装得下
+    1/ratio 的数据，所以每个 epoch 都要把 `dataset_bytes` 重新搬一次。@100 mbit、
+    3 epoch × 8 GiB 的地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run
+    截成 `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
+    其余组态的读量由算力下界压着，沿用 `POD_TIMEOUT`；显式给过 `POD_TIMEOUT`
+    时以显式值为准（冒烟场景）。
+    """
+    explicit = os.environ.get("POD_TIMEOUT")
+    if explicit or not TILT:
+        return int(explicit) if explicit else POD_TIMEOUT
+    mbit = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
+    if not mbit:
+        return POD_TIMEOUT
+    floor_s = (EPOCHS * N_TARS * SHARD_SIZE_MB * 1024 * 1024) / (int(mbit.group(1)) * 1e6 / 8)
+    return int(floor_s * TILT_TIMEOUT_HEADROOM)
 
 # 命中率口径标注（D25，产物列 hit_rate_basis 显式可见）
-BASIS_TC_OPEN = "open_time_demand_miss_bytes(9.2 §1.4:打开时不在本地即未命中)"
+BASIS_TC_OPEN = "open_time_demand_miss_bytes(4.4 §1.4:打开时不在本地即未命中)"
 BASIS_TC_SAVING = "origin_saving(1-agent_fetch_bytes/训练侧读字节,D25对账)"
 BASIS_TC_UNAVAILABLE = "agent_fetch_unavailable(旧磁盘存在性口径已作废,本轮不报)"
 BASIS_DIRECT = "exact_all_miss(直读全回源)"
@@ -402,10 +428,13 @@ KIND_WORKER_NODES = [n for n in os.environ.get(
 
 
 # 冷态要清的节点缓存目录：juicefs / fluid / traincache 各自的 hostPath。
+# 节点上的 traincache 块缓存目录（hostPath）；淘汰证据的目录峰值也按它算。
+NODE_BLOCKS_DIR = "/var/cache/traincache/blocks"
+
 _CACHE_DIRS = [
     "/var/cache/jfs",                    # juicefs 组 hostPath 缓存
     "/tmp/juicefs-cache",                # fluid 组 JuiceFSRuntime tieredstore
-    "/var/cache/traincache/blocks",      # traincache 块缓存
+    NODE_BLOCKS_DIR,                     # traincache 块缓存
     "/var/cache/traincache/quarantine",  # traincache 隔离块
 ]
 
@@ -753,7 +782,7 @@ def group_up(group):
     """起组，并回收 up.sh 回传的两个装置事实：预热时长与 JuiceFS 挂载节点。
 
     JFS_MOUNT_NODE：CE 单机缓存只落在 mount Pod 所在节点，测量 Pod 必须共置，
-    否则 warm 组暖好的块在另一台节点读不到（见 docs/4 §7 第 16 条）。
+    否则 warm 组暖好的块在另一台节点读不到（见 docs/4.2 §4 的 juicefs 共置一条）。
     """
     global JFS_MOUNT_NODE
     JFS_MOUNT_NODE = ""
@@ -778,7 +807,7 @@ def group_up(group):
         env["FLUID_CACHE_GI"] = str(max(1, CACHE_BYTES >> 30))
         env["FLUID_PREHEAT"] = "1" if group == "fluid-warm" else "0"
     if group.startswith("juicefs"):
-        env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/4 §3)
+        env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/4.1 §3)
         # juicefs-warm:up.sh 里自动做 juicefs warmup;juicefs-cold:跳过
         env["JFS_WARMUP"] = "1" if group == "juicefs-warm" else "0"
     if group.startswith("traincache"):
@@ -899,10 +928,10 @@ peak_resident_bytes = 0
 queue_timeouts = 0
 read_errors = 0
 measure_void = False
-# 快照覆盖校验（9.2）：epoch_occ 里出现但 snapshot manifest 里没有的分片名。
+# 快照覆盖校验（4.4）：epoch_occ 里出现但 snapshot manifest 里没有的分片名。
 # 非空时不能当 0 字节静默读，本轮直接作废（见主循环前的检查）。
 snapshot_missing = False
-# 分阶段字节账（9.2）：read_shard 按 phase 累计读到的字节；
+# 分阶段字节账（4.4）：read_shard 按 phase 累计读到的字节；
 # 回源分支（块不存在、走 HTTP 兜底）另计 origin 字节。
 read_bytes_phase = {"startup": 0, "steady": 0, "switch": 0}
 demand_miss_phase = {"startup": 0, "steady": 0, "switch": 0}
@@ -1091,18 +1120,22 @@ def _hook_read_miss(name, chunk_idx):
     _hook_send({"type": "read_miss", "path": name, "chunk": int(chunk_idx),
                 "reason": "absent"})
 
-# Heartbeat:每 10s 重写当前 epoch 的订单(内容相同,ordersource 按字节去重不推送,
-# 但 write_seq 推进避免 collector 因 ring 停滞 30s 降级到 inotify 兜底)。
+# Heartbeat:每 10s 同代际续写当前 epoch 的订单。推进 write_seq 避免 collector 因 ring
+# 停滞 30s 降级到 inotify 兜底(D57);续写必须带 --same-generation——载荷字节相同本不会
+# 推送,但代际一变读端就按 design §7.4 重放订单,等于每 10s 一次虚假 sidecar 重启。
 _hb_stop = threading.Event()
 _hb_epoch = [0]
+_hb_lock = threading.Lock()
 
 def _heartbeat_loop():
     while not _hb_stop.is_set():
+        _hb_stop.wait(10)
+        if _hb_stop.is_set():
+            break
         try:
-            _write_order(str(_hb_epoch[0]))
+            _write_order(str(_hb_epoch[0]), heartbeat=True)
         except Exception:
             pass
-        _hb_stop.wait(10)
 
 def _load_snapshot():
     global _chunk_map
@@ -1122,10 +1155,11 @@ def _load_snapshot():
     _chunk_map = m
     return m
 
-def _write_order(stage_id=""):
+def _write_order(stage_id="", heartbeat=False):
     """写入当前 epoch 的消费顺序到 ring 文件,触发 agentd 预取。
     6.12:顺序取 trace.json 该 epoch 的分片消费序列(perm 按 repeats 循环),
-    不再是线性序;每个 epoch 调用一次(stage_id 不同),体现阶段切换重预取。"""
+    不再是线性序;每个 epoch 调用一次(stage_id 不同),体现阶段切换重预取。
+    heartbeat=True 是保活续写:同一份载荷、同一代际只推进 write_seq(D57)。"""
     chunks = []
     seen = set()
     snap = _load_snapshot()
@@ -1136,16 +1170,23 @@ def _write_order(stage_id=""):
         seen.add(name)
         for chunk_idx, fp, size in snap.get(name, []):
             chunks.append(f"{name}:{chunk_idx}")
+    cmd = [
+        "python3", "/app/ordersrc.py",
+        "--pod-uid", POD_UID,
+        "--dataset", DATASET,
+        "--chunks", ",".join(chunks),
+        "--prefetch-chunks", str(PREFETCH_K),
+        "--stage-id", stage_id,
+    ]
+    if heartbeat:
+        cmd.append("--same-generation")
     try:
-        subprocess.run([
-            "python3", "/app/ordersrc.py",
-            "--pod-uid", POD_UID,
-            "--dataset", DATASET,
-            "--chunks", ",".join(chunks),
-            "--prefetch-chunks", str(PREFETCH_K),
-            "--stage-id", stage_id,
-        ], check=True, capture_output=True, timeout=30)
-        print(f"[ordersrc] stage={stage_id} wrote {len(chunks)} chunks, K={PREFETCH_K}", flush=True)
+        # 心跳线程与 epoch 主循环串行写同一 ring:并发时两个写端会各自算出同一个 seq,
+        # 头 commit 谁后写谁生效,可能把订单盖成心跳的旧载荷。
+        with _hb_lock:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+        print(f"[ordersrc] stage={stage_id} {'hb' if heartbeat else 'new-gen'} "
+              f"wrote {len(chunks)} chunks, K={PREFETCH_K}", flush=True)
     except Exception as e:
         print(f"[ordersrc] WARNING: write order failed: {e}", flush=True)
 
@@ -1153,9 +1194,9 @@ def read_shard(shard, phase):
     """traincache 读取路径：逐块读本地缓存，缺块等待 agentd 预取，超时兜底回源。
     返回本片字节数（累加各块长度，不把整片拼起来留在内存里）。
     注意：hits/misses 只是块级诊断(block_hit_rate_diag 列)——"块在磁盘存在即
-    hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(9.1 D25)；
+    hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(4.5 D25)；
     正式命中率由 runner 侧用 open-time 的 demand_miss 字节账计算。
-    分阶段字节（9.2）：每个块都计入 read_bytes_phase[phase]；块不存在、走
+    分阶段字节（4.4）：每个块都计入 read_bytes_phase[phase]；块不存在、走
     等待/回源分支时另计入 demand_miss_phase[phase]（按块 size 计）。"""
     global hits, misses
     name = "shard-" + str(shard).zfill(5) + ".tar"
@@ -1201,6 +1242,27 @@ def read_shard(shard, phase):
     return "\n"
 
 
+# C 轨挤占计数的状态机源码。测量脚本与 run_bench.py --selftest 共用这一份定义：
+# 模板里拼进 Pod 内执行，自检里 exec 后离线验语义。口径见 docs/4.4 实验协议 §C3。
+HOT_EDGE_DEF_SRC = '''
+def hot_eviction_edges(state, fps, present, count):
+    """按块指纹记热集在位状态,返回本次观测到的 present→absent 转换次数。
+
+    state 是 {块指纹: 上次观测是否在位};fps 是该分片的全部块指纹;
+    present 是本次观测到在该分片里在位的指纹集合。首次观测到不在(冷块)
+    不计,连续多次不在只计一次,块被读回后再次消失算下一次转换。
+    count=False 用在 A 正在读的那片:它的缺失已记进 misses,不重复计数。
+    """
+    edges = 0
+    for fp in fps:
+        now = fp in present
+        if count and state.get(fp) and not now:
+            edges += 1
+        state[fp] = now
+    return edges
+'''
+
+
 def build_measure_loop():
     """主循环段：后台读线程预取 + 主循环取数算力 + 四个指标统计。"""
     return r'''
@@ -1214,8 +1276,8 @@ READ_TIMEOUT_S = float(os.environ.get("READ_TIMEOUT_S", "300"))   # 队头等待
 # 真实加载器会持有的字节数(≈(深度+线程数+1)×分片大小)改用纯计数
 # logical_resident_bytes 跟踪（不真持有 bytes），峰值见 RESULT 的
 # peak_resident_bytes。旧串行版产物的 stall_ratio 口径作废
-# （docs/4 §10）
-# 口径(9.2)：
+# （docs/4.1 §7）
+# 口径(4.4)：
 #   wait_s = 主循环从队列取"已读好分片"的阻塞等待(真 stall);
 #   work_s = 墙钟算力(compute_work 循环 matmul 直到实测 >= COMPUTE_MS，取实测长度);
 #   stall 样本 = 每步 wait_s / work_s，聚合取 mean 与 p90（不再用 Σwait/Σstep）。
@@ -1261,11 +1323,13 @@ def compute_work():
         if time.perf_counter() - t >= budget:
             break
     return time.perf_counter() - t
-
+''' + HOT_EDGE_DEF_SRC + r'''
 # ================= 倾斜双 Job 模式(M5, TRAINCACHE_TILT=1) =================
 # Job A 循环读前 10% 热分片,Job B 顺序扫全量。两者同进程并发,共用一个
 # agentd 与节点 hostPath 缓存 —— B 的扫描会把 A 的热块挤出缓存。
 # 记录:A 的块级命中率、A 的等待占比、B 挤占热块的次数。
+# A 的步预算是常量(TILT_A_STEPS,默认 epochs×steps),实际完成步数 a_steps
+# 是响应变量;挤占按热块 present→absent 的转换计数,口径见 4.4 §C3。
 if os.environ.get("TRAINCACHE_TILT", "") == "1":
     import random
     if not group.startswith("traincache"):
@@ -1274,13 +1338,15 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
     _hot = list(range(_n_hot))
     _full = list(range(n_tars))
     _stagger_s = float(os.environ.get("TILT_STAGGER_S", "5"))
-    _max_a_cycles = int(os.environ.get("TILT_MAX_A_CYCLES", "100000"))
+    _a_steps_budget = int(os.environ.get("TILT_A_STEPS", str(epochs * steps)))
     _stop = threading.Event()
     _lock = threading.Lock()
     _a = {"hits": 0, "misses": 0, "evict": 0, "wait": 0.0, "step": 0.0,
           "reads": 0, "samples": []}
     _b = {"reads": 0}
-    _hot_present = set()
+    _hot_state = {}
+    _hot_fps = {s: [fp for _ci, fp, _sz in _load_snapshot().get(
+                      "shard-" + str(s).zfill(5) + ".tar", [])] for s in _hot}
     _b_done = threading.Event()
 
     def _chunk_count(shard):
@@ -1298,19 +1364,27 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
     def _job_a():
         global measure_void, queue_timeouts, read_errors, read_bytes_total, read_done
         rng = random.Random(int(os.environ.get("TILT_SEED", "20261015")))
-        cycle = 0
-        while not _stop.is_set() and cycle < _max_a_cycles:
+        done = 0
+        while not _stop.is_set() and done < _a_steps_budget:
             order = list(_hot)
             rng.shuffle(order)
             for shard in order:
-                if _stop.is_set():
+                if _stop.is_set() or done >= _a_steps_budget:
                     return
                 t0 = time.perf_counter()
                 present = _present_fps(shard)
                 total_chunks = _chunk_count(shard)
+                # 其余热片每步都观测:块在 A 没读它的时候消失才记挤占;当前片自身
+                # 只更新状态,它的缺失已进 misses(同一件事不记两处,4.4 §C3)。
+                _ev = 0
+                for _other in _hot:
+                    if _other != shard:
+                        _ev += hot_eviction_edges(
+                            _hot_state, _hot_fps[_other],
+                            _present_fps(_other), True)
                 with _lock:
-                    _a["evict"] += len(_hot_present - present)
-                    _hot_present.update(present)
+                    hot_eviction_edges(_hot_state, _hot_fps[shard], present, False)
+                    _a["evict"] += _ev
                     _a["hits"] += len(present)
                     _a["misses"] += max(0, total_chunks - len(present))
                 try:
@@ -1326,17 +1400,30 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                         read_bytes_total += nb
                         read_done += 1
                 wait_s = time.perf_counter() - t0
+                # 读后按在位实况记状态:这样下一步非读取期观测到它消失才算被挤掉。
+                _post = _present_fps(shard)
+                with _lock:
+                    hot_eviction_edges(_hot_state, _hot_fps[shard], _post, False)
                 work_s = compute_work()
                 step_s = wait_s + work_s
                 with _lock:
                     _a["reads"] += 1
+                    _a_n = _a["reads"]
                     _a["wait"] += wait_s
                     _a["step"] += step_s
                     if work_s > 0:
                         _a["samples"].append(wait_s / step_s)
+                done += 1
+                print("[STEP-A] " + json.dumps({
+                    "step": _a_n,
+                    "wait_s": round(wait_s, 6),
+                    "step_s": round(step_s, 6),
+                    "shard": "shard-" + str(shard).zfill(5) + ".tar",
+                    "phase": "steady",
+                    "hit": bool(total_chunks and len(present) == total_chunks)},
+                    ensure_ascii=False), flush=True)
                 if t_first_step is None:
                     _set_first_step()
-            cycle += 1
 
     def _set_first_step():
         global t_first_step
@@ -1356,6 +1443,7 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                   " at_step=" + str(ep * steps) + " kind=" +
                   ("epoch" if ep > 0 else "start"), flush=True)
             for shard in _full:
+                _b_t0 = time.perf_counter()
                 try:
                     nb = read_shard(shard, "steady")
                 except Exception as e:
@@ -1368,8 +1456,17 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                     with _lock:
                         read_bytes_total += nb
                         read_done += 1
+                _b_wait = time.perf_counter() - _b_t0
                 with _lock:
                     _b["reads"] += 1
+                    _b_n = _b["reads"]
+                # B 只做背景扫描，不建模算力，所以 step_s 就是 wait_s（4.4 §C3）。
+                print("[STEP-B] " + json.dumps({
+                    "step": _b_n,
+                    "wait_s": round(_b_wait, 6),
+                    "step_s": round(_b_wait, 6),
+                    "shard": "shard-" + str(shard).zfill(5) + ".tar",
+                    "phase": "scan"}, ensure_ascii=False), flush=True)
                 _set_first_step()
                 t_last_step = now_epoch()
         _b_done.set()
@@ -1420,6 +1517,7 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
         "a_steps=" + str(_a["reads"]),
         "b_steps=" + str(_b["reads"]),
         "tilt_hot_shards=" + str(_n_hot),
+        "tilt_a_budget=" + str(_a_steps_budget),
     ]
     for _p in ("startup", "steady", "switch"):
         _tilt_parts.append("read_bytes_" + _p + "=" + str(read_bytes_phase.get(_p, 0)))
@@ -1452,7 +1550,7 @@ def read_pipeline(shards, phase_seq, q, cursor, cursor_lock):
             add_resident(nbytes)
             q.put((shard, nbytes, None, time.perf_counter() - r0))
 
-# 分阶段判定(9.2)：一个 epoch 的前 k_shards 个分片是"预取窗口内的头段"——
+# 分阶段判定(4.4)：一个 epoch 的前 k_shards 个分片是"预取窗口内的头段"——
 # epoch0 记 startup（启动预热/首轮填充），epoch>0 记 switch（阶段切换重预取），
 # 其余记 steady（持续预取）。窗口按块数折算成分片数：
 #   chunks_per_shard = SHARD_SIZE_MB*1024*1024 // CHUNK_SIZE
@@ -1463,7 +1561,7 @@ _PREFETCH_K_EFF = int(os.environ.get("TRAINCACHE_PREFETCH_K", "''' + str(PREFETC
 _chunks_per_shard = max(1, _SHARD_BYTES // max(1, _CHUNK_BYTES))
 _k_shards = max(1, (_PREFETCH_K_EFF + _chunks_per_shard - 1) // _chunks_per_shard)
 
-# 快照覆盖校验(9.2)：epoch_occ 里要用到的分片必须都在 snapshot manifest 里。
+# 快照覆盖校验(4.4)：epoch_occ 里要用到的分片必须都在 snapshot manifest 里。
 # 缺片时不能当 0 块静默读成 0 字节（字节账与命中率都会被糊弄），本轮直接作废。
 if group.startswith("traincache"):
     try:
@@ -1506,7 +1604,7 @@ for epoch in range(epochs):
     # 6.12: 本 epoch 的分片消费序列取 trace.json（不再是线性序）
     shards = epoch_occ[epoch]
     nocc = len(shards)
-    # 9.2 分阶段序列：与 shards 等长，逐个分片传给 read_shard
+    # 4.4 分阶段序列：与 shards 等长，逐个分片传给 read_shard
     phase_seq = []
     for _i in range(nocc):
         if _i < _k_shards:
@@ -1577,7 +1675,7 @@ for epoch in range(epochs):
                           " wait_s=" + str(round(wait_s, 3)) +
                           " read_s=" + str(round(read_s, 3)) +
                           " qsize=" + str(q.qsize()), flush=True)
-        # t_first_step 边界（9.2）：本步 wait 已结束、算力尚未开始 → 不多算一步。
+        # t_first_step 边界（4.4）：本步 wait 已结束、算力尚未开始 → 不多算一步。
         if t_first_step is None:
             t_first_step = now_epoch()
         # 超时/读错的这一步照常计入统计（wait_s 记实、work_s=0），
@@ -1591,7 +1689,7 @@ for epoch in range(epochs):
             if work_s > 0 and not (epoch == 0 and step < 10):
                 stall_samples.append(wait_s / step_s)
         t_last_step = now_epoch()
-        # 图三需要逐步 stall：recovery.py 按 D40 从每步 wait_s/step_s 算回落。
+        # fig3 需要逐步 stall：recovery.py 按 D40 从每步 wait_s/step_s 算回落。
         # 只打一行 JSON，runner 解析后写 per_step_*.jsonl（不落 Pod 日志文件）。
         print("[STEP] {\"epoch\":" + str(epoch) +
               ",\"step_in_epoch\":" + str(step) +
@@ -1611,7 +1709,7 @@ for epoch in range(epochs):
     for th in workers:
         th.join(timeout=READ_TIMEOUT_S)
 
-# stall 聚合(9.2)：mean 与 p90 = 升序第 ceil(0.9*n)-1 个样本；无样本时留空。
+# stall 聚合(4.4)：mean 与 p90 = 升序第 ceil(0.9*n)-1 个样本；无样本时留空。
 stall_n = len(stall_samples)
 if stall_n:
     stall_ratio = round(sum(stall_samples) / stall_n, 4)
@@ -1677,7 +1775,7 @@ def create_measure_pod(group, run_id, trace_json):
     TRAINCACHE_JOB_CREATED_AT，不再有 juicefs-warm 特判（任务清单 #6）。
     trace.json 与 measure.py 装进同一个 ConfigMap（6.12：七组态共用一份）。
     返回 (pod_name, t_submit)；失败返回 (None, 0.0)。t_submit 必须回传，
-    run_one 用它算 t_pod_ready_s（9.2），且与 Pod 内看到的值严格相同。
+    run_one 用它算 t_pod_ready_s（4.4），且与 Pod 内看到的值严格相同。
     """
     ns = GROUP_NS[group]
     # Pod 名字固定:traincache 组 WarmupTask targetRef.Name=train-job-0
@@ -1719,7 +1817,7 @@ def create_measure_pod(group, run_id, trace_json):
     # ---- juicefs 组:Pod 内自己 mount JuiceFS,hostPath 共享预热缓存 ----
     if group in ("juicefs-cold", "juicefs-warm"):
         redis_url = f"redis://redis.{ns}.svc.cluster.local:6379/0"
-        cache_size = str(CACHE_BYTES >> 20)  # MiB;--cache-size 单位是 MiB(docs/4 §3)
+        cache_size = str(CACHE_BYTES >> 20)  # MiB;--cache-size 单位是 MiB(docs/4.1 §3)
         image = JUICEFS_IMAGE
         cmd = ["/bin/sh", "-c"]
         # 任务清单 #7:删掉 measure Pod 内的 juicefs warmup 行,预热已由 up.sh 在外部完成
@@ -1787,7 +1885,7 @@ def create_measure_pod(group, run_id, trace_json):
         "command": cmd,
         "volumeMounts": vol_mounts,
         # 队列只传字节数 → 预读常驻内存 O(1)；4Gi limit 是给 JuiceFS mount /
-        # 本地块缓存留的余量 (资源与限额口径见 docs/4 §2.3)
+        # 本地块缓存留的余量 (资源与限额口径见 docs/4.2 §2)
         "resources": {"requests": {"cpu": "500m", "memory": "1Gi"},
                       "limits": {"cpu": "2", "memory": "4Gi"}},
     }
@@ -1800,11 +1898,17 @@ def create_measure_pod(group, run_id, trace_json):
         container["env"].append({"name": "TRAINCACHE_CHUNK_SIZE", "value": str(CHUNK_SIZE)})
         container["env"].append({"name": "TRAINCACHE_PREFETCH_K", "value": str(PREFETCH_K)})
         if TILT:
+            # A 步预算：显式 env 优先，缺省按本次 EPOCHS×STEPS_PER_EPOCH 推导
+            # （C 轨 COND 3×400=1200）；Pod 内与产物 tilt_a_budget 用同一个值。
+            _a_budget = int(os.environ.get("TILT_A_STEPS")
+                            or EPOCHS * STEPS_PER_EPOCH)
             container["env"].append({"name": "TRAINCACHE_TILT", "value": "1"})
             container["env"].append({"name": "TILT_STAGGER_S",
                                      "value": os.environ.get("TILT_STAGGER_S", "5")})
             container["env"].append({"name": "TILT_SEED",
                                      "value": os.environ.get("TILT_SEED", "20261015")})
+            container["env"].append({"name": "TILT_A_STEPS",
+                                     "value": str(_a_budget)})
         # 测量体经 hostPath 访问 agentd hook socket（/run/tc-hook/agent.sock）
         container["env"].append({"name": "TRAINCACHE_HOOK_SOCK",
                                  "value": "/run/tc-hook/agent.sock"})
@@ -1835,8 +1939,8 @@ def create_measure_pod(group, run_id, trace_json):
         pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": JFS_MOUNT_NODE}
     # 任务清单 #5:traincache-warm 组走 traincache-scheduler + webhook gate
     # traincache-cold 不走 WarmupTask(bench 冷启动哨兵),普通调度
-    # 图一对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
-    # 调度，用来把「门控的收益」从「预热的收益」里拆出来（9.2 §2.1）。
+    # fig1 对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
+    # 调度，用来把「门控的收益」从「预热的收益」里拆出来（4.4 §2.1）。
     if group == "traincache-warm" and GATE_MODE != "free":
         pod_labels["traincache.io/warmup"] = "enabled"
         pod_spec["spec"]["schedulerName"] = "traincache-scheduler"
@@ -1853,7 +1957,7 @@ def create_measure_pod(group, run_id, trace_json):
         print(f"[train-job] 创建 Pod 失败: {err[:500]}")
         return None, 0.0
     print(f"[train-job] {group} Pod 已创建,label app=train-job, t_submit={t_submit:.3f}")
-    # 9.2：t_submit 与 TRAINCACHE_JOB_CREATED_AT 必须是同一个值，回传给 run_one
+    # 4.4：t_submit 与 TRAINCACHE_JOB_CREATED_AT 必须是同一个值，回传给 run_one
     # 算 t_pod_ready_s（Pod Ready 条件时刻 − t_submit）。
     return pod_name, t_submit
 
@@ -1882,7 +1986,7 @@ def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5)
 def pod_ready_epoch(ns, pod_name):
     """Pod Ready=True 的 lastTransitionTime 换算成纪元秒；未 Ready/拿不到返回 None。
 
-    9.2：t_pod_ready_s = ready − t_submit 是从提交到"数据面可用"的落地时长，
+    4.4：t_pod_ready_s = ready − t_submit 是从提交到"数据面可用"的落地时长，
     post_pod_s = total_makespan − t_pod_ready_s 是落地之后的训练净时长。
     Ready=False 也有 lastTransitionTime，必须过滤掉——Pod 结束后条件会转 False，
     若只看时间戳会把落地时刻记成结束时刻。
@@ -1905,7 +2009,7 @@ def pod_ready_epoch(ns, pod_name):
 
 
 # ---------------------------------------------------------------------------
-# 源站出站字节（9.2）：MinIO cluster metrics 的 s3 出站累计字节
+# 源站出站字节（4.4）：MinIO cluster metrics 的 s3 出站累计字节
 # ---------------------------------------------------------------------------
 MINIO_NODEPORT = int(os.environ.get("MINIO_NODEPORT", "30090"))
 MINIO_METRICS_PATH = os.environ.get("MINIO_METRICS_PATH", "/minio/v2/metrics/cluster")
@@ -2077,7 +2181,7 @@ def fetch_snapshot():
 
 
 # ---------------------------------------------------------------------------
-# 分阶段命中率（9.2）：traincache_cache_hits/misses_total 与 hit_ratio gauge
+# 分阶段命中率（4.4）：traincache_cache_hits/misses_total 与 hit_ratio gauge
 # ---------------------------------------------------------------------------
 _CACHE_HITS_RE = re.compile(
     r'^traincache_cache_hits_total\{([^}]*)\}\s+([0-9eE+.\-]+)')
@@ -2097,7 +2201,7 @@ def _phase_of(labels):
 def cache_counter_snapshot():
     """抓所有 agentd 的块级 hits/misses/hit_ratio，按 phase 汇总。
 
-    9.2：hits/misses 是多 Pod 计数器（按 phase 求和），hit_ratio 是 gauge
+    4.4：hits/misses 是多 Pod 计数器（按 phase 求和），hit_ratio 是 gauge
     （多 Pod 取平均）。抓不到任何一条时返回 None，产物列留空。
     返回 {"ts","hits":{phase:n},"misses":{phase:n},"gauge":{phase:v}}。
     """
@@ -2143,6 +2247,121 @@ def cache_counter_snapshot():
         return None
     gauge = {ph: sum(v) / len(v) for ph, v in gauge_vals.items() if v}
     return {"ts": time.time(), "hits": hits, "misses": misses, "gauge": gauge}
+
+
+# ---------------------------------------------------------------------------
+# 淘汰证据三列（4.4 §1.7）：evict 计数增量、字节累计 gauge、节点目录峰值
+# ---------------------------------------------------------------------------
+_EVICT_BLOCKS_RE = re.compile(
+    r'^traincache_evict_blocks_total\{[^}]*\}\s+([0-9eE+.\-]+)')
+_CAPACITY_BYTES_RE = re.compile(
+    r'^traincache_cache_capacity_bytes_total\{([^}]*)\}\s+([0-9eE+.\-]+)')
+_SOURCE_LABEL_RE = re.compile(r'source="([^"]*)"')
+
+
+def eviction_guard_snapshot():
+    """抓所有 agentd 的淘汰块数与字节累计 gauge，给 4.4 §1.7 的三列用。
+
+    `evict_blocks_total` 是多 Pod 计数器，跨 result 与 Pod 求和；
+    `cache_capacity_bytes_total{source="bytes"}` 是每个 agentd 各记本节点一份的
+    gauge，容量按节点算，所以取单节点最大值而不是求和。两条线都抓不到返回 None。
+    返回 {"ts","evict_total","capacity_bytes_max"}。
+    """
+    texts = _agent_metrics_texts()
+    if texts is None:
+        return None
+    evict_total = 0.0
+    cap_max = None
+    found = False
+    for _pod, txt in texts:
+        for line in txt.splitlines():
+            m = _EVICT_BLOCKS_RE.match(line)
+            if m:
+                try:
+                    evict_total += float(m.group(1))
+                except ValueError:
+                    continue
+                found = True
+                continue
+            m = _CAPACITY_BYTES_RE.match(line)
+            if not m:
+                continue
+            src = _SOURCE_LABEL_RE.search(m.group(1) or "")
+            if not src or src.group(1) != "bytes":
+                continue
+            try:
+                v = float(m.group(2))
+            except ValueError:
+                continue
+            cap_max = v if cap_max is None else max(cap_max, v)
+            found = True
+    if not found:
+        return None
+    return {"ts": time.time(), "evict_total": evict_total,
+            "capacity_bytes_max": cap_max}
+
+
+# 目录峰值只算写完的 .blk，与 agent 字节累计同一批对象。预取在途的 tmp-* 半成品
+# 不计：lookahead×chunk 最大可达容量的两成，计进来会把 5% 余量顶穿、误判作废。
+_BLOCKS_DIR_BYTES_SCRIPT = (
+    'find "$1" -name "*.blk" -printf \'%s\\n\' 2>/dev/null '
+    "| awk '{s+=$1} END{print s+0}'"
+)
+
+
+def blocks_dir_peak_bytes():
+    """各 worker 节点上 blocks 目录 .blk 的字节数，取单节点最大值。
+
+    走 docker exec（与清缓存同一通道），不经过 agent，用来和 agent 自己记的
+    字节累计对账。所有节点都取不到时返回 None。
+    """
+    peak = None
+    for node in KIND_WORKER_NODES:
+        rc, out, _ = run_cmd(["docker", "exec", node, "sh", "-c",
+                              _BLOCKS_DIR_BYTES_SCRIPT, "sh", NODE_BLOCKS_DIR],
+                             timeout=30)
+        if rc != 0:
+            continue
+        try:
+            v = int(float(out.strip().splitlines()[-1]))
+        except (ValueError, IndexError):
+            continue
+        peak = v if peak is None else max(peak, v)
+    return peak
+
+
+def eviction_guard_columns(guard_base, guard_final, dir_peaks):
+    """4.4 §1.7 三列：run 窗口淘汰块数、字节累计末值、目录峰值字节。
+
+    哪一路证据没抓到，对应列就留空串，不写 0 冒充数据。
+    """
+    evict_run = ""
+    if guard_base is not None and guard_final is not None:
+        d = guard_final["evict_total"] - guard_base["evict_total"]
+        if d < 0:
+            # agentd 中途重启使 counter 归零：按末值起算（同 counter_delta）
+            d = guard_final["evict_total"]
+        evict_run = int(round(d))
+    cap_final = ""
+    if guard_final is not None and guard_final.get("capacity_bytes_max") is not None:
+        cap_final = int(round(guard_final["capacity_bytes_max"]))
+    dir_peak = ""
+    peaks = [v for v in (dir_peaks or []) if v is not None]
+    if peaks:
+        dir_peak = max(peaks)
+    return evict_run, cap_final, dir_peak
+
+
+def evict_not_engaged(evict_run, dir_peak, cache_bytes):
+    """目录装过容量而淘汰零增量 → 淘汰闸门没生效，本轮容量口径不成立。
+
+    只在两列都有实测值时判：缺证据不作废，列留空本身就是缺信号。
+    """
+    if not isinstance(evict_run, int) or not isinstance(dir_peak, int):
+        return False
+    if cache_bytes <= 0 or evict_run != 0:
+        return False
+    return dir_peak > cache_bytes * EVICT_GUARD_MARGIN
 
 
 def counter_delta(base, final):
@@ -2224,11 +2443,11 @@ def parse_result(logs):
     return {
         "startup_makespan": float(_num("startup_makespan") or 0.0),
         "total_makespan": float(_num("total_makespan") or 0.0),
-        # 9.2：stall 按步 wait_s/step_s 聚合（mean + p90，epoch0 前 10 步不进样本）
+        # 4.4：stall 按步 wait_s/step_s 聚合（mean + p90，epoch0 前 10 步不进样本）
         "stall_ratio": _num("stall_ratio"),
         "stall_p90": _num("stall_p90"),
         "stall_n": _int("stall_n") or 0,
-        # 9.2：墙钟算力实测均值（ms）与标定出的 matmul 重复次数（只作估算值）
+        # 4.4：墙钟算力实测均值（ms）与标定出的 matmul 重复次数（只作估算值）
         "compute_actual_ms": _num("compute_actual_ms"),
         "compute_reps": _int("compute_reps"),
         "hit_rate": float(_num("hit_rate") or 0.0),
@@ -2238,12 +2457,12 @@ def parse_result(logs):
         "misses": int(_num("misses") or 0),
         # 2026-10-24 新增：测量体自报"这轮不可信"（读队列超时/读失败）与诊断量
         "measure_void": int(_num("void") or 0),
-        # 9.2：快照缺片 → 本轮作废（reason=read_error）
+        # 4.4：快照缺片 → 本轮作废（reason=read_error）
         "snapshot_missing": int(_num("snapshot_missing") or 0),
         "queue_timeouts": int(_num("queue_timeouts") or 0),
         "read_errors": int(_num("read_errors") or 0),
         "peak_resident_bytes": int(_num("peak_resident_bytes") or 0),
-        # 9.2 分阶段字节（非 traincache 组无 origin 口径 → 空串）
+        # 4.4 分阶段字节（非 traincache 组无 origin 口径 → 空串）
         "read_bytes_startup": _int("read_bytes_startup"),
         "read_bytes_steady": _int("read_bytes_steady"),
         "read_bytes_switch": _int("read_bytes_switch"),
@@ -2257,6 +2476,7 @@ def parse_result(logs):
         "a_steps": _int("a_steps"),
         "b_steps": _int("b_steps"),
         "tilt_hot_shards": _int("tilt_hot_shards"),
+        "tilt_a_budget": _int("tilt_a_budget"),
     }
 
 
@@ -2289,14 +2509,18 @@ def parse_switch_events(logs, steps_per_epoch):
     return events
 
 
-def parse_step_records(logs):
-    """[STEP] 行 → 每步记录；坏行跳过，不中断整轮解析。"""
+def parse_step_records(logs, tag="[STEP]"):
+    """`<tag> ` 行的 JSON → 每步记录；坏行跳过，不中断整轮解析。
+
+    单线程负载打 `[STEP]`，倾斜双 Job 打 `[STEP-A]`/`[STEP-B]`。
+    """
+    prefix = tag + " "
     records = []
     for line in logs.splitlines():
-        if not line.startswith("[STEP] "):
+        if not line.startswith(prefix):
             continue
         try:
-            records.append(json.loads(line[len("[STEP] "):]))
+            records.append(json.loads(line[len(prefix):]))
         except (ValueError, TypeError):
             continue
     return records
@@ -2305,19 +2529,27 @@ def parse_step_records(logs):
 def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
     """把逐步 stall 与切换事件写成 recovery.py 能直接吃的 run 目录。
 
-    目录：<cell>/runs/<group>-r<rep>/per_step_1_w1.jsonl + run.json。
-    与 summary.csv 并列，不覆盖旧产物。写完直接跑 D40 回落判据，
-    有切换事件时落 recovery.json；无事件（1 epoch 或固定 seed 不退化的
-    情况除外）不写。
+    目录：<cell>/runs/<group>-r<rep>/。单线程负载落一份 per_step_1_w1.jsonl；
+    倾斜双 Job（`TRAINCACHE_TILT=1`）落 per_step_a.jsonl + per_step_b.jsonl，
+    且不跑 D40 回落判据——该判据的输入契约是恰好一份 per_step 文件（4.4 §C3）。
+    与 summary.csv 并列，不覆盖旧产物。单线程形态有切换事件时落 recovery.json；
+    无事件（1 epoch 或固定 seed 不退化的情况除外）不写。
     """
     run_dir = out_csv.parent / "runs" / f"{group}-r{rep:02d}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    records = parse_step_records(logs)
-    if records:
-        path = run_dir / "per_step_1_w1.jsonl"
-        with path.open("w", encoding="utf-8") as f:
+    if TILT:
+        streams = (("per_step_a.jsonl", parse_step_records(logs, "[STEP-A]")),
+                   ("per_step_b.jsonl", parse_step_records(logs, "[STEP-B]")))
+    else:
+        streams = (("per_step_1_w1.jsonl", parse_step_records(logs)),)
+    n_steps = 0
+    for step_file, records in streams:
+        if not records:
+            continue
+        with (run_dir / step_file).open("w", encoding="utf-8") as f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n_steps += len(records)
     _rate = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
     cond_name = (COND_NAME_OVERRIDE or
                  _cond_name_for_cell(TIER, [group],
@@ -2336,7 +2568,7 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
     }
     with (run_dir / "run.json").open("w", encoding="utf-8") as f:
         json.dump(run, f, ensure_ascii=False, indent=1)
-    if events:
+    if events and not TILT:
         try:
             import recovery  # noqa: PLC0415
             result = recovery.analyze_run(run_dir)
@@ -2344,7 +2576,7 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
                 json.dump(result, f, ensure_ascii=False, indent=1)
         except Exception as exc:  # noqa: BLE001
             print(f"[run] {group} rep={rep} recovery 分析失败: {exc}", flush=True)
-    return run_dir, len(records)
+    return run_dir, n_steps
 
 
 def _cache_phase_ratio(cache_base, cache_final, phase):
@@ -2369,10 +2601,11 @@ def _cache_phase_ratio(cache_base, cache_final, phase):
 
 def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries,
                       cache_base=None, cache_final=None, pre_up_snap=None,
-                      origin_egress=None):
+                      origin_egress=None, guard_base=None, guard_final=None,
+                      dir_peaks=None):
     """6.16：把 D25 命中率口径与 D5 三笔字节成本写进 metrics 行。
 
-    9.2 增补：预热字节实测、分阶段命中率、源站出站字节对账。
+    4.4 增补：预热字节实测、分阶段命中率、源站出站字节对账、淘汰证据三列。
     """
     # ---- 第一笔：启动预热字节（模型值 + 实测值并列）----
     if group == "traincache-warm":
@@ -2401,7 +2634,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
         metrics["warmup_basis"] = ""
     # direct 组直读 MinIO 的分段读法；其余组不走 HTTP 直读，留空。
     metrics["read_mode"] = READ_MODE_DIRECT if group == "direct" else ""
-    # 源站出站字节（9.2）：run 窗口内 MinIO s3 出站累计增量
+    # 源站出站字节（4.4）：run 窗口内 MinIO s3 出站累计增量
     metrics["origin_egress_bytes"] = round(origin_egress, 1) \
         if origin_egress is not None else ""
 
@@ -2413,7 +2646,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
                       for p in ("startup", "steady", "switch")]
         miss_b = sum(miss_parts) if all(isinstance(v, int) for v in miss_parts) else None
         metrics["fetch_bytes_run"] = round(fetch_d, 1) if fetch_d is not None else ""
-        # 主口径（9.2 §1.4）：open-time，打开时不在本地即未命中
+        # 主口径（4.4 §1.4）：open-time，打开时不在本地即未命中
         if read_b > 0 and miss_b is not None:
             hit = 1.0 - miss_b / read_b
             metrics["hit_rate"] = round(min(1.0, max(0.0, hit)), 4)
@@ -2431,7 +2664,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
             metrics["source_saving_ratio"] = ""
             metrics["source_saving_basis"] = BASIS_TC_UNAVAILABLE
         metrics["block_hit_rate_diag"] = metrics["hit_rate_diag"]
-        # ---- 9.2 分阶段命中率 ----
+        # ---- 4.4 分阶段命中率 ----
         # 主口径：训练侧 open-time（打开时块不在本地 = 未命中），与 §1.4 定义一致；
         # 三个 phase 由 read_bytes/demand_miss 差分得到，缺字节账时留空。
         # agent 的 hits/misses 按它的 phase 窗口计，作交叉校验（窗口内无读时留空）。
@@ -2474,6 +2707,22 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
             print(f"[warn] prefetch 归因与计数增量不一致: "
                   f"sustained+switch={sustained + switch:.0f} "
                   f"prefetch={prefetch_d:.0f} (samples={len(samples)})", flush=True)
+        # ---- 淘汰证据三列（4.4 §1.7）----
+        evict_run, cap_final, dir_peak = eviction_guard_columns(
+            guard_base, guard_final, dir_peaks)
+        metrics["evict_blocks_run"] = evict_run
+        metrics["capacity_bytes_final"] = cap_final
+        metrics["cache_dir_peak_bytes"] = dir_peak
+        # 判据 2：Agent 记的字节账对不上目录真实字节 → 重复记账或漏记，只告警。
+        # 用最后一次目录采样，与 gauge 末值同一时刻；峰值是窗口最大值，不同刻。
+        dir_last = next((v for v in reversed(dir_peaks or [])
+                         if v is not None), None)
+        if cap_final != "" and dir_last:
+            ratio = cap_final / dir_last
+            if ratio >= 1.5 or ratio <= 0.5:
+                print(f"[warn] 字节累计对不上目录字节: "
+                      f"capacity_bytes_final={cap_final} dir_last={dir_last} "
+                      f"比值 {ratio:.2f}（4.4 §1.7 判据 2）", flush=True)
     else:
         if group == "direct":
             metrics["hit_rate_basis"] = BASIS_DIRECT
@@ -2499,6 +2748,10 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
             metrics["hit_ratio_agent_" + phase] = ""
             metrics["hit_ratio_gauge_" + phase] = ""
         metrics["origin_reconcile_diff"] = ""
+        # 淘汰证据三列只有 agentd 与节点块目录有关，其余组态留空
+        metrics["evict_blocks_run"] = ""
+        metrics["capacity_bytes_final"] = ""
+        metrics["cache_dir_peak_bytes"] = ""
     metrics["hit_rate_diag"] = ""
     return metrics
 
@@ -2625,7 +2878,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         print(f"[run] group={group} rep={rep+1}/{reps}{'（复用控制面）' if reuse else ''}")
         print(f"{'='*60}", flush=True)
 
-        # 9.2：预热前 fetch 计数基线（只有 traincache-warm 用，见下方 group_up 前）
+        # 4.4：预热前 fetch 计数基线（只有 traincache-warm 用，见下方 group_up 前）
         pre_up_snap = None
         if reuse:
             if rep:
@@ -2672,8 +2925,11 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         # 6.16:traincache 组在创建 train-job 前抓 fetch 计数器基线
         base_snap = fetch_snapshot() if is_tc else None
         cache_base = cache_counter_snapshot() if is_tc else None
+        # 4.4 §1.7：淘汰证据基线与目录峰值采样序列
+        guard_base = eviction_guard_snapshot() if is_tc else None
+        dir_peaks = []
         samples = [base_snap] if base_snap else []
-        # 9.2：源站出站字节基线（MinIO cluster metrics；抓不到为 None）
+        # 4.4：源站出站字节基线（MinIO cluster metrics；抓不到为 None）
         origin_base = minio_egress_snapshot()
 
         pod_name, t_submit = create_measure_pod(group, run_id, trace_json)
@@ -2687,7 +2943,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
 
         ns = GROUP_NS[group]
 
-        # 9.2：采样走独立线程，主循环只查 Pod 状态；抓取四个 agentd 的耗时
+        # 4.4：采样走独立线程，主循环只查 Pod 状态；抓取四个 agentd 的耗时
         # 不再拖长采样间隔。sample_times 用于报告实际节拍。
         sample_times = []
         stop_sample = threading.Event()
@@ -2702,6 +2958,11 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 if snap is not None:
                     samples.append(snap)
                     sample_times.append(t0)
+                # 4.4 §1.7：节点块目录字节与 fetch 同节拍采，取窗口最大值定峰值
+                peak = blocks_dir_peak_bytes()
+                if stop_sample.is_set():
+                    break
+                dir_peaks.append(peak)
 
         # 测量期间每 5s 采一次 degraded；测量 Pod 一结束就停，避免训练结束
         # 30s 后 sidecar 退出导致的必然降级被误判进本轮。
@@ -2732,7 +2993,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 if ts is not None:
                     ready_seen["ts"] = ts
 
-        success, logs = wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT,
+        success, logs = wait_pod_complete(ns, pod_name, timeout=pod_timeout_s(),
                                           on_tick=_tick, tick_s=5)
         stop_sample.set()
         if sample_thread is not None:
@@ -2745,7 +3006,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         stop_degraded.set()
         if degraded_thread is not None:
             degraded_thread.join(timeout=1)
-        # 9.2：源站出站字节末值（与 origin_base 求 run 窗口增量）
+        # 4.4：源站出站字节末值（与 origin_base 求 run 窗口增量）
         origin_final = minio_egress_snapshot()
         degraded_value = degraded["max"] if is_tc and degraded["samples"] else ""
         if is_tc and not degraded["samples"]:
@@ -2787,7 +3048,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
             metrics["evict_policy"] = EVICT_POLICY
             metrics["gate_mode"] = GATE_MODE
             metrics["data_source"] = DATA_SOURCE
-            # 图三：逐步 stall + 切换事件落盘，recovery.py 直接消费。
+            # fig3：逐步 stall + 切换事件落盘，recovery.py 直接消费。
             _run_dir, _n_steps = write_run_artifacts(
                 out_csv, group, rep, logs, trace_sha)
             if _n_steps:
@@ -2822,7 +3083,8 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                       f"(agent_degraded_max=1)，本轮作废", flush=True)
             final_snap = fetch_snapshot() if is_tc else None
             cache_final = cache_counter_snapshot() if is_tc else None
-            # 9.2：落地时长（t_pod_ready_s）与落地后训练净时长（post_pod_s）
+            guard_final = eviction_guard_snapshot() if is_tc else None
+            # 4.4：落地时长（t_pod_ready_s）与落地后训练净时长（post_pod_s）
             ready_ts = ready_seen["ts"] or pod_ready_epoch(ns, pod_name)
             if ready_ts is not None:
                 metrics["t_pod_ready_s"] = round(ready_ts - t_submit, 3)
@@ -2842,7 +3104,21 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 group, metrics, base_snap, samples_for_attr, final_snap,
                 parse_epoch_boundaries(logs),
                 cache_base=cache_base, cache_final=cache_final,
-                pre_up_snap=pre_up_snap, origin_egress=origin_egress)
+                pre_up_snap=pre_up_snap, origin_egress=origin_egress,
+                guard_base=guard_base, guard_final=guard_final,
+                dir_peaks=list(dir_peaks))
+            # 4.4 §1.7：目录装过容量而淘汰没删过一个块 → 容量口径不成立，作废。
+            # 已有更具体的作废原因时保留原原因。
+            if (not metrics.get("void")
+                    and evict_not_engaged(metrics.get("evict_blocks_run"),
+                                          metrics.get("cache_dir_peak_bytes"),
+                                          CACHE_BYTES)):
+                metrics["void"] = True
+                metrics["reason"] = "evict_not_engaged"
+                print(f"[run] {group} rep={rep} 目录峰值 "
+                      f"{metrics['cache_dir_peak_bytes']}B 超容量 {CACHE_BYTES}B "
+                      f"而 run 窗口淘汰增量=0，本轮作废(reason=evict_not_engaged)",
+                      flush=True)
             results.append(metrics)
             print(f"[run] {group} rep={rep} 结果: {metrics}", flush=True)
 
@@ -2873,7 +3149,7 @@ def rate_label(rate_str):
 
 def _cond_name_for_cell(tier, groups, rate_mbit):
     """按档位/带宽/组态找对应的 compare COND，用于取冻结镜像 digest。"""
-    # 命名见 9.2 §C3：S 档是 compare-d-<组态>-<rate>；
+    # 命名见 4.4 §C3：S 档是 compare-d-<组态>-<rate>；
     # M/L 档是 compare-b-<m|l>-<组态>-<rate>。
     for g in groups:
         name = (f"compare-d-{g}-{rate_mbit}" if tier == "S"
@@ -2904,7 +3180,7 @@ def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
     """每格写 lock.json：COND 冻结 digest + 本次实际镜像，不一致不阻止跑分。"""
     import lock as lock_mod  # noqa: PLC0415
 
-    cond_name = _cond_name_for_cell(tier, groups, rate_mbit)
+    cond_name = COND_NAME_OVERRIDE or _cond_name_for_cell(tier, groups, rate_mbit)
     if cond_name:
         os.environ["TRAINCACHE_COND"] = cond_name
     else:
@@ -2929,6 +3205,52 @@ def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
           f"实际镜像 {TRAIN_IMAGE} / {JUICEFS_IMAGE}）")
 
 
+def _row_key(row):
+    """样本点身份：同格同组同 rep 是同一物理格子上的同一次，新行顶掉旧行。"""
+    return (row.get("group", ""), _as_int(row.get("rep")))
+
+
+def _as_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return -1
+
+
+def existing_rows(path):
+    """读回同一 CSV 已有的行（§8 第 5 条：产物只追加不覆盖）。"""
+    if not path.is_file():
+        return []
+    try:
+        with open(path, newline="") as f:
+            return list(csv.DictReader(f))
+    except (OSError, csv.Error) as exc:
+        print(f"[csv] 读不回 {path} 的既有行（{exc}），本次只写新行", flush=True)
+        return []
+
+
+def _is_void(row):
+    return str(row.get("void", "")).strip().lower() in ("true", "1")
+
+
+def merge_rows(old, new):
+    """旧行按样本点去留：本次的有效行顶掉同 (group, rep) 的旧行，其余历史行原样保留。
+
+    作废行不顶替有效行——一次失败的补跑不该抹掉上一轮的好数据；它自己留在表里，
+    按 D14 不进汇总。
+    """
+    overwritten = {_row_key(r) for r in new if not _is_void(r)}
+    kept = [r for r in old if _row_key(r) not in overwritten]
+    rows = kept + list(new)
+
+    def sort_key(r):
+        group = r.get("group", "")
+        index = GROUPS.index(group) if group in GROUPS else len(GROUPS)
+        return (index, _as_int(r.get("rep")))
+
+    return sorted(rows, key=sort_key)
+
+
 # summary.csv 的列顺序（模块级：--selftest 也断言这里的列集合）
 CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "baseline_substituted",
@@ -2945,7 +3267,7 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "trace_sha256", "chunk_size_bytes", "cache_bytes",
                   "compute_ms", "read_workers", "read_queue_depth",
                   "agent_degraded_max",
-                  # 9.2 协议新增列（拿不到值时留空，不写 0 冒充）
+                  # 4.4 协议新增列（拿不到值时留空，不写 0 冒充）
                   "t_pod_ready_s", "post_pod_s", "stall_p90",
                   "compute_actual_ms", "compute_reps",
                   "read_bytes_startup", "read_bytes_steady", "read_bytes_switch",
@@ -2959,7 +3281,10 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "startup_warmup_model_bytes",
                   "origin_egress_bytes", "origin_reconcile_diff",
                   "prefetch_fanout", "measure_shards",
-                  # 9.2 §R3：每个点可回溯到 COND 与 run ID；图一/图二/图三的
+                  # 4.4 §1.7 淘汰证据三列（traincache 组才有值，其余留空）
+                  "evict_blocks_run", "capacity_bytes_final",
+                  "cache_dir_peak_bytes",
+                  # 4.4 §1.10：每个点可回溯到 COND 与 run ID；曲面与字节族的
                   # 自变量列必须随产物落盘，否则出图只能靠目录名猜。
                   "cond", "run_id", "epochs", "shuffle",
                   "dataset_bytes", "cache_ratio",
@@ -2967,7 +3292,7 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "gate_mode", "gateway", "data_source",
                   # M5 倾斜双 Job：A 命中率/等待占比、B 挤占热块次数
                   "a_hit_ratio", "a_wait_ratio", "b_evictions_of_hot",
-                  "a_steps", "b_steps", "tilt_hot_shards"]
+                  "a_steps", "b_steps", "tilt_hot_shards", "tilt_a_budget"]
 
 
 def write_csv(path, results):
@@ -2978,10 +3303,24 @@ def write_csv(path, results):
     fieldnames = CSV_FIELDNAMES
     # 生效 fanout 与本次 measure 实际用到的分片数（N_TARS），逐行同值
     fanout_eff = s3_fanout_count()
+    old = existing_rows(path)
+    rows = merge_rows(old, results)
+    new_keys = {_row_key(r) for r in results if not _is_void(r)}
+    expect = (TIER, rate_label(TC_RATE_EFF))
+    foreign = [r for r in old
+               if (r.get("tier", ""), r.get("rate", "")) != expect
+               and _row_key(r) not in new_keys]
+    if foreign:
+        print(f"[csv] 警告：{path.name} 里 {len(foreign)} 行的档位/带宽与本次 "
+              f"{expect[0]}/{expect[1]} 不同，按只追加口径保留", flush=True)
+    if old:
+        print(f"[csv] 追加写：既有 {len(old)} 行，本次 {len(results)} 行顶掉 "
+              f"{len(new_keys & {_row_key(r) for r in old})} 个样本点，"
+              f"合并后 {len(rows)} 行", flush=True)
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        for r in results:
+        for r in rows:
             row = {k: r.get(k, "") for k in fieldnames}
             row["tier"] = row.get("tier") or TIER
             row["rate"] = row.get("rate") or rate_label(TC_RATE_EFF)
@@ -3019,7 +3358,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查七件事：
+    查十二件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3031,7 +3370,16 @@ def selftest():
          stall 样本，避免除零）；快照缺片的作废原因落 read_error；
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
          档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位；
-      7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh。
+      7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh；
+      8. 产物写入的只追加口径：补跑同一张 CSV 不得截断既有行；
+      9. 逐步打点的两种形态：倾斜双 Job 落 per_step_a/b 两份且不跑 D40 判据，
+         单线程形态仍是一份 per_step_1_w1.jsonl；
+      10. 淘汰证据三列（4.4 §1.7）：指标行解析、counter 归零起算、证据缺失留空、
+         作废判据的边界，以及三列进 summary.csv 的形态；
+      11. C 轨挤占口径与 A 步预算（4.4 §C3）：状态机四条边界、模板里旧的集合
+         差集已删、预算从 runner 下发进 Pod 并随产物落盘；
+      12. 倾斜 run 的 Pod 闸门按字节地板推导：非倾斜档仍用常量，倾斜档由
+         epoch 数、分片数与限速带宽推出，正常推进的 run 不再被截成 pod_failed。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -3130,7 +3478,7 @@ def selftest():
         raise AssertionError(f"自测：命中计数丢增量 hits={metrics['hits']} 读次数={calls}")
     if metrics["measure_void"] or metrics["queue_timeouts"]:
         raise AssertionError("自测：不该出现读队列超时/作废")
-    # 9.2：stall 按步 wait_s/work_s 聚合；epoch0 前 10 步不进样本，
+    # 4.4：stall 按步 wait_s/work_s 聚合；epoch0 前 10 步不进样本，
     # 自测跑 2 个 epoch（每 epoch 4 步），样本应来自 epoch1 且数量正确。
     if metrics["stall_n"] <= 0:
         raise AssertionError("自测：stall 样本为空（epoch0 前 10 步剔除后应有 epoch1 的样本）")
@@ -3144,13 +3492,13 @@ def selftest():
             metrics["stall_p90"] < metrics["stall_ratio"]:
         raise AssertionError(f"自测：stall_p90 不对 p90={metrics['stall_p90']!r} "
                              f"mean={metrics['stall_ratio']!r}")
-    # 9.2：算力按墙钟截断，实测均值不得低于本次下发的目标算力
+    # 4.4：算力按墙钟截断，实测均值不得低于本次下发的目标算力
     target_ms = float(base_env["COMPUTE_MS"])
     if not isinstance(metrics["compute_actual_ms"], float) or \
             metrics["compute_actual_ms"] < target_ms:
         raise AssertionError(f"自测：compute_actual_ms 未达目标 {metrics['compute_actual_ms']!r}"
                              f" < {target_ms}ms")
-    # 9.2：分阶段字节账在 direct 组也要成立（每片按 phase 计一次）
+    # 4.4：分阶段字节账在 direct 组也要成立（每片按 phase 计一次）
     phase_sum = (metrics["read_bytes_startup"] + metrics["read_bytes_steady"]
                  + metrics["read_bytes_switch"])
     if phase_sum != metrics["total_read_bytes"]:
@@ -3265,6 +3613,235 @@ def selftest():
         raise AssertionError("自测：group_up 没有把网关开关透传给 up.sh")
     print(f"[selftest] 7) D23 网关开关：gateway 列紧随 gate_mode，"
           f"映射 1/0 正确，GATEWAY_ON={GATEWAY_ON} 已透传到 up.sh")
+
+    # ---- 8) 只追加不覆盖：同格补跑不得截断既有行 ----
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "summary.csv"
+        saved_rate = TC_RATE_EFF
+        globals()["TC_RATE_EFF"] = "100mbit"   # 自检不连 tc，带宽档写死一个合法值
+        try:
+            write_csv(p, [{"group": "direct", "rep": 0, "total_makespan": 1.0},
+                          {"group": "direct", "rep": 1, "total_makespan": 2.0},
+                          {"group": "fluid-cold", "rep": 0, "total_makespan": 3.0}])
+            write_csv(p, [{"group": "direct", "rep": 1, "total_makespan": 9.0},
+                          {"group": "juicefs-cold", "rep": 0, "total_makespan": 8.0,
+                           "void": True}])
+        finally:
+            globals()["TC_RATE_EFF"] = saved_rate
+        back = list(csv.DictReader(open(p, newline="")))
+        good = {(r["group"], r["rep"]): r for r in back if r["void"] != "True"}
+        voids = [r for r in back if r["void"] == "True"]
+        if (good[("direct", "1")]["total_makespan"] != "9.0"
+                or good[("direct", "0")]["total_makespan"] != "1.0"
+                or good[("fluid-cold", "0")]["total_makespan"] != "3.0"
+                or len(voids) != 1 or voids[0]["group"] != "juicefs-cold"
+                or len(back) != 4):
+            raise AssertionError(
+                "自测：补跑没按只追加口径合并——有效行应顶掉同 (group,rep) 的旧"
+                "有效行、其它历史行保留、作废行只追加不顶替有效行")
+    print("[selftest] 8) 只追加不覆盖：同格补跑顶掉同 (group,rep) 有效行，"
+          "保留其余历史行，作废行不顶替有效行")
+
+    # ---- 9) 倾斜双 Job 的逐步打点：落 a/b 两份，不进 D40 判据 ----
+    _tilt_logs = (
+        "[EPOCH_BOUNDARY] epoch=0 ts=1000.0 at_step=0 kind=start\n"
+        '[STEP-A] {"step":1,"wait_s":0.5,"step_s":1.5,'
+        '"shard":"shard-00001.tar","phase":"steady","hit":true}\n'
+        '[STEP-B] {"step":1,"wait_s":2.0,"step_s":2.0,'
+        '"shard":"shard-00002.tar","phase":"scan"}\n'
+        "[EPOCH_BOUNDARY] epoch=1 ts=2000.0 at_step=400 kind=epoch\n")
+    with tempfile.TemporaryDirectory() as td:
+        saved_tilt, saved_rate = TILT, TC_RATE_EFF
+        globals()["TILT"] = True
+        globals()["TC_RATE_EFF"] = "100mbit"
+        try:
+            _rd, _n = write_run_artifacts(Path(td) / "summary.csv",
+                                          "traincache-cold", 0, _tilt_logs, "sha")
+        finally:
+            globals()["TILT"], globals()["TC_RATE_EFF"] = saved_tilt, saved_rate
+        _names = sorted(p.name for p in _rd.iterdir())
+        if _names != ["per_step_a.jsonl", "per_step_b.jsonl", "run.json"] or _n != 2:
+            raise AssertionError(
+                "自测：倾斜双 Job 应落 per_step_a.jsonl + per_step_b.jsonl 两份、"
+                "不产 recovery.json（D40 判据的输入契约是恰好一份 per_step 文件）")
+    # 单线程形态不变：一份 per_step_1_w1.jsonl
+    with tempfile.TemporaryDirectory() as td:
+        _rd, _n = write_run_artifacts(
+            Path(td) / "summary.csv", "direct", 0,
+            '[STEP] {"epoch":0,"step_in_epoch":0,"global_step":0,"warmup":true,'
+            '"wait_s":0.1,"step_s":1.0,"phase":"preheat",'
+            '"shard":"shard-00000.tar"}\n', "sha")
+        if sorted(p.name for p in _rd.iterdir()) != ["per_step_1_w1.jsonl", "run.json"]:
+            raise AssertionError("自测：单线程形态的逐步打点文件名被改动")
+    print("[selftest] 9) 倾斜双 Job 落 per_step_a/b 两份且不跑 D40；"
+          "单线程形态仍是一份 per_step_1_w1.jsonl")
+
+    # ---- 10) 淘汰证据三列（4.4 §1.7）：指标解析、增量口径、作废判据与产物列 ----
+    _guard_line = (
+        'traincache_evict_blocks_total{dataset="compare-data-8m",result="normal"} 7\n'
+        'traincache_evict_blocks_total{dataset="compare-data-8m",result="danger"} 3\n'
+        'traincache_cache_capacity_bytes_total{source="bytes"} 805306368\n'
+        'traincache_cache_capacity_bytes_total{source="disk"} 0\n'
+        'traincache_cache_hits_total{dataset="compare-data-8m",phase="steady"} 5\n')
+    saved_texts = globals()["_agent_metrics_texts"]
+    globals()["_agent_metrics_texts"] = lambda: [("pod-a", _guard_line * 2)]
+    try:
+        snap = eviction_guard_snapshot()
+        if snap is None or snap["evict_total"] != 20.0 \
+                or snap["capacity_bytes_max"] != 805306368.0:
+            raise AssertionError(
+                f"自测：淘汰指标解析不对（两个 result 求和 + 只取 source=\"bytes\" "
+                f"的 gauge），实得 {snap}")
+    finally:
+        globals()["_agent_metrics_texts"] = saved_texts
+    _b = {"evict_total": 100.0, "capacity_bytes_max": 12.0}
+    _f = {"evict_total": 137.0, "capacity_bytes_max": 805306368.0}
+    if eviction_guard_columns(_b, _f, [1 << 30, 2 << 30, None]) != (37, 805306368, 2 << 30):
+        raise AssertionError("自测：淘汰三列口径不对（增量/末值/峰值）")
+    if eviction_guard_columns({"evict_total": 137.0, "capacity_bytes_max": 1.0},
+                              {"evict_total": 100.0, "capacity_bytes_max": 2.0},
+                              [])[0] != 100:
+        raise AssertionError("自测：counter 归零应按末值起算，不写负数")
+    if eviction_guard_columns(None, _f, [None])[0] != "" \
+            or eviction_guard_columns(_b, None, [None])[2] != "":
+        raise AssertionError("自测：证据没抓到应留空串，不写 0 冒充数据")
+    _cap = 1 << 30
+    if not evict_not_engaged(0, int(_cap * 1.06), _cap):
+        raise AssertionError("自测：目录超容量且淘汰零增量应作废")
+    if evict_not_engaged(0, int(_cap * 1.04), _cap) or evict_not_engaged(5, 3 * _cap, _cap) \
+            or evict_not_engaged("", 3 * _cap, _cap) or evict_not_engaged(0, 3 * _cap, 0):
+        raise AssertionError("自测：作废判据越界——余量内/淘汰有增量/证据缺失/"
+                             "容量未启用都不该作废")
+    # 目录峰值脚本：只算 .blk（排除预取在途的 tmp-*），且必须在节点容器内走 sh -c
+    if "-name \"*.blk\"" not in _BLOCKS_DIR_BYTES_SCRIPT \
+            or "tmp-" in _BLOCKS_DIR_BYTES_SCRIPT:
+        raise AssertionError("自测：目录峰值脚本应只统计 .blk，不计 tmp-* 半成品")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "summary.csv"
+        saved_rate = TC_RATE_EFF
+        globals()["TC_RATE_EFF"] = "100mbit"
+        try:
+            write_csv(p, [{"group": "traincache-cold", "rep": 0,
+                           "evict_blocks_run": 37, "capacity_bytes_final": 805306368,
+                           "cache_dir_peak_bytes": 1100000000},
+                          {"group": "direct", "rep": 0}])
+        finally:
+            globals()["TC_RATE_EFF"] = saved_rate
+        back = list(csv.DictReader(open(p, newline="")))
+        tc_row = next(r for r in back if r["group"] == "traincache-cold")
+        other = next(r for r in back if r["group"] == "direct")
+        if (tc_row["evict_blocks_run"], tc_row["capacity_bytes_final"],
+                tc_row["cache_dir_peak_bytes"]) != ("37", "805306368", "1100000000") \
+                or any(other[k] != "" for k in ("evict_blocks_run",
+                                                "capacity_bytes_final",
+                                                "cache_dir_peak_bytes")):
+            raise AssertionError("自测：淘汰证据三列没进 summary.csv，"
+                                 "或非 traincache 组没留空")
+    print("[selftest] 10) 淘汰证据三列（4.4 §1.7）：指标解析、归零起算、留空口径、"
+          "作废判据边界与产物列落盘均自洽")
+
+    # ---- 11) C 轨挤占口径与 A 步预算（4.4 §C3）----
+    _hot_ns = {}
+    exec(HOT_EDGE_DEF_SRC, _hot_ns)
+    _edges = _hot_ns["hot_eviction_edges"]
+    _fps = ["b0", "b1"]
+    _st = {}
+    if _edges(_st, _fps, set(), True) != 0:
+        raise AssertionError("自测：冷块首次观测不在应记 0，不计挤占")
+    _edges(_st, _fps, {"b0", "b1"}, True)
+    if _edges(_st, _fps, {"b0"}, True) != 1:
+        raise AssertionError("自测：在位块消失应计一次 present→absent 转换")
+    if _edges(_st, _fps, {"b0"}, True) != 0:
+        raise AssertionError("自测：连续多次观测同一块不在只能计一次")
+    _edges(_st, _fps, {"b0", "b1"}, True)          # 块被读回
+    if _edges(_st, _fps, {"b0"}, True) != 1:
+        raise AssertionError("自测：块读回后再次消失应计下一次转换")
+    _st2 = {"b0": True, "b1": True}
+    if _edges(_st2, _fps, set(), False) != 0:
+        raise AssertionError("自测：A 正在读的片不计数（缺失已记进 misses）")
+    if _edges(_st2, _fps, set(), True) != 0:
+        raise AssertionError("自测：当前片那次缺失已跳过，后续观测不得补计")
+    _tilt_src = build_measure_script("traincache-cold")
+    _tilt_tree = ast.parse(_tilt_src)
+    _funcs = {n.name for n in ast.walk(_tilt_tree)
+              if isinstance(n, ast.FunctionDef)}
+    _names = {n.id for n in ast.walk(_tilt_tree) if isinstance(n, ast.Name)}
+    if "hot_eviction_edges" not in _funcs or _tilt_src.count(
+            "hot_eviction_edges(") < 3:
+        raise AssertionError("自测：倾斜模板没把状态机函数拼进去，或三处观测点"
+                            "（其余热片计数/当前片读前读后）没接上")
+    if "_a_steps_budget" not in _names or "_max_a_cycles" in _names:
+        raise AssertionError("自测：A 步预算未替换无界循环的 cycle 计数")
+    if "_hot_present" in _names:
+        raise AssertionError("自测：模板仍在用「累积在位集合减当前片」的旧口径"
+                            "（该式恒等于 64×a_steps，4.4 §C3 已作废）")
+    if '"TILT_A_STEPS"' not in inspect.getsource(create_measure_pod):
+        raise AssertionError("自测：TILT_A_STEPS 没下发进测量 Pod，Pod 内会退回"
+                             "模板默认值，产物 tilt_a_budget 与实跑脱节")
+    _tm = parse_result("RESULT startup_makespan=1.0 total_makespan=2.0 "
+                       "a_steps=1200 b_steps=96 b_evictions_of_hot=42 "
+                       "tilt_hot_shards=3 tilt_a_budget=1200")
+    if _tm["a_steps"] != 1200 or _tm["tilt_a_budget"] != 1200 \
+            or _tm["b_evictions_of_hot"] != 42:
+        raise AssertionError("自测：RESULT 的 C 轨字段没解出来")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "summary.csv"
+        saved_rate = TC_RATE_EFF
+        globals()["TC_RATE_EFF"] = "100mbit"
+        try:
+            write_csv(p, [{"group": "traincache-cold", "rep": 0,
+                           "a_steps": 1200, "b_evictions_of_hot": 42,
+                           "tilt_a_budget": 1200},
+                          {"group": "direct", "rep": 0}])
+        finally:
+            globals()["TC_RATE_EFF"] = saved_rate
+        back = list(csv.DictReader(open(p, newline="")))
+        tc_row = next(r for r in back if r["group"] == "traincache-cold")
+        other = next(r for r in back if r["group"] == "direct")
+        if (tc_row["a_steps"], tc_row["b_evictions_of_hot"],
+                tc_row["tilt_a_budget"]) != ("1200", "42", "1200") \
+                or other["tilt_a_budget"] != "":
+            raise AssertionError("自测：A 步预算没进 summary.csv，"
+                                 "或非倾斜组的预算列没留空")
+    print("[selftest] 11) C 轨挤占按 present→absent 转换计数、A 步预算下发与落盘"
+          "均自洽；旧的集合差集口径已从模板移除")
+
+    # ---- 12) 倾斜 run 的 Pod 闸门按字节地板推导（2026-11-02 探针被 1800s 截断）----
+    saved = {k: os.environ.get(k) for k in ("POD_TIMEOUT",)}
+    saved_tilt, saved_rate = TILT, TC_RATE_EFF
+    saved_n_tars = N_TARS
+    globals()["N_TARS"] = 32          # 倾斜 COND 的 track-b 分片数，与 policy-* 一致
+    floor_s = (EPOCHS * N_TARS * SHARD_SIZE_MB * 1024 * 1024) / (100 * 1e6 / 8)
+    try:
+        globals()["TC_RATE_EFF"] = "100mbit"
+        globals()["TILT"] = False
+        if pod_timeout_s() != POD_TIMEOUT:
+            raise AssertionError(
+                f"自测：非倾斜组态的闸门应保持 POD_TIMEOUT={POD_TIMEOUT}，"
+                f"实得 {pod_timeout_s()}")
+        globals()["TILT"] = True
+        if pod_timeout_s() != int(floor_s * TILT_TIMEOUT_HEADROOM):
+            raise AssertionError(
+                f"自测：倾斜闸门应是字节地板 ×余量（{floor_s:.0f}s×"
+                f"{TILT_TIMEOUT_HEADROOM}），实得 {pod_timeout_s()}")
+        if pod_timeout_s() <= POD_TIMEOUT:
+            raise AssertionError(
+                "自测：倾斜闸门应高于 1800s 常量，否则正常推进的 run 仍会被截成 "
+                "pod_failed")
+        os.environ["POD_TIMEOUT"] = "600"
+        if pod_timeout_s() != 600:
+            raise AssertionError("自测：显式给过 POD_TIMEOUT 应以显式值为准")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        globals()["TILT"], globals()["TC_RATE_EFF"] = saved_tilt, saved_rate
+        globals()["N_TARS"] = saved_n_tars
+    print(f"[selftest] 12) Pod 闸门：非倾斜沿用 {POD_TIMEOUT}s，倾斜按 EPOCHS×N_TARS×"
+          f"分片字节 ÷ 带宽推导（本档地板 {floor_s:.0f}s × {TILT_TIMEOUT_HEADROOM:.0f}"
+          f"= {int(floor_s * TILT_TIMEOUT_HEADROOM)}s），显式 POD_TIMEOUT 优先")
     print("run_bench selftest: PASS")
 
 
@@ -3281,7 +3858,7 @@ def main():
                              "traincache-cold，L=traincache-cold/fluid-cold）。"
                              "显式指定时与该档求交集，越档的组态会被剔除")
     parser.add_argument("--out", type=str,
-                        default=str(bench_config.RESULTS_DIR / "compare" / "summary.csv"))
+                        default=str(bench_config.SCORES_RESULTS_DIR / "compare" / "summary.csv"))
     parser.add_argument("--selftest", action="store_true",
                         help="离线自检（不连集群、不起 Pod）后退出")
     parser.add_argument("--dry-run", action="store_true",

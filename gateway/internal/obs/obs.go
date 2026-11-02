@@ -1,5 +1,5 @@
 // Package obs 维护网关的 60s 汇总计数并输出单行 Info 日志
-// （design 10.1 §7.3；10.2 D20）。
+// （design 9.1 §7.3；9.2 D20）。
 //
 // 所有计数在窗口切换时用原子交换清零；每个请求的每个计数恰好落在一个
 // 窗口里，不重不漏。datasets 是窗口内出现过的 dataset 集合大小，切换时清空。
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// SummaryMsg 是汇总行的固定消息（design 10.1 §7.3 冻结）。
+// SummaryMsg 是汇总行的固定消息（design 9.1 §7.3 冻结）。
 const SummaryMsg = "gateway: 60s 汇总"
 
 // Summary 是一个窗口的九个计数。Snapshot 返回当前窗口的实时值，不清零。

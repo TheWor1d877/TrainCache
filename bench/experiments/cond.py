@@ -2,7 +2,7 @@
 """COND 契约 v1 解析器与校验器。
 
 COND 文件位于 bench/experiments/conds/<name>.json,描述一个实验点。
-字段全集与校验规则见 docs/9.2 实验协议.md §C2/§C5;runner 遇到未知字段直接拒绝。
+字段全集与校验规则见 docs/4.4 实验协议.md §C2/§C5;runner 遇到未知字段直接拒绝。
 """
 import json
 import re
@@ -14,7 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 
-# ---- schema 常量(与 docs/9.2 §C 冻结值逐字一致)----
+# ---- schema 常量(与 docs/4.4 §C 冻结值逐字一致)----
 SCHEMA_VERSION = "1"
 
 VALID_FIGURES = {
@@ -47,7 +47,7 @@ VALID_LOOKAHEAD = {8, 16, 32}
 # 正式实验块大小(D20:固定 8 MiB,写在 dataset.chunk_size_bytes)
 CHUNK_SIZE_BYTES = 8388608
 
-# 顶层允许字段(docs/9.2 §C2.1)
+# 顶层允许字段(docs/4.4 §C2.1)
 ALLOWED_TOP = {
     "schema_version", "name", "figure", "group", "track",
     "dataset", "trace", "workload", "network", "cache",
@@ -89,8 +89,8 @@ COMPARE_SHARD_SIZE_BYTES = config.TRACK_B_TAR_BYTES  # 256MiB
 VALID_CAPACITY_RATIOS = {"S", "M", "L"}
 # 数据集规模枚举(D19 三档):S=2GiB / M=8GiB / L=32GiB
 VALID_DATASET_BYTES = {2 << 30, 8 << 30, 32 << 30}
-# epoch 档位枚举:1 / 3 / 10
-VALID_EPOCHS = {1, 3, 10}
+# epoch 档位枚举(4.4 §3.1、§4.1 的 epoch 轴):1 / 3 / 6
+VALID_EPOCHS = {1, 3, 6}
 CAPACITY_TIER_RATIO = {"S": 2.0, "M": 8.0, "L": 32.0}   # 数据/缓存容量比(D19)
 CAPACITY_TIER_N_TARS = {
     "S": config.TRACK_B_N_TARS // 4,   # 8  × 256MiB = 2GiB
@@ -108,7 +108,7 @@ CAPACITY_TIER_GROUPS = {
     "L": {"traincache-cold", "fluid-cold"},
 }
 EXPLORATORY_TIERS = {"L"}  # L 档 1 次,低于 3 次硬纪律:标 exploratory,不进正式表
-# 9.1 D32、9.2 §9:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
+# 4.5 D32、4.4 §7.2 的 epoch 列:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
 # (3 个连续 epoch),M/L 档跑 B 轨符号探点(1 个 epoch)。显式 EPOCHS 环境变量
 # 优先;COND 的 workload.epochs 仍按 figure 校验,两者不一致由 COND 校验器拒收。
 CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
@@ -166,7 +166,7 @@ def _require(obj: dict, key: str, path: str, errors: list) -> Any:
 
 
 def validate_cond(cond: dict) -> list[str]:
-    """按 docs/9.2 §C5 校验,返回错误信息列表(空列表=通过)。"""
+    """按 docs/4.4 §C5 校验,返回错误信息列表(空列表=通过)。"""
     errors: list[str] = []
 
     # 1. 顶层未知字段 + schema_version
@@ -259,7 +259,7 @@ def validate_cond(cond: dict) -> list[str]:
             elif sha == "0" * 64:
                 errors.append("$.trace.sha256 是全零占位符,需填真实值")
             elif len(set(sha)) == 1:
-                # aaaa… / ffff… 这类单字符重复串也是占位符(docs/9.2 §C5 规则 9)
+                # aaaa… / ffff… 这类单字符重复串也是占位符(docs/4.4 §C5 规则 9)
                 errors.append("$.trace.sha256 是单字符重复占位符(如 aaaa…),需填真实值")
             elif sha.startswith("deadbeef"):
                 errors.append("$.trace.sha256 是占位符(deadbeef…),需填真实值")
@@ -276,11 +276,11 @@ def validate_cond(cond: dict) -> list[str]:
             v = _require(wl, k, "$.workload", errors)
             if v is not None and (not isinstance(v, int) or v <= 0):
                 errors.append(f"$.workload.{k} 必须是 >0 的整数")
-        # epoch 档位枚举:1 / 3 / 10,不在枚举内的实验点直接拒收
+        # epoch 档位枚举(4.4 §3.1、§4.1):1 / 3 / 6,不在枚举内的实验点直接拒收
         ep = wl.get("epochs")
         if isinstance(ep, int) and ep not in VALID_EPOCHS:
             errors.append(
-                f"$.workload.epochs={ep} 不在枚举内(允许 1/3/10)")
+                f"$.workload.epochs={ep} 不在枚举内(允许 1/3/6)")
         shuffle = _require(wl, "shuffle", "$.workload", errors)
         if shuffle is not None and shuffle not in VALID_SHUFFLES:
             errors.append(f"$.workload.shuffle 非法: {shuffle!r}")
@@ -465,14 +465,16 @@ def validate_cond(cond: dict) -> list[str]:
     if isinstance(samp, dict):
         _check_unknown(samp, ALLOWED_SAMPLING, "$.sampling", errors)
         reps = _require(samp, "reps", "$.sampling", errors)
-        # 规则 8:pareto1/pareto2 固定 7;policy 与 fig1/fig2/fig3 固定 3;
+        # 规则 8:pareto1 固定 7;pareto2 固定 2;policy 与 fig1/fig2/fig3 固定 1;
         # compare-* 带 capacity_ratio 时按档位(D32),不带时固定 3
-        if figure in {"pareto1", "pareto2"}:
+        if figure == "pareto1":
             allowed_reps = {7}
+        elif figure == "pareto2":
+            allowed_reps = {2}
         elif figure in {"compare-d", "compare-b"}:
             allowed_reps = CAPACITY_TIER_REPS_ALLOWED[tier] if tier_has_reps else {3}
         else:
-            allowed_reps = {3}
+            allowed_reps = {1}
         if reps is not None and reps not in allowed_reps:
             tier_hint = f",capacity_ratio={tier!r}" if tier_has_reps else ""
             errors.append(
@@ -507,7 +509,7 @@ def validate_cond(cond: dict) -> list[str]:
                 elif val.endswith("0" * 64):
                     errors.append(f"$.environment.images.{key} 是全零占位符,需填真实 digest")
                 else:
-                    # aaaa… / deadbeef… 也是占位符(docs/9.2 §C5 规则 9),digest 必须是真实镜像摘要
+                    # aaaa… / deadbeef… 也是占位符(docs/4.4 §C5 规则 9),digest 必须是真实镜像摘要
                     hexpart = val.split("sha256:", 1)[-1]
                     if len(set(hexpart)) == 1 or hexpart.startswith("deadbeef"):
                         errors.append(
@@ -620,7 +622,7 @@ def selftest() -> None:
     errs2 = validate_cond(good)
     assert not errs2, f"修正占位符后仍有错误: {errs2}"
 
-    # aaaa… 这类单字符重复串同样必须被拒(docs/9.2 §C5 规则 9)
+    # aaaa… 这类单字符重复串同样必须被拒(docs/4.4 §C5 规则 9)
     ph = json.loads(json.dumps(good))
     ph["trace"]["sha256"] = "a" * 64
     errs_ph = validate_cond(ph)

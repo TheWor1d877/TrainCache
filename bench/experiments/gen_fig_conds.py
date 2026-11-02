@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""生成五张图与 Pareto 的 COND 清单。
+"""生成六个出图族的 COND 清单。
 
-图一/图三/Pareto 一与图二共用对照层 Pod + MinIO 装置（协议 §1.8/§C3），
+fig1/fig3/pareto1 与 fig2 共用对照层 Pod + MinIO 装置（协议 §1.8/§C3），
 所以每个 COND 就是一组 (figure, 自变量档位, 组态)。执行器
 `run_figures.py` 按 COND 起一条 run_bench 链路。
 
 命名:
   fig1-<rate>-ratio<R>-fan<F>-<gated|free>
-  fig2-<rate>-size<S>-ep<E>-<traincache-cold|fluid-cold>
-  fig3-<rate>-<shuffle>-ep<E>-<traincache-cold|fluid-cold>
+  fig2-<rate>-size<S>-ep<E>
+  fig3-<shuffle>-ep<E>
   pareto1-fan<F>-<gated|free>
+
+三张曲面每点 1 次（D18），只画形态；pareto1 每点 7 次。
 
 轨迹按 (n_tars, shuffle, epochs) 现场生成，sha256 写进 COND；run_bench.py
 用同一组参数复算，两边必须一致。
@@ -66,7 +68,7 @@ def _trace(n_tars: int, shuffle: str, epochs: int) -> tuple[str, str]:
 
 
 def _cond(tpl: dict, *, name, figure, group, n_tars, ratio, rate, epochs,
-          shuffle, fanout, gate_mode, evict="heat", reps=3) -> dict:
+          shuffle, fanout, gate_mode, evict="heat", reps=1) -> dict:
     dataset_bytes = n_tars * 256 * (1 << 20)
     cache_bytes = dataset_bytes // ratio
     trace_file, trace_sha = _trace(n_tars, shuffle, epochs)
@@ -143,29 +145,26 @@ def _fig1(tpl):
 def _fig2(tpl):
     out = []
     for rate in RATES:
-        for n_tars, ratio in ((8, 2), (32, 8)):
-            for ep in (1, 3, 10):
-                for group in ("traincache-cold", "fluid-cold"):
-                    short = "tc" if group.startswith("traincache") else "fl"
-                    name = f"fig2-{rate}-size{n_tars * 256 >> 10}-ep{ep}-{short}"
-                    out.append(_cond(
-                        tpl, name=name, figure="fig2", group=group,
-                        n_tars=n_tars, ratio=ratio, rate=rate, epochs=ep,
-                        shuffle="per-epoch", fanout=2, gate_mode="gated"))
+        for ep in (1, 3, 6):
+            name = f"fig2-{rate}-size8-ep{ep}"
+            out.append(_cond(
+                tpl, name=name, figure="fig2",
+                group="traincache-cold",
+                n_tars=32, ratio=8, rate=rate, epochs=ep,
+                shuffle="per-epoch", fanout=2, gate_mode="gated"))
     return out
 
 
 def _fig3(tpl):
     out = []
     for shuffle in ("fixed", "per-epoch", "curriculum"):
-        for ep in (1, 3, 10):
-            for group in ("traincache-cold", "fluid-cold"):
-                short = "tc" if group.startswith("traincache") else "fl"
-                name = f"fig3-{shuffle}-ep{ep}-{short}"
-                out.append(_cond(
-                    tpl, name=name, figure="fig3", group=group,
-                    n_tars=8, ratio=2, rate=100, epochs=ep,
-                    shuffle=shuffle, fanout=2, gate_mode="gated"))
+        for ep in (1, 3, 6):
+            name = f"fig3-{shuffle}-ep{ep}"
+            out.append(_cond(
+                tpl, name=name, figure="fig3",
+                group="traincache-cold",
+                n_tars=8, ratio=2, rate=100, epochs=ep,
+                shuffle=shuffle, fanout=2, gate_mode="gated"))
     return out
 
 

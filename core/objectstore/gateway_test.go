@@ -1,6 +1,6 @@
 package objectstore
 
-// gateway_test.go：网关错误分类的契约用例（10.1 §4.4 / 10.3）。
+// gateway_test.go：网关错误分类的契约用例（9.1 §4.4 / 9.3）。
 // 全部用 httptest 假源站，不连真实 S3；minio-go 的 5xx 重试在 TestMain 降到 1 次，
 // 只影响本包测试耗时。
 
@@ -28,7 +28,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// 编译期断言：NewS3Store 的老签名仍然可用（10.1 §1.5）。
+// 编译期断言：NewS3Store 的老签名仍然可用（9.1 §1.5）。
 var _ func(endpoint, accessKey, secretKey, bucket string, secure bool) (*S3Store, error) = NewS3Store
 
 // fakeS3Server 启动一个假 S3 源站：HEAD（存在性探测）恒 200，GET 固定返回

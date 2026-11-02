@@ -101,7 +101,7 @@ func (s *Sub) Close() {
 	e.doRelease(buf, fn)
 }
 
-// Pos 返回订阅者当前的绝对读偏移，供踢出日志使用（design 10.1 §7.2）。
+// Pos 返回订阅者当前的绝对读偏移，供踢出日志使用（design 9.1 §7.2）。
 func (s *Sub) Pos() int64 {
 	e := s.entry
 	e.mu.Lock()

@@ -4,17 +4,21 @@
 #
 # 由 bench/Makefile 的 ctrl-up 目标与 bench/compare/traincache/up.sh 共用。
 # 步骤:
+#   0. kubectl context 断言(kind-$CLUSTER_NAME;别的会话切走 context 时直接失败)
 #   1. namespace traincache
 #   2. worker 节点 traincache.io/s3-access=true 标签
 #   3. 控制面镜像预检(缺失直接失败并打印拉取/导入命令)
+#   3b. 镜像新鲜度(镜像源码指纹标签 != 当前工作树则失败;旧二进制会把修掉的
+#       缺陷再量一遍)
 #   4. Secret traincache-objstore(MinIO 凭证)
 #   5. webhook TLS Secret(含 ca.crt)+ MutatingWebhookConfiguration caBundle
 #   6. kubectl apply -k controller/deploy(仅清单哈希变化或工作负载缺失时)
 #   7. 网关开关(TRAINCACHE_GATEWAY=1):traincache-gateway 副本 1 并等 rollout;
 #      不带或为 0:副本 0(对象保留,不删 Deployment)。见 ensure_gateway
-#   8. traincache-config 的 WHITELIST/CACHE_CAPACITY_BYTES/STARTUP_WINDOW_BYTES/MAX_FILL_FRACTION
-#      与 agentd 的 BUCKET,外加 gatewayEndpoint(开网关指向 traincache-gateway.<NS>.svc:9413,
-#      关网关置空);只有取值真的变化才 patch 并重启一次 agentd
+#   8. traincache-config 的 WHITELIST/CACHE_CAPACITY_BYTES/STARTUP_WINDOW_BYTES/MAX_FILL_FRACTION/BUCKET、
+#      gatewayEndpoint(开网关指向 traincache-gateway.<NS>.svc:9413,关网关置空)
+#      与本轮的 PREFETCH_LOOKAHEAD/EVICT_POLICY(apply 会盖回清单默认,所以在 apply 之后对齐);
+#      只有取值真的变化才 patch 并重启一次 agentd
 #   9. 五个工作负载 rollout 就绪(开网关时含网关),打印 Ready 数与 Pod UID
 #
 # 幂等:清单哈希记在 namespace 注解 traincache.io/deploy-hash。哈希未变且
@@ -35,6 +39,10 @@ HASH_ANNOTATION="traincache.io/deploy-hash"
 CAPACITY_BYTES="${TRAINCACHE_CACHE_CAPACITY_BYTES:-1073741824}"
 STARTUP_WINDOW_BYTES="536870912"
 MAX_FILL_FRACTION="0.125"
+# 与 controller/deploy/agent/configmap.yaml 的默认值一致:独立调用(不带 COND)时
+# 这两项就停在清单默认,不额外触发滚动重启。
+PREFETCH_LOOKAHEAD="${TRAINCACHE_PREFETCH_LOOKAHEAD:-16}"
+EVICT_POLICY="${TRAINCACHE_EVICT_POLICY:-heat}"
 CLUSTER_NAME="${CLUSTER_NAME:-$(cfg CLUSTER_NAME)}"
 CLUSTER_NAME="${CLUSTER_NAME:-traincache}"
 WEBHOOK_CA_B64=""
@@ -49,6 +57,32 @@ if [ "$GATEWAY_ON" = "1" ]; then
 else
   WANT_GATEWAY_ENDPOINT=""
 fi
+
+# ---- 0. context 断言:装置只跑在自己的 kind 集群上 ----
+# 同一台机器上并行的会话会共用 ~/.kube/config,而 kind create cluster 会把
+# current-context 切到新集群。上个会话建 e2e 集群后,这里若不拦,up.sh 会把
+# 控制面 apply 到别人的单节点集群、量出来的数与 bench 无关。
+assert_context() {
+  local want="kind-$CLUSTER_NAME" cur have
+  have="$(kubectl config get-contexts -o name 2>/dev/null || true)"
+  [ -n "$have" ] || return 0
+  if ! printf '%s\n' "$have" | grep -qx "$want"; then
+    log_group "$GROUP" "WARNING: kubeconfig 里没有 context $want,按单集群环境处理(真实集群/CI)" >&2
+    return 0
+  fi
+  cur="$(kubectl config current-context 2>/dev/null || true)"
+  if [ "$cur" = "$want" ]; then
+    return 0
+  fi
+  if [ "${TRAINCACHE_ALLOW_CONTEXT_MISMATCH:-0}" = "1" ]; then
+    log_group "$GROUP" "WARNING: context 是 ${cur:-<无>} 而非 $want,已按 TRAINCACHE_ALLOW_CONTEXT_MISMATCH=1 放行" >&2
+    return 0
+  fi
+  log_group "$GROUP" "错误: kubectl current-context=${cur:-<无>},装置要求 $want。别的会话切走了 context;用独立 kubeconfig 跑,不要改共享的 ~/.kube/config:" >&2
+  printf '  kubectl --context %s config view --minify --flatten >/tmp/%s.kubeconfig && export KUBECONFIG=/tmp/%s.kubeconfig\n' \
+    "$want" "$CLUSTER_NAME" "$CLUSTER_NAME" >&2
+  return 1
+}
 
 # ---- 1. 节点 s3-access 标签(DataSet Ready 前置条件)----
 label_s3_nodes() {
@@ -70,7 +104,62 @@ label_s3_nodes() {
 }
 
 # ---- 2. 镜像预检:只查,不拉取 ----
-# 四个工作负载的 image 引用直接从 kustomize 渲染结果取,与清单同源。
+# 五个工作负载的 image 引用直接从 kustomize 渲染结果取,与清单同源。
+rendered_images() {
+  kubectl kustomize "$DEPLOY_DIR" 2>/dev/null \
+    | awk '/^[[:space:]]*image:[[:space:]]*/{print $2}' | sort -u
+}
+
+# 镜像新鲜度:热集群里 :dev 标签会被反复复用,只查"在不在"会让上一次构建的
+# 二进制继续参与测量——#17 探针就是这么把已在 HEAD 修掉的字节维度又量了一遍
+# (容量 gauge 报 0、目录涨到全量数据集、淘汰增量 0)。判据用 hack/build-images.sh
+# 打在镜像上的源码指纹标签:与当前工作树不一致或没有标签,就是旧镜像。
+check_image_freshness() {
+  local images img label fp stale=0
+  if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+    log_group "$GROUP" "WARNING: docker 不可用,跳过镜像新鲜度检查" >&2
+    return 0
+  fi
+  fp="$(bash "$REPO/hack/build-images.sh" --print-fp 2>/dev/null || true)"
+  if [ -z "$fp" ]; then
+    log_group "$GROUP" "WARNING: 源码指纹取不到,跳过镜像新鲜度检查" >&2
+    return 0
+  fi
+  images="$(rendered_images)"
+  for img in $images; do
+    case "$img" in
+      ghcr.io/thewor1d877/traincache/*) ;;
+      *) continue ;;
+    esac
+    docker image inspect "$img" >/dev/null 2>&1 || continue  # 本机没有=从仓库拉取,无从判定
+    label="$(docker image inspect "$img" --format '{{ index .Config.Labels "io.traincache.src-fp" }}' 2>/dev/null || true)"
+    if [ "$label" = "$fp" ]; then
+      continue
+    fi
+    printf '镜像源码指纹不匹配: %s\n  镜像标签 %s != 当前工作树 %s\n' \
+      "$img" "${label:-<无标签>}" "$fp" >&2
+    stale=1
+  done
+  if [ "$stale" -ne 0 ]; then
+    if [ "${TRAINCACHE_ALLOW_STALE_IMAGE:-0}" = "1" ]; then
+      log_group "$GROUP" "WARNING: 存在旧镜像,已按 TRAINCACHE_ALLOW_STALE_IMAGE=1 放行(只用于复现历史产物)" >&2
+      return 0
+    fi
+    cat >&2 <<EOF
+
+控制面镜像比当前源码旧,直接测量会读到一个已经修掉的缺陷。下一步(repo 根):
+  ./hack/build-images.sh                 # 重建五个 dev 镜像
+  for i in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
+    kind load docker-image ghcr.io/thewor1d877/traincache/\$i:dev --name $CLUSTER_NAME
+  done
+  kubectl -n $NS rollout restart daemonset/traincache-agentd deployment/traincache-controller-manager
+复现历史产物要故意用旧镜像时设 TRAINCACHE_ALLOW_STALE_IMAGE=1。
+EOF
+    return 1
+  fi
+  log_group "$GROUP" "镜像新鲜度通过(源码指纹 ${fp:0:12})"
+}
+
 # kind load 刚结束时 containerd 元数据可能还没同步,单次 crictl 会误报缺失
 # (随即手工 crictl images -q 又正常),故每个镜像最多探 3 次、间隔 2s。
 image_present() {
@@ -92,8 +181,7 @@ check_images() {
     log_group "$GROUP" "WARNING: docker 不可用,跳过控制面镜像预检" >&2
     return 0
   fi
-  images="$(kubectl kustomize "$DEPLOY_DIR" 2>/dev/null \
-    | awk '/^[[:space:]]*image:[[:space:]]*/{print $2}' | sort -u)"
+  images="$(rendered_images)"
   if [ -z "$images" ]; then
     log_group "$GROUP" "WARNING: 未能从 controller/deploy 解析镜像引用,跳过预检" >&2
     return 0
@@ -252,43 +340,71 @@ ensure_gateway() {
   fi
 }
 
-# ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数/网关端点)----
+# ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数/网关端点/预取提前量/淘汰策略)----
 # 这六处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
 # 引用,改值不再动工作负载清单。桶以前由 `kubectl set env` 直接覆盖 DaemonSet 的
 # 显式 env,那份覆盖会在下次 `kubectl apply -k` 时被仓库清单盖回去。
+# 同一件事也发生在 ConfigMap 上:apply -k 会把整份 data 回到清单里的默认值,所以
+# run_bench.py 起跑前写的 prefetchLookahead/evictPolicy 会被 up.sh 盖掉。这里在
+# apply 之后按环境变量再对齐一次,COND 的自变量才留得住(4.4 §5.3 的淘汰矩阵、
+# §5.2 的 lookahead 扫点都靠它)。
 ensure_agent_config() {
-  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw changed=0
+  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw cur_la cur_ep changed=0
   cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"
   cur_cap="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null || true)"
   cur_sw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
   cur_mf="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.maxFillFraction}' 2>/dev/null || true)"
   cur_bucket="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.objstoreBucket}' 2>/dev/null || true)"
   cur_gw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gatewayEndpoint}' 2>/dev/null || true)"
+  cur_la="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.prefetchLookahead}' 2>/dev/null || true)"
+  cur_ep="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.evictPolicy}' 2>/dev/null || true)"
   if [ "$cur_wl" != "$DATASET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ] \
      || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ] \
-     || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_gw" != "$WANT_GATEWAY_ENDPOINT" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT'"
+     || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_gw" != "$WANT_GATEWAY_ENDPOINT" ] \
+     || [ "$cur_la" != "$PREFETCH_LOOKAHEAD" ] || [ "$cur_ep" != "$EVICT_POLICY" ]; then
+    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY"
     kubectl -n "$NS" patch configmap traincache-config --type merge \
-      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\"}}" >/dev/null
+      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\",\"prefetchLookahead\":\"$PREFETCH_LOOKAHEAD\",\"evictPolicy\":\"$EVICT_POLICY\"}}" >/dev/null
     changed=1
   fi
   if [ "$changed" -eq 1 ]; then
     kubectl -n "$NS" rollout restart daemonset/traincache-agentd >/dev/null
-    kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null
+    if ! kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null 2>&1; then
+      log_group "$GROUP" "错误: agentd 滚动更新未在 240s 内就绪(配置 WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY)" >&2
+      kubectl -n "$NS" get pods -l app.kubernetes.io/name=traincache-agentd -o wide >&2 || true
+      kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data}' >&2 || true
+      echo >&2
+      return 1
+    fi
     log_group "$GROUP" "agentd 配置已修正并滚动更新完成"
   else
-    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT')"
+    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY)"
   fi
 }
 
 wait_ready() {
-  kubectl -n "$NS" rollout status deployment/traincache-controller-manager --timeout=180s
-  kubectl -n "$NS" rollout status deployment/traincache-webhook --timeout=180s
-  kubectl -n kube-system rollout status deployment/traincache-scheduler --timeout=180s
-  kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s
+  local entry kind name ns label
+  local targets=(
+    "deployment traincache-controller-manager $NS"
+    "deployment traincache-webhook $NS"
+    "deployment traincache-scheduler kube-system"
+    "daemonset traincache-agentd $NS"
+  )
   if [ "$GATEWAY_ON" = "1" ]; then
-    kubectl -n "$NS" rollout status deployment/traincache-gateway --timeout=120s
+    targets+=("deployment traincache-gateway $NS")
   fi
+  for entry in "${targets[@]}"; do
+    read -r kind name ns <<<"$entry"
+    label="$kind/$name($ns)"
+    if ! kubectl -n "$ns" rollout status "$kind/$name" --timeout=240s >/dev/null 2>&1; then
+      log_group "$GROUP" "错误: $label 未就绪" >&2
+      kubectl -n "$ns" get "$kind" "$name" -o jsonpath='{.status.conditions}' >&2 || true
+      echo >&2
+      kubectl -n "$ns" get pods -l "app.kubernetes.io/name=$name" -o wide >&2 || true
+      return 1
+    fi
+    log_group "$GROUP" "$label 已就绪"
+  done
 }
 
 # ---- 6. 结束打印 Ready 数与 Pod UID,供校验无滚动重启 ----
@@ -319,9 +435,11 @@ print_status() {
   done
 }
 
+assert_context
 ensure_ns "$NS" "$GROUP"
 label_s3_nodes
 check_images
+check_image_freshness
 ensure_objstore_secret
 ensure_webhook_tls
 ensure_control_plane

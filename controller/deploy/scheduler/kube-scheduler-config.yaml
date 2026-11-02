@@ -11,6 +11,14 @@
 #
 # leaderElection.resourceName must differ from kube-scheduler's default lease,
 # otherwise the two schedulers fight over the same lock.
+#
+# This ConfigMap also carries the scheduler's two env values. configMapKeyRef is
+# namespace-local, and the scheduler runs in kube-system, so it cannot reference
+# traincache-config in the traincache namespace — that reference leaves the Pod
+# in CreateContainerConfigError. schedulerScoreTTL must keep the same value as
+# controllerScoreTTL in traincache-config; hack/verify-config-placement.sh checks
+# both keys exist and that every workload references a ConfigMap in its own
+# namespace.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,6 +27,8 @@ metadata:
   labels:
     app.kubernetes.io/name: traincache-scheduler
 data:
+  schedulerScoreTTL: "10m"
+  schedulerLogLevel: "debug"
   scheduler.yaml: |
     apiVersion: kubescheduler.config.k8s.io/v1
     kind: KubeSchedulerConfiguration

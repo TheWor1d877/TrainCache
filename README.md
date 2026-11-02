@@ -38,7 +38,7 @@ TrainCache 在块粒度上补这三段：Job 提交时向候选节点按消费�
 
 前置条件：Kubernetes 集群、kubectl、一个 S3 兼容桶。实验与 e2e 在 kind v1.37.0 上验证。
 
-**1. 装控制面。** 用发布包里的 `install.yaml`，四个镜像按 digest 固定：
+**1. 装控制面。** 用发布包里的 `install.yaml`，五个镜像按 digest 固定：
 
 ```bash
 kubectl apply -f install.yaml
@@ -66,12 +66,13 @@ CLI 默认连 `127.0.0.1:9410`，访问集群内 Agent 先做端口转发。参�
 `bench/` 是本项目的正式实验装置：kind 起的 5 节点集群、MinIO 源站、tc 限速，七组态对照（direct 直读、JuiceFS 冷/热、Fluid 冷/热、TrainCache 冷/热）在同一负载形态下跑分。
 
 ```bash
+cd bench
 make bench-up                        # 建 kind 集群、MinIO、控制面，挂 tc
 make bench-status && make bench-doctor
-make bench COND=<cond-name>          # 跑一个实验点
+python3 bench/exp.py run <族>        # 跑一个实验族，族名见 exp.py status
 ```
 
-数据与产物一律落在 `~/tcd/`，仓库内只存脚本与清单。装置细节与条件清单见 [bench 装置说明](docs/4 bench装置说明.md) 与[实验协议](docs/9.2 实验协议.md)。
+数据与产物一律落在 `~/tcd/`，仓库内只存脚本与清单。装置细节见 [bench 文档导览](docs/4.0%20bench文档导览.md)，条件与判据见[实验协议](docs/4.4%20实验协议.md)。
 
 ## 构建与测试
 
@@ -89,11 +90,16 @@ make e2e           # kind 里的端到端
 | [1 TrainCache介绍与背景](docs/1 TrainCache介绍与背景.md) | 问题定义、外部事实、与 Fluid/JuiceFS 的定位差异 |
 | [2 TrainCache三层架构](docs/2 TrainCache三层架构.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3 现勘报告.md) | 现场勘查数据与缺口证据 |
-| [4 bench装置说明](docs/4 bench装置说明.md) | 实验装置、条件清单、产物格式 |
-| [5.x 缓存核心库](docs/5.1 design.md) | 设计、决策、测试 |
+| [4.0 bench文档导览](docs/4.0%20bench文档导览.md) | 4.1–4.6 的分工与常驻命令 |
+| [4.1 bench装置与禁令](docs/4.1%20bench装置与禁令.md) | 装置构成、文件作用、参数、数据落点、禁令、装置级故障 |
+| [4.2 juicefs与fluid](docs/4.2%20juicefs与fluid.md) | 两类对照组的镜像、起组、预热、跑分、拆组 |
+| [4.3 TrainCache启动与实验](docs/4.3%20TrainCache启动与实验.md) | 镜像构建、控制面拉起、新版本自跑、实验族启动 |
+| [4.4 实验协议](docs/4.4%20实验协议.md) | 预注册假设、口径、条件矩阵、COND 契约与机时 |
+| [4.5 实验口径决策](docs/4.5%20实验口径决策.md) | 验收与实验口径的裁决（D 号） |
+| [4.6 实验版本记录](docs/4.6%20实验版本记录.md) | 版本 × 实验族矩阵，记录产物路径 |
+| [5.x 缓存核心库](docs/5.1 design.md) | 设计要求、计划、决策、测试 |
 | [6.x Agent 服务化](docs/6.1 design.md) | 同上，对应节点面 |
 | [7.x Controller & Scheduler](docs/7.1 design.md) | 同上，对应控制面 |
 | [8.x 日志与监控](docs/8.1 design.md) | 指标、日志契约与使用说明 |
-| [9.1 决策](docs/9.1 decisions.md) | 验收与实验口径的裁决 |
-| [9.2 实验协议](docs/9.2 实验协议.md) | 预注册假设、口径、条件矩阵 |
+| [9.x 合并回源网关](docs/9.1 design.md) | 网关的接口契约、决策与测试 |
 | [发布约束](docs/RELEASE-CONSTRAINTS.md) | 版本、镜像、发布物与 CI 口径 |

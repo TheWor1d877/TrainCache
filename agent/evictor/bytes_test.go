@@ -84,12 +84,12 @@ func TestStatBlocksDirBytes(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "other.log"), 777)
 	mustWriteFile(t, filepath.Join(dir, "ee", "skip.txt"), 400)
 
-	got := statBlocksDirBytes(dir)
+	got, _ := statBlocksDirBytes(dir)
 	if got != 300 {
 		t.Errorf("statBlocksDirBytes = %d, want 300(仅 ab/aaa.blk + cd/bbb.blk)", got)
 	}
 
-	got2 := statBlocksDirBytes(filepath.Join(dir, "no-such"))
+	got2, _ := statBlocksDirBytes(filepath.Join(dir, "no-such"))
 	if got2 != 0 {
 		t.Errorf("statBlocksDirBytes(不存在目录) = %d, want 0", got2)
 	}
@@ -145,7 +145,7 @@ func TestStatBlocksDirBytesFilters(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "cd", "also.real.blk"), 58)
 	mustWriteFile(t, filepath.Join(dir, "e", "f", "skip.txt"), 999)
 
-	got := statBlocksDirBytes(dir)
+	got, _ := statBlocksDirBytes(dir)
 	want := int64(42 + 58)
 	if got != want {
 		t.Errorf("statBlocksDirBytes = %d, want %d(tmp- 与非 .blk 应过滤)", got, want)
@@ -155,7 +155,7 @@ func TestStatBlocksDirBytesFilters(t *testing.T) {
 // TestStatBlocksDirBytesWalkDirErrors:空目录、零字节 .blk、无 .blk 文件。
 func TestStatBlocksDirBytesWalkDirErrors(t *testing.T) {
 	dir := t.TempDir()
-	if got := statBlocksDirBytes(dir); got != 0 {
+	if got, _ := statBlocksDirBytes(dir); got != 0 {
 		t.Errorf("空目录 statBlocksDirBytes = %d, want 0", got)
 	}
 
@@ -164,7 +164,7 @@ func TestStatBlocksDirBytesWalkDirErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWriteFile(t, filepath.Join(dir, "readme.txt"), 10)
-	if got := statBlocksDirBytes(dir); got != 0 {
+	if got, _ := statBlocksDirBytes(dir); got != 0 {
 		t.Errorf("无 .blk 文件 statBlocksDirBytes = %d, want 0", got)
 	}
 
@@ -175,7 +175,7 @@ func TestStatBlocksDirBytesWalkDirErrors(t *testing.T) {
 	if err := os.WriteFile(zeroBlk, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := statBlocksDirBytes(dir); got != 0 {
+	if got, _ := statBlocksDirBytes(dir); got != 0 {
 		t.Errorf("零字节 .blk 应计入 0: got=%d", got)
 	}
 }
@@ -471,8 +471,8 @@ func TestBytesOpenObserverRealOpen(t *testing.T) {
 
 	fp := putUniqueBlock(t, cs, 2048, "observer")
 
-	// Open 触发 OnStoreOpen。New 已 stat → seenFPs 已记 → 首次 Open 不应再加
-	// (但 OnStoreOpen 内部 LoadOrStore:如果 Load 返回 loaded=true,则不加)
+	// 本用例的块是 New 之后才 Put 的(不在启动预扫的 seenFPs 播种里),所以首次 Open
+	// 按文件 size 计一次;第二次 Open 由 seenFPs 拦截。
 	before := ev.BytesAccum()
 
 	br, err := cs.Open(fp)
@@ -482,11 +482,8 @@ func TestBytesOpenObserverRealOpen(t *testing.T) {
 	_ = br.Close()
 
 	after := ev.BytesAccum()
-	// 关键:如果 seenFPs 已由 New 初始化 stat 时通过其他路径累计过,Open 不应再加
-	// 但当前 New 里只是 statBlocksDirBytes,没有调 seenFPs,所以 Open 可能会加
-	// 这不是 bug,只是测试期望要调整:只要 seenFPs 幂等性成立即可
-	if after < before {
-		t.Errorf("bytesAccum 不应减少: before=%d after=%d", before, after)
+	if want := before + 2048 + cas.HeaderSize; after != want {
+		t.Errorf("首次 Open 累计增量 = %d, want %d(块文件 size = 数据 + 块头)", after-before, want-before)
 	}
 
 	// 再次 Open 应不再增加(seenFPs 幂等)
@@ -695,8 +692,8 @@ var _ fmt.Stringer
 
 // —— PutObserver 写路径测试 ——
 
-// TestBytesPutObserverRealPut:真实 cas.Put 触发 OnStorePut,bytesAccum 按 Put 返回的
-// 准确 size 累计(直接用 n,非 stat 估计)。
+// TestBytesPutObserverRealPut:真实 cas.Put 触发 OnStorePut,bytesAccum 按块文件实际占用
+// (Put 返回的数据长度 + cas.HeaderSize 块头)累计——与 stat 侧同口径,淘汰扣减才对得平。
 func TestBytesPutObserverRealPut(t *testing.T) {
 	const C int64 = 1024 * 1024
 	root := t.TempDir()
@@ -734,9 +731,10 @@ func TestBytesPutObserverRealPut(t *testing.T) {
 		t.Fatalf("Put 返回 size=%d, want %d", n, putSize)
 	}
 
+	want := putSize + cas.HeaderSize
 	got := ev.BytesAccum()
-	if got != putSize {
-		t.Errorf("OnStorePut 累计=%d, want %d(Put 应直接用准确 size)", got, putSize)
+	if got != want {
+		t.Errorf("OnStorePut 累计=%d, want %d(数据 %d + 块头 %d)", got, want, putSize, cas.HeaderSize)
 	}
 
 	// 同一 fp 重复 Put(同内容,rename 覆盖同 fp)不应重复累计
@@ -751,8 +749,8 @@ func TestBytesPutObserverRealPut(t *testing.T) {
 	if fp2 != fp {
 		t.Fatalf("同内容 Put 应返回同 fp, got %v want %v", fp2, fp)
 	}
-	if after := ev.BytesAccum(); after != putSize {
-		t.Errorf("重复 Put 不应累计: before=%d after=%d", putSize, after)
+	if after := ev.BytesAccum(); after != want {
+		t.Errorf("重复 Put 不应累计: before=%d after=%d", want, after)
 	}
 }
 
@@ -794,8 +792,8 @@ func TestBytesPutThenOpenNoDoubleCount(t *testing.T) {
 		t.Fatalf("cas.Put: %v", err)
 	}
 	afterPut := ev.BytesAccum()
-	if afterPut != putSize {
-		t.Fatalf("Put 后累计=%d, want %d", afterPut, putSize)
+	if want := putSize + cas.HeaderSize; afterPut != want {
+		t.Fatalf("Put 后累计=%d, want %d(数据 + 块头)", afterPut, want)
 	}
 
 	// Open 同 fp:seenFPs 已由 Put 填入,不应再加
@@ -828,7 +826,8 @@ func TestOnStorePutNoopWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestOnStorePutZeroOrNegativeSize:size<=0 时不累计。
+// TestOnStorePutZeroOrNegativeSize:size<0 不累计;size=0 仍累计块头(文件确实占
+// cas.HeaderSize 字节)。
 func TestOnStorePutZeroOrNegativeSize(t *testing.T) {
 	root := t.TempDir()
 	cs, err := cas.New(root, cas.VerifyXXH3)
@@ -841,11 +840,13 @@ func TestOnStorePutZeroOrNegativeSize(t *testing.T) {
 	})
 
 	before := ev.BytesAccum()
-	ev.OnStorePut(cas.Fingerprint{}, 0)
 	ev.OnStorePut(cas.Fingerprint{}, -100)
-	after := ev.BytesAccum()
-	if before != after {
-		t.Errorf("size<=0 不应累计: before=%d after=%d", before, after)
+	if after := ev.BytesAccum(); after != before {
+		t.Errorf("size<0 不应累计: before=%d after=%d", before, after)
+	}
+	ev.OnStorePut(cas.Fingerprint{}, 0)
+	if after := ev.BytesAccum(); after != before+cas.HeaderSize {
+		t.Errorf("size=0 应累计块头 %d: before=%d after=%d", cas.HeaderSize, before, after)
 	}
 }
 

@@ -58,9 +58,9 @@
     }
   },
   "sampling": {
-    "reps": 3,
+    "reps": 1,
     "coarse_reps": 3,
-    "upgrade_rule": "sign-change",
+    "upgrade_rule": "none",
     "bootstrap_iters": 10000
   },
   "environment": {

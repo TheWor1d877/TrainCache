@@ -144,6 +144,59 @@ class OrdersrcTest(unittest.TestCase):
         self.assertEqual("a-track", json.loads(p1)["dataset"])
         self.assertEqual("b-track", json.loads(p2)["dataset"])
 
+    def test_same_generation_heartbeat_keeps_generation_and_advances_seq(self):
+        """--same-generation = 同一写端会话的续写:代际不变、write_seq 续增(D22/D57)。
+
+        心跳 bump 代际会被读端判成 sidecar 重启并按 design §7.4 重放订单,于是每 10s
+        一次虚假的阶段切换;续写必须留在当前代际。"""
+        common = ["--pod-uid", "pod-h", "--dataset", "a-track", "--chunks", "s:0,s:1",
+                  "--orders-dir", self.dir, "--slot-size", "256", "--slot-count", "4"]
+        first = run_writer(*common)
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertIn("gen=1 seq=1", first.stdout)
+
+        path = self.ring_path("pod-h")
+        first_payload = read_slot(path, 1, 256, 4)[2]
+
+        for seq in (2, 3, 4):
+            r = run_writer(*common, "--same-generation")
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertIn(f"gen=1 seq={seq}", r.stdout)
+            _magic, _version, _res, gen, got_seq, _ss, _sc, _rest = read_header(path)
+            self.assertEqual(1, gen)      # 代际不动
+            self.assertEqual(seq, got_seq)  # write_seq 续增
+            # 心跳推进到的每个槽都是同一份载荷(读端据此按字节去重,不推送)。
+            self.assertEqual(first_payload, read_slot(path, seq, 256, 4)[2])
+
+    def test_same_generation_after_epoch_write_continues_current_generation(self):
+        """epoch 首写 bump 代际(合法的新会话),其后心跳留在该代际续写。"""
+        common = ["--pod-uid", "pod-e", "--orders-dir", self.dir,
+                  "--slot-size", "256", "--slot-count", "4"]
+        self.assertEqual(0, run_writer(*common, "--dataset", "a", "--chunks", "s:0").returncode)
+        r = run_writer(*common, "--dataset", "b", "--chunks", "s:1")
+        self.assertIn("gen=2 seq=2", r.stdout)
+        r = run_writer(*common, "--dataset", "b", "--chunks", "s:1", "--same-generation")
+        self.assertIn("gen=2 seq=3", r.stdout)
+
+    def test_same_generation_without_ring_falls_back_to_first_write(self):
+        """无 ring 可续(冷启动/被清)时退化成新会话首写并提示,不失败退出——
+        心跳不得因一次写不下去拖垮写端进程。"""
+        r = run_writer("--pod-uid", "pod-n", "--dataset", "a-track", "--chunks", "s:0",
+                       "--orders-dir", self.dir, "--same-generation")
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("gen=1 seq=1", r.stdout)
+        self.assertIn("按新会话首写", r.stderr)
+
+    def test_same_generation_on_corrupt_header_falls_back(self):
+        """旧头非法时同样退化成新会话首写(gen=1 seq=1),与默认路径同口径。"""
+        path = os.path.join(self.dir, "pod-c.ring")
+        with open(path, "wb") as f:
+            f.write(b"XXXX" + b"\x00" * 60)
+        r = run_writer("--pod-uid", "pod-c", "--dataset", "a-track", "--chunks", "s:0",
+                       "--orders-dir", self.dir, "--same-generation")
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("gen=1 seq=1", r.stdout)
+
     def test_slot_index_wraps_modulo_slot_count(self):
         """槽索引 =(seq-1) mod slot_count;文件几何保持 64 + slot_count*slot_size。"""
         slot_size = 256

@@ -2,21 +2,13 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。版本号与 git tag 逐字一致，带 `v`；最新版本在最上面。
 每完成一项用户可见的改动就补一条，写在 `## 未发布` 下，先不写版本号；发版时把该节标题改成 `## [vX.Y.Z] - 日期`。
 
-## 未发布
-
-### Changed
-
-- 集群配置统一落位：四份工作负载清单（Agent DaemonSet、manager、webhook、scheduler）不再写任何字面量 env。等于代码默认的参数（监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 默认档）从清单删除，默认值只留在 `agent/svc/config.go` 与 `controller/internal/config/config.go`。
-- 随集群或随实验轮次变化的取值改由 ConfigMap `traincache-config` 注入：新增 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`controllerPollInterval`、`controllerScoreTTL`、`schedulerScoreTTL`、`schedulerLogLevel` 七项，该 ConfigMap 从 6 项扩到 13 项。bench 的桶名不再用 `kubectl set env` 覆盖 DaemonSet，与白名单、容量一起 merge patch 进 ConfigMap。
-- `make verify-metadata` 增加 `hack/verify-config-placement.sh`：清单出现字面量 env、ConfigMap 与清单引用脱钩、Secret 引用非 `accessKey`/`secretKey` 都会失败。落位判据与逐项位置见 `docs/PARAMETER-CONFIGURATION.md`。
-
 ## 写法示例
 下面的代码块只演示格式，不是发布记录。分组按改动性质从 Added / Changed / Deprecated / Removed / Fixed / Security 中选，没有就不写该组。
 ```markdown
 ## [v9.9.9] - 2026-12-01
 
 ### Added
-- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/9.2 实验协议.md` §C。
+- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4 实验协议.md` §C。
 
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
@@ -26,6 +18,40 @@
 ```
 
 # Changelog正文
+
+## [v0.4.0] - 2026-11-02
+
+### Added
+
+- 新增 `traincache-gateway`：在 Agent 与对象存储之间合并在途的块 GET，同一个块只回源一次；单副本 Deployment + ClusterIP Service（`:9413`），`replicas` 固定 1。契约见 `docs/9.1 design.md`。
+- Agent 的块 GET 可经网关：新增 `gatewayEndpoint`（空表示直连）与 `gatewaySecure` 两个配置；`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站。网关不可用时按 10s→120s 退避降级直连，探测成功再切回，判据与状态机见 `docs/9.2 decisions.md` D1/D2/D5。
+- Agent 新增两个指标族：`traincache_source_mode`（0 直连 / 1 网关）与 `traincache_gateway_fallback_total{reason}`，启动注册的族从 40 增至 42。
+- 发布链增加到五个镜像：`hack/build-images.sh`（manager/webhook/scheduler/agent/gateway）、`controller/deploy/kustomization.yaml`、`hack/render-install.sh`、发版与 e2e 工作流均含 `traincache-gateway`；ConfigMap `traincache-config` 的 `gatewayEndpoint`、`gatewaySecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 四项计入下条 Changed 的 15 项。
+- bench 增加网关开关 `TRAINCACHE_GATEWAY=1`，`summary.csv` 增 `gateway` 列（1/0），汇总把开关不同的行折进 `<格>+gw` 格子；新增 `gateway/e2e/run-k8s.sh` 与 CI 的 `gateway kind e2e` 作业。
+
+### Changed
+
+- 集群配置统一落位：五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）不再写任何字面量 env。等于代码默认的参数（监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 默认档）从清单删除，默认值只留在 `agent/svc/config.go` 与 `controller/internal/config/config.go`。
+- 随集群或随实验轮次变化的取值改由 ConfigMap 注入：`traincache-config` 新增 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`controllerPollInterval`、`controllerScoreTTL` 五项，从 6 项扩到 11 项；合并网关分支后再加 `gatewayEndpoint`、`gatewaySecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 四项，现共 15 项；scheduler 的 `schedulerScoreTTL`、`schedulerLogLevel` 写在 kube-system 的 `traincache-scheduler-config`，因为 `configMapKeyRef` 取不到别的 namespace 的对象。bench 的桶名不再用 `kubectl set env` 覆盖 DaemonSet，与白名单、容量一起 merge patch 进 ConfigMap。
+- `make verify-metadata` 增加 `hack/verify-config-placement.sh`：清单出现字面量 env、ConfigMap 与清单引用脱钩、引用落在别的 namespace、Secret 引用非 `accessKey`/`secretKey` 都会失败。落位判据与逐项位置见 `docs/PARAMETER-CONFIGURATION.md`。
+- `hack/build-images.sh` 给每个镜像打 `io.traincache.src-fp` 标签，值是进镜像那批源码（`*.go`、`go.mod`/`go.sum`/`go.work`、Dockerfile）的内容指纹；`bench/scripts/ctrl_up.sh` 起控制面前比对标签与当前工作树，不一致就退出并打印重建命令。`:dev` 标签被反复复用、节点上已有同名镜像时 `imagePullPolicy: IfNotPresent` 不重新拉取，没有这道门禁就会拿旧二进制测量。同脚本另断言 kubectl context 是 `kind-traincache`，防止并行会话把 current-context 切到自己的集群后装置在别的集群上跑。
+- `bench/compare/traincache/up.sh` 的 `traincache-ordersrc` ConfigMap 改为每次 up 都从 `agent/ordersrc/ordersrc.py` 重新 apply。原来「已存在就跳过」，改完的写端代码进不了集群，与静默复用旧镜像是同一类陈旧缺陷。
+- `bench/exp.py` 的产物目录改落数据层既有的五个分区：`compare-groups`→`results/scores/<格名>/`、`startup-surface`/`total-makespan`/`switch-recovery`/`pareto-startup` 四族→`results/figures/<COND 名>/`、`pareto-sustained`/`evict-policy` 两族→`results/policy/<COND 名>/<run ID>/`，对应表在 `results_root()`。此前它写 `results/<族 ID>/<点名>/`，与 `run_figures.py`/`run_policy.py` 写的不是同一棵树：`summarize.py` 只读 `scores/`+`baselines/`、`plot.py` 只认 `figures/fig*-*`，走统一入口跑完的点是「跑完了但出不了图」。点名寻址不变，`--point` 仍写短名，由 `FAMILY_COND_PREFIX` 还原成目录名；`exp.py selftest` 增加分区落位断言，`status` 打印每族的产物分区。
+- `bench/experiments/plot.py` 自动扫描时按一级分区挑七组对照样本（只收 `scores/`、`baselines/`、旧 `compare/`），不再按点目录名前缀排除。前缀黑名单挡不住淘汰矩阵的 run 目录名（`policy-heat-r01-*`），会把 C 轨倾斜样本混进七组柱状图。
+- 实验文档并入 4.x 系列，网关文档降为 9.x：`docs/9.2 实验协议.md`→`docs/4.4 实验协议.md`、`docs/9.1 decisions.md`→`docs/4.5 实验口径决策.md`、`docs/4.4 实验版本记录.md`→`docs/4.6 实验版本记录.md`，`docs/10.0`~`docs/10.3`→`docs/9.0`~`docs/9.3`。`bench/exp.py` 按路径读版本记录，引用这批路径的脚本注释、部署清单与 README 索引同步改完，`hack/verify-doc-refs.sh` 返回 0。
+- `docs/4.5 实验口径决策.md` 的 D13、D18、D28 三行按 `docs/4.4 实验协议.md` 的现行采样口径改写：D18 的每点次数改为 `pareto-startup` 7 次、`pareto-sustained` 2 次、三个曲面族与淘汰矩阵 1 次；D28 的 lookahead 扫点从「3 档 × 3 策略 = 9 点」改为 3 + 3 点；D13 的理由列改按预注册纪律表述。
+
+### Removed
+
+- 删除 `docs/9.1 plan.md`：里程碑表（M0–M8）与任务表不再维护，验收改按实验族寻址；机时口径、带宽与容量档参数、对照层 62 run 分项与各族点数表并入 `docs/4.4 实验协议.md` §7。
+- 删除 `docs/10.4 plan.md`（按其自述：里程碑全部验收后删除）与 `docs/9.0 核心能力验收与测试.md`（内容已散在 4.x，口径合并进 `docs/4.4 实验协议.md`）。
+
+### Fixed
+
+- scheduler 的 `configMapKeyRef` 指到了 `traincache` 的 `traincache-config`，而它在 kube-system，取不到对象，Pod 停在 `CreateContainerConfigError`；两个 Scheduler 配置项改到 kube-system 的 `traincache-scheduler-config`。热集群一直复用旧 ReplicaSet、清单哈希不变就不 `apply -k`，这条直到 M5 前置探针第一次全量 apply 才露头；`hack/verify-config-placement.sh` 现按 namespace 校验每条引用，改回跨 namespace 引用即失败。
+- 字节维度缓存上限（`TRAINCACHE_CACHE_CAPACITY_BYTES`）的记账错在两处，导致设了上限也不会按字节淘汰。其一，口径不一致：`cas.Put` 只加数据长度，启动预扫与淘汰扣减按块文件 size（数据 + 128B 块头），删空目录后累计仍停在 −128B/块；现三个来源统一到文件 size。其二，进程重启后启动预扫只播种累计、没播种去重表，目录里的块被本进程首次打开时再加一次（8GiB 缓存读成 16GiB），淘汰每块只减一次，累计永远回不到真值并停在危险线上反复空转；预扫现同时把已有块指纹写入去重表。契约见 `docs/6.2 decisions.md` D58，判据用例 `agent/svc/capacity_wiring_test.go`。
+- 字节累计的漏记还有一处：`Open` 前置观察者对**缺失块**也触发，而字节累计拿它当「这个块记过了」用——预取窗口先用 `cas.Open` 探就绪（ETA、回填、rescan 同形态），未命中就把块指纹写进 `seenFPs`，随后本进程 `Put` 同一块被当成已累计跳过。冷缓存下几乎每个块都先被探测一遍，写入字节全程漏记，`traincache_cache_capacity_bytes_total{source="bytes"}` 停在启动预扫值、淘汰增量为 0（M5 前置探针现场）。现在缺失块探测不占用去重槽，累计只在块文件确实存在或 `Put` 落地时计入；判据用例 `TestCapacitySurvivesMissOpenProbe`。
+- ring 写端的 10s 保活心跳每跳一次就把订单重铺一遍。代际的语义是「写端会话换了」，可 `ordersrc.py` 每次调用都按新会话算（`writer_generation` +1），而读端遇到代际变化会按 design §7.4 把同载荷订单也重放一次，于是每 10s 一次虚假的 sidecar 重启 → 一次 `OnStageSwitch` → 预取队列整段重铺（M5 前置探针现场：1024 块/次，字节上限生效后演变成无界回源）。新增 `--same-generation`：同一会话内的续写只推进 `write_seq`、代际不变；`agent/deploy/train-pod.yaml` 的 sidecar 循环与 bench reader 的心跳线程改用它，epoch 首写仍按新代际。契约见 `docs/6.2 decisions.md` D22/D41/D57，判据用例 `agent/ordersrc/ordersrc_test.py`。
 
 ## [v0.3.2] - 2026-10-31
 

@@ -84,7 +84,7 @@ func (s soakMemSample) String() string {
 		s.at.Round(time.Second), float64(s.heapInuse)/(1<<20), float64(s.heapAlloc)/(1<<20), s.goroutines)
 }
 
-// TestSoakSteadyState 覆盖长时间运行的内存稳态（design 10.1 §8 K2/K3/K4/K6）：
+// TestSoakSteadyState 覆盖长时间运行的内存稳态（design 9.1 §8 K2/K3/K4/K6）：
 //
 //   - 真实 merge.Registry / sched.Scheduler / obs.Logger + httptest 假源站；
 //   - 3 个 dataset × 每个 4 个对象，每个对象 1MiB，随机键并发 GET，重复命中触发合并；

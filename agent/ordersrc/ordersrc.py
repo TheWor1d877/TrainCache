@@ -8,6 +8,8 @@
 - commit 协议:先整槽一次 pwrite 覆盖,头最后写(write_seq 推进 = 对外可见),读者只会看到完整槽;
 - 文件只增不缩(ftruncate 至 max(现长, 64+slot_size)):读端 mmap 映射被截断的页会 SIGBUS;
 - writer_generation 每次启动 +1、write_seq 跨代际续增:读端据此检测 writer 重启并重读最新。
+  `--same-generation` 表示同一写端会话内的续写(保活心跳,载荷不变):代际不变、只推进 write_seq,
+  否则每次心跳都被读端判成 writer 重启并按 design §7.4 重放订单(decisions D22/D41/D57)。
 
 只依赖标准库(os/struct/json/argparse/sys),用 os.pread/os.pwrite,不用 mmap。
 退出码:0 成功;1 运行时 I/O 错误(open/mkdir/ftruncate/pwrite/fsync);2 参数/校验错误。
@@ -65,6 +67,9 @@ def build_parser():
                    help=f"槽大小字节(≥16,默认 {DEFAULT_SLOT_SIZE} = 1 MiB)")
     p.add_argument("--slot-count", type=int, default=DEFAULT_SLOT_COUNT,
                    help=f"槽数(≥1,默认 {DEFAULT_SLOT_COUNT})")
+    p.add_argument("--same-generation", action="store_true",
+                   help="同一写端会话内的续写(保活心跳):代际不变、只推进 write_seq;"
+                        "ring 不存在或旧头非法时退化成新会话首写")
     return p
 
 
@@ -115,18 +120,29 @@ def parse_and_validate(p, argv):
     return args
 
 
-def next_generation_and_seq(fd, ring_path):
+def next_generation_and_seq(fd, ring_path, same_generation=False):
     """定本次写入的 (generation, write_seq)。
 
     fstat size==0 → 新文件 (1, 1);否则 pread 旧头 64B:magic/version 合法 → (旧gen+1, 旧write_seq+1)
     (D22:write_seq 跨代际全局递增续增);旧头非法或不足 64B → stderr warn 后按新文件 (1, 1)。
+
+    same_generation=True(保活心跳,D22/D57)且旧头合法 → 代际不变 (旧gen, 旧write_seq+1):
+    读端只在代际变化时才把同载荷订单重放一次(design §7.4),心跳 bump 代际等于每 10s 制造一次
+    虚假的 sidecar 重启。无 ring 可续时不退化成心跳,按新会话首写 (1, 1) 并 stderr 提示。
     """
     if os.fstat(fd).st_size == 0:
+        if same_generation:
+            print(
+                f"ordersrc: {ring_path} 尚不存在,--same-generation 按新会话首写 gen=1 seq=1",
+                file=sys.stderr,
+            )
         return 1, 1
     old = os.pread(fd, HEADER_SIZE, 0)
     if len(old) == HEADER_SIZE:
         magic, version, _reserved, gen, seq, _slot_size, _slot_count, _rest = _HEADER.unpack(old)
         if magic == MAGIC and version == VERSION:
+            if same_generation:
+                return gen, seq + 1
             return gen + 1, seq + 1
     print(
         f"ordersrc: {ring_path} 旧头非法(不足 {HEADER_SIZE}B 或 magic/version 不符),"
@@ -164,7 +180,7 @@ def write_ring(args, payload):
         return EXIT_IO
 
     try:
-        gen, seq = next_generation_and_seq(fd, ring_path)
+        gen, seq = next_generation_and_seq(fd, ring_path, args.same_generation)
 
         # 只增不缩:读端按文件当前长度 mmap,收缩会让旧映射访问出 SIGBUS。
         size = os.fstat(fd).st_size

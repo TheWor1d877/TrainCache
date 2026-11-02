@@ -1,4 +1,4 @@
-// Package sched 实现按 dataset 的公平准入（design 10.1 §6.5；10.2 D11）。
+// Package sched 实现按 dataset 的公平准入（design 9.1 §6.5；9.2 D11）。
 //
 // 规则：全局上限 L；A 为 inflight+waiting>0 的 dataset 集合；
 // base = clamp(floor(L/|A|), 1, floor(L/2))（L<2 时 base=L）。候选按
@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	// queueLimit 是等待中的请求总数上限（design 10.1 §6.5）。
+	// queueLimit 是等待中的请求总数上限（design 9.1 §6.5）。
 	queueLimit = 64
 	// waitLimit 是单个请求的最长排队时间。
 	waitLimit = 2 * time.Second

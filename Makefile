@@ -24,9 +24,11 @@ verify-gateway:
 	cd gateway && go build ./... && go vet ./... && go test ./... -race -count=1
 	cd gateway && test -z "$$(gofmt -l .)"
 
-# DataLoader 适配器只有 Python 标准库依赖，不需要 Go 工具链。
+# Python 侧只有标准库依赖，不需要 Go 工具链：DataLoader 适配器 + ring 写端 ordersrc.py。
+# 后者的布局常量与 Go 读端各自独立一份，改一边没人管就会静默漂移，所以进同一道门禁。
 verify-hooklib:
 	cd agent/hooklib && python3 -m unittest discover -s . -p 'test_*.py'
+	cd agent && python3 -m unittest discover -s ordersrc -p '*_test.py'
 
 # 版本引用与文档引用的静态检查，不需要 Go 工具链。
 # verify-config-placement.sh 检查配置落位：清单零字面量 env、ConfigMap 与引用对齐。
@@ -56,13 +58,13 @@ BENCH_MAKE := $(MAKE) --no-print-directory -C $(REPO_ROOT)/bench
 # 仅在变量有值时转发:空的 REPS 若显式传入会改变 bench-quick 对 origin 的判断。
 BENCH_VARS = $(foreach v,TIER RATE REPS TAG COND QUICK DELAY GROUP FORCE,$(if $(strip $($(v))),$(v)=$($(v)),))
 
-.PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-compare bench-list \
+.PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-list \
 	bench-cold bench-verify bench bench-selftest tc-up tc-down \
 	track-d-up track-d-verify track-d-down \
 	kind-up k8s-up data-up upload bench-data bench-tc track-d-data \
 	e2e-local e2e-k8s
 
-bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-compare bench-list \
+bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-list \
 bench-cold bench-verify bench tc-up tc-down \
 track-d-up track-d-verify track-d-down \
 kind-up k8s-up data-up upload bench-data bench-tc track-d-data \

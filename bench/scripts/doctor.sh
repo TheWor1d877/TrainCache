@@ -288,6 +288,78 @@ else
 fi
 
 section "控制面与 Agent"
+# 缓存上限的期望值不写死：环境变量 > 本次 COND(traincache-policy-*/pareto2-*)
+# 的 cache.capacity_bytes > COND 层固定值(1GiB)。输出两行：字节数与来源
+# (env|cond|default)；来源是 default 时说明这一批没声明档位，只比对不判死。
+expected_capacity_bytes() {
+    if [ -n "${TRAINCACHE_CACHE_CAPACITY_BYTES:-}" ]; then
+        printf '%s\nenv\n' "$TRAINCACHE_CACHE_CAPACITY_BYTES"
+        return 0
+    fi
+    "$PY" - "$ROOT/experiments" <<'PYEOF'
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import cond  # noqa: E402
+
+name = (os.environ.get("TRAINCACHE_COND") or "").strip()
+if name:
+    try:
+        print(int(cond.load_cond(name)["cache"]["capacity_bytes"]))
+        print("cond")
+        sys.exit(0)
+    except Exception as exc:  # COND 缺失/没有该字段时退回固定值
+        print(f"读 COND {name} 失败: {exc}", file=sys.stderr)
+print(cond.COMPARE_CACHE_BYTES)
+print("default")
+PYEOF
+}
+EXP_RAW="$(expected_capacity_bytes)"
+EXP_CAP="$(printf '%s\n' "$EXP_RAW" | sed -n 1p)"
+EXP_SRC="$(printf '%s\n' "$EXP_RAW" | sed -n 2p)"
+# 预取提前量与淘汰策略的期望值：环境变量 > COND(prefetch.lookahead /
+# cache.evict_policy) > 清单默认(16、heat)。输出三行：lookahead、evict_policy、来源。
+expected_agent_knobs() {
+    "$PY" - "$ROOT/experiments" <<'PYEOF'
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import cond  # noqa: E402
+
+la = ep = None
+src = "default"
+name = (os.environ.get("TRAINCACHE_COND") or "").strip()
+if name:
+    try:
+        c = cond.load_cond(name)
+        la = (c.get("prefetch") or {}).get("lookahead")
+        ep = (c.get("cache") or {}).get("evict_policy")
+        if la is not None or ep is not None:
+            src = "cond"
+    except Exception as exc:  # COND 缺失/没有该字段时退回清单默认
+        print(f"读 COND {name} 失败: {exc}", file=sys.stderr)
+if os.environ.get("TRAINCACHE_PREFETCH_LOOKAHEAD"):
+    la = os.environ["TRAINCACHE_PREFETCH_LOOKAHEAD"].strip()
+    src = "env"
+if os.environ.get("TRAINCACHE_EVICT_POLICY"):
+    ep = os.environ["TRAINCACHE_EVICT_POLICY"].strip().lower()
+    src = "env"
+print(la if la is not None else 16)
+print(ep if ep is not None else "heat")
+print(src)
+PYEOF
+}
+K_RAW="$(expected_agent_knobs)"
+EXP_LA="$(printf '%s\n' "$K_RAW" | sed -n 1p)"
+EXP_EP="$(printf '%s\n' "$K_RAW" | sed -n 2p)"
+K_SRC="$(printf '%s\n' "$K_RAW" | sed -n 3p)"
+if ! printf '%s' "$EXP_CAP" | grep -Eq '^[0-9]+$'; then
+    fail "算不出缓存上限期望值(PY=$PY,experiments=$ROOT/experiments,得到 ${EXP_CAP:-空})"
+    EXP_CAP="-1"
+    EXP_SRC="unknown"
+fi
 if [ "$HAVE_K8S" -eq 1 ] && kubectl -n traincache get ds traincache-agentd >/dev/null 2>&1; then
     desired="$(kubectl -n traincache get ds traincache-agentd \
         -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || true)"
@@ -304,11 +376,13 @@ if [ "$HAVE_K8S" -eq 1 ] && kubectl -n traincache get ds traincache-agentd >/dev
     if [ "$cap_rc" -ne 0 ]; then
         fail "agentd 缓存上限查询失败(kubectl 退出码 $cap_rc)"
     elif [ -z "$cap" ]; then
-        fail "traincache-config 缺少 cacheCapacityBytes(期望 1073741824)"
-    elif [ "$cap" = "1073741824" ]; then
-        pass "agentd 缓存上限 $cap 字节(1GiB)"
+        fail "traincache-config 缺少 cacheCapacityBytes(期望 $EXP_CAP)"
+    elif [ "$cap" != "$EXP_CAP" ] && [ "$EXP_SRC" != "default" ]; then
+        fail "agentd 缓存上限 $cap,本批期望 $EXP_CAP(来源 $EXP_SRC)"
+    elif [ "$cap" != "$EXP_CAP" ]; then
+        warn "agentd 缓存上限 $cap,与对照层缺省 $EXP_CAP 不同(本批未给 COND/env,只在声明档位时判)"
     else
-        fail "agentd 缓存上限 $cap,期望 1073741824"
+        pass "agentd 缓存上限 $cap 字节(期望值同源:$EXP_SRC)"
     fi
     sw="$(kubectl -n traincache get cm traincache-config \
         -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
@@ -324,8 +398,100 @@ if [ "$HAVE_K8S" -eq 1 ] && kubectl -n traincache get ds traincache-agentd >/dev
     else
         fail "maxFillFraction=${mf:-缺失},期望 0.125"
     fi
+    # `kubectl apply -k` 会把 traincache-config 整份 data 盖回清单默认(16/heat),
+    # 起组前写的本轮值因此会消失;ctrl_up.sh 在 apply 之后按环境变量再对齐一次。
+    # 本批声明过 COND 却没查到本轮值,5.1 的策略矩阵与 5.3 的 lookahead 扫点就没有自变量。
+    cm_la="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.prefetchLookahead}' 2>/dev/null || true)"
+    cm_ep="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.evictPolicy}' 2>/dev/null || true)"
+    for pair in "prefetchLookahead:$cm_la:$EXP_LA" "evictPolicy:$cm_ep:$EXP_EP"; do
+        key="${pair%%:*}"
+        rest="${pair#*:}"
+        got="${rest%%:*}"
+        want="${rest#*:}"
+        if [ "$got" = "$want" ]; then
+            pass "traincache-config 的 $key=$got(期望值同源:$K_SRC)"
+        elif [ "$K_SRC" = "default" ]; then
+            warn "traincache-config 的 $key=${got:-缺失},与清单默认 $want 不同(本批未给 COND/env)"
+        else
+            fail "traincache-config 的 $key=${got:-缺失},本批期望 $want(来源 $K_SRC);make ctrl-up 会重新对齐"
+        fi
+    done
 else
     warn "agentd 未部署(首次 make bench-up 或 make ctrl-up 会部署)"
+fi
+
+section "淘汰证据(4.4 §1.7)"
+if [ "$HAVE_K8S" -eq 1 ]; then
+    agentd_pods="$(kubectl -n traincache get pods -l app=traincache-agentd \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+    if [ -z "$agentd_pods" ]; then
+        warn "没有 agentd Pod,跳过淘汰证据检查"
+    elif [ -z "${cap:-}" ] || [ "${cap:-0}" = "0" ]; then
+        warn "缓存上限为 ${cap:-未配置}(0=字节维度淘汰不启用),跳过淘汰证据断言"
+    else
+        # 容器里的 env 真值:run_bench 只在 cacheCapacityBytes 变化时重启 agentd,
+        # 手改 ConfigMap 或 agentd 早于改配置启动时,进程内仍是旧值(0=淘汰不触发)。
+        env_bad=0
+        for pod in $agentd_pods; do
+            live="$(kubectl -n traincache exec "$pod" -- \
+                printenv TRAINCACHE_CACHE_CAPACITY_BYTES 2>/dev/null || true)"
+            if [ "$live" != "$cap" ]; then
+                fail "agentd $pod 容器内 TRAINCACHE_CACHE_CAPACITY_BYTES=${live:-未设置},ConfigMap 声明 $cap"
+                env_bad=1
+            fi
+            # 同一件事也发生在预取提前量与淘汰策略上:agentd 早于 ConfigMap 改动启动、
+            # 或 apply -k 盖回默认后没重启时,进程内仍是旧值,本轮扫点就是空跑。
+            for kv in "TRAINCACHE_PREFETCH_LOOKAHEAD:${cm_la:-}" \
+                      "TRAINCACHE_EVICT_POLICY:${cm_ep:-}"; do
+                want="${kv#*:}"
+                [ -n "$want" ] || continue
+                live="$(kubectl -n traincache exec "$pod" -- \
+                    printenv "${kv%%:*}" 2>/dev/null || true)"
+                if [ "$live" != "$want" ]; then
+                    fail "agentd $pod 容器内 ${kv%%:*}=${live:-未设置},ConfigMap 声明 $want"
+                    env_bad=1
+                fi
+            done
+        done
+        if [ "$env_bad" -eq 0 ]; then
+            pass "各 agentd 容器内的上限/提前量/淘汰策略 env 与 ConfigMap 一致($cap/${cm_la:-?}/${cm_ep:-?})"
+        fi
+        # 行为断言:块在盘上而 agent 的字节累计恒 0 → 累计没生效,闸门不会触发。
+        BLOCKS_DIR="/var/cache/traincache/blocks"
+        dir_total=0
+        if have docker; then
+            for n in $WORKERS; do
+                b="$(docker exec "$n" sh -c \
+"find $BLOCKS_DIR -name '*.blk' -printf '%s\n' 2>/dev/null | awk '{t+=\$1} END{print t+0}'" \
+                    2>/dev/null || true)"
+                case "$b" in ''|*[!0-9]*) b=0 ;; esac
+                dir_total=$((dir_total + b))
+            done
+        fi
+        accum_max=""
+        for pod in $agentd_pods; do
+            v="$(kubectl -n traincache get --raw \
+"/api/v1/namespaces/traincache/pods/$pod:9411/proxy/metrics" 2>/dev/null \
+                | awk '/^traincache_cache_capacity_bytes_total\{source="bytes"\}/{print $2}' | head -1)"
+            [ -n "$v" ] || continue
+            accum_max="$(awk -v a="${accum_max:-0}" -v b="$v" 'BEGIN{print (b+0>a+0)?b:a}')"
+        done
+        if [ -z "$accum_max" ]; then
+            fail "抓不到任何 agentd 的 cache_capacity_bytes_total{source=\"bytes\"},无法断言淘汰生效"
+        elif [ "$dir_total" -gt 0 ] \
+                && [ "$(awk -v a="$accum_max" 'BEGIN{print (a+0>0)?1:0}')" = "0" ]; then
+            fail "节点上有 $dir_total 字节的块,但各 agentd 的字节累计最大为 $accum_max → 累计没生效,淘汰闸门不会触发"
+        elif [ "$dir_total" -gt 0 ] \
+                && [ "$(awk -v a="$accum_max" -v d="$dir_total" 'BEGIN{print (a+0>1.5*d)?1:0}')" = "1" ]; then
+            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.4 §1.7 判据 2) → 同一批块被重复记账"
+        elif [ "$dir_total" -eq 0 ]; then
+            pass "缓存目录为空(agentd 复位后),累计 $accum_max 是复位前残账,不作判据"
+        else
+            pass "淘汰证据:四节点块共 $dir_total 字节 / agent 字节累计最大 $accum_max"
+        fi
+    fi
 fi
 
 section "MinIO 与桶"

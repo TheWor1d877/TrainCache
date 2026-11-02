@@ -144,7 +144,7 @@ def _read_jsonl_stall(run_dir: Path) -> float | None:
     """从 per_step_*.jsonl 算 stall 占比。
 
     口径:非 warmup 步的 mean(wait_s / step_s),与 bench/scripts/bench_track_d.py
-    的 stall() 同源(docs/4 §10:扫点用 mean,中位数只判形态)。
+    的 stall() 同源(4.4 §1.2:扫点用 mean,中位数只判形态)。
     没有 jsonl 或没有可用步时返回 None。
     """
     vals = []
@@ -215,7 +215,7 @@ def _recovery_stats(run_dir: Path) -> tuple[float | None, int, int]:
 
     返回 (回落时间平均数, 删失事件数, 基线不足事件数)。
     回落时间按「切换时刻→回落点」的实测 step_s 累加,取本轮所有成功回落事件的平均数;
-    删失(到 epoch 末未回落)与基线不足(缺 20 步基线)单独计数,后者不进图三。
+    删失(到 epoch 末未回落)与基线不足(缺 20 步基线)单独计数,后者不进 fig3 的回落曲线。
     产物缺 per_step_*.jsonl 或切换事件时返回 (None, 0, 0),不报错——不是每轮都有切换。
     """
     try:
@@ -286,7 +286,7 @@ def summarize_run(run_dir: Path, cond: dict, rep: int) -> dict:
 def _attach_ci(rows: list[dict]) -> None:
     """给每行补上本 COND 的平均数与 bootstrap 95% CI。
 
-    void 轮不进统计(9.1 D14)。L 档只有 1 次采样,按预注册 1.9 只报单点值、
+    void 轮不进统计(4.5 D14)。L 档只有 1 次采样,按预注册 1.9 只报单点值、
     不报 CI,CI 列留空。
     """
     valid = [r for r in rows if r.get("void") != "true"]

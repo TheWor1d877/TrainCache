@@ -2,7 +2,7 @@ package merge
 
 import "sync"
 
-// Registry 是在途表：key → *Entry（design 10.1 §4.5）。
+// Registry 是在途表：key → *Entry（design 9.1 §4.5）。
 //
 // 锁顺序：Registry.mu → Entry.mu。Registry 只做映射与缓冲池，不持有
 // 条目的数据锁。
@@ -23,7 +23,7 @@ type Registry struct {
 const hotLimit = 32
 
 // NewRegistry 构造在途表。bufferBytes 是单条目环形缓冲容量 C
-// （design 10.1 §5.2，默认 10MiB）。非正值按 1 处理，避免除零。
+// （design 9.1 §5.2，默认 10MiB）。非正值按 1 处理，避免除零。
 func NewRegistry(bufferBytes int) *Registry {
 	if bufferBytes <= 0 {
 		bufferBytes = 1
@@ -35,7 +35,7 @@ func NewRegistry(bufferBytes int) *Registry {
 }
 
 // Attach 在条目在途、未结束且 written <= C 时返回它。任一条件不满足
-// 返回 false，调用方走独立回源（design 10.1 §4.5；10.2 D8）。
+// 返回 false，调用方走独立回源（design 9.1 §4.5；9.2 D8）。
 func (r *Registry) Attach(key string) (*Entry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -80,7 +80,7 @@ func (r *Registry) Len() int {
 
 // InFlight 报告 key 是否仍有登记中的条目，不判断它是否还能被追上。
 // server 用它区分「无条目」与「有条目但 written > C」：后者必须独立回源
-// （design 10.1 §6.2；10.2 D8），而不是新建条目。
+// （design 9.1 §6.2；9.2 D8），而不是新建条目。
 func (r *Registry) InFlight(key string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -62,9 +62,10 @@ spec:
         - /bin/sh
         - -c
         - >-
+          python3 /opt/traincache/ordersrc.py --pod-uid "$POD_UID" --dataset "$DATASET" --chunks "$CHUNKS" || exit 1;
           while true; do
-            python3 /opt/traincache/ordersrc.py --pod-uid "$POD_UID" --dataset "$DATASET" --chunks "$CHUNKS" || exit 1;
             sleep 10;
+            python3 /opt/traincache/ordersrc.py --pod-uid "$POD_UID" --dataset "$DATASET" --chunks "$CHUNKS" --same-generation || exit 1;
           done
       env:
         - name: POD_UID
