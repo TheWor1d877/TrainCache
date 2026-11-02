@@ -73,8 +73,11 @@ jobs:
           BUCKET="$(kubectl -n traincache get configmap traincache-config -o jsonpath='{.data.objstoreBucket}')"
           kubectl -n minio exec deploy/minio -- sh -c \
             "mc alias set local http://127.0.0.1:9000 traincache traincache-probe >/dev/null && mc mb -p local/$BUCKET || true"
-          kubectl -n minio exec -i deploy/minio -- sh -c \
-            "head -c 2097152 /dev/zero | tr '\\0' 'A' | mc pipe local/$BUCKET/e2e-ds/blocks/part-0000#0"
+          # 256 KiB 足够覆盖 10MiB 合并窗口。用 dd + mc cp，不经 kubectl exec -i 管道：
+          # 该管道在受限 runner 上曾被 SIGKILL（exit 137）。
+          kubectl -n minio exec deploy/minio -- sh -c \
+            "dd if=/dev/zero of=/tmp/e2e-object bs=1024 count=256 2>/dev/null && mc cp /tmp/e2e-object 'local/$BUCKET/e2e-ds/blocks/part-0000#0' && rm -f /tmp/e2e-object"
+          kubectl -n minio exec deploy/minio -- mc stat "local/$BUCKET/e2e-ds/blocks/part-0000#0"
       - name: run gateway e2e
         env:
           TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
