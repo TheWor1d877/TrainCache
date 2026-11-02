@@ -53,14 +53,10 @@
 #                              default is 2s; 1s keeps gate release latency
 #                              inside the bench measurement window.
 #   controllerScoreTTL       — TTL of a node score entry as written by the
-#                              Controller. Must match schedulerScoreTTL.
-#   schedulerScoreTTL        — TTL of a score entry as read by the scheduler
-#                              plugin. Must match controllerScoreTTL. The
-#                              scheduler runs in kube-system, so it reads the
-#                              mirror in controller/deploy/scheduler/configmap.yaml;
-#                              hack/verify-config-placement.sh keeps them equal.
-#   schedulerLogLevel        — scheduler verbosity; "debug" emits one
-#                              "scheduler score" line per (pod,node) decision.
+#                              Controller. The scheduler keeps its own copy,
+#                              schedulerScoreTTL, in traincache-scheduler-config
+#                              (kube-system): a configMapKeyRef cannot cross
+#                              namespaces, so the scheduler cannot read this CM.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -85,5 +81,3 @@ data:
   gatewayBlockBufferBytes: "10485760"
   controllerPollInterval: "1s"
   controllerScoreTTL: "10m"
-  schedulerScoreTTL: "10m"
-  schedulerLogLevel: "debug"

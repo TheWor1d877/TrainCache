@@ -128,8 +128,9 @@ spec:
             - --v=2
           env:
             # Only the two values that differ from the code defaults are set,
-            # and they come from traincache-config: the score TTL must match
-            # the Controller's, and debug emits one "scheduler score" line per
+            # and they come from traincache-scheduler-config, the ConfigMap in
+            # this Pod's own namespace: the score TTL must match the Controller's
+            # controllerScoreTTL, and debug emits one "scheduler score" line per
             # (pod,node) decision. Score annotation (traincache.io/node-scores),
             # health (:8081) and metrics (:9412, where the independent
             # traincache_scheduler_score_total registry is served under
@@ -137,12 +138,12 @@ spec:
             - name: SCHEDULER_SCORE_TTL
               valueFrom:
                 configMapKeyRef:
-                  name: traincache-config
+                  name: traincache-scheduler-config
                   key: schedulerScoreTTL
             - name: CONTROLLER_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
-                  name: traincache-config
+                  name: traincache-scheduler-config
                   key: schedulerLogLevel
           ports:
             - name: health

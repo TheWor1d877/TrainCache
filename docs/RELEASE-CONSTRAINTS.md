@@ -166,7 +166,7 @@ main 上打 tag vX.Y.Z 并推送
 
 ### 5.3 运行时参数
 
-运行时参数集中在 `traincache` namespace 的 ConfigMap `traincache-config`（`controller/deploy/agent/configmap.yaml`），共 17 个配置项。Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction` 三个算 K，另读 `controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。改值只需编辑 ConfigMap 并重启对应工作负载，不必改清单；`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者；`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment。五份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
+运行时参数在两个 ConfigMap：`traincache` namespace 的 `traincache-config`（`controller/deploy/agent/configmap.yaml`，15 个配置项）与 kube-system 的 `traincache-scheduler-config`（`controller/deploy/scheduler/kube-scheduler-config.yaml`，scheduler 的 2 个配置项，同一对象还挂 `scheduler.yaml`）。Agent 读 `cacheCapacityBytes`、`prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；Controller 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction` 三个算 K，另读 `controllerPollInterval`、`controllerScoreTTL`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`；scheduler 读自己那份 CM 里的 `schedulerScoreTTL`、`schedulerLogLevel`——`configMapKeyRef` 只在本 namespace 找对象，scheduler 在 kube-system，用不了 `traincache-config`。改值只需编辑 ConfigMap 并重启对应工作负载，不必改清单；`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者；`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment。五份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
 
 | key | 默认值 | 归属 | 说明 |
 |---|---|---|---|
@@ -185,8 +185,8 @@ main 上打 tag vX.Y.Z 并推送
 | `gatewayBlockBufferBytes` | `10485760`（10MiB） | 网关 | 每个在途块环形缓冲的字节数，正整数；非法值使网关拒绝启动 |
 | `controllerPollInterval` | `1s` | Controller | 轮询 Agent 进度的间隔，代码默认 2s |
 | `controllerScoreTTL` | `10m` | Controller | 节点分数有效期，代码默认 5m |
-| `schedulerScoreTTL` | `10m` | Scheduler | 分数过期判定，必须与 `controllerScoreTTL` 同值；scheduler 在 kube-system，读 `controller/deploy/scheduler/configmap.yaml` 的同名镜像 |
-| `schedulerLogLevel` | `debug` | Scheduler | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info`。与上一行一样经 kube-system 的同名镜像生效 |
+| `schedulerScoreTTL` | `10m` | Scheduler，写在 `traincache-scheduler-config` | 分数过期判定，必须与 `controllerScoreTTL` 同值 |
+| `schedulerLogLevel` | `debug` | Scheduler，写在 `traincache-scheduler-config` | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
 
 `k` 的确定：`k` 为 0 或省略时 Controller 自动计算并写回 `spec`，发 Normal 事件 `KDefaulted`；自动值 `K_i = clamp(min(W_i, K_window, K_cache), 1, W_i)`，`W_i` 是该 Pod 实际分到的块数。显式 `k` 的有效范围是 1..`W_i`；`k > W_i` 置 `Condition InvalidSpec=False` 并拒绝，不钳制、不截断。实际预热块数 = `min(max(K_i, score.cutoff), W_i)`。全部 Pod 的实际请求块数合计超过 `cacheCapacityBytes × maxFillFraction` 时发 Warning 事件 `KExceedsFillLimit`，任务继续执行。
 

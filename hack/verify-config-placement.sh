@@ -5,11 +5,19 @@
 #   1. 凭证 -> Secret;2. 节点身份 -> fieldRef;3. 换集群/换轮次要改 -> ConfigMap;
 #   4. 偏离代码默认 -> ConfigMap;5. 等于代码默认 -> 哪里都不写。
 #
-# 不需要 Go 工具链,也不需要集群:kubectl 只在能渲染时用,这里直接读源文件。
+# 引用方向还有一条 Kubernetes 硬约束:configMapKeyRef 只在 Pod 自己的 namespace
+# 里找对象。scheduler 跑在 kube-system,引用 traincache 的 traincache-config 会让
+# Pod 停在 CreateContainerConfigError;清单哈希没变过就不执行 apply,这个缺陷在一直
+# 复用的热集群上不会露头。第 2 步因此按 namespace 校验每一条引用。
+#
+# 不需要 Go 工具链,也不需要集群:直接读源文件。
 set -uo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CM=controller/deploy/agent/configmap.yaml
+CONFIGMAPS=(
+  controller/deploy/agent/configmap.yaml
+  controller/deploy/scheduler/kube-scheduler-config.yaml
+)
 WORKLOADS=(
   controller/deploy/agent/daemonset.yaml
   controller/deploy/manager/deployment.yaml
@@ -30,84 +38,116 @@ for f in "${WORKLOADS[@]}"; do
   fi
 done
 
-# 2 & 3 & 4. ConfigMap 配置项与清单引用一一对应;Secret 引用固定两个键。
-python3 - "$CM" "${WORKLOADS[@]}" <<'PY' || fail=1
-import re, sys
+# 2 & 3 & 4. 每条引用的 namespace 与键都要对得上;ConfigMap 里不许留没人读的键。
+python3 - "$(IFS=,; echo "${CONFIGMAPS[*]}")" "${WORKLOADS[@]}" <<'PY' || fail=1
+import re
+import sys
 
-cm_path, workloads = sys.argv[1], sys.argv[2:]
+cm_paths = [p for p in sys.argv[1].split(",") if p]
+workloads = sys.argv[2:]
 
-body = open(cm_path, encoding="utf-8").read().split("\ndata:\n", 1)
-if len(body) != 2:
-    print(f"FAIL {cm_path}: 找不到 data: 段")
-    sys.exit(1)
-cm_keys = set(re.findall(r"^  ([A-Za-z0-9_]+):", body[1], re.M))
 
-cm_refs, secret_refs = set(), set()
-for path in workloads:
-    pending = None
-    for line in open(path, encoding="utf-8"):
+def docs(text):
+    return re.split(r"^---\s*$", text, flags=re.M)
+
+
+def metadata_field(doc, field):
+    """metadata 下的单层字段(name/namespace):缩进两格,不会撞上 spec 里的同名字段。"""
+    m = re.search(rf"^  {field}:\s*(\S+)\s*$", doc, re.M)
+    return m.group(1) if m else None
+
+
+def data_keys(doc):
+    """data: 段的顶层键;内嵌 YAML(scheduler.yaml)的 4 空格缩进行不算配置项。"""
+    m = re.search(r"^data:\s*$", doc, re.M)
+    if not m:
+        return set()
+    return set(re.findall(r"^  ([A-Za-z0-9_]+):", doc[m.end():], re.M))
+
+
+def refs(doc):
+    """按出现顺序取 (kind, name, key);kind 是 configMapKeyRef 或 secretKeyRef。"""
+    out, pending = [], None
+    for line in doc.splitlines():
         stripped = line.strip()
         if stripped in ("configMapKeyRef:", "secretKeyRef:"):
             pending = {"kind": stripped[:-1], "name": None, "key": None}
             continue
-        if pending is not None:
-            m = re.match(r"(name|key):\s*(\S+)", stripped)
-            if m:
-                pending[m.group(1)] = m.group(2)
-                if pending["name"] and pending["key"]:
-                    if pending["kind"] == "configMapKeyRef":
-                        if pending["name"] != "traincache-config":
-                            print(f"FAIL {path}: 引用了 {pending['name']},本门禁只覆盖 traincache-config")
-                            sys.exit(1)
-                        cm_refs.add(pending["key"])
-                    else:
-                        secret_refs.add(pending["key"])
-                    pending = None
-                continue
-            if stripped and not stripped.startswith("#"):
+        if pending is None:
+            continue
+        m = re.match(r"(name|key):\s*(\S+)", stripped)
+        if m:
+            pending[m.group(1)] = m.group(2)
+            if pending["name"] and pending["key"]:
+                out.append((pending["kind"], pending["name"], pending["key"]))
                 pending = None
-
-missing = sorted(cm_refs - cm_keys)
-orphan = sorted(cm_keys - cm_refs)
-if missing:
-    print(f"FAIL 清单引用了但 {cm_path} 里没有的配置项(Pod 会停在 CreateContainerConfigError): {missing}")
-if orphan:
-    print(f"FAIL {cm_path} 里有但没有任何清单引用的配置项(进程读不到): {orphan}")
-if secret_refs != {"accessKey", "secretKey"}:
-    print(f"FAIL Secret 引用异常(期望 accessKey、secretKey): {sorted(secret_refs)}")
-sys.exit(1 if (missing or orphan or secret_refs != {"accessKey", "secretKey"}) else 0)
-PY
-
-# 5. scheduler 在 kube-system,configMapKeyRef 不跨 namespace;它的同名镜像
-#    必须与共享 ConfigMap 的两个键同值。
-python3 - "$CM" controller/deploy/scheduler/configmap.yaml <<'PYCM' || fail=1
-import re, sys
-
-shared, mirror = sys.argv[1], sys.argv[2]
-
-def data(path):
-    body = open(path, encoding="utf-8").read().split("\ndata:\n", 1)
-    if len(body) != 2:
-        return None
-    out = {}
-    for m in re.finditer(r'^  ([A-Za-z0-9_]+):\s*"?([^"\n]*)"?\s*$', body[1], re.M):
-        out[m.group(1)] = m.group(2).strip()
+            continue
+        if stripped and not stripped.startswith("#"):
+            pending = None
     return out
 
-a, b = data(shared), data(mirror)
-if a is None or b is None:
-    print(f"FAIL 无法解析 ConfigMap data 段: {shared} / {mirror}")
-    sys.exit(1)
-bad = [(k, a.get(k), b.get(k)) for k in ("schedulerScoreTTL", "schedulerLogLevel")
-       if a.get(k) != b.get(k)]
-for k, x, y in bad:
-    print(f"FAIL {k}: traincache-config={x!r}, scheduler 镜像={y!r}(两处必须同值)")
-sys.exit(1 if bad else 0)
-PYCM
+
+cms = {}
+for path in cm_paths:
+    for d in docs(open(path, encoding="utf-8").read()):
+        if not re.search(r"^kind:\s*ConfigMap\s*$", d, re.M):
+            continue
+        name = metadata_field(d, "name")
+        ns = metadata_field(d, "namespace")
+        if name is None or ns is None:
+            print(f"FAIL {path}: ConfigMap 缺 metadata.name 或 metadata.namespace,门禁判不了引用落点")
+            sys.exit(1)
+        cms[(name, ns)] = (path, data_keys(d))
+
+cm_refs = {}
+secret_refs = set()
+problems = []
+
+for path in workloads:
+    for d in docs(open(path, encoding="utf-8").read()):
+        if not re.search(r"^kind:\s*(Deployment|DaemonSet)\s*$", d, re.M):
+            continue
+        w_name = metadata_field(d, "name")
+        w_ns = metadata_field(d, "namespace")
+        if w_ns is None:
+            problems.append(f"{path}: 工作负载 {w_name} 没写 namespace")
+            continue
+        for kind, cm_name, key in refs(d):
+            if kind == "secretKeyRef":
+                secret_refs.add(key)
+                continue
+            entry = cms.get((cm_name, w_ns))
+            if entry is None:
+                home = [ns for (n, ns) in cms if n == cm_name]
+                hint = f",它只存在于 {home[0]}" if home else ",仓库里没有这个 ConfigMap"
+                problems.append(
+                    f"{path}: {w_ns}/{w_name} 引用 {cm_name}/{key}{hint};"
+                    " configMapKeyRef 只在本 namespace 找对象,Pod 会停在 CreateContainerConfigError")
+                continue
+            if key not in entry[1]:
+                problems.append(
+                    f"{path}: {w_ns}/{w_name} 引用 {cm_name}/{key},该 ConfigMap 里没有这一项")
+                continue
+            cm_refs.setdefault((cm_name, w_ns), set()).add(key)
+
+for (cm_name, ns), (path, keys) in sorted(cms.items()):
+    orphan = sorted(keys - cm_refs.get((cm_name, ns), set()))
+    if orphan:
+        problems.append(f"{path}: {ns}/{cm_name} 里没有任何清单引用的配置项(进程读不到): {orphan}")
+
+if problems:
+    for p in problems:
+        print(f"FAIL {p}")
+if secret_refs != {"accessKey", "secretKey"}:
+    print(f"FAIL Secret 引用异常(期望 accessKey、secretKey): {sorted(secret_refs)}")
+sys.exit(1 if (problems or secret_refs != {"accessKey", "secretKey"}) else 0)
+PY
 
 if [ "$fail" -ne 0 ]; then
   echo "配置落位检查未通过:按 docs/PARAMETER-CONFIGURATION.md 的「落位判据」五问重新落位。"
   exit 1
 fi
-cm_count="$(awk 'f{if(/^  [A-Za-z0-9_]+:/)c++} /^data:$/{f=1} END{print c+0}' "$CM")"
-echo "OK 配置落位:清单零字面量 env、traincache-config 的 ${cm_count} 项与清单引用一一对应、scheduler 镜像同值、Secret 引用 accessKey/secretKey"
+for f in "${CONFIGMAPS[@]}"; do
+  n="$(awk 'f{if(/^  [A-Za-z0-9_]+:/)c++} /^data:$/{f=1} END{print c+0}' "$f")"
+  printf 'OK 配置落位: %s 共 %s 项,与同 namespace 的清单引用一一对应;工作负载零字面量 env;Secret 引用 accessKey/secretKey\n' "$f" "$n"
+done
