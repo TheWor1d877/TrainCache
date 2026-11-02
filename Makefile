@@ -24,9 +24,11 @@ verify-gateway:
 	cd gateway && go build ./... && go vet ./... && go test ./... -race -count=1
 	cd gateway && test -z "$$(gofmt -l .)"
 
-# DataLoader 适配器只有 Python 标准库依赖，不需要 Go 工具链。
+# Python 侧只有标准库依赖，不需要 Go 工具链：DataLoader 适配器 + ring 写端 ordersrc.py。
+# 后者的布局常量与 Go 读端各自独立一份，改一边没人管就会静默漂移，所以进同一道门禁。
 verify-hooklib:
 	cd agent/hooklib && python3 -m unittest discover -s . -p 'test_*.py'
+	cd agent && python3 -m unittest discover -s ordersrc -p '*_test.py'
 
 # 版本引用与文档引用的静态检查，不需要 Go 工具链。
 # verify-config-placement.sh 检查配置落位：清单零字面量 env、ConfigMap 与引用对齐。
