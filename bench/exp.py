@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """bench 实验统一入口:status / run / record。
 
-产物布局 results/<族>/<点>/,点 = COND 名去掉族前缀;compare-groups 以格名为点。
+产物落数据层的五个分区(scores / baselines / summary / figures / policy),分区由
+`results_root()` 按族给出;点目录名一律是完整 COND 名(compare-groups 用格名)。
 每族跑完按产物回填 docs/4.4 实验版本记录.md 的最后一行。
 """
 import argparse
@@ -23,7 +24,6 @@ import lock as lock_mod  # noqa: E402
 
 CONDS_DIR = EXPERIMENTS_DIR / "conds"
 RUNNER = BENCH_ROOT / "compare" / "run_bench.py"
-RESULTS_DIR = bench_config.RESULTS_DIR
 REGISTRY = bench_config.REPO_ROOT / "docs" / "4.4 实验版本记录.md"
 LOCK_FILE = Path("/tmp/traincache-exp.lock")
 
@@ -32,6 +32,47 @@ COND_FAMILIES = ("startup-surface", "total-makespan", "switch-recovery",
                  "pareto-startup")
 TILT_FAMILIES = ("pareto-sustained", "evict-policy")
 FAMILIES = (COMPARE_FAMILY,) + COND_FAMILIES + TILT_FAMILIES
+
+# 族 ID 是 `--family` 与 `--point` 的寻址名，产物目录名用的是数据层分区 +
+# 完整 COND 名（9.2 §C1），两套名字不同词（evict-policy 族的 COND 叫 policy-*，
+# pareto-sustained 族叫 pareto2-*）。认领 COND、还原点名与算目录都以这张表为准；
+# 漏了这张表，一族会认领不到任何 COND，点目录名还会退化成空串，
+# 三个点写进同一个分区。
+FAMILY_COND_PREFIX = {
+    "startup-surface": "fig1",
+    "total-makespan": "fig2",
+    "switch-recovery": "fig3",
+    "pareto-startup": "pareto1",
+    "pareto-sustained": "pareto2",
+    "evict-policy": "policy",
+}
+
+
+def cond_prefix(family: str) -> str:
+    return FAMILY_COND_PREFIX.get(family, family)
+
+
+def results_root(family: str) -> Path:
+    """族 → 数据层分区，与 run_figures.py / run_policy.py / summarize.py 同一张表。
+
+    图系列的点目录名带 `fig1-` 这类 COND 前缀，`plot.py` 靠它把曲面样本从五组对照
+    里分出去；倾斜两族的每个 rep 独占一个 run 目录，产物不能并进一个 summary.csv。
+    """
+    if family == COMPARE_FAMILY:
+        return bench_config.SCORES_RESULTS_DIR
+    if family in TILT_FAMILIES:
+        return bench_config.POLICY_RESULTS_DIR
+    return bench_config.FIGURES_RESULTS_DIR
+
+
+def point_of(family: str, cond: dict) -> str:
+    """点名 = COND 名去掉该族的 COND 前缀（4.3 §5 的 `--point` 写法）。"""
+    return cond["name"][len(cond_prefix(family)) + 1:]
+
+
+def point_base(family: str, point: str) -> Path:
+    """点目录 = 分区目录 + 完整 COND 名（点名加回前缀还原）。"""
+    return results_root(family) / f"{cond_prefix(family)}-{point}"
 
 COMPARE_CELLS = (("S-100", "S", 100), ("S-300", "S", 300),
                  ("S-1000", "S", 1000), ("M-1000", "M", 1000),
@@ -73,7 +114,7 @@ def _cond_families() -> dict[str, list[dict]]:
     out = {f: [] for f in COND_FAMILIES + TILT_FAMILIES}
     for path in sorted(CONDS_DIR.glob("*.json")):
         for family in out:
-            if path.stem.startswith(f"{family}-"):
+            if path.stem.startswith(f"{cond_prefix(family)}-"):
                 out[family].append(cond_mod.load_cond(path.stem, CONDS_DIR))
                 break
     return out
@@ -111,7 +152,7 @@ def compare_cell_done(cell: str, tier: str,
     """(已完成组数, 应跑组数)。TrainCache 行按版本,对照行取 baselines。"""
     groups = _compare_groups(tier, cell)
     reps = cond_mod.CAPACITY_TIER_REPS[tier]
-    tc_rows = _valid_rows(RESULTS_DIR / COMPARE_FAMILY / cell / "summary.csv")
+    tc_rows = _valid_rows(results_root(COMPARE_FAMILY) / cell / "summary.csv")
     base_rows = _valid_rows(bench_config.BASELINE_RESULTS_DIR / cell / "summary.csv")
     tc_counts: dict[str, int] = {}
     for row in tc_rows:
@@ -121,7 +162,7 @@ def compare_cell_done(cell: str, tier: str,
     for row in base_rows:
         group = row.get("group", "")
         base_counts[group] = base_counts.get(group, 0) + 1
-    stamped = _stamp(RESULTS_DIR / COMPARE_FAMILY / cell) == version
+    stamped = _stamp(results_root(COMPARE_FAMILY) / cell) == version
     done = 0
     for group in groups:
         if group in cond_mod.TRAINCACHE_GROUPS:
@@ -134,7 +175,7 @@ def compare_cell_done(cell: str, tier: str,
 
 def point_done(family: str, point: str, reps: int,
                version: str | None) -> bool:
-    base = RESULTS_DIR / family / point
+    base = point_base(family, point)
     if family in TILT_FAMILIES:
         return _tilt_done(base, version) >= reps
     return _stamp(base) == version and \
@@ -163,7 +204,7 @@ def family_state(family: str, version: str | None,
         return [], ["<无 COND>"]
     done, missing = [], []
     for cond in conds[family]:
-        point = cond["name"][len(family) + 1:]
+        point = point_of(family, cond)
         if point_done(family, point, int(cond["sampling"]["reps"]), version):
             done.append(point)
         else:
@@ -233,7 +274,7 @@ def run_compare_cell(cell: str, tier: str, rate: int, force: bool,
         return True
     groups = _compare_run_groups(tier, cell)
     reps = cond_mod.CAPACITY_TIER_REPS[tier]
-    out = RESULTS_DIR / COMPARE_FAMILY / cell / "summary.csv"
+    out = results_root(COMPARE_FAMILY) / cell / "summary.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update({
@@ -252,9 +293,9 @@ def run_compare_cell(cell: str, tier: str, rate: int, force: bool,
 
 def run_cond_point(family: str, cond: dict, force: bool,
                    version: str) -> bool:
-    point = cond["name"][len(family) + 1:]
+    point = point_of(family, cond)
     reps = int(cond["sampling"]["reps"])
-    base = RESULTS_DIR / family / point
+    base = point_base(family, point)
     if point_done(family, point, reps, version) and not force:
         print(f"[skip] {family}/{point} 已完成")
         return True
@@ -270,9 +311,9 @@ def run_cond_point(family: str, cond: dict, force: bool,
 
 def run_tilt_point(family: str, cond: dict, force: bool,
                    version: str) -> bool:
-    point = cond["name"][len(family) + 1:]
+    point = point_of(family, cond)
     reps = int(cond["sampling"]["reps"])
-    base = RESULTS_DIR / family / point
+    base = point_base(family, point)
     if point_done(family, point, reps, version) and not force:
         print(f"[skip] {family}/{point} 已完成")
         return True
@@ -323,13 +364,13 @@ def run_family(family: str, points: list[str] | None, force: bool,
     if not conds:
         raise SystemExit(f"{family} 在 {CONDS_DIR} 下没有 COND")
     if points:
-        known = {c["name"][len(family) + 1:] for c in conds}
+        known = {point_of(family, c) for c in conds}
         unknown = sorted(set(points) - known)
         if unknown:
             raise SystemExit(f"{family} 没有这些点: {' '.join(unknown)}")
     runner = run_tilt_point if family in TILT_FAMILIES else run_cond_point
     for cond in conds:
-        point = cond["name"][len(family) + 1:]
+        point = point_of(family, cond)
         if points and point not in points:
             continue
         ok = runner(family, cond, force, version) and ok
@@ -378,13 +419,25 @@ def check_registry() -> str:
     return version
 
 
+def artifact_cell(family: str) -> str:
+    """4.4 表格里这一族的产物路径：数据层分区 + 该族 COND 前缀，相对 `results/`。
+
+    一族占一个 glob 而不是分区名：图系列四族同在 `figures/` 下，只写分区名
+    四列会一模一样，反查不到点目录。
+    """
+    root = results_root(family).name
+    if family == COMPARE_FAMILY:
+        return f"`{root}/<格名>/`"
+    return f"`{root}/{cond_prefix(family)}-*/`"
+
+
 def record_family(family: str) -> None:
     lines, header, row_idx = _registry_grid(REGISTRY)
     cells = _last_row_cells(lines, row_idx)
     if not cells[0]:
         raise SystemExit("4.4 最后一行的版本号为空;先在最后一行的第一格写版本号")
     done, missing = family_state(family, cells[0])
-    value = f"`{family}/`" if not missing else "未完成"
+    value = artifact_cell(family) if not missing else "未完成"
     col = _family_column(header, family)
     cells[col] = value
     ending = "\r\n" if lines[row_idx[-1]].endswith("\r\n") else "\n"
@@ -404,7 +457,8 @@ def cmd_status(family: str | None, detail: bool) -> None:
     print(f"版本 {version or '(未写)'}")
     for name in families:
         done, missing = family_state(name, version or None, conds)
-        print(f"{name:16s} {len(done)}/{len(done) + len(missing)}")
+        print(f"{name:16s} {len(done)}/{len(done) + len(missing)}"
+              f"  产物 {results_root(name).name}/")
         if detail:
             for point in missing:
                 print(f"  未完成 {point}")
@@ -424,7 +478,7 @@ def cmd_run(family: str | None, points: list[str] | None,
     failed = []
     for name in families:
         if dry_run:
-            _print_plan(name)
+            _print_plan(name, points if len(families) == 1 else None)
             continue
         if run_family(name, points if len(families) == 1 else None,
                       force, version):
@@ -435,21 +489,31 @@ def cmd_run(family: str | None, points: list[str] | None,
         raise SystemExit(f"失败 {len(failed)} 族: {' '.join(failed)}")
 
 
-def _print_plan(family: str) -> None:
+def _print_plan(family: str, points: list[str] | None = None) -> None:
     if family == COMPARE_FAMILY:
         for cell, tier, rate in COMPARE_CELLS:
-            out = RESULTS_DIR / COMPARE_FAMILY / cell / "summary.csv"
+            if points and cell not in points:
+                continue
+            out = results_root(COMPARE_FAMILY) / cell / "summary.csv"
             cmd = _runner_cmd(tier, rate, _compare_run_groups(tier, cell),
                               cond_mod.CAPACITY_TIER_REPS[tier], out)
             print(f"[plan] {family}/{cell}")
             print("       " + " ".join(cmd))
         return
-    for cond in _cond_families()[family]:
-        point = cond["name"][len(family) + 1:]
+    conds = _cond_families()[family]
+    if points:
+        known = {point_of(family, c) for c in conds}
+        unknown = sorted(set(points) - known)
+        if unknown:
+            raise SystemExit(f"{family} 没有这些点: {' '.join(unknown)}")
+    for cond in conds:
+        point = point_of(family, cond)
+        if points and point not in points:
+            continue
         reps = int(cond["sampling"]["reps"])
         tilt = family in TILT_FAMILIES
-        out = (RESULTS_DIR / family / point / "<run>" / "summary.csv"
-               if tilt else RESULTS_DIR / family / point / "summary.csv")
+        out = (point_base(family, point) / "<run>" / "summary.csv"
+               if tilt else point_base(family, point) / "summary.csv")
         cmd = _runner_cmd(_run_tier(cond, tilt), cond["network"]["rate_mbit"],
                           [cond["group"]], 1 if tilt else reps, out)
         print(f"[plan] {family}/{point} reps={reps}")
@@ -466,9 +530,56 @@ def cmd_record(family: str | None) -> None:
         record_family(name)
 
 
+def cmd_selftest() -> None:
+    """族↔COND 认领表、点名与产物分区的本地自检。
+
+    命名一漂移，一族就认领不到任何 COND，点目录名退化成空串，几个点写进同一个
+    分区；4.3 §5 的 `--point` 与 4.4 的完成判定都按族/点寻址，所以这条要进门禁。
+    分区落位也在这里查：`plot.py` 按 `figures/fig*-*`、`summarize.py` 按
+    `scores/<格名>` 读产物，目录写错分区的跑分是「跑完了但出不了图」，只有
+    对照表会静默少行。
+    """
+    conds = _cond_families()
+    claimed = {c["name"] for v in conds.values() for c in v}
+    unowned = {p.stem for p in CONDS_DIR.glob("*.json")
+               if not p.stem.startswith("compare-")} - claimed
+    problems = []
+    if unowned:
+        problems.append(f"没有族认领的 COND: {sorted(unowned)}")
+    for fam in COND_FAMILIES + TILT_FAMILIES:
+        pts = [point_of(fam, c) for c in conds[fam]]
+        if not pts:
+            problems.append(f"{fam} 认领不到任何 COND")
+        if any(not p for p in pts):
+            problems.append(f"{fam} 有点名退化成空串")
+        if len(set(pts)) != len(pts):
+            problems.append(f"{fam} 点名重复: {sorted(pts)}")
+        for c, p in zip(conds[fam], pts):
+            if f"{cond_prefix(fam)}-{p}" != c["name"]:
+                problems.append(f"{fam}: 点名 {p} 还原不出 COND 名 {c['name']}")
+            want = (bench_config.POLICY_RESULTS_DIR if fam in TILT_FAMILIES
+                    else bench_config.FIGURES_RESULTS_DIR)
+            if point_base(fam, p).parent != want:
+                problems.append(
+                    f"{fam}: 点 {p} 的产物分区是 "
+                    f"{point_base(fam, p).parent.name}/,应为 {want.name}/")
+    expect = {COMPARE_FAMILY: bench_config.SCORES_RESULTS_DIR}
+    expect.update({f: bench_config.FIGURES_RESULTS_DIR for f in COND_FAMILIES})
+    expect.update({f: bench_config.POLICY_RESULTS_DIR for f in TILT_FAMILIES})
+    for fam, want in expect.items():
+        if results_root(fam) != want:
+            problems.append(f"{fam} 映射到 {results_root(fam).name}/,应为 {want.name}/")
+    if problems:
+        raise SystemExit("exp.py 自检失败:\n  " + "\n  ".join(problems))
+    print(f"exp.py 自检通过: {len(conds)} 族认领 {sum(len(v) for v in conds.values())} 个 COND，"
+          "点命名与族前缀互逆、产物分区落位正确")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="bench 实验统一入口")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("selftest", help="族↔COND 认领表与点名的本地自检")
 
     p_status = sub.add_parser("status", help="各族完成度")
     p_status.add_argument("--family", choices=FAMILIES)
@@ -487,7 +598,9 @@ def main() -> None:
                           nargs="?", default="all")
 
     args = parser.parse_args()
-    if args.command == "status":
+    if args.command == "selftest":
+        cmd_selftest()
+    elif args.command == "status":
         cmd_status(args.family, args.detail)
     elif args.command == "run":
         if args.point and args.family == "all":

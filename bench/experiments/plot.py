@@ -77,6 +77,11 @@ def _data_root() -> Path:
 DATA_ROOT = _data_root()
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
 
+# 只有这三个一级目录是七组对照的样本:scores 本轮 TrainCache 行、baselines 既有
+# 对照组行、compare 是旧的单文件产物。其余一级目录(figures/policy/quick/
+# track_d/summary)装的是曲面点、倾斜双 Job 与自检产物,不是对照样本。
+COMPARE_PARTITIONS = ("scores", "baselines", "compare")
+
 
 # ---------------------------------------------------------------------------
 # 数据读取
@@ -695,14 +700,12 @@ def main():
         if not path.is_file():
             print(f"[compare] {path} 不存在,跳过")
             continue
-        # quick 是跑分速览,不是对照样本;混进来会让 traincache 两态重复计权。
-        if auto and "quick" in path.parts:
-            print(f"[compare] 跳过 quick 产物 {path.parent}")
-            continue
-        # m8 的图系列产物(fig1-*/fig2-*/fig3-*/pareto*)不是五组对照,
-        # 由下面的曲面/Pareto 函数单独消费。
-        if auto and path.parent.name.startswith(
-                ("fig1-", "fig2-", "fig3-", "pareto1-", "pareto2-")):
+        # 自动扫描时只收对照分区:scores/ 是本轮 TrainCache 行,baselines/ 是既有
+        # 对照组行(4.3 §5)。figures/ 与 policy/ 下的点目录名带 fig*/pareto2-*
+        # 前缀由下面的曲面函数单独消费,而淘汰矩阵的行名是 policy-<策略>-rNN-*;
+        # 按前缀黑名单挡不住它,会把 C 轨样本混进七组对照柱状图。
+        if auto and path.relative_to(RESULTS_DIR).parts[0] not in COMPARE_PARTITIONS:
+            print(f"[compare] 跳过非对照分区 {path.parent}")
             continue
         print(f"[compare] 读取 {path}")
         rows = read_summary(path)
