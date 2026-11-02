@@ -62,7 +62,7 @@ ConfigMap 现在装 17 项，见 §2.1；往 ConfigMap 加一项而清单里没�
 
 ### 2.1 ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，17 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，17 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；scheduler 读 `schedulerScoreTTL`、`schedulerLogLevel`（它在 `kube-system`，读的是同名 ConfigMap 的镜像，见下）；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。
 
 | 配置项 | 默认 | 读取方 | 说明 |
 |---|---|---|---|
@@ -83,6 +83,8 @@ ConfigMap 现在装 17 项，见 §2.1；往 ConfigMap 加一项而清单里没�
 | `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
 | `schedulerScoreTTL` | `"10m"` | scheduler | scheduler 判定分数过期的有效期，代码默认 5m，必须与 `controllerScoreTTL` 同值 |
 | `schedulerLogLevel` | `"debug"` | scheduler | 只有 scheduler 用 `debug`：每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
+
+scheduler 的 Pod 在 `kube-system`，而 `configMapKeyRef` 只在 Pod 自己的 namespace 解析，所以 `controller/deploy/scheduler/configmap.yaml` 放了一份同名 `traincache-config` 的镜像，只含 `schedulerScoreTTL` 与 `schedulerLogLevel` 两个键。改值仍然只改 `controller/deploy/agent/configmap.yaml`；`make verify-metadata` 会比较两份，不一致直接失败。
 
 `cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。改仓库文件后 apply，再重启读取方：
 

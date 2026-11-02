@@ -1,0 +1,19 @@
+# The scheduler Pod runs in kube-system, and a configMapKeyRef resolves in the
+# Pod's own namespace. The shared traincache/traincache-config is therefore not
+# visible here, so this is a read-only mirror of the two keys the scheduler
+# reads.
+#
+# Edit the values in controller/deploy/agent/configmap.yaml only. Both copies
+# must stay equal; hack/verify-config-placement.sh compares them and fails the
+# metadata gate if they diverge.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+    app.kubernetes.io/part-of: traincache
+data:
+  schedulerScoreTTL: "10m"
+  schedulerLogLevel: "debug"

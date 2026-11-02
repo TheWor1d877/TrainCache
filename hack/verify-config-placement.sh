@@ -78,9 +78,36 @@ if secret_refs != {"accessKey", "secretKey"}:
 sys.exit(1 if (missing or orphan or secret_refs != {"accessKey", "secretKey"}) else 0)
 PY
 
+# 5. scheduler 在 kube-system,configMapKeyRef 不跨 namespace;它的同名镜像
+#    必须与共享 ConfigMap 的两个键同值。
+python3 - "$CM" controller/deploy/scheduler/configmap.yaml <<'PYCM' || fail=1
+import re, sys
+
+shared, mirror = sys.argv[1], sys.argv[2]
+
+def data(path):
+    body = open(path, encoding="utf-8").read().split("\ndata:\n", 1)
+    if len(body) != 2:
+        return None
+    out = {}
+    for m in re.finditer(r'^  ([A-Za-z0-9_]+):\s*"?([^"\n]*)"?\s*$', body[1], re.M):
+        out[m.group(1)] = m.group(2).strip()
+    return out
+
+a, b = data(shared), data(mirror)
+if a is None or b is None:
+    print(f"FAIL 无法解析 ConfigMap data 段: {shared} / {mirror}")
+    sys.exit(1)
+bad = [(k, a.get(k), b.get(k)) for k in ("schedulerScoreTTL", "schedulerLogLevel")
+       if a.get(k) != b.get(k)]
+for k, x, y in bad:
+    print(f"FAIL {k}: traincache-config={x!r}, scheduler 镜像={y!r}(两处必须同值)")
+sys.exit(1 if bad else 0)
+PYCM
+
 if [ "$fail" -ne 0 ]; then
   echo "配置落位检查未通过:按 docs/PARAMETER-CONFIGURATION.md 的「落位判据」五问重新落位。"
   exit 1
 fi
 cm_count="$(awk 'f{if(/^  [A-Za-z0-9_]+:/)c++} /^data:$/{f=1} END{print c+0}' "$CM")"
-echo "OK 配置落位:清单零字面量 env、traincache-config 的 ${cm_count} 项与清单引用一一对应、Secret 引用 accessKey/secretKey"
+echo "OK 配置落位:清单零字面量 env、traincache-config 的 ${cm_count} 项与清单引用一一对应、scheduler 镜像同值、Secret 引用 accessKey/secretKey"

@@ -55,7 +55,10 @@
 #   controllerScoreTTL       — TTL of a node score entry as written by the
 #                              Controller. Must match schedulerScoreTTL.
 #   schedulerScoreTTL        — TTL of a score entry as read by the scheduler
-#                              plugin. Must match controllerScoreTTL.
+#                              plugin. Must match controllerScoreTTL. The
+#                              scheduler runs in kube-system, so it reads the
+#                              mirror in controller/deploy/scheduler/configmap.yaml;
+#                              hack/verify-config-placement.sh keeps them equal.
 #   schedulerLogLevel        — scheduler verbosity; "debug" emits one
 #                              "scheduler score" line per (pod,node) decision.
 apiVersion: v1

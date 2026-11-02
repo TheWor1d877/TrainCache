@@ -185,8 +185,8 @@ main 上打 tag vX.Y.Z 并推送
 | `gatewayBlockBufferBytes` | `10485760`（10MiB） | 网关 | 每个在途块环形缓冲的字节数，正整数；非法值使网关拒绝启动 |
 | `controllerPollInterval` | `1s` | Controller | 轮询 Agent 进度的间隔，代码默认 2s |
 | `controllerScoreTTL` | `10m` | Controller | 节点分数有效期，代码默认 5m |
-| `schedulerScoreTTL` | `10m` | Scheduler | 分数过期判定，必须与 `controllerScoreTTL` 同值 |
-| `schedulerLogLevel` | `debug` | Scheduler | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
+| `schedulerScoreTTL` | `10m` | Scheduler | 分数过期判定，必须与 `controllerScoreTTL` 同值；scheduler 在 kube-system，读 `controller/deploy/scheduler/configmap.yaml` 的同名镜像 |
+| `schedulerLogLevel` | `debug` | Scheduler | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info`。与上一行一样经 kube-system 的同名镜像生效 |
 
 `k` 的确定：`k` 为 0 或省略时 Controller 自动计算并写回 `spec`，发 Normal 事件 `KDefaulted`；自动值 `K_i = clamp(min(W_i, K_window, K_cache), 1, W_i)`，`W_i` 是该 Pod 实际分到的块数。显式 `k` 的有效范围是 1..`W_i`；`k > W_i` 置 `Condition InvalidSpec=False` 并拒绝，不钳制、不截断。实际预热块数 = `min(max(K_i, score.cutoff), W_i)`。全部 Pod 的实际请求块数合计超过 `cacheCapacityBytes × maxFillFraction` 时发 Warning 事件 `KExceedsFillLimit`，任务继续执行。
 
