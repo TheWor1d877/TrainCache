@@ -97,6 +97,10 @@ selftest:
 	@$(PY) $(ROOT)/compare/summarize.py --selftest
 	@$(PY) $(ROOT)/experiments/lock.py --selftest
 	@$(PY) $(ROOT)/experiments/collect.py --selftest
+	# C 轨两个 mock 自检只验产物字段与统计形态，不是产品淘汰生效的证据(9.2 §1.7)
+	@$(PY) $(ROOT)/scripts/bench_track_c.py --selftest
+	@$(PY) $(ROOT)/experiments/run_policy.py --selftest
+	@$(PY) $(ROOT)/exp.py selftest
 	@$(PY) -c "import json,sys,glob,os; sys.path.insert(0,'$(ROOT)/experiments'); import cond; bad=[(os.path.basename(f),e) for f in sorted(glob.glob('$(ROOT)/experiments/conds/*.json')) for e in cond.validate_cond(json.load(open(f)))]; print('COND 全量校验: %d 个文件, %d 条错误' % (len(glob.glob('$(ROOT)/experiments/conds/*.json')), len(bad))); [print(' ', b) for b in bad[:5]]; sys.exit(1 if bad else 0)"
 	@bash $(ROOT)/scripts/tc_apply.sh --self-test
 	@$(MAKE) --no-print-directory -C $(ROOT)/compare check
