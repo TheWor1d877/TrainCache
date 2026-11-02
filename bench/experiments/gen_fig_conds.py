@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""生成五张图与 Pareto 的 COND 清单。
+"""生成六个出图族的 COND 清单。
 
-图一/图三/Pareto 一与图二共用对照层 Pod + MinIO 装置（协议 §1.8/§C3），
+fig1/fig3/pareto1 与 fig2 共用对照层 Pod + MinIO 装置（协议 §1.8/§C3），
 所以每个 COND 就是一组 (figure, 自变量档位, 组态)。执行器
 `run_figures.py` 按 COND 起一条 run_bench 链路。
 

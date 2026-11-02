@@ -10,7 +10,7 @@
     per_step jsonl 无绝对时间戳,步时长累加即口径内的经过时间);
   * 到 epoch 末仍未满足 → 右删失(censored=True),单独统计删失率
     (删失率 = 删失数 / (回落数 + 删失数),基线不足事件不进分母);
-  * 切换前不足 20 步实测 → status=insufficient_baseline,不进图三。
+  * 切换前不足 20 步实测 → status=insufficient_baseline,不进 fig3。
 
 输入契约(D 轨 run 目录,由 bench/scripts/bench_track_d.py 写入):
   <run_dir>/per_step_*.jsonl  每步一行:epoch / step_in_epoch / global_step /
@@ -23,7 +23,7 @@
       打点若未写 run.json 则从这里取切换事件)
   历史旧格式打点(行缺 phase、事件缺 at_step)会明确报错,不做静默降级。
 
-输出:默认 <run_dir>/recovery_q9.json(--out 可改);plot.py 图三消费其中的
+输出:默认 <run_dir>/recovery_q9.json(--out 可改);plot.py 的 fig3 消费其中的
 recovery_time_s(recovered 事件)与删失率。
 
 用法:
@@ -79,7 +79,7 @@ def analyze_switch(pre, post):
         "recovery_time_s": None,
         "n_post_steps": len(post),
     }
-    if len(base_vals) < BASELINE_STEPS:      # 切换前不足 20 步 → 不进图三
+    if len(base_vals) < BASELINE_STEPS:      # 切换前不足 20 步 → 不进 fig3
         out["status"] = "insufficient_baseline"
         return out
     baseline = sum(base_vals) / len(base_vals)
@@ -276,7 +276,7 @@ def selftest():
     r = analyze_switch(pre, post_recs)
     check("短暂回落又抬头:未保持 10 步 → censored", r["status"] == "censored")
 
-    # ③ 基线不足:切换前只有 5 步实测 → insufficient_baseline,不进图三。
+    # ③ 基线不足:切换前只有 5 步实测 → insufficient_baseline,不进 fig3。
     pre, post_recs = _pre_post(n_pre=5, post=[(0.9, 1.0)] * 15)
     r = analyze_switch(pre, post_recs)
     check("基线不足(前 5 步):insufficient_baseline",
@@ -360,7 +360,7 @@ def main():
         rate = "—" if s["censoring_rate"] is None else f"{s['censoring_rate']:.1%}"
         print(f"[{rd}] 事件 {s['n_events']}:回落 {s['recovered']} / "
               f"删失 {s['censored']} / 基线不足 {s['insufficient_baseline']}"
-              f"(不进图三);删失率 {rate}")
+              f"(不进 fig3);删失率 {rate}")
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")

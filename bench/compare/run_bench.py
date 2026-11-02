@@ -260,7 +260,7 @@ AGENT_PREFETCH_K = int(os.environ.get(
 # 预热节点数(D26):对照链路固定 2,scheduler 按就绪度选落点;s3-access 节点数只作上限
 PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "2"))
 PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
-# 图一/图三的自变量：门控开关与数据源。gated 是默认形态；free 去掉
+# fig1/fig3 的自变量：门控开关与数据源。gated 是默认形态；free 去掉
 # SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（9.2 §2.1）。
 GATE_MODE = os.environ.get("TRAINCACHE_GATE_MODE", "gated").strip().lower()
 DATA_SOURCE = os.environ.get("TRAINCACHE_DATA_SOURCE", "minio").strip().lower()
@@ -1689,7 +1689,7 @@ for epoch in range(epochs):
             if work_s > 0 and not (epoch == 0 and step < 10):
                 stall_samples.append(wait_s / step_s)
         t_last_step = now_epoch()
-        # 图三需要逐步 stall：recovery.py 按 D40 从每步 wait_s/step_s 算回落。
+        # fig3 需要逐步 stall：recovery.py 按 D40 从每步 wait_s/step_s 算回落。
         # 只打一行 JSON，runner 解析后写 per_step_*.jsonl（不落 Pod 日志文件）。
         print("[STEP] {\"epoch\":" + str(epoch) +
               ",\"step_in_epoch\":" + str(step) +
@@ -1939,7 +1939,7 @@ def create_measure_pod(group, run_id, trace_json):
         pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": JFS_MOUNT_NODE}
     # 任务清单 #5:traincache-warm 组走 traincache-scheduler + webhook gate
     # traincache-cold 不走 WarmupTask(bench 冷启动哨兵),普通调度
-    # 图一对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
+    # fig1 对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
     # 调度，用来把「门控的收益」从「预热的收益」里拆出来（9.2 §2.1）。
     if group == "traincache-warm" and GATE_MODE != "free":
         pod_labels["traincache.io/warmup"] = "enabled"
@@ -3048,7 +3048,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
             metrics["evict_policy"] = EVICT_POLICY
             metrics["gate_mode"] = GATE_MODE
             metrics["data_source"] = DATA_SOURCE
-            # 图三：逐步 stall + 切换事件落盘，recovery.py 直接消费。
+            # fig3：逐步 stall + 切换事件落盘，recovery.py 直接消费。
             _run_dir, _n_steps = write_run_artifacts(
                 out_csv, group, rep, logs, trace_sha)
             if _n_steps:
@@ -3284,7 +3284,7 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   # 9.2 §1.7 淘汰证据三列（traincache 组才有值，其余留空）
                   "evict_blocks_run", "capacity_bytes_final",
                   "cache_dir_peak_bytes",
-                  # 9.2 §R3：每个点可回溯到 COND 与 run ID；图一/图二/图三的
+                  # 9.2 §1.10：每个点可回溯到 COND 与 run ID；曲面与字节族的
                   # 自变量列必须随产物落盘，否则出图只能靠目录名猜。
                   "cond", "run_id", "epochs", "shuffle",
                   "dataset_bytes", "cache_ratio",

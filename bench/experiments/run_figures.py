@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按 COND 执行图一/图二/图三/Pareto 一的对照层跑分。
+"""按 COND 执行 fig1/fig2/fig3/pareto1 的对照层跑分。
 
 每个 COND 对应一个 (figure, 档位, 组态) 点，执行器把它翻译成 run_bench.py
 的环境变量与命令行参数。产物落 results/m8/<COND>/summary.csv，runs/ 下的

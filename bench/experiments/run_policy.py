@@ -285,7 +285,7 @@ def run_reps(cond_name: str, reps: int | None = None,
              results_root: Path | None = None) -> list[Path]:
     """跑 reps 轮。cond_name 传给 load_cond。
 
-    reps=None 时取 COND 的 sampling.reps(D18:5.1 每点 1 次、Pareto 二 2 次)。
+    reps=None 时取 COND 的 sampling.reps(D18:`evict-policy` 每点 1 次、`pareto-sustained` 每点 2 次)。
     selftest=True 时:reps 强制为 1,使用 mock 模式。
     results_root=selftest 的落点覆盖,自检用它把 mock 产物引离正式分区。
     返回每轮产物目录列表。

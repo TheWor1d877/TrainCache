@@ -108,7 +108,7 @@ CAPACITY_TIER_GROUPS = {
     "L": {"traincache-cold", "fluid-cold"},
 }
 EXPLORATORY_TIERS = {"L"}  # L 档 1 次,低于 3 次硬纪律:标 exploratory,不进正式表
-# 9.1 D32、9.2 §9.2 的 epoch 列:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
+# 9.1 D32、9.2 §7.2 的 epoch 列:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
 # (3 个连续 epoch),M/L 档跑 B 轨符号探点(1 个 epoch)。显式 EPOCHS 环境变量
 # 优先;COND 的 workload.epochs 仍按 figure 校验,两者不一致由 COND 校验器拒收。
 CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
