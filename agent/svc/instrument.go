@@ -48,7 +48,7 @@ func (m *PrefetchManager) dispatchOrderTouch(dataset string, cat *index.Catalog,
 // OnSnapshotChange 统一计入(R1/7.1 §5.9:ForOrder 与 Follow 共用回调,避免重复计数),
 // 本函数追加 traincache_index_refresh_duration_seconds{dataset,success}(签名无 result,
 // 失败耗时不上报——避免以 result="success" 混入失败样本),并以 Catalog.ShardsLoaded()
-// (5.3 D30:当前生效快照的 Manifest 分片数)上报 traincache_index_shards_loaded{dataset}
+// (5.2 D30:当前生效快照的 Manifest 分片数)上报 traincache_index_shards_loaded{dataset}
 // (family 调用点即在此;此前恒 0 为 M6 遗留)。失败路径不更新该 gauge:失败不动旧映射,
 // gauge 保持前次成功值(尚无成功加载则为注册初值 0),不被瞬时错误打成 0。
 // 打点不改变调用语义:LoadPrefixes 的错误原样返回,调用方行为不变。

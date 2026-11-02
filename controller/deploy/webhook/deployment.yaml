@@ -28,19 +28,10 @@ spec:
         - name: webhook
           image: ghcr.io/thewor1d877/traincache/webhook:dev
           imagePullPolicy: IfNotPresent
-          env:
-            - name: CONTROLLER_WEBHOOK_ADDR
-              value: ":9443"
-            - name: CONTROLLER_HEALTH_ADDR
-              value: ":8081"
-            - name: CONTROLLER_METRICS_ADDR
-              value: ":9412"
-            - name: CONTROLLER_NAMESPACE
-              value: ""
-            - name: CONTROLLER_GATE_NAME
-              value: traincache.io/warmup
-            - name: CONTROLLER_LOG_LEVEL
-              value: info
+          # No env entries: every setting this process reads uses the default in
+          # controller/internal/config/config.go (webhook :9443, health :8081,
+          # metrics :9412, all namespaces, gate traincache.io/warmup, log level
+          # info).
           ports:
             - name: https
               containerPort: 9443

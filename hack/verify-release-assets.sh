@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # verify-release-assets.sh — 校验一个候选产物目录的完整性。
 #
-# 查四件事：install.yaml 里恰好四个 digest 引用、SHA256SUMS 逐项对得上、
-# 目录内每个文件都被 SHA256SUMS 覆盖、四个 GHCR digest 匿名可解析
+# 查四件事：install.yaml 里恰好五个 digest 引用、SHA256SUMS 逐项对得上、
+# 目录内每个文件都被 SHA256SUMS 覆盖、五个 GHCR digest 匿名可解析
 # （docker manifest inspect，只看 manifest 不下载层；包不是 Public 这里就报
 # not pullable，层数据的真拉由 release-smoke 的装机段负责）。
 #
@@ -28,18 +28,18 @@ done
 
 printf '\n== image digests in install.yaml\n'
 mapfile -t refs < <(grep -oE "${REG}/[a-z0-9._-]+@sha256:[0-9a-f]{64}" "$DIR/install.yaml" | sort -u)
-if [[ "${#refs[@]}" -eq 4 ]]; then
-  ok "4 digest references"
+if [[ "${#refs[@]}" -eq 5 ]]; then
+  ok "5 digest references"
 else
-  fail "expected 4 digest references, got ${#refs[@]}"
+  fail "expected 5 digest references, got ${#refs[@]}"
 fi
 
-if [[ -f "$DIR/candidate.json" && "${#refs[@]}" -eq 4 ]]; then
+if [[ -f "$DIR/candidate.json" && "${#refs[@]}" -eq 5 ]]; then
   printf '\n== candidate digests match install.yaml\n'
   mapfile -t cand < <(jq -r '.images[]' "$DIR/candidate.json" | sed 's/^sha256://' | sort)
   mapfile -t have < <(printf '%s\n' "${refs[@]}" | sed 's/.*@//; s/^sha256://' | sort)
-  if [[ "${#cand[@]}" -eq 4 && "${cand[*]}" == "${have[*]}" ]]; then
-    ok "install.yaml 的四个 digest 与 candidate.json 一致"
+  if [[ "${#cand[@]}" -eq 5 && "${cand[*]}" == "${have[*]}" ]]; then
+    ok "install.yaml 的五个 digest 与 candidate.json 一致"
   else
     fail "install.yaml 的 digest 与 candidate.json 不一致"
     diff <(printf '%s\n' "${cand[@]}") <(printf '%s\n' "${have[@]}") || true

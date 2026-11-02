@@ -1,5 +1,5 @@
 // Package gate implements the three-condition WarmupTask gate from
-// docs/7.1 design.md §5.6, §7.5 and docs/7.3 D14/D15/D26. It is a pure package:
+// docs/7.1 design.md §5.6, §7.5 and docs/7.2 D14/D15/D26. It is a pure package:
 // it reads only its Input and returns a Decision. Rate/Gap/Slope are
 // observations for logging and the marginal-gain condition; condition ① is an
 // existential quantifier over the Pod's preheat node set and compares each

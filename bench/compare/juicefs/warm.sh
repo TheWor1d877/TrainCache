@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# juicefs 组 warm:预热 JuiceFS 缓存(等价 Fluid DataLoad,M6 任务 6.3)。
+# juicefs 组 warm:预热 JuiceFS 缓存(等价 Fluid DataLoad)。
 #
 # 预热语义:
 #   * 在 jfs-mount Pod 内执行 juicefs warmup /mnt/jfs/,把全部 shard-*.tar

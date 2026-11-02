@@ -201,7 +201,7 @@ def discover_result_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
     dirs = {p.parent for p in root.rglob("summary.csv")}
-    # M7 的补跑行在 summary.all.csv(merge_m7.py 生成);有合并表时只读它
+    # 补跑行在 summary.all.csv(merge_compare.py 生成);有合并表时只读它
     dirs |= {p.parent for p in root.rglob("summary.all.csv")}
     return sorted(dirs)
 

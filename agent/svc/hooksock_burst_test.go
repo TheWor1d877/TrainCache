@@ -19,7 +19,7 @@ import (
 
 // hooksock_burst_test.go exercises the recv side under a one-shot burst from
 // many senders: no goroutine leak, exact format-error counters, and no loss of
-// well-formed frames (docs/7.4 后续覆盖计划).
+// well-formed frames (docs/7.3 后续覆盖计划).
 
 const burstTimeout = 10 * time.Second
 

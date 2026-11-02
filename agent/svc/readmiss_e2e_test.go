@@ -63,7 +63,7 @@ func newReadMissAgent(t *testing.T, env *m3Fixture) *Agent {
 // TestHookReadMissEndToEndDemandBackfill:直写 Unix datagram 的 read_miss 触发
 // demand 补块;块可读、帧计数与 reason=demand 回源计数同步增长。
 func TestHookReadMissEndToEndDemandBackfill(t *testing.T) {
-	env := newM3Fixture(t)
+	env := newIntegrationFixture(t)
 	ref := struct {
 		path  string
 		chunk int64

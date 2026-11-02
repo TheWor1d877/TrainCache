@@ -1,6 +1,6 @@
 package gwaa
 
-// Gatekeeping for the D45 hysteresis (docs/7.1 §5.5, docs/7.3 D45). The wide
+// Gatekeeping for the D45 hysteresis (docs/7.1 §5.5, docs/7.2 D45). The wide
 // preheat hands the same window to every candidate, so their readiness counts
 // advance in lockstep; with a strict c_ij ordering the target set then changed
 // hands every few seconds and each change cost one Submit plus one Cancel.

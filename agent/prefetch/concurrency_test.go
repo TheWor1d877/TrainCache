@@ -10,7 +10,7 @@ import (
 )
 
 // concurrency_test.go covers the P0×stage-switch interleaving from
-// docs/7.4 后续覆盖计划: 100 EnqueueP0 calls racing 10 OnStageSwitch calls,
+// docs/7.3 后续覆盖计划: 100 EnqueueP0 calls racing 10 OnStageSwitch calls,
 // with the D45 dedup invariant (one task per blockKey) checked continuously.
 
 // pendingInvariantLocked checks the D45 invariant and returns a message on

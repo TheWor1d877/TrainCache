@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# fluid 组 up:Fluid Dataset + JuiceFSRuntime + DataLoad + 亲和调度(M6 任务 6.4)。
+# fluid 组 up:Fluid Dataset + JuiceFSRuntime + DataLoad + 亲和调度。
 #
 # 部署形态(参考 survey/manifests/{dataset,juicefsruntime,dataload}.yaml,
 # 重写为幂等脚本):

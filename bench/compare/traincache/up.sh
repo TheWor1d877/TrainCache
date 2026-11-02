@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# traincache 组 up:复用 TrainCache 装置(DataSet + WarmupTask + 训练 Job,M6 任务 6.5)。
+# traincache 组 up:复用 TrainCache 装置(DataSet + WarmupTask + 训练 Job)。
 #
 # 复用现有装置:
 #   * 控制面(controller-manager/webhook/scheduler/agent DaemonSet)由

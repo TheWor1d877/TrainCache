@@ -11,7 +11,7 @@
 #   make bench-doctor  只读体检:逐项 PASS/FAIL/WARN,有 FAIL 时退出码非零
 #   make bench-quick TIER=S RATE=1000 REPS=3 [TAG=...]
 #                      只跑 traincache-cold + traincache-warm 的快速跑分
-#   make bench-m7 [FORCE=1]  M7 五格串行跑分(约 6.3 h;FORCE=1 全量重跑)
+#   make bench-compare [FORCE=1]  五格对照串行跑分(约 6.3 h;FORCE=1 全量重跑)
 #   make track-d-data  D 轨数据(16×~128MB≈2GiB,落宿主机,不上传 MinIO)
 #   make track-d-up    D 轨:搭源站容器+欠配 50%+tc+连续 10 epoch(训练由本目标单独触发)
 #   make track-d-verify  D 轨:两轮冷读对账
@@ -22,7 +22,7 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 # .venv/bin/python 自带依赖目录,无需额外路径配置。
 PY := $(abspath $(ROOT)/../.venv/bin/python)
 
-.PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-m7 kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down e2e-local e2e-k8s selftest
+.PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-compare kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down e2e-local e2e-k8s selftest
 
 # D 轨数据已挂在 data-up 之下(track-d-data);bench-up 显式列出,使全链路依赖面直读含 D 轨(幂等,不会重复执行)
 bench-up: kind-up k8s-up data-up track-d-data upload ctrl-up tc-up bench-verify
@@ -92,10 +92,10 @@ bench-verify:
 # 跑正式轮前后各跑一遍,任何一项红即整轮不该开跑。
 selftest:
 	@echo "== 装置自检(纯本地) =="
-	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/merge_m7.py $(ROOT)/compare/summarize_m7.py $(ROOT)/compare/trace.py
+	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/merge_compare.py $(ROOT)/compare/summarize_compare.py $(ROOT)/compare/trace.py
 	@$(PY) $(ROOT)/compare/run_bench.py --selftest
 	@$(PY) $(ROOT)/experiments/cond.py --selftest
-	@$(PY) $(ROOT)/compare/summarize_m7.py --selftest
+	@$(PY) $(ROOT)/compare/summarize_compare.py --selftest
 	@$(PY) $(ROOT)/experiments/lock.py --selftest
 	@$(PY) $(ROOT)/experiments/collect.py --selftest
 	@$(PY) -c "import json,sys,glob,os; sys.path.insert(0,'$(ROOT)/experiments'); import cond; bad=[(os.path.basename(f),e) for f in sorted(glob.glob('$(ROOT)/experiments/conds/*.json')) for e in cond.validate_cond(json.load(open(f)))]; print('COND 全量校验: %d 个文件, %d 条错误' % (len(glob.glob('$(ROOT)/experiments/conds/*.json')), len(bad))); [print(' ', b) for b in bad[:5]]; sys.exit(1 if bad else 0)"
@@ -133,11 +133,11 @@ QUICK_REPS = $(if $(filter command line environment,$(origin REPS)),$(strip $(RE
 bench-quick:
 	@bash $(ROOT)/scripts/bench_quick.sh --tier "$(TIER)" --rate "$(QUICK_RATE)" --reps "$(QUICK_REPS)" $(if $(strip $(TAG)),--tag "$(strip $(TAG))")
 
-# ---- M7 五格串行跑分 ----
-# 五格顺序、rate/groups/reps 与产物目录由 run_m7.sh 单点定义。
+# ---- 五格对照串行跑分 ----
+# 五格顺序、rate/groups/reps 与产物目录由 run_compare.sh 单点定义。
 # 已完成格自动跳过;FORCE=1 忽略已完成格全量重跑。
-bench-m7:
-	@bash $(ROOT)/compare/run_m7.sh $(if $(strip $(FORCE)),--force)
+bench-compare:
+	@bash $(ROOT)/compare/run_compare.sh $(if $(strip $(FORCE)),--force)
 
 # ---- D 轨(v4 全程收益专用):单 Job 连续 10 epoch、每 epoch 换 seed、缓存欠配 50% ----
 # 数据 16 个 shard-*.tar 落宿主机(路径取 config.py 的 TRACK_D_DIR),经独立 nginx
@@ -161,7 +161,7 @@ track-d-verify:
 track-d-down:
 	@bash $(ROOT)/scripts/track_d_down.sh
 
-# ---- e2e 演练(M7c):Agent 服务化端到端 ----
+# ---- e2e 演练:Agent 服务化端到端 ----
 # e2e-local:本机跑真实 agentd(TRAINCACHE_CACHE_ROOT 指向可写临时目录)+ CLI 三命令
 #            + /metrics 七线指标;自清理进程与临时目录,可重复执行。
 # e2e-k8s:  复用 kind 集群(traincache,幂等 kubectl apply),演练验收 2/3/8/10。

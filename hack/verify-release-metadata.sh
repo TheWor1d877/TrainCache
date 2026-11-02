@@ -12,7 +12,7 @@ fail() { printf '  [FAIL] %s\n' "$*"; bad=1; }
 # 1. 部署清单里的镜像只能带 dev 标签或 digest。observability 是 dev-only，不参与。
 images="$(grep -rh --exclude-dir=observability -E '^[[:space:]]*image:' controller/deploy \
   | sed -E 's/^[[:space:]]*image:[[:space:]]*//' | sort -u)"
-[[ "$(printf '%s\n' "$images" | grep -c .)" -ge 4 ]] || fail "controller/deploy 中镜像少于 4 个"
+[[ "$(printf '%s\n' "$images" | grep -c .)" -ge 5 ]] || fail "controller/deploy 中镜像少于 5 个"
 while IFS= read -r img; do
   [[ -n "$img" ]] || continue
   case "$img" in
@@ -22,8 +22,8 @@ while IFS= read -r img; do
   esac
 done <<<"$images"
 
-# 2. kustomization 的 images 必须覆盖全部四个组件，且发布前都指向 dev。
-for comp in controller-manager webhook kube-scheduler traincache-agentd; do
+# 2. kustomization 的 images 必须覆盖全部五个组件，且发布前都指向 dev。
+for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
   if ! grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
       | grep -q 'newTag: dev'; then
     fail "kustomization images 缺少 $comp 或未指向 dev"
@@ -32,15 +32,17 @@ done
 
 # 3. Dockerfile 不设镜像站参数,VERSION 默认 dev 并由 ldflags 注入。
 for df in agent/Dockerfile controller/deploy/manager/Dockerfile \
-          controller/deploy/webhook/Dockerfile controller/deploy/scheduler/Dockerfile; do
+          controller/deploy/webhook/Dockerfile controller/deploy/scheduler/Dockerfile \
+          gateway/Dockerfile; do
   ! grep -q 'ARG REGISTRY' "$df" || fail "$df: 不应有镜像站参数,基础镜像写官方短名"
   grep -qx 'ARG VERSION=dev' "$df" || fail "$df: ARG VERSION 默认值不是 dev"
   grep -q -- '-X main.version=\${VERSION}' "$df" || fail "$df: 未用 ldflags 注入 main.version"
 done
 
-# 4. 四个 main 包必须暴露可被 -X 覆盖的 version 变量。
+# 4. 五个 main 包必须暴露可被 -X 覆盖的 version 变量。
 for f in controller/cmd/controller-manager/main.go controller/cmd/webhook/main.go \
-         controller/cmd/scheduler/main.go agent/cmd/agentd/main.go; do
+         controller/cmd/scheduler/main.go agent/cmd/agentd/main.go \
+         gateway/cmd/gatewayd/main.go; do
   grep -qx 'var version = "dev"' "$f" || fail "$f: 缺少 var version = \"dev\""
 done
 

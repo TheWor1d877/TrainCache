@@ -220,12 +220,12 @@ build_images() {
   # otherwise BuildKit resolves them remotely and a slow network stalls the
   # pull. Missing images are left to the builder (CI pulls them normally).
   "$REPO_ROOT/hack/build-images.sh" --prepare-only
-  # go.work references all three modules, so every build needs a context with
-  # agent/, core/ and controller/. Stage just those instead of sending the
+  # go.work references all four modules, so every build needs a context with
+  # agent/, core/, controller/ and gateway/. Stage just those instead of sending the
   # multi-gigabyte repository root to the Docker daemon.
   local stage
   stage="$(mktemp -d "${TMPDIR:-/tmp}/traincache-build.XXXXXX")"
-  cp -a "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum" "$REPO_ROOT/agent" "$REPO_ROOT/core" "$REPO_ROOT/controller" "$stage/" \
+  cp -a "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum" "$REPO_ROOT/agent" "$REPO_ROOT/core" "$REPO_ROOT/controller" "$REPO_ROOT/gateway" "$stage/" \
     || { fail "stage build context"; rm -rf "$stage"; return 1; }
   # Per-component build inputs. The Dockerfiles copy the whole workspace, but
   # controller binaries only import controller/, core/ and agent/api while
@@ -236,11 +236,11 @@ build_images() {
     "$REPO_ROOT/controller/cmd" "$REPO_ROOT/controller/internal"
     "$REPO_ROOT/controller/api" "$REPO_ROOT/controller/config"
     "$REPO_ROOT/controller/deploy"
-    "$REPO_ROOT/core" "$REPO_ROOT/agent/api"
+    "$REPO_ROOT/core" "$REPO_ROOT/agent/api" "$REPO_ROOT/gateway"
   )
   local agent_src=(
     "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum"
-    "$REPO_ROOT/agent" "$REPO_ROOT/core"
+    "$REPO_ROOT/agent" "$REPO_ROOT/core" "$REPO_ROOT/gateway"
   )
   build_image manager "$IMG_MANAGER" "$REPO_ROOT/controller/deploy/manager/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
   build_image webhook "$IMG_WEBHOOK" "$REPO_ROOT/controller/deploy/webhook/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }

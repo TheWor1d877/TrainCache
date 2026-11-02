@@ -1,6 +1,15 @@
 # Changelog说明
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。版本号与 git tag 逐字一致，带 `v`；最新版本在最上面。
 每完成一项用户可见的改动就补一条，写在 `## 未发布` 下，先不写版本号；发版时把该节标题改成 `## [vX.Y.Z] - 日期`。
+
+## 未发布
+
+### Changed
+
+- 集群配置统一落位：四份工作负载清单（Agent DaemonSet、manager、webhook、scheduler）不再写任何字面量 env。等于代码默认的参数（监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 默认档）从清单删除，默认值只留在 `agent/svc/config.go` 与 `controller/internal/config/config.go`。
+- 随集群或随实验轮次变化的取值改由 ConfigMap `traincache-config` 注入：新增 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`controllerPollInterval`、`controllerScoreTTL`、`schedulerScoreTTL`、`schedulerLogLevel` 七项，该 ConfigMap 从 6 项扩到 13 项。bench 的桶名不再用 `kubectl set env` 覆盖 DaemonSet，与白名单、容量一起 merge patch 进 ConfigMap。
+- `make verify-metadata` 增加 `hack/verify-config-placement.sh`：清单出现字面量 env、ConfigMap 与清单引用脱钩、Secret 引用非 `accessKey`/`secretKey` 都会失败。落位判据与逐项位置见 `docs/PARAMETER-CONFIGURATION.md`。
+
 ## 写法示例
 下面的代码块只演示格式，不是发布记录。分组按改动性质从 Added / Changed / Deprecated / Removed / Fixed / Security 中选，没有就不写该组。
 ```markdown

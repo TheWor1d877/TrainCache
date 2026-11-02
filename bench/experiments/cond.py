@@ -81,7 +81,7 @@ DATASET_SOURCES = {"minio", "local-nginx"}
 VALID_RATES = set(config.TC_RATE_MBITS)
 CURRICULUM_FRACTIONS_FROZEN = [1.0, 2.0 / 3.0, 1.0 / 3.0]
 
-# ---- 容量档位 S/M/L(docs/9.1 任务 0.6/6.13,D19;与 cache.ratio/capacity_bytes 同一口径)----
+# ---- 容量档位 S/M/L(D19;与 cache.ratio/capacity_bytes 同一口径)----
 # 对照实验缓存固定 1GiB;数据量 = N_TARS × SHARD_SIZE_MB(256MiB,即 config.TRACK_B_TAR_BYTES)。
 # M 档 N_TARS 即 config.TRACK_B_N_TARS(32);S/L 为其 1/4 与 4 倍。
 COMPARE_CACHE_BYTES = 1 << 30  # 1GiB,三档共用
@@ -89,7 +89,7 @@ COMPARE_SHARD_SIZE_BYTES = config.TRACK_B_TAR_BYTES  # 256MiB
 VALID_CAPACITY_RATIOS = {"S", "M", "L"}
 # 数据集规模枚举(D19 三档):S=2GiB / M=8GiB / L=32GiB
 VALID_DATASET_BYTES = {2 << 30, 8 << 30, 32 << 30}
-# epoch 档位枚举(9.1 M3):1 / 3 / 10
+# epoch 档位枚举:1 / 3 / 10
 VALID_EPOCHS = {1, 3, 10}
 CAPACITY_TIER_RATIO = {"S": 2.0, "M": 8.0, "L": 32.0}   # 数据/缓存容量比(D19)
 CAPACITY_TIER_N_TARS = {
@@ -108,7 +108,7 @@ CAPACITY_TIER_GROUPS = {
     "L": {"traincache-cold", "fluid-cold"},
 }
 EXPLORATORY_TIERS = {"L"}  # L 档 1 次,低于 3 次硬纪律:标 exploratory,不进正式表
-# 9.1 D32/§12:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
+# 9.1 D32、9.2 §9:对照层 runner 的 epochs 缺省随档位联动 —— S 档跑 D 轨口径
 # (3 个连续 epoch),M/L 档跑 B 轨符号探点(1 个 epoch)。显式 EPOCHS 环境变量
 # 优先;COND 的 workload.epochs 仍按 figure 校验,两者不一致由 COND 校验器拒收。
 CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
@@ -276,7 +276,7 @@ def validate_cond(cond: dict) -> list[str]:
             v = _require(wl, k, "$.workload", errors)
             if v is not None and (not isinstance(v, int) or v <= 0):
                 errors.append(f"$.workload.{k} 必须是 >0 的整数")
-        # epoch 档位枚举(9.1 M3):1 / 3 / 10,不在枚举内的实验点直接拒收
+        # epoch 档位枚举:1 / 3 / 10,不在枚举内的实验点直接拒收
         ep = wl.get("epochs")
         if isinstance(ep, int) and ep not in VALID_EPOCHS:
             errors.append(

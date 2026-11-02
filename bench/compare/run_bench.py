@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M7 五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
+"""五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
 
 七组态各跑 N 次（次数按 9.1 D19/D32 分档：S=3（@100 与 @1000 各 3 次）
 / M=3 / L=1 探点，--reps 可显式覆盖；GROUPS 是五个受试者展开的七个组态），
@@ -36,7 +36,7 @@
 6.15 stall_ratio 改造（2026-10-24）：
   旧版 measure 是串行"读整片 tar → matmul"，读比算慢两个数量级，
   stall_ratio = wait_s/step_s 恒≈0.98，没有判别力——旧串行版本产物的
-  stall_ratio 一律作废（docs/9.1 §8/6.15、docs/4 §10），需按本口径重跑。
+  stall_ratio 一律作废（docs/4 §10），需按本口径重跑。
   新版用 COMPUTE_MS=200ms 控制每步算力，读与计算并行（后台 reader 线程
   模拟 DataLoader 异步预取，把接下来若干分片读进内存队列，主循环从队头
   取数据 + 做固定算力）：预取有效（热缓存/预取跟上）→ stall_ratio 趋 0；
@@ -117,7 +117,7 @@ D30/D32 接线（2026-10-25）：
                          数据按轨迹顺序恰好过一遍）
   CHUNK_SIZE             实验块大小，默认 8388608（8MiB，9.1 D20；
                          生产默认 64MiB 不变）
-  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（9.1 Q12；
+  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（9.1 D41；
                          MinIO 内该快照由 trainpublish -chunk-size 8388608
                          发布属后续动作，本脚本只按新名引用）
   TRAINCACHE_CACHE_CAPACITY_BYTES  统一缓存容量，默认 1GiB
@@ -263,13 +263,22 @@ PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
 # SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（9.2 §2.1）。
 GATE_MODE = os.environ.get("TRAINCACHE_GATE_MODE", "gated").strip().lower()
 DATA_SOURCE = os.environ.get("TRAINCACHE_DATA_SOURCE", "minio").strip().lower()
+# 网关开关(D23)：只有 "1" 打开;其余取值（含空串/0/true）一律按无网关处理，
+# 与 bench/scripts/ctrl_up.sh 的归一规则一致。
+GATEWAY_ON = os.environ.get("TRAINCACHE_GATEWAY", "0").strip() == "1"
+
+
+def gateway_flag(on=None):
+    """summary.csv 的 gateway 列：1=经网关，0=agentd 直连源站。"""
+    return "1" if (GATEWAY_ON if on is None else on) else "0"
+
 EVICT_POLICY = os.environ.get("TRAINCACHE_EVICT_POLICY", "heat").strip().lower()
 # 扫点脚本可显式指定本条产物的 COND 名（fig1/fig2/fig3/pareto1 的 COND
 # 不叫 compare-*，_cond_name_for_cell 匹配不到）。
 COND_NAME_OVERRIDE = os.environ.get("TRAINCACHE_COND_NAME", "").strip()
 # 图系列(fig1/2/3、pareto1)由 run_figures.py 按 COND 驱动。它们的组态、
-# 次数与带宽档不受 M7 的 D30/D31/D32 档位约束,所以显式关掉越组过滤与
-# 次数白名单;M7 与冒烟保持默认 0,行为不变。
+# 次数与带宽档不受 D30/D31/D32 档位约束,所以显式关掉越组过滤与
+# 次数白名单;对照跑分与冒烟保持默认 0,行为不变。
 FIGURE_MODE = os.environ.get("TRAINCACHE_FIGURE_MODE", "").strip() == "1"
 # M5：倾斜双 Job（跑在同一个 measure Pod 里），只用于 pareto2/policy。
 TILT = os.environ.get("TRAINCACHE_TILT", "").strip() == "1"
@@ -297,7 +306,7 @@ SAMPLE_INTERVAL_S = float(os.environ.get("COMPARE_SAMPLE_INTERVAL_S", "5"))
 SAMPLE_JOIN_TIMEOUT_S = float(os.environ.get("COMPARE_SAMPLE_JOIN_TIMEOUT_S", "30"))
 AGENT_NS = "traincache"
 AGENT_LABEL = "app=traincache-agentd"
-AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/8.4：TRAINCACHE_METRICS_ADDR=":9411"）
+AGENT_METRICS_PORT = 9411  # agentd /metrics（docs/8.3：TRAINCACHE_METRICS_ADDR=":9411"）
 AGENT_DEGRADED_SAMPLE_S = 5  # 测量期间降级采样间隔
 AGENTD_HIDE_TIMEOUT_S = 120  # 缩到 0 后等 Pod 全消失
 AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
@@ -779,6 +788,8 @@ def group_up(group):
         env["TRAINCACHE_PREHEAT_FANOUT"] = str(PREHEAT_FANOUT)
         env["TRAINCACHE_PREHEAT_FANOUT_MIN"] = str(PREHEAT_FANOUT_MIN)
         env["DATASET"] = DATASET_NAME
+        # D23：网关开关透传到 ctrl_up.sh，决定 gatewayEndpoint 与网关副本数
+        env["TRAINCACHE_GATEWAY"] = "1" if GATEWAY_ON else "0"
     rc, out, err = run_cmd(["bash", str(GROUP_UP[group])], env=env, timeout=3600)
     if rc != 0:
         print(f"[up] {group} 失败(rc={rc}): {err[:800]}")
@@ -1142,7 +1153,7 @@ def read_shard(shard, phase):
     """traincache 读取路径：逐块读本地缓存，缺块等待 agentd 预取，超时兜底回源。
     返回本片字节数（累加各块长度，不把整片拼起来留在内存里）。
     注意：hits/misses 只是块级诊断(block_hit_rate_diag 列)——"块在磁盘存在即
-    hit"口径会虚高(agent 运行期悄悄回源补块)，2026-10-24 已作废(9.1 6.16/D25)；
+    hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(9.1 D25)；
     正式命中率由 runner 侧用 open-time 的 demand_miss 字节账计算。
     分阶段字节（9.2）：每个块都计入 read_bytes_phase[phase]；块不存在、走
     等待/回源分支时另计入 demand_miss_phase[phase]（按块 size 计）。"""
@@ -1203,7 +1214,7 @@ READ_TIMEOUT_S = float(os.environ.get("READ_TIMEOUT_S", "300"))   # 队头等待
 # 真实加载器会持有的字节数(≈(深度+线程数+1)×分片大小)改用纯计数
 # logical_resident_bytes 跟踪（不真持有 bytes），峰值见 RESULT 的
 # peak_resident_bytes。旧串行版产物的 stall_ratio 口径作废
-# （docs/9.1 §8 6.15、docs/4 §10）
+# （docs/4 §10）
 # 口径(9.2)：
 #   wait_s = 主循环从队列取"已读好分片"的阻塞等待(真 stall);
 #   work_s = 墙钟算力(compute_work 循环 matmul 直到实测 >= COMPUTE_MS，取实测长度);
@@ -2918,11 +2929,8 @@ def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
           f"实际镜像 {TRAIN_IMAGE} / {JUICEFS_IMAGE}）")
 
 
-def write_csv(path, results):
-    # 列：四指标 + warmup_seconds(任务#8) + tier/rate/trace_sha256(6.12/6.13/D31)
-    #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
-    #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
-    fieldnames = ["group", "tier", "rate", "rep", "status", "void", "reason",
+# summary.csv 的列顺序（模块级：--selftest 也断言这里的列集合）
+CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "baseline_substituted",
                   "warmup_seconds", "warmup_time_basis",
                   "startup_makespan", "total_makespan",
@@ -2956,10 +2964,18 @@ def write_csv(path, results):
                   "cond", "run_id", "epochs", "shuffle",
                   "dataset_bytes", "cache_ratio",
                   "prefetch_lookahead", "evict_policy",
-                  "gate_mode", "data_source",
+                  "gate_mode", "gateway", "data_source",
                   # M5 倾斜双 Job：A 命中率/等待占比、B 挤占热块次数
                   "a_hit_ratio", "a_wait_ratio", "b_evictions_of_hot",
                   "a_steps", "b_steps", "tilt_hot_shards"]
+
+
+def write_csv(path, results):
+    # 列：四指标 + warmup_seconds(任务#8) + tier/rate/trace_sha256(6.12/6.13/D31)
+    #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
+    #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
+    #     + gateway(D23：1=经合并回源网关，0=直连源站)
+    fieldnames = CSV_FIELDNAMES
     # 生效 fanout 与本次 measure 实际用到的分片数（N_TARS），逐行同值
     fanout_eff = s3_fanout_count()
     with open(path, "w", newline="") as f:
@@ -2995,6 +3011,7 @@ def write_csv(path, results):
             row["prefetch_lookahead"] = r.get("prefetch_lookahead") or PREFETCH_K
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
+            row["gateway"] = gateway_flag()
             row["data_source"] = r.get("data_source") or DATA_SOURCE
             w.writerow(row)
 
@@ -3002,7 +3019,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查六件事：
+    查七件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3013,7 +3030,8 @@ def selftest():
       5. 读队列超时那一步的 wait 照实计入诊断账、本轮标 void（bad 步不进
          stall 样本，避免除零）；快照缺片的作废原因落 read_error；
       6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
-         档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位。
+         档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位；
+      7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -3231,11 +3249,27 @@ def selftest():
     print(f"[selftest] 6) D30/D32 接线：M 档跑 {m_pick}（L 档剔除 {l_drop}）；"
           f"status ok/void/exploratory 三态、S/M/L epochs 3/1/1、"
           f"三档 burst 推导、抖动轴已撤、替补全废判据均自洽")
+
+    # ---- 7) D23 网关开关：新列、取值映射与透传 ----
+    if "gateway" not in CSV_FIELDNAMES:
+        raise AssertionError("自测：summary.csv 缺 gateway 列")
+    if CSV_FIELDNAMES.index("gateway") != CSV_FIELDNAMES.index("gate_mode") + 1:
+        raise AssertionError("自测：gateway 列应紧跟 gate_mode")
+    if gateway_flag(True) != "1" or gateway_flag(False) != "0":
+        raise AssertionError(f"自测：gateway_flag 映射不对 "
+                             f"{gateway_flag(True)!r}/{gateway_flag(False)!r}")
+    if gateway_flag() != ("1" if GATEWAY_ON else "0"):
+        raise AssertionError("自测：gateway 列没有跟随 TRAINCACHE_GATEWAY")
+    import inspect  # noqa: PLC0415
+    if 'env["TRAINCACHE_GATEWAY"]' not in inspect.getsource(group_up):
+        raise AssertionError("自测：group_up 没有把网关开关透传给 up.sh")
+    print(f"[selftest] 7) D23 网关开关：gateway 列紧随 gate_mode，"
+          f"映射 1/0 正确，GATEWAY_ON={GATEWAY_ON} 已透传到 up.sh")
     print("run_bench selftest: PASS")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="M7 五组对照跑分")
+    parser = argparse.ArgumentParser(description="五组对照跑分")
     parser.add_argument("--reps", type=int, default=None,
                         help="每点采样次数；缺省按档位取 D19/D32 值（S=3/M=3/L=1）")
     parser.add_argument("--tier", choices=("S", "M", "L"), default=TIER,
@@ -3339,7 +3373,7 @@ def main():
     out_path = resolve_out_path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # 图系列的缓存容量与策略逐 COND 变化：先把 ConfigMap 对齐，再起组。
-    # M7 三档参数与默认值相同，这里是空操作。
+    # 三档参数与默认值相同，这里是空操作。
     ensure_agent_config()
     write_cell_lock(out_path, tier, picked, rate_mbit, TC_RATE_EFF)
 

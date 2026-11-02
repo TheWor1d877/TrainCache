@@ -1,6 +1,6 @@
 package warmup
 
-// M12 log assertions for docs/8.1 design.md §4.1: the Pod score annotation is
+// Log assertions for docs/8.1 design.md §4.1: the Pod score annotation is
 // written in the same patch that removes the gate, and a failed patch leaves
 // the Pod gated; released Pods landing off their GWAA assignment (Warn log
 // paired with the NodeDeviation event).
@@ -19,7 +19,7 @@ import (
 
 // §4.1: pod score detail (Debug) and the successful annotation write (Info)
 // carry the Pod, key and generation context.
-func TestM12ScoreAnnotationLogFields(t *testing.T) {
+func TestScoreAnnotationLogFields(t *testing.T) {
 	buf, log := m12JSONLog(t)
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
@@ -53,7 +53,7 @@ func TestM12ScoreAnnotationLogFields(t *testing.T) {
 
 // §4.1: a failed Pod patch logs the Warn line and leaves the Pod gated, so the
 // score annotation and the gate stay consistent.
-func TestM12ScoreAnnotationPatchFailureLogFields(t *testing.T) {
+func TestScoreAnnotationPatchFailureLogFields(t *testing.T) {
 	buf, log := m12JSONLog(t)
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{
@@ -81,7 +81,7 @@ func TestM12ScoreAnnotationPatchFailureLogFields(t *testing.T) {
 }
 
 // §4.1 第 5 点: GWAA 分配结果按 reconcile 打出 fanout/assign/unassigned.
-func TestM12GwaaPlacementAppliedLogFields(t *testing.T) {
+func TestGwaaPlacementAppliedLogFields(t *testing.T) {
 	task := fixtureTask(2, 2, [][]int32{{0, 1, 2}, {3, 4, 5}})
 	ds := fixtureDataSet(6, singleShardLayout(6), []string{"n1", "n2"})
 	buf, log := m12JSONLog(t)
@@ -124,7 +124,7 @@ func TestM12GwaaPlacementAppliedLogFields(t *testing.T) {
 
 // §4.1 第 17 点: a released Pod on a node outside its assignment records the
 // Warn log and the NodeDeviation event as one pair.
-func TestM12DeviationWarnAndEventPaired(t *testing.T) {
+func TestDeviationWarnAndEventLogs(t *testing.T) {
 	task := fixtureTask(1, 1, [][]int32{{0}})
 	task.Status.Phase = traincachev1alpha1.WarmupPhaseReleased
 	task.Status.PodNodeReadiness = []traincachev1alpha1.PodNodeReadiness{

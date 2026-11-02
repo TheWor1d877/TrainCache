@@ -1,4 +1,4 @@
-# controller-manager Deployment (single replica by default, docs/7.3 Q10).
+# controller-manager Deployment (single replica by default, docs/7.2 Q10).
 #
 # Watches all namespaces: DataSet/WarmupTask and the Pods selected by
 # traincache.io/warmup=enabled (DegradedReconciler). The Agent is discovered
@@ -28,32 +28,23 @@ spec:
           image: ghcr.io/thewor1d877/traincache/controller-manager:dev
           imagePullPolicy: IfNotPresent
           env:
-            - name: CONTROLLER_METRICS_ADDR
-              value: ":9412"
-            - name: CONTROLLER_HEALTH_ADDR
-              value: ":8081"
-            # Recorded in the startup log only: the manager watches every
-            # namespace whatever this holds.
-            - name: CONTROLLER_NAMESPACE
-              value: ""
-            - name: CONTROLLER_AGENT_PORT
-              value: "9410"
-            - name: CONTROLLER_AGENT_TIMEOUT
-              value: 5s
+            # No literal values here. Values equal to the defaults in
+            # controller/internal/config/config.go (metrics :9412, health
+            # :8081, namespace "", agent port 9410, agent timeout 5s, score
+            # annotation traincache.io/node-scores, gate
+            # traincache.io/warmup, leader election off, max chunks 10000000,
+            # log level info) are written nowhere; the two values that override
+            # a default come from traincache-config.
             - name: CONTROLLER_POLL_INTERVAL
-              value: 1s
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: controllerPollInterval
             - name: CONTROLLER_SCORE_TTL
-              value: 10m
-            - name: CONTROLLER_SCORE_ANNOTATION
-              value: traincache.io/node-scores
-            - name: CONTROLLER_GATE_NAME
-              value: traincache.io/warmup
-            - name: CONTROLLER_LEADER_ELECTION
-              value: "false"
-            - name: CONTROLLER_MAX_CHUNKS
-              value: "10000000"
-            - name: CONTROLLER_LOG_LEVEL
-              value: info
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: controllerScoreTTL
             # K auto-default inputs, shared with the Agent through
             # traincache-config (D43). Missing keys block Pod startup.
             - name: TRAINCACHE_CACHE_CAPACITY_BYTES

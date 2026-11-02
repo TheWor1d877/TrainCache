@@ -2,7 +2,7 @@
 #
 # traincache-agentd 节点镜像(DaemonSet 入口;design 7.1 §8:镜像入口 traincache-agentd、单容器)。
 #
-# 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller,
+# 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller、./gateway,
 # 三个模块目录都需入上下文):
 #   docker build -f agent/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-agentd:dev .
 # 本机构建用 hack/build-images.sh:构建前先把基础镜像补成官方短名。
@@ -26,6 +26,7 @@ COPY go.work go.work.sum ./
 COPY core/ core/
 COPY agent/ agent/
 COPY controller/ controller/
+COPY gateway/ gateway/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     cd agent \
  && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/traincache-agentd ./cmd/agentd \

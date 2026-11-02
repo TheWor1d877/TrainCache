@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# run-k8s.sh — TrainCache Agent 服务化「kind 集群端到端」演练(M7c)。
+# run-k8s.sh — TrainCache Agent 服务化「kind 集群端到端」演练。
 #
-# 前置:复用 M7b 已部署的 kind 集群(traincache),镜像 traincache-agentd:dev /
+# 前置:复用已部署的 kind 集群(traincache),镜像 traincache-agentd:dev /
 #       traincache-ordersrc:dev / busybox:latest 已 kind load(见 agent/deploy/*.yaml 头注释)。
-#       脚本先 kubectl apply 两个清单(幂等:已存在则不改),再逐条演练验收。
+#       脚本先 kubectl apply 三个清单(幂等:已存在则不改),再逐条演练验收。
 # 覆盖验收:2 / 3 / 8 / 10(1/5/9 需 MinIO 对象存储 + 测试数据,见 DECISIONS 与回传)。
 # 用法:
 #   bash agent/e2e/run-k8s.sh        # 由 bench/Makefile 的 e2e-k8s 调用
@@ -47,6 +47,12 @@ ok "集群可达"
 # ---- 1. 幂等部署 ----
 say "-- [1/7] 幂等 apply 部署清单"
 kubectl apply -f "$REPO_ROOT/controller/deploy/namespace.yaml" >>"$RAW_LOG" 2>&1 || fail "apply namespace.yaml 失败"
+# DaemonSet 的取值全靠 configMapKeyRef 引用,缺 traincache-config 会让 Pod 卡在
+# CreateContainerConfigError。已存在时不动它:bench 改过 objstoreBucket、
+# cacheCapacityBytes 等,按仓库清单重新 apply 会把这些值盖回默认。
+kubectl -n "$NS" get configmap traincache-config >/dev/null 2>&1 \
+  || kubectl apply -f "$REPO_ROOT/controller/deploy/agent/configmap.yaml" >>"$RAW_LOG" 2>&1 \
+  || fail "apply agent configmap 失败"
 kubectl apply -f "$REPO_ROOT/controller/deploy/agent/daemonset.yaml" >>"$RAW_LOG" 2>&1 || fail "apply agent daemonset 失败"
 # 演练用本地构建的镜像：清单里写的是推送后的 ghcr 引用，这里替换成 kind load 的名字。
 kubectl -n "$NS" set image ds/"$DS" agentd=traincache-agentd:dev >>"$RAW_LOG" 2>&1 || fail "set image 失败"

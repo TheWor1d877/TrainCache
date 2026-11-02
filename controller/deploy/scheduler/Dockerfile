@@ -22,6 +22,7 @@ COPY go.work go.work.sum ./
 COPY core/ core/
 COPY agent/ agent/
 COPY controller/ controller/
+COPY gateway/ gateway/
 # No "go mod download" pre-layer: in workspace mode it walks the whole module
 # graph (including k8s.io/kubernetes test-only staging modules).
 WORKDIR /src/controller

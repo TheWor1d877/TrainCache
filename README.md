@@ -90,10 +90,10 @@ make e2e           # kind 里的端到端
 | [2 TrainCache三层架构](docs/2 TrainCache三层架构.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3 现勘报告.md) | 现场勘查数据与缺口证据 |
 | [4 bench装置说明](docs/4 bench装置说明.md) | 实验装置、条件清单、产物格式 |
-| [5.x 缓存核心库](docs/5.1 design.md) | 设计要求、计划、决策、测试 |
+| [5.x 缓存核心库](docs/5.1 design.md) | 设计、决策、测试 |
 | [6.x Agent 服务化](docs/6.1 design.md) | 同上，对应节点面 |
 | [7.x Controller & Scheduler](docs/7.1 design.md) | 同上，对应控制面 |
 | [8.x 日志与监控](docs/8.1 design.md) | 指标、日志契约与使用说明 |
-| [9.1 plan](docs/9.1 plan.md) | 验收与实验里程碑 |
+| [9.1 决策](docs/9.1 decisions.md) | 验收与实验口径的裁决 |
 | [9.2 实验协议](docs/9.2 实验协议.md) | 预注册假设、口径、条件矩阵 |
 | [发布约束](docs/RELEASE-CONSTRAINTS.md) | 版本、镜像、发布物与 CI 口径 |
