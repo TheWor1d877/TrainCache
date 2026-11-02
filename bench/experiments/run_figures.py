@@ -27,6 +27,7 @@ BENCH_ROOT = EXPERIMENTS_DIR.parent
 sys.path.insert(0, str(EXPERIMENTS_DIR))
 sys.path.insert(0, str(BENCH_ROOT))
 import cond as cond_mod  # noqa: E402
+import cond as cond_mod  # noqa: E402
 import config as bench_config  # noqa: E402
 
 CONDS_DIR = EXPERIMENTS_DIR / "conds"
@@ -42,7 +43,7 @@ def cond_env(c: dict) -> dict:
     wl = c["workload"]
     net = c["network"]
     cache = c["cache"]
-    pf = c["prefetch"]
+    pf = c.get("prefetch") or {}
     tier = "S" if int(ds["shards"]) <= 8 else "M"
     env = os.environ.copy()
     env.update({
@@ -51,20 +52,20 @@ def cond_env(c: dict) -> dict:
         "CAPACITY_RATIO": tier,
         "N_TARS": str(ds["shards"]),
         "EPOCHS": str(wl["epochs"]),
-        "STEPS_PER_EPOCH": str(wl["steps_per_epoch"]),
-        "BATCH": str(wl["batch"]),
+        "STEPS_PER_EPOCH": str(cond_mod.DEFAULTS["steps_per_epoch"]),
+        "BATCH": str(cond_mod.DEFAULTS["batch"]),
         "SHUFFLE": wl["shuffle"],
         "SEED": str(ds["seed"]),
         "DATASET_NAME": ds["name"],
-        "MINIO_BUCKET": ds["bucket"],
-        "TRAINCACHE_CACHE_CAPACITY_BYTES": str(cache["capacity_bytes"]),
-        "TRAINCACHE_EVICT_POLICY": cache["evict_policy"],
-        "TRAINCACHE_PREHEAT_FANOUT": str(pf["fanout"]),
-        "TRAINCACHE_PREHEAT_FANOUT_MIN": str(pf["fanout_min"]),
-        "TRAINCACHE_PREFETCH_K": str(pf["lookahead"]),
-        "TRAINCACHE_GATE_MODE": pf["gate"]["mode"],
+        "MINIO_BUCKET": bench_config.MINIO_BUCKET,
+        "TRAINCACHE_CACHE_CAPACITY_BYTES": str(cond_mod.cache_bytes(c)),
+        "TRAINCACHE_EVICT_POLICY": cache.get("evict_policy", "external"),
+        "TRAINCACHE_PREHEAT_FANOUT": str(pf.get("fanout", 1)),
+        "TRAINCACHE_PREHEAT_FANOUT_MIN": str(cond_mod.DEFAULTS["fanout_min"]),
+        "TRAINCACHE_PREFETCH_K": str(pf.get("lookahead", 16)),
+        "TRAINCACHE_GATE_MODE": (pf.get("gate") or {}).get("mode", "gated"),
         "TC_RATE": f"{net['rate_mbit']}mbit",
-        "TC_DELAY": f"{net['delay_ms']}ms",
+        "TC_DELAY": f"{cond_mod.DEFAULTS['delay_ms']}ms",
     })
     return env
 

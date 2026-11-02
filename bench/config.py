@@ -22,6 +22,7 @@ SCORES_RESULTS_DIR = RESULTS_DIR / "scores"      # 五组对照跑分，按容�
 BASELINE_RESULTS_DIR = RESULTS_DIR / "baselines" # 对照组既有跑分，只读，汇总层按组态补入
 FIGURES_RESULTS_DIR = RESULTS_DIR / "figures"    # fig1/fig2/fig3/pareto1 逐点产物
 POLICY_RESULTS_DIR = RESULTS_DIR / "policy"      # policy 与 pareto2 族
+GATEWAY_RESULTS_DIR = RESULTS_DIR / "gateway"    # 网关合并实验（多读端）
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
 COMPARE_LOGS_DIR = DATA_ROOT / "bench" / "compare" / "logs"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"

@@ -19,6 +19,27 @@
 
 # Changelog正文
 
+## [v0.4.1] - 2026-11-02
+
+### Added
+
+- bench 新增网关合并实验族 `gateway-merge`：12 个点（单读端 / 4 节点复制读 / 4 节点分片读 × 100/1000 mbit × 网关开关），每个点 1 epoch、3 reps。多读端执行体 `compare/gateway_multi.py` 负责反亲和建 Pod、绝对时刻起跑栅栏、分片轨迹与结果聚合；`make -C bench gw-conds` 生成 COND，`gw-plan` 打印计划。
+- `bench/experiments/images/<sha256>.json` 共享镜像集：COND 只存内容哈希（`environment.image_set`）与网关镜像位，不再逐文件重复十行 digest。
+
+### Changed
+
+- COND 契约升到 v3：只保留会变的量（数据规模、轨迹、epoch、读端形态、带宽、缓存比例与策略、采样次数、网关开关）。固定值集中在 `bench/experiments/cond.py` 的 `DEFAULTS`，派生值（数据量、缓存字节、burst、时延）由代码计算；`lock.json` 新增 `effective` 快照记录实际生效值。118 个 COND 从 11,496 行降到 6,578 行。
+- `docs/4.4 实验协议.md` 从 757 行压到 591 行：删掉与 4.1/4.2/4.3 重复的七组态表、只作诊断的 `t_origin_first_byte` 行、逐族机时算式与 C4 消费方大表；§5.4 新增网关合并一族的口径与判据。
+- `bench/Makefile` 的 python 解释器加回退：项目根 `.venv` 不存在时计划类目标改用系统 `python3`，不再在解析阶段报错。
+
+### Removed
+
+- COND 删掉无消费者的字段（`dataset.endpoint`/`bucket`、`prefetch.gate` 的五个数值、`prefetch.score` 两项、`prefetch.window_k`）与全常量字段（`batch`、`workers`、`steps_per_epoch`、`compute_ms`、`delay_ms`、`chunk_size_bytes`、`coarse_reps`、`bootstrap_iters`、`kind_workers`、`k8s_version`、`lock_file` 等）。
+
+### Fixed
+
+- `docs/4.3 TrainCache启动与实验.md` 排障表两行被 `||` 连成一行，渲染错位。
+
 ## [v0.4.0] - 2026-11-02
 
 ### Added

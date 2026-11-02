@@ -1,17 +1,13 @@
 {
-  "schema_version": "1",
+  "schema_version": "3",
   "name": "fig1-d-bw100-ratio2-fan2",
   "figure": "fig1",
   "group": "traincache-cold",
   "track": "D",
   "dataset": {
     "name": "track-d",
-    "source": "local-nginx",
-    "endpoint": "http://127.0.0.1:9100",
-    "bytes": 2147483648,
     "shards": 16,
     "shard_size_bytes": 134217728,
-    "chunk_size_bytes": 8388608,
     "seed": 20261015
   },
   "trace": {
@@ -21,61 +17,36 @@
   },
   "workload": {
     "epochs": 1,
-    "batch": 32,
-    "workers": 4,
-    "steps_per_epoch": 400,
-    "prefetch_factor": 2,
-    "compute_ms": 200,
-    "shuffle": "fixed"
+    "shuffle": "fixed",
+    "readers": 1,
+    "access_pattern": "single"
   },
   "network": {
-    "rate_mbit": 100,
-    "delay_ms": 20,
-    "burst_k": 1250
+    "rate_mbit": 100
   },
   "cache": {
     "enabled": true,
-    "capacity_bytes": 1073741824,
     "ratio": 2.0,
-    "evict_policy": "heat",
-    "root": "/var/cache/traincache"
+    "evict_policy": "heat"
+  },
+  "sampling": {
+    "reps": 1
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7"
   },
   "prefetch": {
     "lookahead": 8,
-    "window_k": 8,
-    "fanout": 2,
-    "fanout_min": 1,
-    "gate": {
-      "threshold": 0.9,
-      "gap_min": 0.1,
-      "slope_min": 0.001,
-      "t_max_s": 600,
-      "min_interval_s": 1
-    },
-    "score": {
-      "half_life": 4,
-      "cutoff": 8
-    }
+    "fanout": 2
   },
-  "sampling": {
-    "reps": 1,
-    "coarse_reps": 3,
-    "upgrade_rule": "none",
-    "bootstrap_iters": 10000
-  },
-  "environment": {
-    "kind_workers": 4,
-    "k8s_version": "v1.31.0",
-    "images": {
-      "agent": "traincache-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "controller": "traincache-controller@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "training": "traincache-train@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "minio": "minio/minio@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "juicefs": "juicefs/juicefs@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-      "fluid": "fluidcloudnative/fluid@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    },
-    "lock_file": "locks/fig1-d-bw100-ratio2-fan2.lock.json"
-  },
-  "tags": ["fig1", "axis=fanout", "bw100", "ratio2", "fan2"],
+  "tags": [
+    "fig1",
+    "axis=fanout",
+    "bw100",
+    "ratio2",
+    "fan2"
+  ],
   "notes": "示例值；实际 sha256 与镜像 digest 由 runner 在跑分前填充。"
 }

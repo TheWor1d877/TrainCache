@@ -20,6 +20,8 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 # 所有 python 调用统一走项目根 .venv,依赖清单见 $(ROOT)/requirements.txt。
 # .venv/bin/python 自带依赖目录,无需额外路径配置。
 PY := $(abspath $(ROOT)/../.venv/bin/python)
+# 只给不依赖第三方库的目标用：.venv 没装时退回系统 python3，避免连计划都打不开。
+PY_FALLBACK := $(if $(wildcard $(PY)),$(PY),python3)
 
 .PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick kind-up k8s-up data-up upload tc-up tc-down cold-reset bench-cold bench-verify bench-data bench-tc track-d-data track-d-up track-d-verify track-d-down e2e-local e2e-k8s selftest
 
@@ -45,10 +47,10 @@ k8s-up:
 	@echo "== MinIO 就绪 =="
 
 # 数据与产物一律落运行时数据层,路径口径只认 config.py 一处
-DATA_DIR      := $(shell $(PY) $(ROOT)/config.py --sh DATA_DIR)
-TRACK_A_DIR   := $(shell $(PY) $(ROOT)/config.py --sh TRACK_A_DIR)
-TRACK_B_DIR   := $(shell $(PY) $(ROOT)/config.py --sh TRACK_B_DIR)
-RESULTS_DIR   := $(shell $(PY) $(ROOT)/config.py --sh RESULTS_DIR)
+DATA_DIR      := $(shell $(PY_FALLBACK) $(ROOT)/config.py --sh DATA_DIR)
+TRACK_A_DIR   := $(shell $(PY_FALLBACK) $(ROOT)/config.py --sh TRACK_A_DIR)
+TRACK_B_DIR   := $(shell $(PY_FALLBACK) $(ROOT)/config.py --sh TRACK_B_DIR)
+RESULTS_DIR   := $(shell $(PY_FALLBACK) $(ROOT)/config.py --sh RESULTS_DIR)
 
 data-up: track-d-data
 	@if [ -z "$(TRACK_A_DIR)" ] || [ -z "$(TRACK_B_DIR)" ]; then \
@@ -65,7 +67,7 @@ upload:
 	@$(PY) -c "import boto3" >/dev/null 2>&1 || { \
 		echo "错误: $(PY) 缺 boto3。请运行 $(PY) -m pip install -r $(ROOT)/requirements.txt"; exit 1; \
 	}
-	@echo "== 上传 B 轨数据到 MinIO($(shell $(PY) $(ROOT)/config.py --sh MINIO_BUCKET) 桶)=="
+	@echo "== 上传 B 轨数据到 MinIO($(shell $(PY_FALLBACK) $(ROOT)/config.py --sh MINIO_BUCKET) 桶)=="
 	@$(PY) $(ROOT)/scripts/upload_bench.py
 
 ctrl-up:
@@ -91,7 +93,7 @@ bench-verify:
 # 跑正式轮前后各跑一遍,任何一项红即整轮不该开跑。
 selftest:
 	@echo "== 装置自检(纯本地) =="
-	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/summarize.py $(ROOT)/compare/trace.py
+	@$(PY) -m py_compile $(ROOT)/config.py $(wildcard $(ROOT)/experiments/*.py) $(ROOT)/compare/run_bench.py $(ROOT)/compare/gateway_multi.py $(ROOT)/compare/summarize.py $(ROOT)/compare/trace.py
 	@$(PY) $(ROOT)/compare/run_bench.py --selftest
 	@$(PY) $(ROOT)/experiments/cond.py --selftest
 	@$(PY) $(ROOT)/compare/summarize.py --selftest
@@ -105,6 +107,14 @@ selftest:
 	@bash $(ROOT)/scripts/tc_apply.sh --self-test
 	@$(MAKE) --no-print-directory -C $(ROOT)/compare check
 	@echo "== 装置自检通过 =="
+
+# ---- 网关合并实验（多读端） ----
+# 生成 12 个 COND：3 读法 × 2 带宽 × 开关。digest 从 kind 节点 containerd 读，
+# 读不到就退出，不写占位符；镜像重建后要重新生成本组 COND。
+gw-conds:
+	@$(PY_FALLBACK) $(ROOT)/experiments/gen_gw_conds.py --from-cluster
+gw-plan:
+	@$(PY_FALLBACK) $(ROOT)/exp.py run gateway-merge --dry-run
 
 bench-data: data-up
 
@@ -141,7 +151,7 @@ bench-quick:
 # 容器 traincache-source-d(端口 9100,挂 /usr/share/nginx/html/track-d)供训练进程
 # 读取,不上传 MinIO。track_d_up/verify/down.sh 由 T2a 实现(接口冻结:脚本名与调用
 # 形态即下述 recipe;脚本自读 config.py 的 TRACK_D_* 参数,风格同既有 tc-up/bench-verify)。
-TRACK_D_DIR := $(shell $(PY) $(ROOT)/config.py --sh TRACK_D_DIR)
+TRACK_D_DIR := $(shell $(PY_FALLBACK) $(ROOT)/config.py --sh TRACK_D_DIR)
 
 track-d-data:
 	@if [ -z "$$(ls $(TRACK_D_DIR)/shard-*.tar 2>/dev/null)" ]; then \
