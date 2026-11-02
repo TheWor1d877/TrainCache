@@ -193,13 +193,14 @@ else
 fi
 
 # ---- 3. ordersrc.py ConfigMap(训练 Pod 用于写消费顺序 ring)----
+# 每次 up 都从源文件重新 apply:ordersrc.py 是代码不是数据,「已存在就跳过」会让集群里
+# 跑着上一版的写端(与静默复用旧镜像同类的陈旧缺陷),改完不生效还看不出来。
 ORDERSRC_SRC="$BENCH_ROOT/../agent/ordersrc/ordersrc.py"
-if resource_exists configmap traincache-ordersrc -n "$NS"; then
-  log_group "$GROUP" "configmap/traincache-ordersrc 已存在,跳过"
-elif [ -f "$ORDERSRC_SRC" ]; then
+if [ -f "$ORDERSRC_SRC" ]; then
   kubectl -n "$NS" create configmap traincache-ordersrc \
-    --from-file=ordersrc.py="$ORDERSRC_SRC"
-  log_group "$GROUP" "configmap/traincache-ordersrc 已创建"
+    --from-file=ordersrc.py="$ORDERSRC_SRC" \
+    --dry-run=client -o yaml | kubectl -n "$NS" apply -f -
+  log_group "$GROUP" "configmap/traincache-ordersrc 已从 $ORDERSRC_SRC 刷新"
 else
   log_group "$GROUP" "WARNING: $ORDERSRC_SRC 不存在,ordersrc ConfigMap 未创建" >&2
 fi
