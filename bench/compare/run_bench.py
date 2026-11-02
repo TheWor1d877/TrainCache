@@ -267,6 +267,16 @@ DATA_SOURCE = os.environ.get("TRAINCACHE_DATA_SOURCE", "minio").strip().lower()
 # 网关开关(D23)：只有 "1" 打开;其余取值（含空串/0/true）一律按无网关处理，
 # 与 bench/scripts/ctrl_up.sh 的归一规则一致。
 GATEWAY_ON = os.environ.get("TRAINCACHE_GATEWAY", "0").strip() == "1"
+# 多读端（网关合并实验）：readers=1 时走原有单读端路径，>1 时分派到
+# gateway_multi.run_group_multi。两个变量对所有既有实验点都是 1/single。
+READERS = int(os.environ.get("TRAINCACHE_READERS", "1"))
+ACCESS_PATTERN = os.environ.get("TRAINCACHE_ACCESS_PATTERN", "single").strip() or "single"
+if READERS < 1 or READERS > 4:
+    raise SystemExit(f"[cfg] TRAINCACHE_READERS 必须是 1..4（收到 {READERS}）")
+if ACCESS_PATTERN not in ("single", "replicated", "sharded"):
+    raise SystemExit(f"[cfg] TRAINCACHE_ACCESS_PATTERN 非法（收到 {ACCESS_PATTERN!r}）")
+if (READERS == 1) != (ACCESS_PATTERN == "single"):
+    raise SystemExit("[cfg] readers=1 与 access_pattern=single 必须同时成立")
 
 
 def gateway_flag(on=None):
@@ -901,6 +911,16 @@ for _ep in _trace["per_epoch"]:
 #       它由单调钟推算（起跑时对一次纪元），Pod 内 NTP 校正不会让它跳。
 _t0_perf = time.perf_counter()
 _t0_epoch = time.time()
+
+# 多读端栅栏：runner 下发同一个绝对时刻，所有 Pod 到点一起开始读。
+# 单读端不设这个 env，整段是空操作。用纪元校准后的时钟，不额外调 time.time()。
+_start_at = float(os.environ.get("TRAINCACHE_START_AT", "0") or 0)
+if _start_at > 0:
+    while _t0_epoch + (time.perf_counter() - _t0_perf) < _start_at:
+        time.sleep(0.02)
+    _go_at = _t0_epoch + (time.perf_counter() - _t0_perf)
+    print("[BARRIER] start_at=" + str(_start_at) + " go_at=" + str(_go_at) +
+          " skew_ms=" + str(round((_go_at - _start_at) * 1000, 3)), flush=True)
 
 
 def now_epoch():
@@ -2859,6 +2879,11 @@ def rep_cold_reset(group):
 
 
 def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
+    if READERS > 1:
+        import gateway_multi
+        return gateway_multi.run_group_multi(
+            sys.modules[__name__], group, reps, out_csv, trace_json, trace_sha,
+            substitute_for)
     results = []
     is_tc = group.startswith("traincache")
     # D32 ①：cold 组（含 direct，都无预热）跨 rep 复用控制面；warm 组每 rep 整轮 down/up。
@@ -3292,7 +3317,13 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "gate_mode", "gateway", "data_source",
                   # M5 倾斜双 Job：A 命中率/等待占比、B 挤占热块次数
                   "a_hit_ratio", "a_wait_ratio", "b_evictions_of_hot",
-                  "a_steps", "b_steps", "tilt_hot_shards", "tilt_a_budget"]
+                  "a_steps", "b_steps", "tilt_hot_shards", "tilt_a_budget",
+                  # 网关合并实验：读端形态与逐 Pod 离散度、网关侧计数
+                  "readers", "access_pattern", "readers_ok",
+                  "pod_makespan_max", "pod_makespan_min", "barrier_skew_ms",
+                  "gateway_gets", "gateway_merged", "gateway_owners",
+                  "gateway_passthrough", "gateway_kicked", "gateway_rejected",
+                  "gateway_bytes", "gateway_windows"]
 
 
 def write_csv(path, results):
@@ -3351,6 +3382,8 @@ def write_csv(path, results):
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
             row["gateway"] = gateway_flag()
+            row["readers"] = r.get("readers") or READERS
+            row["access_pattern"] = r.get("access_pattern") or ACCESS_PATTERN
             row["data_source"] = r.get("data_source") or DATA_SOURCE
             w.writerow(row)
 

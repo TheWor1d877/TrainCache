@@ -73,53 +73,45 @@ def _cond(tpl: dict, *, name, figure, group, n_tars, ratio, rate, epochs,
     cache_bytes = dataset_bytes // ratio
     trace_file, trace_sha = _trace(n_tars, shuffle, epochs)
     c = json.loads(json.dumps(tpl))
-    c["schema_version"] = "1"
+    c["schema_version"] = "3"
     c["name"] = name
     c["figure"] = figure
     c["group"] = group
     c["track"] = "B"
-    c["dataset"].update({
+    c["dataset"] = {
         "name": "compare-data-8m",
-        "source": "minio",
-        "bytes": dataset_bytes,
         "shards": n_tars,
         "shard_size_bytes": 256 * (1 << 20),
-        "chunk_size_bytes": 8 * (1 << 20),
         "seed": SEED,
-    })
+    }
     c["trace"] = {"file": trace_file, "sha256": trace_sha, "seed": SEED}
-    c["workload"].update({
-        "epochs": epochs, "batch": BATCH, "workers": 4,
-        "steps_per_epoch": STEPS_PER_EPOCH, "shuffle": shuffle,
-    })
-    c["network"].update({
-        "rate_mbit": rate, "delay_ms": 20,
-        # 与 config.burst_for_rate 同口径:0.1 s 的传输量,单位 kbit
-        "burst_k": int(round(rate * 125 * 0.1)),
-    })
-    c["cache"].pop("capacity_ratio", None)
-    c["cache"].update({
-        "enabled": True,
-        "capacity_bytes": cache_bytes,
-        "ratio": ratio,
-        "evict_policy": evict,
-    })
+    c["workload"] = {
+        "epochs": epochs, "shuffle": shuffle,
+        "readers": 1, "access_pattern": "single",
+    }
     if shuffle == "curriculum":
         c["workload"]["curriculum"] = {
             "stages": 3,
             "shard_fractions": [1.0, 2.0 / 3.0, 1.0 / 3.0],
             "boundary_rule": "equal-thirds",
         }
-    else:
-        c["workload"].pop("curriculum", None)
-    c["prefetch"].update({
-        "lookahead": 8, "window_k": 8,
-        "fanout": fanout, "fanout_min": 1,
-    })
-    c["prefetch"]["gate"]["mode"] = gate_mode
-    c["sampling"].update({"reps": reps, "coarse_reps": 3,
-                          "bootstrap_iters": 10000})
-    c["environment"]["lock_file"] = f"locks/{name}.lock.json"
+    c["network"] = {"rate_mbit": rate}
+    c["cache"] = {
+        "enabled": True,
+        "ratio": ratio,
+        "evict_policy": evict,
+    }
+    c["prefetch"] = {
+        "lookahead": 8,
+        "fanout": fanout,
+        "gate": {"mode": gate_mode},
+    }
+    c["sampling"] = {"reps": reps}
+    c["environment"] = {
+        "gateway": False,
+        "gateway_image": None,
+        "image_set": tpl["environment"]["image_set"],
+    }
     c["tags"] = [figure, f"rate={rate}", f"ratio={ratio}",
                  f"fanout={fanout}", f"gate={gate_mode}"]
     c["notes"] = (f"{figure}: {n_tars} 个 256 MiB 分片（{dataset_bytes >> 30} GiB），"

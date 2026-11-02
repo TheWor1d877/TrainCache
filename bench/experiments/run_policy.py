@@ -222,14 +222,14 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
             "TRAINCACHE_PREFETCH_LOOKAHEAD": str(cond["prefetch"]["lookahead"]),
             "N_TARS": str(cond["dataset"]["shards"]),
             "EPOCHS": str(cond["workload"]["epochs"]),
-            "STEPS_PER_EPOCH": str(cond["workload"]["steps_per_epoch"]),
-            "BATCH": str(cond["workload"]["batch"]),
+            "STEPS_PER_EPOCH": str(cond_mod.DEFAULTS["steps_per_epoch"]),
+            "BATCH": str(cond_mod.DEFAULTS["batch"]),
             "SHUFFLE": cond["workload"]["shuffle"],
             "SEED": str(cond["dataset"]["seed"]),
             "DATASET_NAME": cond["dataset"]["name"],
-            "MINIO_BUCKET": cond["dataset"]["bucket"],
+            "MINIO_BUCKET": bench_config.MINIO_BUCKET,
             "TC_RATE": f"{cond['network']['rate_mbit']}mbit",
-            "TC_DELAY": f"{cond['network']['delay_ms']}ms",
+            "TC_DELAY": f"{cond_mod.DEFAULTS['delay_ms']}ms",
         })
         rb_cmd = [PY, str(RUN_BENCH),
                   "--tier", "S",
@@ -330,7 +330,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
     assert not errs, f"COND 校验失败: {errs}"
     print(f"  COND 加载与校验通过: evict_policy={cond['cache']['evict_policy']} "
           f"lookahead={cond['prefetch']['lookahead']} "
-          f"capacity_bytes={cond['cache']['capacity_bytes']}")
+          f"capacity_bytes={cond_mod.cache_bytes(cond)}")
 
     # 2. cond_to_env 正确设置环境变量
     env = cond_mod.cond_to_env(cond)
@@ -340,7 +340,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
         cond["prefetch"]["lookahead"]), \
         f"TRAINCACHE_PREFETCH_LOOKAHEAD 错误"
     assert env["TRAINCACHE_CACHE_CAPACITY_BYTES"] == str(
-        cond["cache"]["capacity_bytes"]), \
+        cond_mod.cache_bytes(cond)), \
         f"TRAINCACHE_CACHE_CAPACITY_BYTES 错误"
     print(f"  环境变量映射正确: "
           f"TRAINCACHE_EVICT_POLICY={env['TRAINCACHE_EVICT_POLICY']} "

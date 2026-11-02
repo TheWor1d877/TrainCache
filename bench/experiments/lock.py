@@ -13,6 +13,8 @@ from typing import Any
 
 EXPERIMENTS_DIR = Path(__file__).resolve().parent
 CONDS_DIR = EXPERIMENTS_DIR / "conds"
+sys.path.insert(0, str(EXPERIMENTS_DIR))
+import cond as cond_mod  # noqa: E402
 
 
 def _run(cmd: list[str], timeout: int = 30) -> str | None:
@@ -83,7 +85,10 @@ def _docker_images(cond: dict | None) -> dict[str, str | None]:
     拉下来的镜像 containerd 存的是 kind load 后本地重算的摘要)。"""
     images_cfg = {}
     if cond and isinstance(cond.get("environment"), dict):
-        images_cfg = cond["environment"].get("images") or {}
+        try:
+            images_cfg = cond_mod.resolve_images(cond)
+        except (OSError, ValueError, KeyError):
+            images_cfg = {}
     result: dict[str, str | None] = {}
     for key, ref in images_cfg.items():
         if not isinstance(ref, str):
@@ -97,7 +102,10 @@ def _docker_repo_digests(cond: dict | None) -> dict[str, str | None]:
     """docker inspect <repo:tag> 的 RepoDigests[0];拿不到写 None。"""
     images_cfg = {}
     if cond and isinstance(cond.get("environment"), dict):
-        images_cfg = cond["environment"].get("images") or {}
+        try:
+            images_cfg = cond_mod.resolve_images(cond)
+        except (OSError, ValueError, KeyError):
+            images_cfg = {}
     result: dict[str, str | None] = {}
     for key, ref in images_cfg.items():
         if not isinstance(ref, str):
@@ -189,6 +197,32 @@ def snapshot() -> dict:
         "dataset_name": _dataset_name(),
         "git_commit": _git_commit(),
         "cond": os.environ.get("TRAINCACHE_COND") or None,
+        # 固定值与派生值的生效快照：COND 里删掉它们之后，靠这里回溯。
+        "effective": _effective(cond),
+    }
+
+
+def _effective(cond: dict | None) -> dict | None:
+    """COND 未写出、但本次 run 实际生效的固定值与派生值。"""
+    if not cond:
+        return None
+    wl = cond.get("workload") or {}
+    net = cond.get("network") or {}
+    return {
+        "readers": wl.get("readers"),
+        "access_pattern": wl.get("access_pattern"),
+        "gateway": (cond.get("environment") or {}).get("gateway"),
+        "rate_mbit": net.get("rate_mbit"),
+        "delay_ms": cond_mod.DEFAULTS["delay_ms"],
+        "burst_k": (cond_mod.burst_k_for_rate(net["rate_mbit"])
+                    if net.get("rate_mbit") in cond_mod.VALID_RATES else None),
+        "dataset_bytes": cond_mod.dataset_bytes(cond),
+        "cache_bytes": cond_mod.cache_bytes(cond),
+        "chunk_size_bytes": cond_mod.CHUNK_SIZE_BYTES,
+        "batch": cond_mod.DEFAULTS["batch"],
+        "steps_per_epoch": cond_mod.DEFAULTS["steps_per_epoch"],
+        "compute_ms": cond_mod.DEFAULTS["compute_ms"],
+        "window_k": cond_mod.DEFAULTS["window_k"],
     }
 
 

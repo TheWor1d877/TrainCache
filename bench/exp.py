@@ -29,7 +29,7 @@ LOCK_FILE = Path("/tmp/traincache-exp.lock")
 
 COMPARE_FAMILY = "compare-groups"
 COND_FAMILIES = ("startup-surface", "total-makespan", "switch-recovery",
-                 "pareto-startup")
+                 "pareto-startup", "gateway-merge")
 TILT_FAMILIES = ("pareto-sustained", "evict-policy")
 FAMILIES = (COMPARE_FAMILY,) + COND_FAMILIES + TILT_FAMILIES
 
@@ -45,6 +45,7 @@ FAMILY_COND_PREFIX = {
     "pareto-startup": "pareto1",
     "pareto-sustained": "pareto2",
     "evict-policy": "policy",
+    "gateway-merge": "gw",
 }
 
 
@@ -62,6 +63,8 @@ def results_root(family: str) -> Path:
         return bench_config.SCORES_RESULTS_DIR
     if family in TILT_FAMILIES:
         return bench_config.POLICY_RESULTS_DIR
+    if family == "gateway-merge":
+        return bench_config.GATEWAY_RESULTS_DIR
     return bench_config.FIGURES_RESULTS_DIR
 
 
@@ -217,7 +220,7 @@ def family_state(family: str, version: str | None,
 # ---------------------------------------------------------------------------
 def _cond_env(cond: dict, tilt: bool) -> dict[str, str]:
     ds, wl, net = cond["dataset"], cond["workload"], cond["network"]
-    cache, pf = cond["cache"], cond["prefetch"]
+    cache, pf = cond["cache"], (cond.get("prefetch") or {})
     env = os.environ.copy()
     env.update({
         "TRAINCACHE_FIGURE_MODE": "1",
@@ -225,20 +228,24 @@ def _cond_env(cond: dict, tilt: bool) -> dict[str, str]:
         "CAPACITY_RATIO": _run_tier(cond, tilt),
         "N_TARS": str(ds["shards"]),
         "EPOCHS": str(wl["epochs"]),
-        "STEPS_PER_EPOCH": str(wl["steps_per_epoch"]),
-        "BATCH": str(wl["batch"]),
+        "STEPS_PER_EPOCH": str(cond_mod.DEFAULTS["steps_per_epoch"]),
+        "BATCH": str(cond_mod.DEFAULTS["batch"]),
         "SHUFFLE": wl["shuffle"],
         "SEED": str(ds["seed"]),
         "DATASET_NAME": ds["name"],
-        "MINIO_BUCKET": ds["bucket"],
-        "TRAINCACHE_CACHE_CAPACITY_BYTES": str(cache["capacity_bytes"]),
-        "TRAINCACHE_EVICT_POLICY": cache["evict_policy"],
-        "TRAINCACHE_PREHEAT_FANOUT": str(pf["fanout"]),
-        "TRAINCACHE_PREHEAT_FANOUT_MIN": str(pf["fanout_min"]),
+        "MINIO_BUCKET": bench_config.MINIO_BUCKET,
+        "TRAINCACHE_CACHE_CAPACITY_BYTES": str(cond_mod.cache_bytes(cond)),
+        "TRAINCACHE_EVICT_POLICY": cache.get("evict_policy", "external"),
+        "TRAINCACHE_PREHEAT_FANOUT": str(pf.get("fanout", 1)),
+        "TRAINCACHE_PREHEAT_FANOUT_MIN": str(cond_mod.DEFAULTS["fanout_min"]),
         "TRAINCACHE_PREFETCH_K": "16" if tilt else str(pf["lookahead"]),
         "TC_RATE": f"{net['rate_mbit']}mbit",
-        "TC_DELAY": f"{net['delay_ms']}ms",
+        "TC_DELAY": f"{cond_mod.DEFAULTS['delay_ms']}ms",
     })
+    # 读端形态与网关开关：所有族都下发，既有族是 1/single/0，行为不变。
+    env["TRAINCACHE_READERS"] = str(wl.get("readers", 1))
+    env["TRAINCACHE_ACCESS_PATTERN"] = wl.get("access_pattern", "single")
+    env["TRAINCACHE_GATEWAY"] = "1" if cond["environment"].get("gateway") else "0"
     mode = (pf.get("gate") or {}).get("mode")
     if mode:
         env["TRAINCACHE_GATE_MODE"] = mode
@@ -517,6 +524,11 @@ def _print_plan(family: str, points: list[str] | None = None) -> None:
         cmd = _runner_cmd(_run_tier(cond, tilt), cond["network"]["rate_mbit"],
                           [cond["group"]], 1 if tilt else reps, out)
         print(f"[plan] {family}/{point} reps={reps}")
+        if family == "gateway-merge":
+            wl = cond["workload"]
+            print(f"       readers={wl['readers']} "
+                  f"access_pattern={wl['access_pattern']} "
+                  f"gateway={int(cond['environment']['gateway'])}")
         print("       " + " ".join(cmd))
 
 
@@ -558,6 +570,7 @@ def cmd_selftest() -> None:
             if f"{cond_prefix(fam)}-{p}" != c["name"]:
                 problems.append(f"{fam}: 点名 {p} 还原不出 COND 名 {c['name']}")
             want = (bench_config.POLICY_RESULTS_DIR if fam in TILT_FAMILIES
+                    else bench_config.GATEWAY_RESULTS_DIR if fam == "gateway-merge"
                     else bench_config.FIGURES_RESULTS_DIR)
             if point_base(fam, p).parent != want:
                 problems.append(
@@ -566,6 +579,7 @@ def cmd_selftest() -> None:
     expect = {COMPARE_FAMILY: bench_config.SCORES_RESULTS_DIR}
     expect.update({f: bench_config.FIGURES_RESULTS_DIR for f in COND_FAMILIES})
     expect.update({f: bench_config.POLICY_RESULTS_DIR for f in TILT_FAMILIES})
+    expect["gateway-merge"] = bench_config.GATEWAY_RESULTS_DIR
     for fam, want in expect.items():
         if results_root(fam) != want:
             problems.append(f"{fam} 映射到 {results_root(fam).name}/,应为 {want.name}/")
