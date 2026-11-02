@@ -144,7 +144,7 @@ def _read_jsonl_stall(run_dir: Path) -> float | None:
     """从 per_step_*.jsonl 算 stall 占比。
 
     口径:非 warmup 步的 mean(wait_s / step_s),与 bench/scripts/bench_track_d.py
-    的 stall() 同源(docs/4 §10:扫点用 mean,中位数只判形态)。
+    的 stall() 同源(9.2 §1.2:扫点用 mean,中位数只判形态)。
     没有 jsonl 或没有可用步时返回 None。
     """
     vals = []

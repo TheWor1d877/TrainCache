@@ -36,7 +36,7 @@
 6.15 stall_ratio 改造（2026-10-24）：
   旧版 measure 是串行"读整片 tar → matmul"，读比算慢两个数量级，
   stall_ratio = wait_s/step_s 恒≈0.98，没有判别力——旧串行版本产物的
-  stall_ratio 一律作废（docs/4 §10），需按本口径重跑。
+  stall_ratio 一律作废（docs/4.1 §7），需按本口径重跑。
   新版用 COMPUTE_MS=200ms 控制每步算力，读与计算并行（后台 reader 线程
   模拟 DataLoader 异步预取，把接下来若干分片读进内存队列，主循环从队头
   取数据 + 做固定算力）：预取有效（热缓存/预取跟上）→ stall_ratio 趋 0；
@@ -110,7 +110,7 @@ D30/D32 接线（2026-10-25）：
                          @1000 各 3 次）、
                          M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点）
   N_TARS                 分片数（缺省按档位：S=8、M=32、L=128；
-                         S 档 8×256MiB≈2GiB，docs/4 §3 对照口径）
+                         S 档 8×256MiB≈2GiB，docs/4.1 §3 对照口径）
   EPOCHS/STEPS_PER_EPOCH/BATCH/IMAGES_PER_TAR/SEED/SHUFFLE
                          统一轨迹参数（默认 3/400/32/1600/20261015/per-epoch，
                          与 bench/config.py D 轨语义对齐：一个 epoch 把全量
@@ -125,7 +125,7 @@ D30/D32 接线（2026-10-25）：
                          缓存容量/块大小（1GiB/8MiB=128，D20 重标度）。
                          cold 组用 0 作 bench 哨兵，跳过 WarmupTask；省略 k
                          时由 Controller 自动计算，不属于 bench 口径
-  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4 §3；D21 对照三档统一 16）。
+  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4.1 §3；D21 对照三档统一 16）。
                          agent 侧 lookahead 三档统一 16 块（D21）：8MiB 下
                          窗口 16×8MiB=128MiB≈缓存 1/8，无退化，不需重标度。
   COMPUTE_MS/READ_WORKERS/READ_QUEUE_DEPTH/READ_TIMEOUT_S
@@ -254,7 +254,7 @@ WARMUP_K = int(os.environ.get("TRAINCACHE_WARMUP_K",
 # 16×8MiB=128MiB≈缓存 1/8，无退化）；旧默认 8 与 D21 不符，改为 16。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # Agent 侧持续预取窗口。pareto2 的自变量是它，训练侧消费窗口 PREFETCH_K
-# 保持 16 不动（docs/4 §3：两个旋钮）。缺省跟随 PREFETCH_K。
+# 保持 16 不动（docs/4.1 §3：两个旋钮）。缺省跟随 PREFETCH_K。
 AGENT_PREFETCH_K = int(os.environ.get(
     "TRAINCACHE_PREFETCH_LOOKAHEAD", str(PREFETCH_K)))
 # 预热节点数(D26):对照链路固定 2,scheduler 按就绪度选落点;s3-access 节点数只作上限
@@ -782,7 +782,7 @@ def group_up(group):
     """起组，并回收 up.sh 回传的两个装置事实：预热时长与 JuiceFS 挂载节点。
 
     JFS_MOUNT_NODE：CE 单机缓存只落在 mount Pod 所在节点，测量 Pod 必须共置，
-    否则 warm 组暖好的块在另一台节点读不到（见 docs/4 §7 第 16 条）。
+    否则 warm 组暖好的块在另一台节点读不到（见 docs/4.2 §4 的 juicefs 共置一条）。
     """
     global JFS_MOUNT_NODE
     JFS_MOUNT_NODE = ""
@@ -807,7 +807,7 @@ def group_up(group):
         env["FLUID_CACHE_GI"] = str(max(1, CACHE_BYTES >> 30))
         env["FLUID_PREHEAT"] = "1" if group == "fluid-warm" else "0"
     if group.startswith("juicefs"):
-        env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/4 §3)
+        env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/4.1 §3)
         # juicefs-warm:up.sh 里自动做 juicefs warmup;juicefs-cold:跳过
         env["JFS_WARMUP"] = "1" if group == "juicefs-warm" else "0"
     if group.startswith("traincache"):
@@ -1276,7 +1276,7 @@ READ_TIMEOUT_S = float(os.environ.get("READ_TIMEOUT_S", "300"))   # 队头等待
 # 真实加载器会持有的字节数(≈(深度+线程数+1)×分片大小)改用纯计数
 # logical_resident_bytes 跟踪（不真持有 bytes），峰值见 RESULT 的
 # peak_resident_bytes。旧串行版产物的 stall_ratio 口径作废
-# （docs/4 §10）
+# （docs/4.1 §7）
 # 口径(9.2)：
 #   wait_s = 主循环从队列取"已读好分片"的阻塞等待(真 stall);
 #   work_s = 墙钟算力(compute_work 循环 matmul 直到实测 >= COMPUTE_MS，取实测长度);
@@ -1817,7 +1817,7 @@ def create_measure_pod(group, run_id, trace_json):
     # ---- juicefs 组:Pod 内自己 mount JuiceFS,hostPath 共享预热缓存 ----
     if group in ("juicefs-cold", "juicefs-warm"):
         redis_url = f"redis://redis.{ns}.svc.cluster.local:6379/0"
-        cache_size = str(CACHE_BYTES >> 20)  # MiB;--cache-size 单位是 MiB(docs/4 §3)
+        cache_size = str(CACHE_BYTES >> 20)  # MiB;--cache-size 单位是 MiB(docs/4.1 §3)
         image = JUICEFS_IMAGE
         cmd = ["/bin/sh", "-c"]
         # 任务清单 #7:删掉 measure Pod 内的 juicefs warmup 行,预热已由 up.sh 在外部完成
@@ -1885,7 +1885,7 @@ def create_measure_pod(group, run_id, trace_json):
         "command": cmd,
         "volumeMounts": vol_mounts,
         # 队列只传字节数 → 预读常驻内存 O(1)；4Gi limit 是给 JuiceFS mount /
-        # 本地块缓存留的余量 (资源与限额口径见 docs/4 §2.3)
+        # 本地块缓存留的余量 (资源与限额口径见 docs/4.2 §2)
         "resources": {"requests": {"cpu": "500m", "memory": "1Gi"},
                       "limits": {"cpu": "2", "memory": "4Gi"}},
     }

@@ -396,7 +396,7 @@ def plot_fig2(metrics: list[dict], out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     rates = [100, 300, 1000]
     epochs = [1, 3, 6]
-    # 有效带宽 MB/s,取 9.1 §11.1 的实测口径(100/300/1000 mbit 档)
+    # 有效带宽 MB/s,取 docs/9.2 实验协议.md §9.4 的实测口径(100/300/1000 mbit 档)
     eff_mbps = {100: 13.4, 300: 35.0, 1000: 61.0}
     compute_s_per_epoch = 80.0
     colors = {100: "#60a5fa", 300: "#10b981", 1000: "#f59e0b"}

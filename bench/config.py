@@ -17,7 +17,7 @@ TRACK_A_DIR = DATA_DIR / "track_a" / "files"
 TRACK_B_DIR = DATA_DIR / "track_b" / "tars"
 TRACK_C_DIR = DATA_DIR / "track_c"
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
-# 结果层的分区目录，名字只描述装的是什么，不携带里程碑编号与轮次后缀（docs/4 §1）。
+# 结果层的分区目录，名字只描述装的是什么，不携带里程碑编号与轮次后缀（docs/4.1 §4）。
 SCORES_RESULTS_DIR = RESULTS_DIR / "scores"      # 五组对照跑分，按容量/带宽格分目录
 BASELINE_RESULTS_DIR = RESULTS_DIR / "baselines" # 对照组既有跑分，只读，汇总层按组态补入
 FIGURES_RESULTS_DIR = RESULTS_DIR / "figures"    # 图一/图二/图三/Pareto 一逐点产物

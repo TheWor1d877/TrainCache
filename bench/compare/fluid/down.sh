@@ -25,7 +25,7 @@ kubectl -n "$NS" delete dataset jfs-demo --ignore-not-found --wait=true 2>/dev/n
 log_group "$GROUP" "dataset/jfs-demo 已删除"
 # --wait 只等 Dataset 本身,JuiceFSRuntime 是 Fluid 事后异步级联删的。不在这儿等齐,
 # 下一次 up 就会把"还在删除中的 Runtime"当成现成资源跳过 → Dataset 无人认领,
-# 永远 NotBound(见 docs/4 §7 第 22 条)。
+# 永远 NotBound(见 docs/4.2 §4 的 fluid 删除竞态一条)。
 if resource_exists juicefsruntime jfs-demo -n "$NS"; then
   wait_absent "$GROUP" juicefsruntime jfs-demo -n "$NS" --timeout 180 || \
     log_group "$GROUP" "警告:juicefsruntime/jfs-demo 未在 180s 内删净,下次 up 会自己再等一次" >&2

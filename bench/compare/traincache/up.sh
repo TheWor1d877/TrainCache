@@ -265,8 +265,9 @@ bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 
 # ---- 6. WarmupTask CR(先删后建,不可原地更新)----
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
-# gate 绝对超时。全档统一 5m(单一 MinIO 出站 100mbit × fanout 2,
-# 2GiB 预热约需 172s,5m 留足余量;9.2 §7 撤销了旧的 7m 特例)。
+# gate 绝对超时。全档统一 10m:100mbit × fanout 2 预热 1GiB 实测 332–343s,
+# 原估的 172s 低估了 tc 限速下的实际吞吐,5m 会在半程判 Degraded 废掉整轮
+# (抬档与 7m 特例的撤销都记在 9.2 §7)。
 GATE_TMAX="${TRAINCACHE_GATE_TMAX:-10m}"
 WARM_SECONDS=0
 kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2>/dev/null || true
