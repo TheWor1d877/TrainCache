@@ -1,4 +1,4 @@
-// Package origin 封装网关到源站的对象存储客户端（design 10.1 §3、§4.1）。
+// Package origin 封装网关到源站的对象存储客户端（design 9.1 §3、§4.1）。
 //
 // 只提供两种操作：Stat（HEAD）与 Open（单次 GET，懒发送）。本包不改写
 // minio 的错误语义，源站错误与连接层失败都由 server 层按 4.2 的规则映射。
@@ -25,7 +25,7 @@ type ObjectInfo struct {
 	ContentType  string
 }
 
-// Client 是绑定单个桶的 minio-go 客户端（v1 单桶，10.2 D18）。
+// Client 是绑定单个桶的 minio-go 客户端（v1 单桶，9.2 D18）。
 type Client struct {
 	client *minio.Client
 	bucket string
@@ -64,7 +64,7 @@ func (c *Client) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 }
 
 // Open 发起一次 GET。minio-go 的 GetObject 是懒发送：连接与 4xx/5xx 错误
-// 在首次 Read 时才暴露，由调用方处理（design 10.1 §6.3）。
+// 在首次 Read 时才暴露，由调用方处理（design 9.1 §6.3）。
 func (c *Client) Open(ctx context.Context, key string) (*Object, error) {
 	cap := &metadataCapture{}
 	obj, err := c.client.GetObject(context.WithValue(ctx, metadataKey{}, cap),
@@ -86,7 +86,7 @@ func (o *Object) Read(p []byte) (int, error) { return o.rc.Read(p) }
 func (o *Object) Close() error { return o.rc.Close() }
 
 // Stat 返回对象元数据，不发新请求：值来自 metadataTransport 记录的 GET
-// 响应头（design 10.1 §5.2 的元数据来源）。
+// 响应头（design 9.1 §5.2 的元数据来源）。
 //
 // 不直接调用 minio.Object.Stat：v7.3.0 的 Stat 会把 objectInfo.Size 改写成
 // 「剩余字节数」，而 Object.Read 用该值判断 EOF，读流中调用会提前截断响应体。

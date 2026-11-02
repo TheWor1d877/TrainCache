@@ -1,6 +1,6 @@
 package svc
 
-// backend_test.go：后端选择器的降级语义（10.1 §4.4 / M2 验收）与 Assemble 默认行为。
+// backend_test.go：后端选择器的降级语义（9.1 §4.4 / M2 验收）与 Assemble 默认行为。
 
 import (
 	"bytes"
@@ -305,7 +305,7 @@ func testAssembleConfig(t *testing.T) Config {
 }
 
 // TestAssembleWithoutGateway：默认配置（未设置 TRAINCACHE_GATEWAY_ENDPOINT）下
-// Agent.ObjectStore 就是源站 S3Store，sourceState 为 nil（10.1 §1.5 / M2 验收）。
+// Agent.ObjectStore 就是源站 S3Store，sourceState 为 nil（9.1 §1.5 / M2 验收）。
 func TestAssembleWithoutGateway(t *testing.T) {
 	cfg := testAssembleConfig(t)
 	ag, err := Assemble(cfg)

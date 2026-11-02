@@ -21,7 +21,7 @@
                       b_evictions_of_hot/hot_shard_count/full_shard_count/
                       data_source)。data_source=minio 是真实运行,mock-selftest
                       是自检产物;自检的挤占来自 mock 下载器自己的 LRU,不是产品
-                      淘汰生效的证据(产品证据看 run_bench 的三列,9.2 §1.7)。
+                      淘汰生效的证据(产品证据看 run_bench 的三列,4.4 §1.7)。
 
 挤占统计口径:
   * Job A 每次访问某热块前,检查该块在本地缓存目录是否存在(os.path.exists);
@@ -410,7 +410,7 @@ def selftest() -> int:
 
     # ---- 校验挤占逻辑 ----
     # 容量仅 3 片,B 扫 8 片必然把 A 的热分片挤出去,故 evictions > 0。
-    # 这条只证明 mock 的计数链路在动,不构成产品淘汰生效的证据(9.2 §1.7)。
+    # 这条只证明 mock 的计数链路在动,不构成产品淘汰生效的证据(4.4 §1.7)。
     assert sa["evictions"] > 0, \
         "selftest 失败:容量仅 3 片、B 扫 8 片,mock LRU 应挤出热分片,实际 evictions=0"
     # hits + misses == n_steps
@@ -429,7 +429,7 @@ def selftest() -> int:
     # ---- 校验汇总统计函数 ----
     ev = compute_eviction_stats(sa, len(hot_shards), len(full_shards))
     # 这里的 evictions 是 mock 下载器自己的 LRU 挤出次数，只验证计数与统计
-    # 函数的形态；产品淘汰是否生效只看 run_bench 的三列（9.2 §1.7）。
+    # 函数的形态；产品淘汰是否生效只看 run_bench 的三列（4.4 §1.7）。
     ev["data_source"] = "mock-selftest"
     assert ev["a_hits"] == sa["hits"]
     assert ev["a_misses"] == sa["misses"]
@@ -696,7 +696,7 @@ def main() -> int:
     eviction_stats = compute_eviction_stats(
         a_stats, len(hot_shards), len(full_shards))
     # 真实运行标 minio，selftest 的 mock 产物标 mock-selftest：两者不能混读，
-    # 产品淘汰是否生效看 run_bench 的 evict_blocks_run 等三列（9.2 §1.7）。
+    # 产品淘汰是否生效看 run_bench 的 evict_blocks_run 等三列（4.4 §1.7）。
     eviction_stats["data_source"] = "minio"
     ev_path.write_text(
         json.dumps(eviction_stats, ensure_ascii=False, indent=2) + "\n")

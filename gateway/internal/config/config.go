@@ -1,7 +1,7 @@
-// Package config 读取并校验网关的运行配置（design 10.1 §5.3/§6.7）。
+// Package config 读取并校验网关的运行配置（design 9.1 §5.3/§6.7）。
 //
 // env 解析 helper 从 agent/svc/config.go 复制而来（envOr/envBool/正整数），
-// 不导出、不抽到 core：网关与 Agent 是两个独立模块，按 10.2 D24 的依赖方向
+// 不导出、不抽到 core：网关与 Agent 是两个独立模块，按 9.2 D24 的依赖方向
 // 保持各自一份，避免为几个字符串引入跨模块依赖。
 //
 // 配置一次性读取，不做热加载；非法值返回错误，进程退出码 1。
@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-// 默认值逐字来自 design 10.1 §5.3。
+// 默认值逐字来自 design 9.1 §5.3。
 const (
 	defaultObjstoreEndpoint  = "127.0.0.1:9000"
 	defaultObjstoreBucket    = "traincache"
@@ -25,7 +25,7 @@ const (
 	defaultLogLevel          = "info"
 )
 
-// env 名（design 10.1 §5.3 冻结；沿用的是全仓同名键）。
+// env 名（design 9.1 §5.3 冻结；沿用的是全仓同名键）。
 const (
 	envObjstoreEndpoint  = "TRAINCACHE_OBJSTORE_ENDPOINT"
 	envObjstoreAccessKey = "TRAINCACHE_OBJSTORE_ACCESS_KEY"
@@ -38,7 +38,7 @@ const (
 	envLogLevel          = "TRAINCACHE_LOG_LEVEL"
 )
 
-// Config 是网关进程的完整配置（design 10.1 §5.3）。
+// Config 是网关进程的完整配置（design 9.1 §5.3）。
 type Config struct {
 	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT，默认 127.0.0.1:9000（不带 scheme）
 	ObjstoreAccessKey string // TRAINCACHE_OBJSTORE_ACCESS_KEY，默认空
@@ -51,7 +51,7 @@ type Config struct {
 	LogLevel          string // TRAINCACHE_LOG_LEVEL，默认 info（未知值退化为 info）
 }
 
-// Load 从环境变量加载配置并校验（design 10.1 §6.7）：
+// Load 从环境变量加载配置并校验（design 9.1 §6.7）：
 // 整数必须 >0，端口必须 1..65535，枚举外的日志级别退化为 info 而不报错。
 func Load() (*Config, error) {
 	listen, err := loadListen()

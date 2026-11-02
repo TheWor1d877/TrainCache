@@ -3,7 +3,7 @@
 
 产物落数据层的五个分区(scores / baselines / summary / figures / policy),分区由
 `results_root()` 按族给出;点目录名一律是完整 COND 名(compare-groups 用格名)。
-每族跑完按产物回填 docs/4.4 实验版本记录.md 的最后一行。
+每族跑完按产物回填 docs/4.6 实验版本记录.md 的最后一行。
 """
 import argparse
 import csv
@@ -24,7 +24,7 @@ import lock as lock_mod  # noqa: E402
 
 CONDS_DIR = EXPERIMENTS_DIR / "conds"
 RUNNER = BENCH_ROOT / "compare" / "run_bench.py"
-REGISTRY = bench_config.REPO_ROOT / "docs" / "4.4 实验版本记录.md"
+REGISTRY = bench_config.REPO_ROOT / "docs" / "4.6 实验版本记录.md"
 LOCK_FILE = Path("/tmp/traincache-exp.lock")
 
 COMPARE_FAMILY = "compare-groups"
@@ -34,7 +34,7 @@ TILT_FAMILIES = ("pareto-sustained", "evict-policy")
 FAMILIES = (COMPARE_FAMILY,) + COND_FAMILIES + TILT_FAMILIES
 
 # 族 ID 是 `--family` 与 `--point` 的寻址名，产物目录名用的是数据层分区 +
-# 完整 COND 名（9.2 §C1），两套名字不同词（evict-policy 族的 COND 叫 policy-*，
+# 完整 COND 名（4.4 §C1），两套名字不同词（evict-policy 族的 COND 叫 policy-*，
 # pareto-sustained 族叫 pareto2-*）。认领 COND、还原点名与算目录都以这张表为准；
 # 漏了这张表，一族会认领不到任何 COND，点目录名还会退化成空串，
 # 三个点写进同一个分区。
@@ -404,7 +404,7 @@ def _family_column(header: list[str], family: str) -> int:
     for i, cell in enumerate(header):
         if family in cell:
             return i
-    raise SystemExit(f"4.4 表头没有 {family} 列")
+    raise SystemExit(f"4.6 表头没有 {family} 列")
 
 
 def _last_row_cells(lines: list[str], row_idx: list[int]) -> list[str]:
@@ -415,12 +415,12 @@ def check_registry() -> str:
     lines, _header, row_idx = _registry_grid(REGISTRY)
     version = _last_row_cells(lines, row_idx)[0]
     if not version:
-        raise SystemExit("4.4 最后一行的版本号为空;先在最后一行的第一格写版本号")
+        raise SystemExit("4.6 最后一行的版本号为空;先在最后一行的第一格写版本号")
     return version
 
 
 def artifact_cell(family: str) -> str:
-    """4.4 表格里这一族的产物路径：数据层分区 + 该族 COND 前缀，相对 `results/`。
+    """4.6 表格里这一族的产物路径：数据层分区 + 该族 COND 前缀，相对 `results/`。
 
     一族占一个 glob 而不是分区名：图系列四族同在 `figures/` 下，只写分区名
     四列会一模一样，反查不到点目录。
@@ -435,7 +435,7 @@ def record_family(family: str) -> None:
     lines, header, row_idx = _registry_grid(REGISTRY)
     cells = _last_row_cells(lines, row_idx)
     if not cells[0]:
-        raise SystemExit("4.4 最后一行的版本号为空;先在最后一行的第一格写版本号")
+        raise SystemExit("4.6 最后一行的版本号为空;先在最后一行的第一格写版本号")
     done, missing = family_state(family, cells[0])
     value = artifact_cell(family) if not missing else "未完成"
     col = _family_column(header, family)
@@ -534,7 +534,7 @@ def cmd_selftest() -> None:
     """族↔COND 认领表、点名与产物分区的本地自检。
 
     命名一漂移，一族就认领不到任何 COND，点目录名退化成空串，几个点写进同一个
-    分区；4.3 §5 的 `--point` 与 4.4 的完成判定都按族/点寻址，所以这条要进门禁。
+    分区；4.3 §5 的 `--point` 与 4.6 的完成判定都按族/点寻址，所以这条要进门禁。
     分区落位也在这里查：`plot.py` 按 `figures/fig*-*`、`summarize.py` 按
     `scores/<格名>` 读产物，目录写错分区的跑分是「跑完了但出不了图」，只有
     对照表会静默少行。

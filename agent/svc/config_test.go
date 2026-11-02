@@ -140,10 +140,10 @@ func TestLoadDefaults(t *testing.T) {
 		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
 	}
 	if cfg.GatewayEndpoint != "" {
-		t.Errorf("GatewayEndpoint 默认值 = %q, want 空(10.1 §5.3:全部直连)", cfg.GatewayEndpoint)
+		t.Errorf("GatewayEndpoint 默认值 = %q, want 空(9.1 §5.3:全部直连)", cfg.GatewayEndpoint)
 	}
 	if cfg.GatewaySecure {
-		t.Error("GatewaySecure 默认值 = true, want false(10.1 §5.3)")
+		t.Error("GatewaySecure 默认值 = true, want false(9.1 §5.3)")
 	}
 	if cfg.DebugAddr != defaultDebugAddr {
 		t.Errorf("DebugAddr = %q, want %q", cfg.DebugAddr, defaultDebugAddr)
@@ -277,7 +277,7 @@ func TestLoadEnvOverride(t *testing.T) {
 		t.Error("ObjstoreSecure = false, want true(TRAINCACHE_OBJSTORE_SECURE=1)")
 	}
 	if cfg.GatewayEndpoint != "gateway.traincache.svc:9413" {
-		t.Errorf("GatewayEndpoint = %q, want gateway.traincache.svc:9413(10.1 §5.3)", cfg.GatewayEndpoint)
+		t.Errorf("GatewayEndpoint = %q, want gateway.traincache.svc:9413(9.1 §5.3)", cfg.GatewayEndpoint)
 	}
 	if !cfg.GatewaySecure {
 		t.Error("GatewaySecure = false, want true(TRAINCACHE_GATEWAY_SECURE=yes)")
@@ -373,7 +373,7 @@ func TestLoadObjstoreSecureBool(t *testing.T) {
 	}
 }
 
-// TestLoadGatewayEnv:网关入口与独立 TLS 开关(10.1 §5.3 / 10.2 D15/D16)。
+// TestLoadGatewayEnv:网关入口与独立 TLS 开关(9.1 §5.3 / 9.2 D15/D16)。
 // 缺省为空/false;TRAINCACHE_GATEWAY_SECURE 按 envBool 口径(1/true/yes);
 // 两个 secure 互相独立;地址不做 scheme 校验(非法值不阻断启动)。
 func TestLoadGatewayEnv(t *testing.T) {

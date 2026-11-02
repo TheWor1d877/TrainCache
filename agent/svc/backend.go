@@ -1,6 +1,6 @@
 package svc
 
-// backend.go：Agent 侧后端选择器与降级状态机（10.1 design §4.3/§4.4）。
+// backend.go：Agent 侧后端选择器与降级状态机（9.1 design §4.3/§4.4）。
 //
 // 只有 Get 走选择逻辑；Put/Delete/GetETag/PutIfMatch/List 一律直连源站。状态只在
 // 进程内存里，不写 CRD；Agent 重启回到配置默认（gatewayEndpoint 非空即 mode=1）。
@@ -16,7 +16,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// 降级状态机的常量（10.2 D5 / 10.1 §4.3）。
+// 降级状态机的常量（9.2 D5 / 9.1 §4.3）。
 const (
 	// gatewayInitialBackoff 是首次降级的退避时长。
 	gatewayInitialBackoff = 10 * time.Second
@@ -46,7 +46,7 @@ func newBackendStore(origin, gateway objectstore.Store) *backendStore {
 	return s
 }
 
-// Get 实现 objectstore.Store。失败分类与降级规则见 10.1 §4.4 表。
+// Get 实现 objectstore.Store。失败分类与降级规则见 9.1 §4.4 表。
 func (s *backendStore) Get(ctx context.Context, key string, w io.Writer) error {
 	if s.gateway == nil || s.state == nil {
 		return s.origin.Get(ctx, key, w)
@@ -80,7 +80,7 @@ func (s *backendStore) Get(ctx context.Context, key string, w io.Writer) error {
 		return err
 	}
 
-	// 已向调用方写过任何字节就不能重试，否则会污染已落盘内容（10.2 D6）。
+	// 已向调用方写过任何字节就不能重试，否则会污染已落盘内容（9.2 D6）。
 	if cw.written == 0 {
 		return s.origin.Get(ctx, key, w)
 	}
@@ -124,7 +124,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// sourceState 是网关降级状态机（10.1 §4.3）。用一把 Mutex 串行化，等价于文档里的
+// sourceState 是网关降级状态机（9.1 §4.3）。用一把 Mutex 串行化，等价于文档里的
 // CAS 抢占：同一时刻最多一个探测请求（只有抢占成功者才把 nextProbe 推到 5s 后）。
 type sourceState struct {
 	mu         sync.Mutex

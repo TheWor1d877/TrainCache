@@ -68,7 +68,7 @@ func TestPrometheusRegistry(t *testing.T) {
 	// (ordersource 格式错误 counter[D23]、prefetch 队列深度/游标 gauge 与阶段切换停滞
 	// histogram[M3]);七线 23 个(M6,含复用的这 3 个)在 TestSevenLineFamiliesRegisteredAtStartup
 	// 校验;D33 钩子帧错误、D44 读 miss、M9 的 8 个证据 family、D63 订单通道 3 个与
-	// 10.1 网关线 2 个也在该测试校验。
+	// 9.1 网关线 2 个也在该测试校验。
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -82,7 +82,7 @@ func TestPrometheusRegistry(t *testing.T) {
 		objectstoreConditionalWriteSupportedName: "GAUGE",
 	}
 	if len(families) != 42 {
-		t.Fatalf("注册表应恰有 42 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个 + D63 订单通道 3 个 + 10.1 网关线 2 个),实际 %d 个", len(families))
+		t.Fatalf("注册表应恰有 42 个 family(七线 23 + D23 ordersource + D33 钩子帧错误 + D44 读 miss + M9 8 个 + R3/R4 2 个 + M-debug-1 capacity_bytes 1 个 + D63 订单通道 3 个 + 9.1 网关线 2 个),实际 %d 个", len(families))
 	}
 	byName := make(map[string]int, len(families))
 	for i, mf := range families {

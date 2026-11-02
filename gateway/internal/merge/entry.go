@@ -1,5 +1,5 @@
 // Package merge 实现在途表、环形缓冲、订阅者扇出与踢出
-// （design 10.1 §4.5/§5.2/§6.1–§6.3）。
+// （design 9.1 §4.5/§5.2/§6.1–§6.3）。
 //
 // 不可变语义：
 //   - 容量 C 的环形缓冲，written 是绝对偏移；订阅者可读区间恒为 [pos, written)。
@@ -62,7 +62,7 @@ func newEntry(reg *Registry, key string, buf []byte) *Entry {
 }
 
 // Subscribe 挂一个从 pos=0 开始的订阅者。调用方应先经 Attach 确认条目
-// 在途且 written <= C（design 10.1 §6.1）。
+// 在途且 written <= C（design 9.1 §6.1）。
 //
 // 只适用于刚 Create 的 owner：owner 不可能已结束，因此不检查 done。
 // Attach 命中的路径必须改用 TrySubscribe，否则会在「Attach 与订阅之间
@@ -99,7 +99,7 @@ func (e *Entry) TrySubscribe() (*Sub, bool) {
 }
 
 // Pump 从 src 读到 EOF 并写入环形缓冲，结束时调用 Finish。
-// 返回的错误与传给 Finish 的错误相同（design 10.1 §4.5；M4 不变量 6）。
+// 返回的错误与传给 Finish 的错误相同（design 9.1 §4.5；M4 不变量 6）。
 // 读 IO 在锁外进行，只有写入缓冲与广播状态在锁内。
 //
 // ctx 由调用方持有并通过 SetCancel 把取消函数交给条目：最后一个订阅者
@@ -198,7 +198,7 @@ func (e *Entry) Metadata() (etag string, lastModified time.Time) {
 	return e.etag, e.lastModified
 }
 
-// Subscribers 返回当前订阅者数量，供 server 层日志使用（design 10.1 §7.2）。
+// Subscribers 返回当前订阅者数量，供 server 层日志使用（design 9.1 §7.2）。
 func (e *Entry) Subscribers() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -206,7 +206,7 @@ func (e *Entry) Subscribers() int {
 }
 
 // SetRelease 把准入槽的释放函数交给条目：条目在「拉取协程结束且订阅者
-// 清零」时调用它，只调用一次（design 10.1 §6.1 第 7 步）。
+// 清零」时调用它，只调用一次（design 9.1 §6.1 第 7 步）。
 //
 // 该方法是 server 注入依赖所需的最小扩展；若条目已经释放，立即调用 fn。
 func (e *Entry) SetRelease(fn func()) {
@@ -254,7 +254,7 @@ func (e *Entry) broadcastLocked() {
 }
 
 // removeSubLocked 从集合移除订阅者；若这是最后一个且拉取协程仍在跑，
-// 取消源站请求（10.2 D10）。
+// 取消源站请求（9.2 D10）。
 func (e *Entry) removeSubLocked(s *Sub) {
 	if _, ok := e.subs[s]; !ok {
 		return

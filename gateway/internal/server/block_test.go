@@ -142,7 +142,7 @@ func TestFiveConcurrentGetsMerge(t *testing.T) {
 }
 
 // TestMergedResponseCarriesMetadata 覆盖合并路径的 200 回填 Last-Modified 与
-// ETag（10.2 D28）：首读后从源站 GET 响应头取，且不写 Content-Length。
+// ETag（9.2 D28）：首读后从源站 GET 响应头取，且不写 Content-Length。
 func TestMergedResponseCarriesMetadata(t *testing.T) {
 	const target = "/traincache/ds/blocks/meta%230"
 	lastModified := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)

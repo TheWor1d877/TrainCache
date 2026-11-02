@@ -97,7 +97,7 @@ selftest:
 	@$(PY) $(ROOT)/compare/summarize.py --selftest
 	@$(PY) $(ROOT)/experiments/lock.py --selftest
 	@$(PY) $(ROOT)/experiments/collect.py --selftest
-	# C 轨两个 mock 自检只验产物字段与统计形态，不是产品淘汰生效的证据(9.2 §1.7)
+	# C 轨两个 mock 自检只验产物字段与统计形态，不是产品淘汰生效的证据(4.4 §1.7)
 	@$(PY) $(ROOT)/scripts/bench_track_c.py --selftest
 	@$(PY) $(ROOT)/experiments/run_policy.py --selftest
 	@$(PY) $(ROOT)/exp.py selftest

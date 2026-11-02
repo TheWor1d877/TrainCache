@@ -41,7 +41,7 @@ case "$TIER" in
     S) ;;
     M|L)
         echo "错误: bench-quick 只支持 TIER=S。" >&2
-        echo "      M/L 档按 9.1 D30 不含 traincache-warm,凑不齐 cold+warm 两阶段。" >&2
+        echo "      M/L 档按 4.5 D30 不含 traincache-warm,凑不齐 cold+warm 两阶段。" >&2
         exit 2
         ;;
     *)

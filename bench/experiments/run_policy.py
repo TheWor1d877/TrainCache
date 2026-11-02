@@ -164,7 +164,7 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
         "full_shard_count": len(full_shards),
         "n_steps_a": sa["n_steps"],
         "n_steps_b": sb["n_steps"],
-        # 正式 C 轨的 A 步预算是常量(9.2 §C3)；mock 这里按合成热集规模给等价的量
+        # 正式 C 轨的 A 步预算是常量(4.4 §C3)；mock 这里按合成热集规模给等价的量
         "tilt_a_budget": a_epochs * len(hot_shards),
         "selftest": True,
         "evict_policy": cond["cache"]["evict_policy"],
@@ -177,7 +177,7 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
     ev = btc.compute_eviction_stats(sa, len(hot_shards), len(full_shards))
     # mock 产物显式标来源:这里的 evictions 是 mock 下载器自己的 LRU 挤出次数,
     # 只验统计形态。产品淘汰是否生效看 run_bench 落进 summary.csv 的三列
-    # (evict_blocks_run/capacity_bytes_final/cache_dir_peak_bytes,9.2 §1.7)。
+    # (evict_blocks_run/capacity_bytes_final/cache_dir_peak_bytes,4.4 §1.7)。
     ev["data_source"] = "mock-selftest"
     (run_dir / "eviction_stats.json").write_text(
         json.dumps(ev, ensure_ascii=False, indent=2) + "\n")
@@ -369,7 +369,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
         assert run_obj["selftest"] is True
         assert run_obj["evict_policy"] == cond["cache"]["evict_policy"]
         assert run_obj["tilt_a_budget"] == 15 * 2, \
-            "mock 的 A 步预算字段与合成热集规模脱节(9.2 §C3 口径)"
+            "mock 的 A 步预算字段与合成热集规模脱节(4.4 §C3 口径)"
 
         a_recs = [json.loads(ln) for ln
                   in (run_dir / "per_step_a.jsonl").read_text().splitlines()
@@ -397,7 +397,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
         assert ev["data_source"] == "mock-selftest", \
             "mock 产物必须自带 data_source=mock-selftest,否则会被当成真实淘汰证据"
         # selftest 容量仅 3 片、B 扫 8 片,mock LRU 应挤出热分片。
-        # 这条只验计数链路,产品淘汰证据看 9.2 §1.7 的三列。
+        # 这条只验计数链路,产品淘汰证据看 4.4 §1.7 的三列。
         assert ev["b_evictions_of_hot"] > 0, \
             "selftest 的 mock LRU 应挤出热分片(b_evictions_of_hot > 0)"
 

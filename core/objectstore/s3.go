@@ -15,7 +15,7 @@ type S3Store struct {
 	client *minio.Client
 	bucket string
 	// probe 为 true 表示这是网关 Store，Get 期间安装响应头探针并类型化连接层失败；
-	// 源站 Store 为 false，错误语义与改动前逐字一致（10.1 §1.5/§4.4）。
+	// 源站 Store 为 false，错误语义与改动前逐字一致（9.1 §1.5/§4.4）。
 	probe bool
 }
 
@@ -26,14 +26,14 @@ var _ Store = (*S3Store)(nil)
 // bucket 为对象存储桶名（v1 约定单桶，见 decisions.md Q5）。
 //
 // 本函数不安装网关响应头探针，错误语义与既有调用方保持一致。需要走网关时用
-// NewS3StoreWithOptions（10.1 §4.4）。
+// NewS3StoreWithOptions（9.1 §4.4）。
 func NewS3Store(endpoint, accessKey, secretKey, bucket string, secure bool) (*S3Store, error) {
 	return newS3Store(endpoint, accessKey, secretKey, bucket, secure, Options{}, false)
 }
 
 // Get 实现 Store.Get（GET 前先 Stat 确认存在性，不存在返回 ErrNotFound）。
 // 三个出错点共用 classifyGetError：网关 Store 额外识别响应头/错误码并类型化
-// 连接层失败，源站 Store 的返回与改动前一致（10.1 §4.4）。
+// 连接层失败，源站 Store 的返回与改动前一致（9.1 §4.4）。
 func (s *S3Store) Get(ctx context.Context, key string, w io.Writer) error {
 	var probe *gatewayProbe
 	if s.probe {

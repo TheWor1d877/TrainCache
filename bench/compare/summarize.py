@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """五格对照汇总：按 (格子, 组态) 报平均数与 bootstrap 95% CI，并给组间判定。
 
-口径来源 docs/9.2：§1.6 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
+口径来源 docs/4.4：§1.6 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
 §1.7 作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
 
 用法：
@@ -186,7 +186,7 @@ def build_verdict(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
     out = []
     for cell in _cell_order({cell for cell, _g in cells}):
         if cell.startswith("L-"):
-            continue  # 探点不做判定（9.2 §1.9）
+            continue  # 探点不做判定（4.4 §1.9）
         for group, bases in BASELINES.items():
             grows = cells.get((cell, group))
             if not grows:

@@ -2,7 +2,7 @@
 """实验出图脚本。
 
 读取 bench/results/compare/summary.csv 与 bench/results/experiments/ 下的
-metrics.csv,产出预注册(docs/9.2 §2~§5)定义的六张图:
+metrics.csv,产出预注册(docs/4.4 §2~§5)定义的六张图:
 
   fig1  启动阶段盈亏曲面(带宽 × 缓存比 × fanout → 启动 makespan 改善%)
   fig2  全程 makespan 绝对值(带宽 × epoch,8 GiB 数据集,附计算与传输下界)
@@ -396,7 +396,7 @@ def plot_fig2(metrics: list[dict], out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     rates = [100, 300, 1000]
     epochs = [1, 3, 6]
-    # 有效带宽 MB/s,取 docs/9.2 实验协议.md §7.4 的实测口径(100/300/1000 mbit 档)
+    # 有效带宽 MB/s,取 docs/4.4 实验协议.md §7.4 的实测口径(100/300/1000 mbit 档)
     eff_mbps = {100: 13.4, 300: 35.0, 1000: 61.0}
     compute_s_per_epoch = 80.0
     colors = {100: "#60a5fa", 300: "#10b981", 1000: "#f59e0b"}

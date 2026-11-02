@@ -1,7 +1,7 @@
 package server
 
 // integration_test.go：真实 minio-go 客户端 → 网关 HTTP → httptest 假源站 的
-// 端到端合并用例（docs/10.3 test.md §4）。与 block_test.go 不同，这里不直接
+// 端到端合并用例（docs/9.3 test.md §4）。与 block_test.go 不同，这里不直接
 // 调 handler，也不注入假 Origin：网关持有真实的 minio-go 源站客户端，客户端侧
 // 也走完整 HTTP/SigV4。
 
@@ -254,7 +254,7 @@ func TestIntegrationMinioClientMergesBlock(t *testing.T) {
 
 	for i := 0; i < clients; i++ {
 		// minio-go 会对每个 GET 响应调用 ToObjectInfo，后者强制解析
-		// Last-Modified；网关必须回填该头，否则这里会报 InternalError（10.2 D28）。
+		// Last-Modified；网关必须回填该头，否则这里会报 InternalError（9.2 D28）。
 		if errs[i] != nil {
 			t.Fatalf("客户端 %d 失败: %v", i, errs[i])
 		}

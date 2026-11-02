@@ -1,4 +1,4 @@
-// Package logging 初始化网关的结构化日志（design 10.1 §7.1；10.2 D19）。
+// Package logging 初始化网关的结构化日志（design 9.1 §7.1；9.2 D19）。
 //
 // 与 agent/internal/logging 同构：只做设级别、装处理器、注入
 // component/version/log_schema_version 三件事；脱敏、采样与动态级别全部复用

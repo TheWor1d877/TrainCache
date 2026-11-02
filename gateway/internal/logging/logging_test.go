@@ -80,7 +80,7 @@ func TestNewRedactsAccessKey(t *testing.T) {
 	}
 }
 
-// TestNewUnknownLevelDegradesToInfo 覆盖非法级别退化（design 10.1 §5.3）。
+// TestNewUnknownLevelDegradesToInfo 覆盖非法级别退化（design 9.1 §5.3）。
 func TestNewUnknownLevelDegradesToInfo(t *testing.T) {
 	buf := captureOutput(t)
 
