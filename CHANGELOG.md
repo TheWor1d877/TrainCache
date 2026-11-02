@@ -4,6 +4,14 @@
 
 ## 未发布
 
+### Added
+
+- 新增 `traincache-gateway`：在 Agent 与对象存储之间合并在途的块 GET，同一个块只回源一次；单副本 Deployment + ClusterIP Service（`:9413`），`replicas` 固定 1。契约见 `docs/9.1 design.md`。
+- Agent 的块 GET 可经网关：新增 `gatewayEndpoint`（空表示直连）与 `gatewaySecure` 两个配置；`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站。网关不可用时按 10s→120s 退避降级直连，探测成功再切回，判据与状态机见 `docs/9.2 decisions.md` D1/D2/D5。
+- Agent 新增两个指标族：`traincache_source_mode`（0 直连 / 1 网关）与 `traincache_gateway_fallback_total{reason}`，启动注册的族从 40 增至 42。
+- 发布链增加到五个镜像：`hack/build-images.sh`（manager/webhook/scheduler/agent/gateway）、`controller/deploy/kustomization.yaml`、`hack/render-install.sh`、发版与 e2e 工作流均含 `traincache-gateway`；ConfigMap `traincache-config` 的 `gatewayEndpoint`、`gatewaySecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 四项计入下条 Changed 的 15 项。
+- bench 增加网关开关 `TRAINCACHE_GATEWAY=1`，`summary.csv` 增 `gateway` 列（1/0），汇总把开关不同的行折进 `<格>+gw` 格子；新增 `gateway/e2e/run-k8s.sh` 与 CI 的 `gateway kind e2e` 作业。
+
 ### Changed
 
 - 集群配置统一落位：五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）不再写任何字面量 env。等于代码默认的参数（监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 默认档）从清单删除，默认值只留在 `agent/svc/config.go` 与 `controller/internal/config/config.go`。
@@ -11,12 +19,15 @@
 - `make verify-metadata` 增加 `hack/verify-config-placement.sh`：清单出现字面量 env、ConfigMap 与清单引用脱钩、引用落在别的 namespace、Secret 引用非 `accessKey`/`secretKey` 都会失败。落位判据与逐项位置见 `docs/PARAMETER-CONFIGURATION.md`。
 - `hack/build-images.sh` 给每个镜像打 `io.traincache.src-fp` 标签，值是进镜像那批源码（`*.go`、`go.mod`/`go.sum`/`go.work`、Dockerfile）的内容指纹；`bench/scripts/ctrl_up.sh` 起控制面前比对标签与当前工作树，不一致就退出并打印重建命令。`:dev` 标签被反复复用、节点上已有同名镜像时 `imagePullPolicy: IfNotPresent` 不重新拉取，没有这道门禁就会拿旧二进制测量。同脚本另断言 kubectl context 是 `kind-traincache`，防止并行会话把 current-context 切到自己的集群后装置在别的集群上跑。
 - `bench/compare/traincache/up.sh` 的 `traincache-ordersrc` ConfigMap 改为每次 up 都从 `agent/ordersrc/ordersrc.py` 重新 apply。原来「已存在就跳过」，改完的写端代码进不了集群，与静默复用旧镜像是同一类陈旧缺陷。
-- `bench/exp.py` 的产物目录改落数据层既有的五个分区：`compare-groups`→`results/scores/<格名>/`、图系列四族→`results/figures/<COND 名>/`、倾斜两族→`results/policy/<COND 名>/<run ID>/`，对应表在 `results_root()`。此前它写 `results/<族 ID>/<点名>/`，与 `run_figures.py`/`run_policy.py` 写的不是同一棵树：`summarize.py` 只读 `scores/`+`baselines/`、`plot.py` 只认 `figures/fig*-*`，走统一入口跑完的点是「跑完了但出不了图」。点名寻址不变，`--point` 仍写短名，由 `FAMILY_COND_PREFIX` 还原成目录名；`exp.py selftest` 增加分区落位断言，`status` 打印每族的产物分区。
+- `bench/exp.py` 的产物目录改落数据层既有的五个分区：`compare-groups`→`results/scores/<格名>/`、`startup-surface`/`total-makespan`/`switch-recovery`/`pareto-startup` 四族→`results/figures/<COND 名>/`、`pareto-sustained`/`evict-policy` 两族→`results/policy/<COND 名>/<run ID>/`，对应表在 `results_root()`。此前它写 `results/<族 ID>/<点名>/`，与 `run_figures.py`/`run_policy.py` 写的不是同一棵树：`summarize.py` 只读 `scores/`+`baselines/`、`plot.py` 只认 `figures/fig*-*`，走统一入口跑完的点是「跑完了但出不了图」。点名寻址不变，`--point` 仍写短名，由 `FAMILY_COND_PREFIX` 还原成目录名；`exp.py selftest` 增加分区落位断言，`status` 打印每族的产物分区。
 - `bench/experiments/plot.py` 自动扫描时按一级分区挑七组对照样本（只收 `scores/`、`baselines/`、旧 `compare/`），不再按点目录名前缀排除。前缀黑名单挡不住淘汰矩阵的 run 目录名（`policy-heat-r01-*`），会把 C 轨倾斜样本混进七组柱状图。
-- `docs/9.2 实验协议.md` 按实验为粒度重排并压缩（914 行到 731 行）：每族一节、每节固定五块（自变量与档位 → 预注册假设 → 采样 → COND 与跑法 → 产物与出图），文件头加导览表按「测什么/怎么跑/图从哪来」定位；正文按「测什么」称呼实验（启动门控盈亏曲面、全程时长随带宽与 epoch、阶段切换后的 stall 回落、启动收益对启动预热字节、全程收益对持续预取字节、淘汰策略矩阵），族 ID 与 COND 前缀留作代码与数据层的寻址名；删掉偏离记录与报告模板两节——偏离改记 commit message 与 CHANGELOG，报告栏位并进 §1.6 与 §1.10，每族的「阴性结论的接受条件」并进 §1.6 的允许清单，契约与环境记录与机时上移成 §6/§7，示例 COND 并进 §C5；`docs/9.0 核心能力验收与测试.md` 的内容已散在 4.x 与 9.2 里，删除该文件并把口径合并到 `docs/9.2 实验协议.md`。拆分与重排留下的悬空引用一并改掉：脚本注释与文档正文里的 `docs/4 §N` 指向 4.1/4.2/4.3 的对应小节，9.2 的旧章节号（淘汰矩阵、lookahead 扫点、字段映射表）指向重排后的 §5.3/§5.2/§C4。
-- 删除 `docs/9.1 plan.md`：里程碑表（M0–M8）与任务表不再维护，验收改按实验族寻址。机时口径、带宽与容量档参数、对照层 62 run 分项、五族的点数与单 run 时长表并入 `docs/9.2 实验协议.md` §7，术语与 D 号决策留在 `docs/9.1 decisions.md`，两份 9.1 同号的冲突随之消除。9.2 正文里 11 处 M 号改为族名（对照层、倾斜两族、C 轨负载器）。
-- `docs/10.4 plan.md` 按其自述（里程碑全部验收后删除）删除，`docs/10.1 design.md`、`docs/10.2 decisions.md` 的引用与 README 文档索引同步去掉。
-- `docs/9.1 decisions.md` 的 D13、D18、D28 三行按 `docs/9.2 实验协议.md` 的现行采样口径改写：D18 原写「两张 Pareto 每点 7 次、曲面与淘汰矩阵每点 3 次」，与 9.2 §2.3/§3.3/§4.4/§5.2/§5.3 的 1 次与 2 次冲突；D28 原写「lookahead 三档 × 三策略 = 9 点」，与 §5.2/§5.3 的 3 + 3 点冲突；D13 的理由列引用已删除的旧 `10.0`，改为预注册纪律。
+- 实验文档并入 4.x 系列，网关文档降为 9.x：`docs/9.2 实验协议.md`→`docs/4.4 实验协议.md`、`docs/9.1 decisions.md`→`docs/4.5 实验口径决策.md`、`docs/4.4 实验版本记录.md`→`docs/4.6 实验版本记录.md`，`docs/10.0`~`docs/10.3`→`docs/9.0`~`docs/9.3`。`bench/exp.py` 按路径读版本记录，引用这批路径的脚本注释、部署清单与 README 索引同步改完，`hack/verify-doc-refs.sh` 返回 0。
+- `docs/4.5 实验口径决策.md` 的 D13、D18、D28 三行按 `docs/4.4 实验协议.md` 的现行采样口径改写：D18 的每点次数改为 `pareto-startup` 7 次、`pareto-sustained` 2 次、三个曲面族与淘汰矩阵 1 次；D28 的 lookahead 扫点从「3 档 × 3 策略 = 9 点」改为 3 + 3 点；D13 的理由列改按预注册纪律表述。
+
+### Removed
+
+- 删除 `docs/9.1 plan.md`：里程碑表（M0–M8）与任务表不再维护，验收改按实验族寻址；机时口径、带宽与容量档参数、对照层 62 run 分项与各族点数表并入 `docs/4.4 实验协议.md` §7。
+- 删除 `docs/10.4 plan.md`（按其自述：里程碑全部验收后删除）与 `docs/9.0 核心能力验收与测试.md`（内容已散在 4.x，口径合并进 `docs/4.4 实验协议.md`）。
 
 ### Fixed
 
@@ -31,7 +42,7 @@
 ## [v9.9.9] - 2026-12-01
 
 ### Added
-- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/9.2 实验协议.md` §C。
+- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4 实验协议.md` §C。
 
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
