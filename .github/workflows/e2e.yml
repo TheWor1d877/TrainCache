@@ -56,6 +56,8 @@ jobs:
       - name: build and load gateway image
         run: |
           docker build -f gateway/Dockerfile -t traincache-gateway:dev .
+          # kind load 只从本机镜像库取镜像；runner 默认没有 busybox。
+          docker pull busybox:latest
           kind load docker-image traincache-gateway:dev --name gw-e2e
           kind load docker-image busybox:latest --name gw-e2e
       - name: prepare namespace, configmap, secret
