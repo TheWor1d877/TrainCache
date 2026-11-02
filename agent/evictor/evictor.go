@@ -165,11 +165,17 @@ func New(cs *cas.Store, heat HeatSource, protected ProtectedSource, m *metrics.R
 	if cfg.BlockDir != "" {
 		e.blocksDir = filepath.Join(cfg.BlockDir, "blocks")
 	}
-	// 初始字节累计:启用字节维度且有 BlockDir → stat blocks/ 目录总字节。
+	// 初始字节累计:启用字节维度且有 BlockDir → stat blocks/ 目录总字节,并把目录里
+	// 已有的块播种进 seenFPs——否则这些块被本进程首次 Open/Put 时会再加一次(双计),
+	// 而淘汰每块只减一次,累计永远回不到真值。
 	if e.cacheCapacityBytes > 0 && e.blocksDir != "" {
-		e.bytesAccum.Store(statBlocksDirBytes(e.blocksDir))
+		total, fps := statBlocksDirBytes(e.blocksDir)
+		e.bytesAccum.Store(total)
+		for _, fp := range fps {
+			e.seenFPs.Store(fp, true)
+		}
 		if m != nil {
-			m.SetCapacityBytes(metrics.CapacitySourceBytes, e.bytesAccum.Load())
+			m.SetCapacityBytes(metrics.CapacitySourceBytes, total)
 		}
 	}
 	return e
@@ -410,16 +416,10 @@ func (e *Evictor) statBlocksByMtime() []EvictionEntry {
 		if err != nil {
 			return nil
 		}
-		hexs := strings.TrimSuffix(name, ".blk")
-		if len(hexs) != 32 { // cas.Fingerprint [16]byte → 32 hex chars
+		fp, ok := fingerprintFromName(name)
+		if !ok {
 			return nil
 		}
-		b, err := hex.DecodeString(hexs)
-		if err != nil {
-			return nil
-		}
-		var fp cas.Fingerprint
-		copy(fp[:], b)
 		found = append(found, mtimeEntry{fp: fp, mtime: st.ModTime()})
 		return nil
 	})
@@ -529,10 +529,12 @@ func moreSevere(a, b int) int {
 	return b
 }
 
-// statBlocksDirBytes 递归扫描 blocksDir 下所有 .blk 文件的实际磁盘字节数(用于初始化累计)。
-// 目录不存在或扫描失败返回 0;临时文件 tmp-* 与非 .blk 文件忽略(同 cas.listBlockDir 口径)。
-func statBlocksDirBytes(blocksDir string) int64 {
+// statBlocksDirBytes 递归扫描 blocksDir 下所有 .blk 文件的实际磁盘字节数与指纹清单
+// (用于初始化累计与 seenFPs 播种;两条口径必须同源,否则重启后已计块会重复累加)。
+// 目录不存在或扫描失败返回 (0, nil);临时文件 tmp-* 与非 .blk 文件忽略(同 cas.listBlockDir 口径)。
+func statBlocksDirBytes(blocksDir string) (int64, []cas.Fingerprint) {
 	var total int64
+	var fps []cas.Fingerprint
 	_ = filepath.WalkDir(blocksDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // 跳过访问错误的条目
@@ -552,9 +554,28 @@ func statBlocksDirBytes(blocksDir string) int64 {
 			return nil
 		}
 		total += info.Size()
+		if fp, ok := fingerprintFromName(name); ok {
+			fps = append(fps, fp)
+		}
 		return nil
 	})
-	return total
+	return total, fps
+}
+
+// fingerprintFromName 从块文件名 <fp hex>.blk 还原指纹;名字不是 32 位 hex 时返回 false
+// (非 cas 块文件,不参与 seenFPs 播种)。
+func fingerprintFromName(name string) (cas.Fingerprint, bool) {
+	hexs := strings.TrimSuffix(name, ".blk")
+	if len(hexs) != 32 { // cas.Fingerprint [16]byte → 32 hex chars
+		return cas.Fingerprint{}, false
+	}
+	b, err := hex.DecodeString(hexs)
+	if err != nil {
+		return cas.Fingerprint{}, false
+	}
+	var fp cas.Fingerprint
+	copy(fp[:], b)
+	return fp, true
 }
 
 // statBlockSize stat 单个块文件的 size。文件不存在或 stat 失败返回 0。
@@ -572,34 +593,46 @@ func (e *Evictor) statBlockSize(fp cas.Fingerprint) int64 {
 	return 0
 }
 
-// OnStoreOpen 处理 Store.Open 前置事件:对首次 Open 的块 stat 文件 size 并累计
+// OnStoreOpen 处理 Store.Open 前置事件:对首次 Open 且已存在的块 stat 文件 size 并累计
 // 到字节维度(D58"只统计 Agent 自己写的块")。同一 fp 重复 Open 幂等(seenFPs 去重);
 // 未启用字节维度(cacheCapacityBytes ≤ 0)时直接 no-op。供装配层合并 observer 调用。
+//
+// Open 前置事件对缺失块同样触发(预取的就绪探测、ETA、回填都先 Open 再看命中与否)。
+// 缺失块 stat 为 0,此时不得占用去重槽:否则随后本进程 Put 同一块会被 OnStorePut 当成
+// "已累计过"跳过,整块字节永远漏记,冷缓存下累计停在播种值、字节维度不再触发淘汰。
 func (e *Evictor) OnStoreOpen(fp cas.Fingerprint) {
 	if e.cacheCapacityBytes <= 0 {
 		return
 	}
+	size := e.statBlockSize(fp)
+	if size <= 0 {
+		return // 块尚不存在:不登记,等 Put 落地时按真实 size 累计
+	}
 	if _, loaded := e.seenFPs.LoadOrStore(fp, true); loaded {
 		return // 已累计过
 	}
-	e.AddBytes(e.statBlockSize(fp))
+	e.AddBytes(size)
 }
 
-// OnStorePut 处理 Store.Put 后置事件:对首次 Put 的块直接累计传入的准确数据字节数
-// 到字节维度(D58"只统计 Agent 自己写的块")。同一 fp 重复 Put 幂等(seenFPs 去重,
+// OnStorePut 处理 Store.Put 后置事件:对首次 Put 的块累计该块占用的磁盘字节数
+// (Put 返回的纯数据长度 + cas.HeaderSize 块头 = 块文件 size)到字节维度
+// (D58"只统计 Agent 自己写的块")。同一 fp 重复 Put 幂等(seenFPs 去重,
 // 与 OnStoreOpen 共享去重表:Put 先于 Open,后续 Open 自动跳过);未启用字节维度时
 // 直接 no-op。供装配层合并 observer 调用。
+//
+// 口径必须与 stat 侧一致:启动预扫与淘汰扣减读的都是文件 size(含 128B 块头),
+// 这里只加数据长度会让累计系统性偏低、清空后残出负值。
 func (e *Evictor) OnStorePut(fp cas.Fingerprint, size int64) {
 	if e.cacheCapacityBytes <= 0 {
 		return
 	}
-	if size <= 0 {
+	if size < 0 {
 		return
 	}
 	if _, loaded := e.seenFPs.LoadOrStore(fp, true); loaded {
 		return // 已累计过(可能先前通过 Open 累计,或同一 fp 重复 Put)
 	}
-	e.AddBytes(size)
+	e.AddBytes(size + cas.HeaderSize)
 }
 
 // AddBytes 增量加字节累计(§14 D58:外部 hook 注册;cas.Open 成功后调用)。

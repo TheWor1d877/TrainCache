@@ -237,18 +237,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		CacheCapacityBytes: cfg.CacheCapacityBytes,
 	})
 
-	// 统一注册 Store.Open 前置观察者(单槽 atomic.Pointer,必须合并两个回调):
-	// selfOpen.Mark(D49 自打开守卫) + evictor.OnStoreOpen(字节维度累计,内部 seenFPs 去重)。
-	// evictor.New 不再自动注册 SetOpenObserver,避免覆盖装配层的合并回调。
-	cs.SetOpenObserver(func(fp cas.Fingerprint) {
-		ag.selfOpen.Mark(fp)
-		ag.Evictor.OnStoreOpen(fp)
-	})
-	// Store.Put 后置观察者:evictor.OnStorePut(字节维度累计,直接用 Put 返回的准确 size,
-	// 与 OnStoreOpen 共享 seenFPs 去重表——Put 先于 Open,后续 Open 自动跳过)。
-	cs.SetPutObserver(func(fp cas.Fingerprint, size int64) {
-		ag.Evictor.OnStorePut(fp, size)
-	})
+	// Store.Open/Put 观察者注册(D49 自打开守卫 + §14 D58 字节维度累计;实现见 wiring.go,
+	// 抽成方法是为了让装配级测试覆盖同一处注册)。
+	ag.installStoreObservers(cs)
 
 	// 发现循环由 agentd 在 signal ctx 下起 goroutine 运行(M2);handler = M2 日志行 + 预取
 	// 接线(M3);订单通道状态由发现循环单写者聚合(D63)。
