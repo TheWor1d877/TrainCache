@@ -49,6 +49,8 @@
 - Agent 新增两个指标族：`traincache_source_mode`（0 直连 / 1 网关）与 `traincache_gateway_fallback_total{reason}`，启动注册的族从 40 增至 42。
 - 发布链增加到五个镜像：`hack/build-images.sh`（manager/webhook/scheduler/agent/gateway）、`controller/deploy/kustomization.yaml`、`hack/render-install.sh`、发版与 e2e 工作流均含 `traincache-gateway`；ConfigMap `traincache-config` 的 `gatewayEndpoint`、`gatewaySecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 四项计入下条 Changed 的 15 项。
 - bench 增加网关开关 `TRAINCACHE_GATEWAY=1`，`summary.csv` 增 `gateway` 列（1/0），汇总把开关不同的行折进 `<格>+gw` 格子；新增 `gateway/e2e/run-k8s.sh` 与 CI 的 `gateway kind e2e` 作业。
+- 新增 `bench/experiments/row_gate.py`：读侧三道过滤。`plot.py`、`summarize.py` 收 `summary.csv` 时逐行按顺序核 ① 点目录的 `version` 戳等于 `docs/4.6 实验版本记录.md` 最后一行的当前版本；② `void` 为假，倾斜两族的行还要 §1.7 三列齐且非空；③ 倾斜两族的行满足 `total_makespan ≥ fetch_bytes_run ÷ 该档实测有效带宽`（表在 `bench/config.py` 的 `TILT_EFF_BW_MB_S`，@100 取 11.95 MB/s）。只筛 `traincache-*` 行，第三条只对倾斜两族成立：其余族的预热与计算重叠，`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速，当上界会误杀。拒因只取第一条命中的，顺序是先版本戳、再 void 与证据列、最后字节地板；出图的把排除明细写 `results/summary/rejected.csv`。2026-11-01 的 9 条倾斜行缺 §1.7 三列也没有版本戳，从此进不了图和表。自检 `bench/experiments/row_gate.py --selftest`（已串进 `make -C bench selftest`）。
+- 新增 `bench/experiments/policy_table.py`：淘汰矩阵（族 `evict-policy`）的出表入口，`docs/4.4 实验协议.md` §5.3 的三档七列此前没有消费者。读 `results/policy/policy-<策略>/<run ID>/summary.csv`、套 `row_gate.py` 的三道过滤，产出 `results/summary/policy.csv` 与 `policy.md`；列顺序按 §5.3 固定，每档带一条 §1.7 判定（淘汰是否触发、热分片有没有被逐、目录峰值对声明容量的比值有没有越过按 `cache_dir_peak_period_s` 回代的上界），判据不过的那档标「只作诊断」；三栏判定只用判据全过的档，不足两档写「样本不足」。§5.3 增「出表」一条；自检 `policy_table.py --selftest`，含 2026-11-02 取证实跑那条 run 的读数，同样串进 `make -C bench selftest`。
 
 ### Changed
 

@@ -23,6 +23,7 @@ BENCH = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(BENCH / "experiments"))
 import config  # noqa: E402
+import row_gate  # noqa: E402
 import stats  # noqa: E402
 
 # (列名, 方向)。low=越低越好, high=越高越好, cost=成本列只报数不判定
@@ -73,7 +74,15 @@ def _nums(rows: list[dict], metric: str) -> list[float]:
     return out
 
 
-def _read_root(root: Path) -> dict[tuple[str, str], list[dict]]:
+def _read_root(root: Path, version: str | None = None,
+               rejected: list[dict] | None = None
+               ) -> dict[tuple[str, str], list[dict]]:
+    """收一份 root 下的 summary.csv。
+
+    `version` 给了就按读侧三道过滤筛 TrainCache 行（row_gate.py：版本戳、
+    §1.7 证据列与 void、倾斜两族的字节地板）；不给时保留旧行为，只按
+    void/顶替行剔除。被排除的行随 `rejected` 带出，让「谁被排除」入账。
+    """
     cells: dict[tuple[str, str], list[dict]] = {}
     for path in sorted(root.rglob("summary.csv")):
         parts = path.relative_to(root).parts
@@ -85,33 +94,49 @@ def _read_root(root: Path) -> dict[tuple[str, str], list[dict]]:
         if not parts or parts[0] not in CELL_ORDER:
             continue
         cell = parts[0]
-        for row in csv.DictReader(open(path)):
-            if (row.get("void") or "False").strip().lower() in ("true", "1"):
-                continue
-            if row.get("baseline_substituted"):
-                continue
-            if row.get("group") not in GROUP_ORDER:
-                continue
-            # D23：gateway=1 的行走 +gw 格子，与无网关的同名格子分开统计
-            if (row.get("gateway") or "").strip().lower() in ("1", "true"):
-                cell_key = f"{cell}+gw"
-            else:
-                cell_key = cell
-            cells.setdefault((cell_key, row["group"]), []).append(row)
+        stamp = row_gate.stamp_of(path.parent) if version else None
+        with open(path) as f:
+            for row in csv.DictReader(f):
+                reason = row_gate.reject_reason(row, stamp, version) if version else ""
+                if reason:
+                    if rejected is not None:
+                        rejected.append({"source": str(path.parent),
+                                         "cond": row.get("cond", ""),
+                                         "group": row.get("group", ""),
+                                         "rate": row.get("rate", ""),
+                                         "total_makespan": row.get("total_makespan", ""),
+                                         "fetch_bytes_run": row.get("fetch_bytes_run", ""),
+                                         "reason": reason})
+                    continue
+                if (row.get("void") or "False").strip().lower() in ("true", "1"):
+                    continue
+                if row.get("baseline_substituted"):
+                    continue
+                if row.get("group") not in GROUP_ORDER:
+                    continue
+                # D23：gateway=1 的行走 +gw 格子，与无网关的同名格子分开统计
+                if (row.get("gateway") or "").strip().lower() in ("1", "true"):
+                    cell_key = f"{cell}+gw"
+                else:
+                    cell_key = cell
+                cells.setdefault((cell_key, row["group"]), []).append(row)
     return cells
 
 
-def read_cells(root: Path, fallback: Path | None = None) -> dict[tuple[str, str], list[dict]]:
+def read_cells(root: Path, fallback: Path | None = None,
+               version: str | None = None,
+               rejected: list[dict] | None = None
+               ) -> dict[tuple[str, str], list[dict]]:
     """返回 {(格子, 组态): [有效行]}；下划线目录（汇总/临时）不取。
 
     `fallback` 只补非 traincache 组：本轮重跑只做 traincache 两组态，
     direct/juicefs/fluid 沿用既有产物（它们不读 TrainCache 快照）。同一
     (格子, 组态) 在 root 已有行时一律用 root，fallback 不覆盖。
     """
-    cells = _read_root(root)
+    cells = _read_root(root, version, rejected)
     if fallback is None or fallback == root or not fallback.is_dir():
         return cells
-    for (cell, group), rows in _read_root(fallback).items():
+    for (cell, group), rows in _read_root(fallback, version, rejected).items():
         if group.startswith("traincache") or (cell, group) in cells:
             continue
         for r in rows:
@@ -387,7 +412,11 @@ def main() -> int:
         return 1
     fallback = None if args.no_fallback else (
         args.fallback or config.BASELINE_RESULTS_DIR)
-    cells = read_cells(root, fallback)
+    version = row_gate.current_version()
+    rejected: list[dict] = []
+    cells = read_cells(root, fallback, version, rejected)
+    if rejected:
+        row_gate.print_rejects(rejected, config.RESULTS_DIR)
     rows = build_table(cells)
     if not rows:
         print(f"[err] {root} 下没有有效行", file=sys.stderr)

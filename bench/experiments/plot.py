@@ -77,6 +77,11 @@ def _data_root() -> Path:
 DATA_ROOT = _data_root()
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
 
+# 读侧三道过滤(4.4 §1.7、§7.4):缺陷期的行既进不了图也不该进表
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from row_gate import (current_version, print_rejects,  # noqa: E402
+                      read_gated, write_reject_log)
+
 # 只有这三个一级目录是七组对照的样本:scores 本轮 TrainCache 行、baselines 既有
 # 对照组行、compare 是旧的单文件产物。其余一级目录(figures/policy/quick/
 # track_d/summary)装的是曲面点、倾斜双 Job 与自检产物,不是对照样本。
@@ -695,6 +700,8 @@ def main():
                         else [RESULTS_DIR / "experiments"])
 
     # 五组对照
+    version = current_version()
+    all_rejected = []
     compare_rows = []
     for path in summary_paths:
         if not path.is_file():
@@ -708,9 +715,12 @@ def main():
             print(f"[compare] 跳过非对照分区 {path.parent}")
             continue
         print(f"[compare] 读取 {path}")
-        rows = read_summary(path)
+        rows, rejected = read_gated(path, version)
+        print_rejects(rejected, RESULTS_DIR)
+        all_rejected.extend(rejected)
         mapped = adapt_summary_rows(rows)
-        print(f"  共 {len(rows)} 条,有效 {len(mapped)} 条")
+        print(f"  共 {len(rows) + len(rejected)} 条,有效 {len(mapped)} 条,"
+              f"排除 {len(rejected)} 条")
         compare_rows.extend(mapped)
     if compare_rows:
         plot_compare_all(compare_rows, args.out_dir)
@@ -731,7 +741,10 @@ def main():
         if str(path) in seen_sources:
             continue
         seen_sources.add(str(path))
-        metrics.extend(adapt_summary_rows(read_summary(path)))
+        rows, rejected = read_gated(path, version)
+        print_rejects(rejected, RESULTS_DIR)
+        all_rejected.extend(rejected)
+        metrics.extend(adapt_summary_rows(rows))
     for directory in metrics_dirs:
         for row in read_metrics_dir(directory):
             source = row.get("_source")
@@ -755,6 +768,10 @@ def main():
     plot_pareto2(metrics, args.out_dir)
 
     print(f"\n[done] 图片输出到 {args.out_dir}")
+    if all_rejected:
+        reject_csv = RESULTS_DIR / "summary" / "rejected.csv"
+        write_reject_log(reject_csv, all_rejected)
+        print(f"[reject] 合计排除 {len(all_rejected)} 条,明细见 {reject_csv}")
 
 
 if __name__ == "__main__":

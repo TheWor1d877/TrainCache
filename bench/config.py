@@ -4,6 +4,7 @@
 bash 侧取值:python3 config.py --sh <KEY>
 """
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -131,6 +132,35 @@ def burst_for_rate(rate_mbit: int) -> str:
     3750k 回读成 3839962b)。
     """
     return f"{round(rate_mbit * 125 * 0.1)}k"
+
+
+# ---- 倾斜两族的字节地板(4.4 §7.4;读侧过滤 row_gate.py 的除数)----
+# 倾斜两族的 COND 前缀。两族统一 @100 mbit(D31),回源是串行阻塞,所以
+# 「跑完 time ÷ 有效带宽」才是这一族成立的物理下界;其余族的预热与计算
+# 重叠,同一比值普遍高于线速,不套这道地板。
+TILT_COND_PREFIXES = ("policy-", "pareto2-")
+# 每档实测有效带宽(MB/s)。@100 = 2026-11-02 集群内只读探针,同一对象四种
+# 取法同值;@300 = §7.4 的 35.6(95% 线速)。表里没有的档位给不出地板,
+# 读侧跳过第三条而不是猜一个值。
+TILT_EFF_BW_MB_S = {100: 11.95, 300: 35.6}
+
+
+def rate_mbit(value) -> int | None:
+    """'100mbit' / 100 / '100' → 100;解析不出给 None。"""
+    m = re.search(r"(\d+)", str(value or ""))
+    return int(m.group(1)) if m else None
+
+
+def tilt_floor_seconds(row: dict) -> float | None:
+    """该行回源字节走完整整形链路所需的最短秒数;取不到给 None。"""
+    if not str(row.get("cond", "")).startswith(TILT_COND_PREFIXES):
+        return None
+    bw = TILT_EFF_BW_MB_S.get(rate_mbit(row.get("rate")))
+    try:
+        fetch = float(row.get("fetch_bytes_run") or "")
+    except ValueError:
+        return None
+    return fetch / (bw * 1e6) if bw and fetch > 0 else None
 
 
 # ---- 冷态规程与验证 ----
