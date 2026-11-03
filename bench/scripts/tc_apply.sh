@@ -20,11 +20,20 @@
 #           TRACK_D_TC_DELAY;latency 固定 50ms(与既有挂点一致)
 #           —— 无参调用行为与改造前一致(make tc-up / cold_reset.sh 依赖此路径)。
 #
-# burst(D31):burst 与 rate 联动,取"≈0.1 秒的传输量"(config.burst_for_rate):
+# burst(D31):burst 与 rate 联动,取"约 0.1 秒的传输量"(config.burst_for_rate):
 #   100mbit→1250k、300mbit→3750k、1000mbit→12500k。
 #   显式给 burst 时以显式值为准(旧调用形态 tc_apply.sh 300mbit 10ms 1600k 不变);
 #   不给 burst 时按 rate 推导;rate 解析不出 mbit 时退回 config.TC_BURST 并告警。
-#   固定 1600k 跨档复用会让突发窗口从 128ms(100mbit)缩到 13ms(1000mbit),禁止。
+#   固定 1600k 跨档复用会让突发窗口从 131ms(100mbit)缩到 13ms(1000mbit),禁止。
+#
+# burst 的两个单位坑(2026-11-03 在一次性容器内实测,iproute2-6.1.0):
+#   · tc 把 k 解析成 1024:1250k 是 1 280 000 字节,对 @100 的 tbf 速率 12.5 MB/s
+#     是 102 ms 突发窗口(按 1000 算会读成 100 ms);3750k 是 3 840 000 字节。
+#   · 命令行上的 latency 50ms 不覆盖 burst:同一 qdisc 把 latency 换成 5ms/50ms/
+#     500ms,回读的 burst 恒为 1250Kb;latency 只定队列长度上限。
+#   回读形态有两种:`tc qdisc show` 打印 burst 1250Kb( KiB)或 burst 3839962b(字节,
+#   iproute2 按 32 位字取整会掉几十字节零头)。make bench-doctor 折算成字节后与本档
+#   期望值比,容 ±1%。
 #
 # 幂等:先 del 再 add。Pod/容器重建后 netns 换新,qdisc 随之消失,需重挂。
 # source-d 挂点需要 root:root 直跑 → sudo -n → sudo -S(bench/.sudo-pass,600);
@@ -139,9 +148,9 @@ usage() {
                  [--dry-run] [--self-test]
   <rate>    限速值(如 100mbit / 300mbit);缺省:minio=TC_RATE,source-d=TRACK_D_TC_RATE
   <delay>   延迟值(如 20ms / 10ms);缺省:minio=TC_DELAY,source-d=TRACK_D_TC_DELAY
-  [burst]   tbf 突发桶;缺省按 rate 推导(config.burst_for_rate,≈0.1 秒传输量:
-            100mbit→1250k、300mbit→3750k、1000mbit→12500k);显式给值以显式为准;
-            rate 解析不出 mbit 时退回 TC_BURST 并告警
+  [burst]   tbf 突发桶;缺省按 rate 推导(config.burst_for_rate,约 0.1 秒传输量:
+            100mbit→1250k、300mbit→3750k、1000mbit→12500k;k 按 1024 解析);
+            显式给值以显式为准;rate 解析不出 mbit 时退回 TC_BURST 并告警
   --target minio     默认;kind 内 MinIO Pod 的 eth0 egress(既有行为,不变)
   --target source-d  v4 D 轨:本地源站容器 TRACK_D_SOURCE_CONTAINER 的 eth0 egress
   --dry-run          只打印将执行的命令,不实际执行

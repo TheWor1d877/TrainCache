@@ -89,8 +89,9 @@ TRACK_D_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
 
 # ---- tc 限速档位(扫点实验的自变量)----
 TC_RATE = "100mbit"
-TC_BURST = "1600k"          # 旧固定值;跨带宽档复用会让突发窗口从 128ms 缩到 13ms(D31)
-TC_LATENCY = "50ms"
+TC_BURST = "1600k"          # 旧固定值。tc 把 k 解析成 1024:1 638 400 字节,对 @100 的
+                            # tbf 速率 12.5 MB/s 是 131 ms 突发窗口,对 @1000 只剩 13 ms
+TC_LATENCY = "50ms"         # tbf 的 latency 决定队列长度,不覆盖 burst(容器内实测)
 TC_DELAY = "20ms"
 
 # ---- 带宽档口径(D31:带宽是实验自变量)----
@@ -114,9 +115,20 @@ def bw_over_r(tier: str, rate_mbit: int) -> float:
 
 
 def burst_for_rate(rate_mbit: int) -> str:
-    """burst ≈ 0.1 秒的传输量:rate_mbit × 125 KB/s × 0.1 s。
+    """burst 取「0.1 秒的传输量」:rate_mbit × 125 KB/s × 0.1 s,带 k 后缀交给 tc。
 
     100mbit → 1250k、300mbit → 3750k、1000mbit → 12500k。
+
+    两处按十进制算会读错的地方:
+    · tc 把 k 解析成 1024 不是 1000:1250k 挂上后是 1 280 000 字节,
+      `tc qdisc show` 回读打印成 burst 1250Kb(KiB,不是 kilobit);对 @100 的
+      tbf 速率 12.5 MB/s 突发窗口是 102 ms,对实测有效带宽 11.95 MB/s 是 107 ms。
+    · 命令行同时给的 `latency 50ms` 不覆盖这个桶:同一容器内实测 latency 取
+      5ms / 50ms / 500ms,回读的 burst 恒为命令行给的 1250Kb;latency 只定队列
+      长度上限。
+    `make bench-doctor` 把这两条钉住:从节点 netns 回读的 burst 折算成字节后
+    必须等于本函数的返回值(±1%,容纳 iproute2 按 32 位字取整的零头,实测
+    3750k 回读成 3839962b)。
     """
     return f"{round(rate_mbit * 125 * 0.1)}k"
 
