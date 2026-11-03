@@ -8,7 +8,8 @@
 并配 §1.10 末条的「预注册假设 vs 实测 vs 判定」三栏。
 
 每档另给一条 §1.7 的判定:淘汰是否生效、热分片有没有被逐、目录峰值有没有
-压在声明容量之上。判据不过的那一档只作诊断,不进结论。
+压在声明容量之上。判据一、判据二不过的那一档只作诊断,不进结论;判据三按
+§1.7 原文不作废轮次,越界的档仍在结论里、判定栏带越界旁注。
 
 用法:
   .venv/bin/python bench/experiments/policy_table.py
@@ -63,7 +64,7 @@ def peak_bound(row: dict) -> float:
 
 
 def evidence_verdict(row: dict) -> str:
-    """§1.7 三条判据的逐档判定;通过给「进结论」。"""
+    """§1.7 三条判据的逐档判定;通过给「进结论」,判据三越界的带诊断旁注。"""
     evicted = _f(row.get("evict_blocks_run"))
     hot = _f(row.get("b_evictions_of_hot"))
     peak = _f(row.get("cache_dir_peak_bytes"))
@@ -77,8 +78,14 @@ def evidence_verdict(row: dict) -> str:
     ratio = peak / cap
     bound = peak_bound(row)
     if ratio > bound:
-        return f"只作诊断:目录峰值 {ratio:.3f} > 上界 {bound:.3f}(判据三)"
+        return (f"进结论(诊断:目录峰值 {ratio:.3f} > 上界 {bound:.3f},"
+                "判据三只作诊断)")
     return "进结论"
+
+
+def in_conclusion(row: dict) -> bool:
+    """判据三越界的档仍进结论,所以按前缀判,不写全等。"""
+    return str(row.get("verdict", "")).startswith("进结论")
 
 
 def read_policy_runs(root: Path, version: str | None,
@@ -129,7 +136,7 @@ def hypothesis_table(table: list[dict], threshold: float = 0.05) -> list[dict]:
     for metric in ("hit_rate", "total_makespan", "stall_ratio",
                    "b_evictions_of_hot", "evict_blocks_run"):
         conds = [r for r in table if r.get(metric) is not None
-                 and r.get("verdict") == "进结论"]
+                 and in_conclusion(r)]
         if len(conds) < 2:
             out.append({"metric": metric, "premise": premise,
                         "observed": "进结论的档不足两个",
@@ -220,7 +227,7 @@ def main() -> int:
         row_gate.write_reject_log(config.RESULTS_DIR / "summary" / "rejected.csv",
                                   rejected)
     print(f"[out] {out_dir}/policy.csv、policy.md"
-          f"（{sum(1 for r in table if r['verdict'] == '进结论')}/3 档进结论）")
+          f"（{sum(1 for r in table if in_conclusion(r))}/3 档进结论）")
     return 0
 
 
