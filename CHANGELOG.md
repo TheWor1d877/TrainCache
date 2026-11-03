@@ -61,6 +61,8 @@
 - `bench/experiments/plot.py` 自动扫描时按一级分区挑七组对照样本（只收 `scores/`、`baselines/`、旧 `compare/`），不再按点目录名前缀排除。前缀黑名单挡不住淘汰矩阵的 run 目录名（`policy-heat-r01-*`），会把 C 轨倾斜样本混进七组柱状图。
 - 实验文档并入 4.x 系列，网关文档降为 9.x：`docs/9.2 实验协议.md`→`docs/4.4 实验协议.md`、`docs/9.1 decisions.md`→`docs/4.5 实验口径决策.md`、`docs/4.4 实验版本记录.md`→`docs/4.6 实验版本记录.md`，`docs/10.0`~`docs/10.3`→`docs/9.0`~`docs/9.3`。`bench/exp.py` 按路径读版本记录，引用这批路径的脚本注释、部署清单与 README 索引同步改完，`hack/verify-doc-refs.sh` 返回 0。
 - `docs/4.5 实验口径决策.md` 的 D13、D18、D28 三行按 `docs/4.4 实验协议.md` 的现行采样口径改写：D18 的每点次数改为 `pareto-startup` 7 次、`pareto-sustained` 2 次、三个曲面族与淘汰矩阵 1 次；D28 的 lookahead 扫点从「3 档 × 3 策略 = 9 点」改为 3 + 3 点；D13 的理由列改按预注册纪律表述。
+- `docs/4.4 实验协议.md` §1.7 的淘汰证据从两条判据增到三条。新增一条管目录峰值：`cache_dir_peak_bytes ÷ cache_bytes ≤ 1.15`，分母是 COND 声明容量，1.15 按淘汰节拍 30 s（`agent/evictor/evictor.go` 的 `defaultInterval`）乘 @100 mbit 实测有效带宽 12 MB/s、再对 2 576 980 377 算出。「拿 `capacity_bytes_final` 当分母、阈值 1.05」的旧写法作废——那是 Agent 训练结束时的在用字节末值，不是声明上限，1.05 等于要求淘汰节拍 ≤10 s。§7.4 的倾斜两族时长账按 2026-11-02 实测重写：@100 mbit 有效带宽 11.95 MB/s、单 run ≈ 37 min、9 run ≈ 5.5 h；旧的 30–33 min 与 4.6–6.0 h 作废。
+- `bench/compare/run_bench.py` 测量体等补块的轮询从 0.5 s 降到 25 ms。块落盘是临时文件 + `os.Rename`（`core/cas/store.go`），`exists` 即完整可读，所以可以加密；0.5 s 的粒度让下一块的 `read_miss` 必须等检测与读完才发出，倾斜 run 单块墙钟从抓取的 0.82 s 被抬到 1.79 s，抓取槽只占用 35%。实测单块降到 0.70 s、槽占用 94%，单 run 从 92 min 到 37 min。命中率与分阶段字节账口径不变。
 
 ### Removed
 

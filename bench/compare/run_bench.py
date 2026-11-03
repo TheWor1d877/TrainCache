@@ -327,7 +327,8 @@ AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
 AGENTD_CLEAN_TIMEOUT_S = 60  # 等 degraded=0 且 fetch 计数停增
 
 POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
-# 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、逐块 0.5s 轮询与 A/B 抢带宽。
+# 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
+# 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
 
 
@@ -1238,10 +1239,12 @@ def read_shard(shard, phase):
             with counter_lock:
                 demand_miss_phase[phase] = demand_miss_phase.get(phase, 0) + size
             _hook_read_miss(name, chunk_idx)
-            waited = 0.0
-            while not os.path.exists(blk) and waited < 180:
-                time.sleep(0.5)
-                waited += 0.5
+            # 块落盘是临时文件 + rename(core/cas/store.go 的 CreateTemp/os.Rename),
+            # exists 即完整可读,所以轮询可以直接加密:0.5 s 每块平均多等 0.25 s,
+            # 3000 块就是 12 分钟;改成 25 ms 纯 stat,等待量级降到秒。
+            deadline = time.perf_counter() + 180
+            while not os.path.exists(blk) and time.perf_counter() < deadline:
+                time.sleep(0.025)
             if os.path.exists(blk):
                 nbytes += read_file_bytes(blk)
                 n_hits += 1
