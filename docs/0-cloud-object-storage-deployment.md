@@ -1,16 +1,6 @@
 # TrainCache 云对象存储部署指南
 
-## 0. 换什么：数据源后端从本地 MinIO 换成云对象存储
-
-开发阶段的数据源是 kind 集群里的 MinIO。它免费、启动快、完全可控，适合跑 bench 扫点。
-
-真实训练数据在云上：腾讯云 COS、阿里云 OSS、AWS S3。没人会先迁到自建 MinIO 再训练。
-
-所以切到真实测试时，要换的就是这个数据源后端。
-
-core 层只认 `objectstore.Store` 接口，不绑定后端。MinIO 和云厂商的差异由接口与 minio-go SDK 吸收。换后端只改环境变量，代码零侵入。
-
-## 0.1 前置知识：minio-go SDK 是什么
+## 前置：minio-go SDK 是什么
 
 `core/objectstore/s3.go` 引入了 `github.com/minio/minio-go/v7`。名字里带 minio，容易被理解成项目跟 MinIO 绑定。实际不会。它只是一个 Go 语言的 S3 客户端库。
 

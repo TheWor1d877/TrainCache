@@ -1,7 +1,4 @@
 # CLI 接口
-
-`traincache` 是纯 gRPC 客户端：缓存索引、块下载、落盘全在 Agent 侧，CLI 只发请求、打印响应。源码 `agent/cmd/traincache/main.go`。
-
 ## 1. 定位与连接模型
 
 - 四条子命令：`prefetch`、`node status`、`status`、`ls`，没有本地操作模式。

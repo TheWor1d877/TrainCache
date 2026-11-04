@@ -1,10 +1,4 @@
-# P1 对手现勘报告(Fluid / JuiceFS 机制现勘)
-
-- 日期:2026-10-09(2026-10-13 补做阶段感知实验,并轻修恢复装置后重装,见 §1.1)
-- 环境:kind 集群 `traincache`(3 节点,k8s **v1.37.0**,containerd 2.3.4;节点镜像 kindest/node:v1.37.0,宿主机上现仅剩 dangling 状态,见 §6)
-- 全部证据归档:`../survey/evidence`(本报告每条判断均标注对应证据文件)
-- 版本:**开源 Fluid 1.1.0-alpha.9**(镜像 1.1.0-36f0467,helm chart fluid-1.1.0-alpha.9)、**JuiceFS CE 1.3.0**(客户端 1.3.0+2025-07-03.30190ca1)、JuiceFS CSI v0.32.0(本地镜像)、MinIO latest、redis 7-alpine
-
+# P1 现勘报告(Fluid / JuiceFS 机制现勘)
 ## 0. 摘要与闸门判定
 
 这次现勘一共验证了三个问题,结论如下:
@@ -211,21 +205,3 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 **闸门判定:缺口被证据确认 → 核心1 按"闭环"叙事推进,不带假设开工。**
 
 §2.6 的"无阶段感知"判定,是缝①在运行期语义上的延伸:对手既没有"Job→预热→调度"的闭环,也没有"读序/阶段切换→预取"的闭环。
-
-## 6. 遗留事项
-
-1. **未回收装置残留**(2026-10-13 新增,待用户决定):实验后 fuse pod `jfsdemo-fuse-2467z`(节点 traincache-worker)与节点标签 `fluid.io/f-default-jfsdemo=true` 仍未回收——fuse Pod 的清理策略是 OnRuntimeDeleted(NodeUnstageVolume 记录),不删 Runtime 就不会回收;如果需要手动摘标签:`kubectl label node traincache-worker fluid.io/f-default-jfsdemo-`。证据:`evidence/jfsruntime-describe.yaml`、`evidence/fluid-runtime-log-3epoch.txt`。
-2. **kindest/node 镜像仅剩 dangling**(2026-10-13 新增):宿主机上 kindest/node:v1.37.0 的 RepoTags 已经丢了(只剩 image ID `sha256:24f646398ba8...`);以后要重建集群,必须先 `docker tag` 把镜像 tag 恢复回来,否则 kind 会尝试联网拉取(而 docker hub 不可达)。证据:`evidence/kind-repair-log.txt`。
-3. **3.9G 污染数据已消解**(2026-10-13,原遗留事项 1 关闭):redis 元数据重建 + 裸对象重传(16 分片/1.97GiB)之后,垃圾镜像目录没有再出现;原先"删除 `traincache-demo/` 垃圾目录"那条命令不再需要执行——阶段感知实验(§2.6)就是在干净数据上做的。证据:`evidence/kind-repair-log.txt`。
-4. **Fluid 仍是 alpha 版**(原遗留事项 2 延续):1.1.0-alpha.9(稳定线 1.0.8);2026-10-13 重装后还是这个版本(镜像 tag 1.1.0-36f0467)。本报告里所有开源 Fluid 结论都标注了 alpha 状态;如果要出正式结论,建议用 1.0.8 再测一遍(需要另拉 5 个镜像)。
-5. **ACK 侧证据都是文档级**(沿用原遗留事项 3):没有在真实 ACK 集群里验证过(也无法访问);§4 边界表(含新增的"阶段感知"行)里 ACK 的判断都标注了来源为官方文档。
-6. **JuiceFS CSI 独立对照组没有执行**(沿用原遗留事项 4):需要 5 个新镜像(mount ce-v1.4.0 + sig-storage sidecar×4);裸挂载对照组(§3)已经覆盖了"独立 JuiceFS 基线"这个目标。
-
-## 参考来源
-
-- [Fluid 官方文档](https://fluid-cloudnative.github.io/docs/core-concepts/architecture-and-concepts)
-- [在 Fluid 中使用 JuiceFS(JuiceFS 文档)](https://juicefs.com/docs/zh/cloud/kubernetes/fluid/)
-- [ack-fluid 组件介绍与发布记录(阿里云)](https://www.alibabacloud.com/help/en/ack/cloud-native-ai-suite/product-overview/ack-fluid)
-- [JuiceFS IORPC 协议](https://juicefs.com/docs/cloud/guide/iorpc/)、[分布式缓存 RDMA 加速](https://www.juicefs.io/docs/zh/cloud/guide/distributed-cache-rdma/)
-- [JuiceFS 云服务(企业版特性)](https://beta.juicefs.com/zh-cn/product/cloud-service)
-- [JuiceFS CSI 安装文档](https://juicefs.com/docs/zh/csi/getting_started/)
