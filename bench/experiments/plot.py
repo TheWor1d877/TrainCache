@@ -110,9 +110,18 @@ def _bolden(fig):
         fig._suptitle.set_fontweight("bold")
 
 
+VERSION = "unknown"
+
+
+def _with_version(path: Path) -> Path:
+    """产物名带版本号:同一文件名在不同版本下不再互相覆盖。"""
+    return path.with_name(f"{path.stem}_{VERSION}{path.suffix}")
+
+
 def _save(fig, path: Path):
     """统一落盘:白底、200 dpi、裁掉空白边。"""
     _bolden(fig)
+    path = _with_version(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=SAVE_DPI, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
@@ -121,6 +130,7 @@ def _save(fig, path: Path):
 
 def _write_csv(path: Path, header: list[str], rows: list[list]):
     """把图上用到的聚合值写到 figures/data/,图与数可逐格核对。"""
+    path = _with_version(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -753,8 +763,9 @@ def plot_fig3(metrics: list[dict], out_dir: Path):
                 "recovered": n_rec, "censored": n_cen,
                 "censored_ratio": round(n_cen / (n_rec + n_cen), 4) if (n_rec + n_cen) else None,
             }
-    (out_dir / "fig3_censoring.json").write_text(
-        json.dumps(rates, ensure_ascii=False, indent=2))
+    censoring_path = _with_version(out_dir / "fig3_censoring.json")
+    censoring_path.write_text(json.dumps(rates, ensure_ascii=False, indent=2))
+    print(f"  saved {censoring_path.name}")
 
     sample = [v for vals in grid.values() for v in vals]
     if not sample:
@@ -1022,7 +1033,9 @@ def main():
                         else [RESULTS_DIR / "experiments"])
 
     # 五组对照
+    global VERSION
     version = current_version()
+    VERSION = version or "unknown"
     all_rejected = []
     compare_rows = []
     for path in summary_paths:
