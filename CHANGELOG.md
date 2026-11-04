@@ -19,6 +19,24 @@
 
 # Changelog正文
 
+## 未发布
+
+### Added
+
+- README 拆成英文默认版 `README.md` 与中文版 `README.zh-CN.md`，顶部放语言切换；两版分别引用 `.en` 与 `.zh` 图，并注明 `docs/` 内容为中文。
+- `bench/experiments/plot.py` 一次运行输出中英两套图：8 种图 × 2 种语言，`_save` 追加 `.zh`/`.en` 后缀，图面文案集中到 `EN` 表；CSV 仍只写一次，不带语言后缀。
+- 架构图拆成 `docs/assets/figures/architecture_v0.4.1.en.svg` 与 `architecture_v0.4.1.zh.svg`。
+
+### Changed
+
+- `docs/` 下 35 个文档改为「数字前缀 + 英文短名」，正文保持中文；README、CHANGELOG、CLAUDE、docs 内部互链与 `bench/exp.py` 的版本记录路径同步更新。
+- `docs/assets/logo/` 换成不带版本后缀的图标、字标、单色与深色标记，README 顶部改用 `traincache-lockup.svg`。
+- `hack/verify-doc-refs.sh` 的检查列表加入 `README.zh-CN.md`。
+
+### Fixed
+
+- `fig1_startup_surface` 三面各标一次横轴标题，英文文案互相压住；改为只在中间面标一条共享标题，中文图同步生效。
+
 ## [v0.4.1] - 2026-11-02
 
 ### Added
@@ -29,7 +47,7 @@
 ### Changed
 
 - COND 契约升到 v3：只保留会变的量（数据规模、轨迹、epoch、读端形态、带宽、缓存比例与策略、采样次数、网关开关）。固定值集中在 `bench/experiments/cond.py` 的 `DEFAULTS`，派生值（数据量、缓存字节、burst、时延）由代码计算；`lock.json` 新增 `effective` 快照记录实际生效值。118 个 COND 从 11,496 行降到 6,578 行。
-- `docs/4.4-experiment-protocol.md` 从 757 行压到 591 行：删掉与 4.1/4.2/4.3 重复的七组态表、只作诊断的 `t_origin_first_byte` 行、逐族机时算式与 C4 消费方大表；§5.4 新增网关合并一族的口径与判据。
+- `docs/4.4-experiment-protocol.md` 删掉与 4.1/4.2/4.3 重复的七组态表、只作诊断的 `t_origin_first_byte` 行与 C4 消费方大表，746 行压到 672 行；§5.4 新增网关合并一族的口径与判据；§7 保留 2026-11-02 取证后的机时账（25 ms 轮询、倾斜两族单 run ≈ 37 min、9 run ≈ 5.5 h），并在 §7.4 补 `gateway-merge` 的 12 点 × 3 reps = 36 run 分项。
 - `bench/Makefile` 的 python 解释器加回退：项目根 `.venv` 不存在时计划类目标改用系统 `python3`，不再在解析阶段报错。
 
 ### Removed
