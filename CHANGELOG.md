@@ -33,6 +33,7 @@
 - `docs/` 下 35 个文档改为「数字前缀 + 英文短名」，正文保持中文；README、CHANGELOG、CLAUDE、docs 内部互链与 `bench/exp.py` 的版本记录路径同步更新。首轮同步只覆盖到 Markdown 与 `bench/exp.py`，源码注释与 `controller/deploy/observability/prometheus/rules-configmap.yaml` 的 `runbook_url` 仍写旧中文文件名，`hack/verify-doc-refs.sh` 只看 `](target)` 形式的链接、查不到这批；本轮补齐 41 个文件 53 处，其中 `runbook_url` 5 条（按旧名 `docs/8.1%20design.md` 找不到文件，告警里的排障链接是死链）。旧名只保留在 CHANGELOG 的历史条目和 `docs/4.5-metric-decisions.md` 导言那条「原 `docs/9.0 核心能力验收与测试.md` 已并入它」里。
 - `docs/assets/logo/` 换成不带版本后缀的图标、字标、单色与深色标记，README 顶部改用 `traincache-lockup.svg`。
 - `hack/verify-doc-refs.sh` 的检查列表加入 `README.zh-CN.md`。
+- README.md 与 README.zh-CN.md 的 Figure 6 架构图更新为中英双版本（`docs/assets/figures/architecture_v0.4.1.zh.svg` 与 `.en.svg`），`architecture_v0.4.1.svg` 保留为中文版。图内文字表述与 README 正文未变，图片链接不变。
 
 ### Fixed
 
