@@ -33,6 +33,7 @@
 ## 镜像拉取
 docker 拉取加速用 `/etc/docker/daemon.json` 的 `registry-mirrors`；镜像站域名不写进 Dockerfile、清单、脚本或文档。
 k8s/containerd 不读 daemon.json。镜像拉不到时先在宿主机 `docker pull`，再 `kind load`，不要给清单里的镜像名加域名前缀。
+送镜像进集群用 `./hack/kind-load.sh <cluster> <image>`，不要用 `kind load docker-image`：Docker 29 全新安装默认启用 containerd 镜像库，`docker save` 会带上本机没有 blob 的其他平台引用，节点侧 `ctr images import --all-platforms` 随即报 content digest not found（升级安装的 overlay2 后端撞不到，所以开发机上看不出来）。
 拉取问题长时间无法解决就保留进度并中断，交给用户处理。
 
 ## 版本、镜像与发布物

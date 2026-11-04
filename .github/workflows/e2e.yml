@@ -56,10 +56,9 @@ jobs:
       - name: build and load gateway image
         run: |
           docker build -f gateway/Dockerfile -t traincache-gateway:dev .
-          # kind load 只从本机镜像库取镜像；runner 默认没有 busybox。
-          docker pull busybox:latest
-          kind load docker-image traincache-gateway:dev --name gw-e2e
-          kind load docker-image busybox:latest --name gw-e2e
+          # kind 只从本机镜像库取镜像；runner 默认没有 busybox。
+          docker pull busybox:1.36.1
+          ./hack/kind-load.sh gw-e2e traincache-gateway:dev busybox:1.36.1
       - name: prepare namespace, configmap, secret
         run: |
           kubectl apply -f controller/e2e/manifests/minio.yaml
@@ -82,6 +81,7 @@ jobs:
         env:
           TRAINCACHE_DATA_ROOT: ${{ github.workspace }}/.traincachedata
           E2E_KEY: 'e2e-ds/blocks/part-0000#0'
+          TC_PROBE_IMAGE: busybox:1.36.1
         run: bash gateway/e2e/run-k8s.sh
       - name: upload results
         if: always()

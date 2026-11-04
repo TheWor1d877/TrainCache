@@ -209,9 +209,14 @@ build_image() {
 
 load_image() {
   local image="$1"
-  kind load docker-image --name "$CLUSTER" "$image" >/dev/null 2>&1 \
-    && ok "loaded $(basename "$image")" \
-    || { fail "kind load $image"; return 1; }
+  local log="$LOGS/kind-load.log"
+  if "$REPO_ROOT/hack/kind-load.sh" "$CLUSTER" "$image" >"$log" 2>&1; then
+    ok "loaded $(basename "$image")"
+  else
+    fail "kind load $image"
+    tail -20 "$log"
+    return 1
+  fi
 }
 
 build_images() {

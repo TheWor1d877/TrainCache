@@ -40,7 +40,7 @@ docker build -f agent/Dockerfile \
 - 仓库内清单写 `:dev`，用 `kustomize build controller/deploy` 渲染。
 - 发布清单由 kustomize `images:` 把五个镜像改成 `@sha256:<digest>`，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
-- kind 环境用 `kind load docker-image` 导入同名镜像，清单的 `imagePullPolicy` 是 `IfNotPresent`。
+- kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。
 
 ## 3. 发布
 
