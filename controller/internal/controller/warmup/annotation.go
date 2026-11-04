@@ -26,7 +26,7 @@ func ScoreAnnotationKey(configured string) string {
 
 // EncodePodScores encodes the node→score snapshot for one Pod. The value is
 // written in the same patch that removes the Pod's scheduling gate
-// (docs/7.1 design.md §6.2).
+// (docs/7.1-design.md §6.2).
 func EncodePodScores(task TaskRef, nodeScores map[string]int32, now time.Time) (string, error) {
 	if task.Namespace == "" || task.Name == "" {
 		return "", fmt.Errorf("warmup: score annotation: empty task namespace or name")

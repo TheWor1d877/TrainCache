@@ -1,5 +1,5 @@
 // Package agentclient resolves per-Node Agent addresses and exposes the gRPC
-// client pool used by the WarmupTask controller (docs/7.1 design.md §5.9).
+// client pool used by the WarmupTask controller (docs/7.1-design.md §5.9).
 package agentclient
 
 import (

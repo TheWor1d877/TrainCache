@@ -5,7 +5,7 @@
 带宽、缓存比例与策略、采样次数、网关开关。其余一律取本文件的默认值，实际生效
 值由每次 run 的 `lock.json` 记录。
 
-字段全集与校验规则见 `docs/4.4 实验协议.md` 附录 C；runner 遇到未知字段直接拒绝。
+字段全集与校验规则见 `docs/4.4-experiment-protocol.md` 附录 C；runner 遇到未知字段直接拒绝。
 """
 import hashlib
 import json

@@ -26,16 +26,17 @@
 - README 拆成英文默认版 `README.md` 与中文版 `README.zh-CN.md`，顶部放语言切换；两版分别引用 `.en` 与 `.zh` 图，并注明 `docs/` 内容为中文。
 - `bench/experiments/plot.py` 一次运行输出中英两套图：8 种图 × 2 种语言，`_save` 追加 `.zh`/`.en` 后缀，图面文案集中到 `EN` 表；CSV 仍只写一次，不带语言后缀。
 - 架构图拆成 `docs/assets/figures/architecture_v0.4.1.en.svg` 与 `architecture_v0.4.1.zh.svg`。
+- `docs/10.0-checkpoint-asynchronous-sidecar.md`：checkpoint 异步 sidecar 设计（checkpointd 按 Pod 搬整份目录，不进读缓存路径、不经合并回源网关），标注设计态、尚未落地。
 
 ### Changed
 
-- `docs/` 下 35 个文档改为「数字前缀 + 英文短名」，正文保持中文；README、CHANGELOG、CLAUDE、docs 内部互链与 `bench/exp.py` 的版本记录路径同步更新。
-- 改名的引用同步只覆盖到 Markdown 与 `bench/exp.py`：源码注释与 `controller/deploy/observability/prometheus/rules-configmap.yaml` 的 `runbook_url` 仍写旧中文文件名，现共 42 个文件 52 处，`hack/verify-doc-refs.sh` 只看 `](target)` 形式的链接、查不到这批，按旧名找不到文件。
+- `docs/` 下 35 个文档改为「数字前缀 + 英文短名」，正文保持中文；README、CHANGELOG、CLAUDE、docs 内部互链与 `bench/exp.py` 的版本记录路径同步更新。首轮同步只覆盖到 Markdown 与 `bench/exp.py`，源码注释与 `controller/deploy/observability/prometheus/rules-configmap.yaml` 的 `runbook_url` 仍写旧中文文件名，`hack/verify-doc-refs.sh` 只看 `](target)` 形式的链接、查不到这批；本轮补齐 41 个文件 53 处，其中 `runbook_url` 5 条（按旧名 `docs/8.1%20design.md` 找不到文件，告警里的排障链接是死链）。旧名只保留在 CHANGELOG 的历史条目和 `docs/4.5-metric-decisions.md` 导言那条「原 `docs/9.0 核心能力验收与测试.md` 已并入它」里。
 - `docs/assets/logo/` 换成不带版本后缀的图标、字标、单色与深色标记，README 顶部改用 `traincache-lockup.svg`。
 - `hack/verify-doc-refs.sh` 的检查列表加入 `README.zh-CN.md`。
 
 ### Fixed
 
+- `docs/4.3-startup-and-experiments.md` 与 `docs/4.4-experiment-protocol.md` 的实验族数写成「七族」，`bench/exp.py run all` 实跑八族（`gateway-merge` 是第八族，12 点 × 3 reps）：族数改成八族，4.3 第 5 节补上 `gateway-merge` 一行（3 读法 × 2 带宽 × 开关、产物 `gateway/gw-*/`），4.4 §7 机时账补该族 36 run 的账；dev 与 release 两侧都写七族，不是合并造成的。
 - `hack/verify-release-metadata.sh` 判「未发布小节必须排在所有版本标题之前」时取的是文件里第一个 `## ` 标题，说明区的 `## 写法示例` 抢在前面，只要存在未发布节就必判 FAIL。改为只在未发布标题与版本标题两类之间比序，说明区的 `## ` 不参与；未发布节排在任一版本标题之后仍然 FAIL。dev 合并 release 后 `make verify-metadata` 的红灯来自这条，release 自己同样红。
 - `fig1_startup_surface` 三面各标一次横轴标题，英文文案互相压住；改为只在中间面标一条共享标题，中文图同步生效。
 

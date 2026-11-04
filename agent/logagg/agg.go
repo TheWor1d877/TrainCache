@@ -1,4 +1,4 @@
-// Package logagg 汇总 Agent 高频路径的日志(docs/8.1 design.md §3.3/§4.2)。
+// Package logagg 汇总 Agent 高频路径的日志(docs/8.1-design.md §3.3/§4.2)。
 //
 // 口径:逐块、逐次明细一律走 Debug(采样由 core/logging 的 handler 统一按 1/100 做,
 // 本包不自造随机数);Info 只在 60s 窗口到期时输出一条汇总,任何情况下都不逐块写 Info。

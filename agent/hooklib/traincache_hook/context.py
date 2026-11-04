@@ -1,4 +1,4 @@
-"""环境上下文：DataLoader 只读 webhook 注入的 TRAINCACHE_* 变量（docs/8.1 design.md §4.3）。
+"""环境上下文：DataLoader 只读 webhook 注入的 TRAINCACHE_* 变量（docs/8.1-design.md §4.3）。
 
 环境变量缺失时不报错、不猜值：记 context_missing=True，日志照常打，钩子照常发——
 训练正确性不依赖这些字段。

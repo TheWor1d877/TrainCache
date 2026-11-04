@@ -718,7 +718,7 @@ def plot_fig2(metrics: list[dict], out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     rates = [100, 300, 1000]
     epochs = [1, 3, 6]
-    # 有效带宽 MB/s,取 docs/4.4 实验协议.md §7.4 的实测口径(100/300/1000 mbit 档)
+    # 有效带宽 MB/s,取 docs/4.4-experiment-protocol.md §7.4 的实测口径(100/300/1000 mbit 档)
     eff_mbps = {100: 13.4, 300: 35.0, 1000: 61.0}
     compute_s_per_epoch = 80.0
     # 带宽是序数,取蓝→紫的饱和色阶,三档一眼可分且不出现红绿相邻

@@ -8,7 +8,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 )
 
-// DataLoader 日志与钩子所需的环境变量（docs/8.1 design.md §4.3 冻结契约）。
+// DataLoader 日志与钩子所需的环境变量（docs/8.1-design.md §4.3 冻结契约）。
 // webhook 在准入时写入；训练侧只读，缺失即降级为仅本地日志。
 const (
 	EnvTask              = "TRAINCACHE_TASK"                // <namespace>/<warmupTaskName>
@@ -17,7 +17,7 @@ const (
 	EnvDataset           = "TRAINCACHE_DATASET"             // <namespace>/<dataSetName>
 	EnvHookSock          = "TRAINCACHE_HOOK_SOCK"           // agent.sock 绝对路径
 	EnvGenerationAtStart = "TRAINCACHE_GENERATION_AT_START" // 准入时看到的 WarmupTask generation
-	// DefaultHookSockPath 是 Agent 钩子套接字的冻结路径（docs/6.1 design.md §5.4）。
+	// DefaultHookSockPath 是 Agent 钩子套接字的冻结路径（docs/6.1-design.md §5.4）。
 	DefaultHookSockPath = "/run/traincache/agent.sock"
 )
 

@@ -1,5 +1,5 @@
 // Package scorefmt encodes and decodes the Pod score annotation value
-// (docs/7.1 design.md §6.2, D49).
+// (docs/7.1-design.md §6.2, D49).
 //
 // The annotation lives on the training Pod itself and is written in the same
 // patch that removes its scheduling gate, so the scheduler reads the snapshot
@@ -30,7 +30,7 @@ const (
 
 // Value is the JSON payload stored in the Pod score annotation.
 //
-// The wire format is frozen by docs/7.1 design.md §6.2:
+// The wire format is frozen by docs/7.1-design.md §6.2:
 //
 //	{"v":1,"task":"default/train-1","g":12,"t":"2026-10-20T08:00:00Z","s":{"node-a":87}}
 //

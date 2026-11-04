@@ -8,7 +8,7 @@ import (
 )
 
 // TestDefaultAnnotation pins the Pod score annotation key that both the
-// controller-manager and the scheduler default to (docs/7.1 design.md §6.2).
+// controller-manager and the scheduler default to (docs/7.1-design.md §6.2).
 func TestDefaultAnnotation(t *testing.T) {
 	if DefaultAnnotation != "traincache.io/node-scores" {
 		t.Fatalf("DefaultAnnotation = %q, want traincache.io/node-scores", DefaultAnnotation)
