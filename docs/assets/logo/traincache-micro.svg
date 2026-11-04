@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512" role="img" aria-label="TrainCache">
+  <rect width="100" height="100" rx="22" fill="#EEF0FF"/>
+  <g fill="#6366F1">
+    <rect x="46.96" y="10.13" width="12" height="12" rx="3.2"/>
+    <rect x="24.5" y="16.15" width="12" height="12" rx="3.2"/>
+    <rect x="11.16" y="35.2" width="12" height="12" rx="3.2"/>
+    <rect x="13.19" y="58.37" width="12" height="12" rx="3.2"/>
+    <rect x="29.63" y="74.81" width="12" height="12" rx="3.2"/>
+    <rect x="52.8" y="76.84" width="12" height="12" rx="3.2"/>
+    <rect x="71.85" y="63.5" width="12" height="12" rx="3.2"/>
+    <rect x="77.87" y="41.04" width="12" height="12" rx="3.2"/>
+  </g>
+  <rect x="-6" y="-6" width="12" height="12" rx="2.8" fill="#5B21B6" transform="translate(81.82 18.18) rotate(20)"/>
+</svg>

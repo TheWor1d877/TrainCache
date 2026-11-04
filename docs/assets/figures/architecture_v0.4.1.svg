@@ -1,0 +1,455 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1840 1350" width="1840" height="1350" role="img" aria-label="TrainCache 架构：控制面闭环、节点层、对象存储、可观测、回源合并网关与训练全程三阶段">
+<style>
+text{font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif}
+.zt{font-size:16px;font-weight:bold;fill:#0F172A}
+.zs{font-size:11px;fill:#64748B}
+.bt{font-size:13px;font-weight:bold}
+.bs{font-size:11px;font-weight:bold}
+.b{font-size:10.5px}
+.sm{font-size:9.5px}
+.mono{font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace;font-size:9.5px}
+.c1t{fill:#312E81}.c1b{fill:#3730A3}.c1s{fill:#4C51BF}
+.c2t{fill:#4C1D95}.c2b{fill:#5B21B6}
+.c3t{fill:#7C2D12}.c3b{fill:#9A3412}
+.c4t{fill:#123C5C}.c4b{fill:#1E5A8A}
+.c5t{fill:#1E293B}.c5b{fill:#475569}
+.c6t{fill:#134E4A}.c6b{fill:#115E59}
+.c7t{fill:#831843}.c7b{fill:#9D174D}
+.dsk{fill:#78350F}
+</style>
+<defs>
+<marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#6366F1"/></marker>
+<marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#8B5CF6"/></marker>
+<marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#D97B29"/></marker>
+<marker id="a4" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#2F6DB5"/></marker>
+<marker id="a5" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#0D9488"/></marker>
+<marker id="a6" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#64748B"/></marker>
+</defs>
+
+<rect width="1840" height="1350" fill="#FFFFFF"/>
+
+<!-- ══════════ ① 控制面闭环 ══════════ -->
+<rect x="20" y="16" width="1800" height="340" rx="14" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+<text class="zt" x="40" y="40">① 控制面闭环 — 把「预热」和「调度」接成一个回路</text>
+<text class="zs" x="40" y="40" dx="430">工业方案是「先手动预热整份数据集，再靠二进制缓存亲和碰运气」，两者之间没有控制回路</text>
+
+<!-- CRD -->
+<rect x="40" y="52" width="252" height="292" rx="8" fill="#EEF0FF" stroke="#6366F1" stroke-width="1.3"/>
+<text class="bt c1t" x="52" y="72">两个 CRD</text>
+<text class="b c1b" x="52" y="92">DataSet — 静态数据契约。回</text>
+<text class="b c1b" x="52" y="105">答「有哪些块、块在哪、怎么</text>
+<text class="b c1b" x="52" y="118">被消费」。它的控制器只做校</text>
+<text class="b c1b" x="52" y="131">验、固化块空间（块编号只在</text>
+<text class="b c1b" x="52" y="144">这里推一次）、探测入口是否</text>
+<text class="b c1b" x="52" y="157">可达；不执行预热，也不记录</text>
+<text class="b c1b" x="52" y="170">谁引用了它。</text>
+<text class="b c1b" x="52" y="190">WarmupTask — 一次预热的运</text>
+<text class="b c1b" x="52" y="203">行时载体。回答「给谁预热、</text>
+<text class="b c1b" x="52" y="216">各预热哪些块、现在到哪了、</text>
+<text class="b c1b" x="52" y="229">能不能放行」。status 里带</text>
+<text class="b c1b" x="52" y="242">P×N 就绪表、每对 (Pod, 节</text>
+<text class="b c1b" x="52" y="255">点) 的块级就绪位图与门控状</text>
+<text class="b c1b" x="52" y="268">态机。</text>
+<text class="sm c1s" x="52" y="290">用户只建这两个对象即可完成整套预热，</text>
+<text class="sm c1s" x="52" y="303">不需要再写 Job 的 yaml——控制器里没</text>
+<text class="sm c1s" x="52" y="316">有 Job 这个概念。随机种子不进 spec，</text>
+<text class="sm c1s" x="52" y="329">留在 DataLoader 侧。</text>
+
+<!-- 四步流水 -->
+<rect x="310" y="52" width="230" height="214" rx="8" fill="#FFFFFF" stroke="#6366F1" stroke-width="1.2"/>
+<text class="bt c1t" x="322" y="72">筛选</text>
+<text class="bs c1s" x="322" y="90">粗粒度 · 能不能参与</text>
+<text class="b c1b" x="322" y="110">从集群所有节点里排除根本</text>
+<text class="b c1b" x="322" y="123">没法参与这次调度的，得到</text>
+<text class="b c1b" x="322" y="136">候选集合：</text>
+<text class="b c1b" x="322" y="152">· 资源余量——预热本身也</text>
+<text class="b c1b" x="330" y="165">吃缓存与 IO，给已满的节</text>
+<text class="b c1b" x="330" y="178">点预热是浪费</text>
+<text class="b c1b" x="322" y="194">· 数据可达——节点须带人</text>
+<text class="b c1b" x="330" y="207">工维护的 s3-access 标签</text>
+<text class="b c1b" x="322" y="223">· 健康——NotReady、有污</text>
+<text class="b c1b" x="330" y="236">点、维护中直接排除</text>
+<text class="b c1b" x="322" y="252">· 是否满足 Job 亲和性</text>
+
+<rect x="556" y="52" width="230" height="214" rx="8" fill="#FFFFFF" stroke="#6366F1" stroke-width="1.2"/>
+<text class="bt c1t" x="568" y="72">宽预热</text>
+<text class="bs c1s" x="568" y="90">块粒度 · 提前铺数据</text>
+<text class="b c1b" x="568" y="110">分配算法 GWAA 只回答一件</text>
+<text class="b c1b" x="568" y="123">事：每个节点该预热哪些</text>
+<text class="b c1b" x="568" y="136">Pod 的窗口。它给每个 Pod</text>
+<text class="b c1b" x="568" y="149">挑 preheatFanout 个预热节</text>
+<text class="b c1b" x="568" y="162">点，不决定最终落点。</text>
+<text class="b c1b" x="568" y="178">先把「必须同节点」的 Pod</text>
+<text class="b c1b" x="568" y="191">合并成超 Pod，再按就绪度</text>
+<text class="b c1b" x="568" y="204">降序贪心认领；争同一节点</text>
+<text class="b c1b" x="568" y="217">时比「比次优高多少」，更</text>
+<text class="b c1b" x="568" y="230">依赖该节点的留下，其余</text>
+<text class="b c1b" x="568" y="243">顺延；无处可放标记未分配。</text>
+<text class="sm c1s" x="568" y="259">顺序严格按消费顺序（块 0,1,2…）</text>
+
+<rect x="802" y="52" width="230" height="214" rx="8" fill="#FFFFFF" stroke="#6366F1" stroke-width="1.2"/>
+<text class="bt c1t" x="814" y="72">门控</text>
+<text class="bs c1s" x="814" y="90">中粒度 · 现在能不能放行</text>
+<text class="b c1b" x="814" y="110">Pod 上挂着 SchedulingGate，</text>
+<text class="b c1b" x="814" y="123">gate 在，调度器就不调度</text>
+<text class="b c1b" x="814" y="136">它，Pod 一直 Pending。</text>
+<text class="b c1b" x="814" y="152">只看启动窗口——前 K 块，</text>
+<text class="b c1b" x="814" y="165">覆盖从训练开始到 GPU 打满</text>
+<text class="b c1b" x="814" y="178">那一段。K 三层兜底：可选</text>
+<text class="b c1b" x="814" y="191">提供 + 默认推导 + 兜底。</text>
+<text class="b c1b" x="814" y="207">gate 只能在 Pod 创建那一</text>
+<text class="b c1b" x="814" y="220">瞬贴上，之后只能摘下——</text>
+<text class="b c1b" x="814" y="233">所以需要准入 webhook 在</text>
+<text class="b c1b" x="814" y="246">创建那一刻拦下来。</text>
+
+<rect x="1048" y="52" width="230" height="214" rx="8" fill="#FFFFFF" stroke="#6366F1" stroke-width="1.2"/>
+<text class="bt c1t" x="1060" y="72">打分</text>
+<text class="bs c1s" x="1060" y="90">细粒度 · 放行后选哪个</text>
+<text class="b c1b" x="1060" y="110">打分看全局（启动 + 全程），</text>
+<text class="b c1b" x="1060" y="123">因为要选出对整体数据流加</text>
+<text class="b c1b" x="1060" y="136">速最好的节点。</text>
+<text class="b c1b" x="1060" y="152">窗口内权重恒为 1，窗口外</text>
+<text class="b c1b" x="1060" y="165">按离起点的距离指数衰减，</text>
+<text class="b c1b" x="1060" y="178">低到截断距离就不再计——</text>
+<text class="b c1b" x="1060" y="191">防的是「算分时还在、真正</text>
+<text class="b c1b" x="1060" y="204">要用时已被淘汰」，同时省</text>
+<text class="b c1b" x="1060" y="217">计算。</text>
+<text class="b c1b" x="1060" y="233">放行那一刻把分数快照定格</text>
+<text class="b c1b" x="1060" y="246">写进 Node，之后的预热不计分。</text>
+
+<line x1="540" y1="159" x2="556" y2="159" stroke="#6366F1" stroke-width="1.6" marker-end="url(#a1)"/>
+<line x1="786" y1="159" x2="802" y2="159" stroke="#6366F1" stroke-width="1.6" marker-end="url(#a1)"/>
+<line x1="1032" y1="159" x2="1048" y2="159" stroke="#6366F1" stroke-width="1.6" marker-end="url(#a1)"/>
+
+<!-- 判据条 -->
+<rect x="310" y="276" width="968" height="68" rx="8" fill="#EEF0FF" stroke="#6366F1" stroke-width="1.1"/>
+<text class="bs c1t" x="322" y="294">放行判据（三条任一满足即摘 gate）　与　就绪度得分</text>
+<text class="b c1b" x="322" y="312">① 每个 Pod 的预热节点集合里至少有一个节点，其窗口就绪块数 ≥ floor(阈值 × K)，且全部 Pod 都满足　② 已有 Pod 达标后，未达标的 Pod 同时满足「离阈值还差得远」与「就绪率已经不涨」→ 提前降级放行　③ 超时 → 降级放行</text>
+<text class="b c1b" x="322" y="330">得分 w(i)：i &lt; K 时为 1；K ≤ i &lt; C 时为 0.5^((i−K)/H)，每过 H 块权重减半；i ≥ C 时为 0。窗口内与窗口外就绪度分开存。整数判据用于门控，比例只用于观测。</text>
+
+<!-- 三个执行者 -->
+<rect x="1316" y="52" width="488" height="292" rx="8" fill="#EEF0FF" stroke="#6366F1" stroke-width="1.3"/>
+<text class="bt c1t" x="1328" y="72">三个执行者的分工</text>
+<text class="bs c1s" x="1328" y="94">准入 Webhook — 负责「挂住」</text>
+<text class="b c1b" x="1328" y="112">在 Pod 创建那一刻拦下来，替它贴上调度门，同时声明它属于哪个</text>
+<text class="b c1b" x="1328" y="125">WarmupTask（从 Pod 名解析出 index 并绑定）。挑选条件只有一个</text>
+<text class="b c1b" x="1328" y="138">标签；失败策略是「忽略」——webhook 自己挂了，Pod 直接放过去，</text>
+<text class="b c1b" x="1328" y="151">只是不享受预热保护，绝不因为预热组件不可用而卡住训练。</text>
+<text class="bs c1s" x="1328" y="175">Controller — 负责「放行」</text>
+<text class="b c1b" x="1328" y="193">持续收 Agent 上报的块级进度，算出各节点就绪度填回 status；按</text>
+<text class="b c1b" x="1328" y="206">「分数 → 门 → 状态」的顺序评估，达标就摘掉 gate，并把分数快照</text>
+<text class="b c1b" x="1328" y="219">写到对应 Node 上。它管「数据备好没、能不能放行、哪个节点备得</text>
+<text class="b c1b" x="1328" y="232">最好」，不管「Pod 最终坐哪」。reconcile 必须幂等：控制器重启与</text>
+<text class="b c1b" x="1328" y="245">事件重放都不能产生重复动作。</text>
+<text class="bs c1s" x="1328" y="269">Scheduler 插件 — 负责「选落点」</text>
+<text class="b c1b" x="1328" y="287">只在放行之后才登场。读 Node 上的分数快照做归一化打分，在各</text>
+<text class="b c1b" x="1328" y="300">Pod 的暖节点集合里选最终落点；被抢占时也可能落到集合之外，</text>
+<text class="b c1b" x="1328" y="313">这时会做一次落点偏离检查。</text>
+<text class="sm c1s" x="1328" y="333">一句话：webhook 挂住、控制器放行、调度器选落点。</text>
+
+<!-- ①↔② -->
+<line x1="340" y1="356" x2="340" y2="396" stroke="#6366F1" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#a1)" marker-start="url(#a1)"/>
+<text class="sm c1s" x="356" y="372">Controller 经 gRPC 向各节点 Agent 下发块粒度预热任务</text>
+<text class="sm c1s" x="356" y="386">Agent 回报进度 → 写回 WarmupTask.status 的就绪表与位图</text>
+
+<!-- ══════════ ② 节点层 ══════════ -->
+<rect x="20" y="396" width="1120" height="540" rx="14" fill="#FAFAFF" stroke="#C7D2FE" stroke-width="1.4"/>
+<text class="zt" x="40" y="420">② 节点层 — Agent 把块铺到本地盘，训练 Pod 只读直取</text>
+<text class="zs" x="40" y="420" dx="470">preheat 模型：Agent 完全不参与读 I/O，读路径零额外延迟；代价是读侧信号只能旁路采集</text>
+
+<!-- Agent 列 -->
+<rect x="40" y="432" width="548" height="488" rx="10" fill="#EDE9FE" stroke="#8B5CF6" stroke-width="1.3"/>
+<text class="bt c2t" x="52" y="452">缓存 Agent — DaemonSet，每个缓存节点一个</text>
+<text class="sm c2b" x="52" y="452" dx="330">以节点为服务边界</text>
+
+<!-- 旁路输入 -->
+<rect x="52" y="462" width="524" height="52" rx="6" fill="#F5F3FF" stroke="#A78BFA" stroke-width="1"/>
+<text class="bs c2t" x="62" y="478">三条输入（全是旁路，没有一条在读路径上）</text>
+<text class="sm c2b" x="62" y="494">① 控制面 gRPC 下发的显式预热任务　② 消费顺序 sidecar 经共享内存单向推来的块顺序与阶段切换事件</text>
+<text class="sm c2b" x="62" y="507">③ DataLoader 钩子经 Unix socket 报来的「实际打开了哪块 / 位点推进 / 缺哪块」，以及 inotify 旁路看到的文件打开事件</text>
+
+<!-- 预取编排 -->
+<rect x="52" y="524" width="254" height="136" rx="6" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="1.1"/>
+<text class="bs c2t" x="62" y="542">预取编排 · 四档优先级</text>
+<text class="sm c2b" x="62" y="560">P0 显式启动预取——直接决定</text>
+<text class="sm c2b" x="62" y="572">makespan，阻塞门控</text>
+<text class="sm c2b" x="62" y="586">P1 阶段切换重预取——防切换</text>
+<text class="sm c2b" x="62" y="598">后 data stall</text>
+<text class="sm c2b" x="62" y="612">P2 邻域预取——消费位点往前</text>
+<text class="sm c2b" x="62" y="624">留 lookahead，常态化防饿死</text>
+<text class="sm c2b" x="62" y="638">P3 后台补全——低优先级补缺</text>
+<text class="sm c2b" x="62" y="652">高优先级只插队，不取消在途请求</text>
+
+<!-- 抓取管线 -->
+<rect x="52" y="670" width="254" height="124" rx="6" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="1.1"/>
+<text class="bs c2t" x="62" y="688">抓取管线 · 四档折叠成两档准入</text>
+<text class="sm c2b" x="62" y="706">在读（需求读补块 + 坏块修复）</text>
+<text class="sm c2b" x="62" y="718">按全场额度接入，不受折半与让</text>
+<text class="sm c2b" x="62" y="730">路门约束</text>
+<text class="sm c2b" x="62" y="744">预铺（预取 + 显式预热）任务槽</text>
+<text class="sm c2b" x="62" y="756">与在途字节各折半，在读有在途</text>
+<text class="sm c2b" x="62" y="768">时先让路</text>
+<text class="sm c2b" x="62" y="782">并发按在途字节数限，不按协程数</text>
+
+<!-- CAS 落盘 -->
+<rect x="52" y="804" width="254" height="104" rx="6" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="1.1"/>
+<text class="bs c2t" x="62" y="822">CAS 落盘 · 内容寻址</text>
+<text class="sm c2b" x="62" y="840">字节流边写边算指纹，按指纹命</text>
+<text class="sm c2b" x="62" y="852">名落盘；临时文件写完再改名原</text>
+<text class="sm c2b" x="62" y="864">子发布，别的进程永远看不到写</text>
+<text class="sm c2b" x="62" y="876">了一半的块</text>
+<text class="sm c2b" x="62" y="890">块头记大小与摘要，读回时顺手</text>
+<text class="sm c2b" x="62" y="902">校验；相同内容只存一份</text>
+
+<!-- 容量治理 -->
+<rect x="318" y="524" width="258" height="192" rx="6" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="1.1"/>
+<text class="bs c2t" x="328" y="542">容量治理 · 淘汰 ≠ 回收</text>
+<text class="sm c2b" x="328" y="560">inotify 旁路监听缓存目录的打开</text>
+<text class="sm c2b" x="328" y="572">事件，得到「哪些块真被读过」；</text>
+<text class="sm c2b" x="328" y="584">同进程反复打开同一文件要合并，</text>
+<text class="sm c2b" x="328" y="596">否则统计的是打开次数而不是有</text>
+<text class="sm c2b" x="328" y="608">多少数据被读。</text>
+<text class="sm c2b" x="328" y="624">冷热得分取「热度」与「新鲜度」</text>
+<text class="sm c2b" x="328" y="636">两者较强的一方，不用加权平均</text>
+<text class="sm c2b" x="328" y="648">——加权保护不了「刚预取进来还</text>
+<text class="sm c2b" x="328" y="660">没被读过」的块。</text>
+<text class="sm c2b" x="328" y="676">两条水位线：利用率超触发线 →</text>
+<text class="sm c2b" x="328" y="688">降回触发线以下一档；暴增到危</text>
+<text class="sm c2b" x="328" y="700">险线 → 激进淘汰 + 告警。</text>
+<text class="sm c2t" x="328" y="716" font-weight="bold">淘汰只删本地副本，索引条目与引用</text>
+<text class="sm c2t" x="328" y="728" font-weight="bold">关系不动；回收只删不再被任何已提</text>
+<text class="sm c2t" x="328" y="740" font-weight="bold">交快照引用的数据。一个管容量，一</text>
+<text class="sm c2t" x="328" y="752" font-weight="bold">个管正确性。</text>
+
+<!-- 重启重扫描 -->
+<rect x="318" y="726" width="258" height="182" rx="6" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="1.1"/>
+<text class="bs c2t" x="328" y="744">重启重扫描</text>
+<text class="sm c2b" x="328" y="762">进程退出与升级不得破坏本地缓</text>
+<text class="sm c2b" x="328" y="774">存的持久性，重启后要把「哪些</text>
+<text class="sm c2b" x="328" y="786">块能直接命中、哪些要重拉」重</text>
+<text class="sm c2b" x="328" y="798">新建起来。</text>
+<text class="sm c2b" x="328" y="814">磁盘会静默损坏，所以要校验：</text>
+<text class="sm c2b" x="328" y="826">先抽样校验一小部分块头，全过</text>
+<text class="sm c2b" x="328" y="838">就先用起来；发现损坏标为坏块，</text>
+<text class="sm c2b" x="328" y="850">交后台全量扫描慢慢修。</text>
+<text class="sm c2b" x="328" y="866">全量没做完也能正常服务——读</text>
+<text class="sm c2b" x="328" y="878">块本身会自校验，后台全量只是</text>
+<text class="sm c2b" x="328" y="890">提前发现。坏块在被读到时若还</text>
+<text class="sm c2b" x="328" y="902">没修好，取出队列交 Agent 直接</text>
+
+<!-- 索引跟随 (补在 CAS 下方空隙) -->
+<text class="sm c2b" x="62" y="918">索引跟随：定时读提交指针，快照变了就下载新清单与所需索引分片，校验后原子切换内存映射</text>
+
+<!-- 训练 Pod 列 -->
+<rect x="604" y="432" width="516" height="488" rx="10" fill="#FFF8F0" stroke="#F3C99B" stroke-width="1.3"/>
+<text class="bt c3t" x="616" y="452">训练 Pod ×N（数据并行：每个 Pod 只跑自己的分片）</text>
+
+<rect x="616" y="462" width="492" height="70" rx="6" fill="#FEF3C7" stroke="#D97706" stroke-width="1.1"/>
+<text class="bs dsk" x="626" y="480">节点本地盘（hostPath）</text>
+<text class="sm c3b" x="626" y="498">缓存根目录下是内容寻址的块、坏块隔离区与热度快照；另有一个运行时目录放钩子通道与消费顺序环。</text>
+<text class="sm c3b" x="626" y="512">Agent 独占写，训练 Pod 只读挂载。所有进程只写 stdout，日志与缓存不抢同一块盘。</text>
+<text class="sm c3b" x="626" y="526">块不做逐块 fsync——数据丢了重新下载就好，掉电丢块的代价就是重拉。</text>
+
+<rect x="616" y="542" width="492" height="118" rx="6" fill="#FFF4E5" stroke="#D97B29" stroke-width="1.2"/>
+<text class="bs c3t" x="626" y="560">训练容器（镜像不改）</text>
+<text class="sm c3b" x="626" y="578">hostPath 只读挂载缓存目录 → 直接读本地盘与内核 page cache，Agent 完全不参与读 I/O。</text>
+<text class="sm c3b" x="626" y="592">这就是 preheat 模型：读路径零额外延迟，读延迟等于读本地盘。</text>
+<text class="sm c3b" x="626" y="608">DataLoader 侧只加一层轻量钩子适配器，不替换 PyTorch DataLoader。钩子上报：实际打开的块、</text>
+<text class="sm c3b" x="626" y="620">当前 epoch、shuffle seed、消费位点推进。</text>
+<text class="sm c3t" x="626" y="638" font-weight="bold">打开失败不直连对象存储、不拿凭证：把 miss 这个信号单向异步告诉 Agent，由 Agent 在自己的抓取</text>
+<text class="sm c3t" x="626" y="650" font-weight="bold">域里以最高优先级补块，与预取、坏块修复共用同一个合并域，所以不会重复下载。</text>
+
+<rect x="616" y="670" width="492" height="92" rx="6" fill="#FFF4E5" stroke="#D97B29" stroke-width="1.2"/>
+<text class="bs c3t" x="626" y="688">消费顺序 sidecar</text>
+<text class="sm c3b" x="626" y="706">按 Job 配置（数据集、epochs、shuffle seed、batch size、prefetch factor）算出当前阶段按消费顺</text>
+<text class="sm c3b" x="626" y="718">序排列的块列表，经共享内存环喂给同节点 Agent；单写端（sidecar）单读端（Agent），带代际与序</text>
+<text class="sm c3b" x="626" y="730">号做保活心跳。</text>
+<text class="sm c3b" x="626" y="746">Agent 把启动窗口（前 K 块，K = batch size × prefetch factor）作为高优先级送进抓取管线，其余</text>
+<text class="sm c3b" x="626" y="758">块进低优先级持续预取队列。sidecar 退出后这路通道在 30 秒内标成 stalled、降级指标置 1；</text>
+
+<rect x="616" y="772" width="492" height="136" rx="6" fill="#FFFFFF" stroke="#94A3B8" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text class="bs" x="626" y="790" fill="#475569">checkpoint 异步 sidecar（设计态，尚未落地）</text>
+<text class="sm" x="626" y="808" fill="#64748B">借用 CSI / CNI 的插件思想，把 checkpoint 的保存逻辑与声明完全解耦。四层三角色：</text>
+<text class="sm" x="626" y="824" fill="#64748B">声明层——Pod 上挂 annotation，只选用哪个插件、指向哪份配置，参数全在配置里，训练镜像不改。</text>
+<text class="sm" x="626" y="838" fill="#64748B">注入层——准入 webhook 给训练容器和 sidecar 挂同一个共享卷、注入同一个环境变量，双方看到的</text>
+<text class="sm" x="626" y="850" fill="#64748B">本地路径由平台保证一致，不靠用户两边手动对齐。</text>
+<text class="sm" x="626" y="866" fill="#64748B">触发层——保存时优先等训练程序留完成信号；镜像完全不能改就退化成观察文件行为（文件描述符</text>
+<text class="sm" x="626" y="878" fill="#64748B">已关 + 连续两次扫描大小不变）。恢复时不用推断：主进程启动前先拉回本地。</text>
+<text class="sm" x="626" y="894" fill="#64748B">执行层——插件只面对「一份就绪的数据 + 一份后端配置」，不判时机、不感知训练框架。保存与恢</text>
+<text class="sm" x="626" y="906" fill="#64748B">复只差方向；上传校验通过才清本地，恢复优先命中本地缓存副本。</text>
+
+<!-- 节点内箭头 -->
+<line x1="470" y1="910" x2="470" y2="926" stroke="#8B5CF6" stroke-width="1.6" marker-end="url(#a2)"/>
+<text class="sm c2b" x="330" y="940">写块 ↓</text>
+<line x1="700" y1="926" x2="700" y2="912" stroke="#D97706" stroke-width="1.6" stroke-dasharray="3 3" marker-end="url(#a3)"/>
+<text class="sm c3b" x="712" y="940">↑ 只读直取</text>
+<line x1="588" y1="800" x2="616" y2="800" stroke="#D97706" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#a3)"/>
+
+<!-- ②↔③ -->
+<line x1="1200" y1="600" x2="1272" y2="600" stroke="#2F6DB5" stroke-width="1.4" stroke-dasharray="6 4" marker-start="url(#a4)" marker-end="url(#a4)"/>
+<rect x="1204" y="566" width="64" height="28" fill="#FFFFFF"/>
+<text class="sm c4b" x="1206" y="578">索引跟随</text>
+<text class="sm c4b" x="1206" y="590">换内存映射</text>
+<line x1="1200" y1="800" x2="1272" y2="800" stroke="#2F6DB5" stroke-width="2" marker-end="url(#a4)"/>
+<rect x="1204" y="806" width="64" height="28" fill="#FFFFFF"/>
+<text class="sm c4b" x="1206" y="818">块 GET</text>
+<text class="sm c4b" x="1206" y="830">配了网关走</text>
+
+<!-- ══════════ ③ 数据源 ══════════ -->
+<rect x="1272" y="396" width="548" height="540" rx="14" fill="#F4F9FD" stroke="#9CC3E5" stroke-width="1.4"/>
+<text class="zt" x="1292" y="420">③ 数据源 · 对象存储（集群外）</text>
+<text class="zs" x="1292" y="420" dx="290">内容寻址 + 快照提交，索引不进 etcd</text>
+
+<rect x="1284" y="432" width="524" height="150" rx="8" fill="#E8F1FA" stroke="#2F6DB5" stroke-width="1.2"/>
+<text class="bs c4t" x="1296" y="450">桶内布局（逻辑视角）</text>
+<text class="sm c4b mono" x="1296" y="468">CURRENT                          ← 提交指针，文本 = 快照 id + 清单指纹</text>
+<text class="sm c4b mono" x="1296" y="481">snapshots/&lt;id&gt;/manifest.json     ← 快照清单 = 索引分片引用列表</text>
+<text class="sm c4b mono" x="1296" y="494">snapshots/&lt;id&gt;/shard-*.idx       ← 索引分片，每片不超过 10 万条</text>
+<text class="sm c4b mono" x="1296" y="507">readers/&lt;nodeID&gt;.json            ← 读者登记 + 心跳时间戳</text>
+<text class="sm c4b mono" x="1296" y="520">&lt;dataset&gt;/blocks/&lt;path&gt;#&lt;chunk&gt;  ← 数据块（裸数据）</text>
+<text class="sm c4b mono" x="1296" y="533">_traincache/format.json          ← 整桶块大小，首次写入后只读</text>
+<text class="sm c4t" x="1296" y="552" font-weight="bold">逐级背书：CURRENT 里的清单指纹 → 背书清单 → 背书每个索引分片的指纹 →</text>
+<text class="sm c4t" x="1296" y="565" font-weight="bold">背书每条索引里的块指纹 → 背书块内容（落盘时算出的指纹必须等于它）</text>
+<text class="sm c4b" x="1296" y="578">开发期用集群内自搭的 S3 兼容存储；真实环境直接连云对象存储，换后端只改配置。</text>
+
+<rect x="1284" y="592" width="524" height="110" rx="8" fill="#E8F1FA" stroke="#2F6DB5" stroke-width="1.2"/>
+<text class="bs c4t" x="1296" y="610">索引与寻址</text>
+<text class="sm c4b" x="1296" y="628">索引条目是「路径 + 块号 + 大小 + 指纹」，键为 (路径, 块号)——路径寻址，不承诺跨路径去重；去重</text>
+<text class="sm c4b" x="1296" y="640">发生在物理层，不同路径下内容相同的块只存一份。</text>
+<text class="sm c4b" x="1296" y="656">一个数据集几十万个块，这张表放不进 etcd（单个对象有 1.5MB 上限），所以索引表本身也存对象存</text>
+<text class="sm c4b" x="1296" y="668">储，并切成索引分片管理。</text>
+<text class="sm c4b" x="1296" y="684">索引默认全量加载太浪费——训练可能只需要某个前缀下的路径。清单体积小仍全量下载，真正省掉的</text>
+<text class="sm c4b" x="1296" y="696">是无关索引分片：逐个做区间相交判定，只下载需要的那些。</text>
+
+<rect x="1284" y="712" width="524" height="126" rx="8" fill="#E8F1FA" stroke="#2F6DB5" stroke-width="1.2"/>
+<text class="bs c4t" x="1296" y="730">原子提交 + 快照（数据集更新不覆盖旧索引分片）</text>
+<text class="sm c4b" x="1296" y="748">① 写新块到新位置，不覆盖旧块　② 读当前已提交快照，生成本次要改的新索引分片，用独立对象</text>
+<text class="sm c4b" x="1296" y="760">键，提交前不被当前快照引用　③ 上传分片与新清单——此时它们对读侧仍不可见</text>
+<text class="sm c4b" x="1296" y="776">④ 提交前验完整性：新清单已上传、引用的分片都写入且完整、被引用的新块都已发布</text>
+<text class="sm c4b" x="1296" y="792">⑤ 用对象存储的条件写把提交指针从旧快照切到新快照；并发时只有仍指向旧值的那次能成功。</text>
+<text class="sm c4b" x="1296" y="804">提交失败就重读最新快照、基于它重建再提交。</text>
+<text class="sm c4b" x="1296" y="820">条件写能力各家后端支持程度不同，启动时可探测；不支持就退回乐观写 + 读回校验 + 冲突重试。</text>
+<text class="sm c4b" x="1296" y="832">发布器负责把上游 tar 切块上传并提交一次快照；管理 CLI 的删除走一次新快照提交，不原地改。</text>
+
+<rect x="1284" y="848" width="524" height="72" rx="8" fill="#E8F1FA" stroke="#2F6DB5" stroke-width="1.2"/>
+<text class="bs c4t" x="1296" y="866">读者登记与清理</text>
+<text class="sm c4b" x="1296" y="884">Agent 加载新快照后写一条「我在用这个快照」的登记，带心跳；切快照时更新登记并保留上一快照的</text>
+<text class="sm c4b" x="1296" y="896">宽限期，不搞分布式租约。清理方删旧快照前查全部登记：没人声明 + 心跳过期 + 不是当前指针，才删。</text>
+<text class="sm c4b" x="1296" y="912">心跳过期就当读者死了，允许删——防的是 Agent 崩了旧快照永远留着。旧块只有不再被任何已提交快</text>
+
+<!-- ══════════ ④ 可观测 ══════════ -->
+<rect x="20" y="976" width="900" height="234" rx="14" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+<text class="zt" x="40" y="1000">④ 可观测 — 日志一条链、指标一条链，三层共用一套字段契约</text>
+
+<rect x="40" y="1012" width="420" height="80" rx="8" fill="#F1F5F9" stroke="#64748B" stroke-width="1.2"/>
+<text class="bs c5t" x="52" y="1030">日志链</text>
+<text class="sm c5b" x="52" y="1048">三层（控制面 / Agent / DataLoader）都只写 stdout 的结构化</text>
+<text class="sm c5b" x="52" y="1060">JSON → 节点采集器 → 中心存储 → 看板。</text>
+<text class="sm c5b" x="52" y="1076">跨进程关联键是「任务 + 节点 + 代际」，不引入分布式 traceId。</text>
+<text class="sm c5b" x="52" y="1088">给定一个 Pod，能一次查出控制面 → Agent → DataLoader 三段。</text>
+
+<rect x="40" y="1102" width="420" height="80" rx="8" fill="#F1F5F9" stroke="#64748B" stroke-width="1.2"/>
+<text class="bs c5t" x="52" y="1120">指标链</text>
+<text class="sm c5b" x="52" y="1138">各进程自己暴露指标，Prometheus 定期抓取，Grafana 查询。</text>
+<text class="sm c5b" x="52" y="1154">六条线：命中率 / 回源量 / 索引刷新 / 回收 / 延迟 / 节点状态，</text>
+<text class="sm c5b" x="52" y="1166">总量压在 15 项以内。</text>
+<text class="sm c5b" x="52" y="1180">延迟要两条一起看：实测读等待回答「现在饿没饿」，阶段切换</text>
+
+<rect x="476" y="1012" width="424" height="170" rx="8" fill="#F1F5F9" stroke="#64748B" stroke-width="1.2"/>
+<text class="bs c5t" x="488" y="1030">分工与红线</text>
+<text class="sm c5b" x="488" y="1048">低基数进标签（数据集、节点、结果状态、端点），高基数进日志</text>
+<text class="sm c5b" x="488" y="1060">（请求 id、Pod、任务 id、路径、块号、指纹）。</text>
+<text class="sm c5b" x="488" y="1076">数据集标签走白名单，白名单外一律并入 other，防标签组合撑爆</text>
+<text class="sm c5b" x="488" y="1088">监控；延迟类用固定分桶，不动态生成。</text>
+<text class="sm c5b" x="488" y="1104">只进指标：计数、比率、分位、队列深度、磁盘利用率、门控状态。</text>
+<text class="sm c5b" x="488" y="1116">只进 Event：门控放行与降级、落点偏离、映射失败、条件变化。</text>
+<text class="sm c5b" x="488" y="1128">只进日志：请求 id、任务 id、Pod、路径、错误原文、决策分支。</text>
+<text class="sm c5b" x="488" y="1144">禁止用日志做告警阈值。高频路径不逐条记：逐块下载与校验只出</text>
+<text class="sm c5b" x="488" y="1156">每分钟一条汇总，命中与未命中明细走 Debug 采样。</text>
+<text class="sm c5t" x="488" y="1174" font-weight="bold">脱敏红线：不记 Secret、不记访问密钥、不记带签名的 URL、不记</text>
+
+<!-- ②→④ -->
+<line x1="340" y1="936" x2="340" y2="976" stroke="#64748B" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#a6)"/>
+<text class="sm c5b" x="356" y="952">三层日志与指标旁路汇入</text>
+<text class="sm c5b" x="356" y="966">（不在任何数据路径上）</text>
+
+<!-- ══════════ ⑤ 回源合并网关 ══════════ -->
+<rect x="940" y="976" width="880" height="234" rx="14" fill="#F2FBF9" stroke="#5EEAD4" stroke-width="1.4"/>
+<text class="zt" x="960" y="1000">⑤ S3 合并回源网关 — 把 N 份重复回源压成 1 份</text>
+<text class="zs" x="960" y="1000" dx="430">只做在途合并，不做缓存：不命中不返回、不落盘、不管容量与淘汰</text>
+
+<rect x="960" y="1012" width="272" height="170" rx="8" fill="#E6F7F4" stroke="#0D9488" stroke-width="1.2"/>
+<text class="bs c6t" x="972" y="1030">为什么要有它</text>
+<text class="sm c6b" x="972" y="1048">重复块有两个来源：</text>
+<text class="sm c6b" x="972" y="1062">· 预热扇出——同一块要铺到</text>
+<text class="sm c6b" x="980" y="1074">2–3 个候选节点</text>
+<text class="sm c6b" x="972" y="1088">· 同一数据集上并发多个预热</text>
+<text class="sm c6b" x="980" y="1100">任务，shuffle seed 不同但</text>
+<text class="sm c6b" x="980" y="1112">要的块相同</text>
+<text class="sm c6b" x="972" y="1128">向 2–3 个候选节点重复预热有</text>
+<text class="sm c6b" x="972" y="1140">2–3 倍字节与带宽代价，什么</text>
+<text class="sm c6b" x="972" y="1152">情况下这笔代价值得，以前没</text>
+<text class="sm c6b" x="972" y="1164">有公开曲线。</text>
+<text class="sm c6t" x="972" y="1180" font-weight="bold">等价于把节点内那张在途表搬到</text>
+
+<rect x="1244" y="1012" width="272" height="170" rx="8" fill="#E6F7F4" stroke="#0D9488" stroke-width="1.2"/>
+<text class="bs c6t" x="1256" y="1030">怎么合并</text>
+<text class="sm c6b" x="1256" y="1048">按对象键合并并发请求，只合并</text>
+<text class="sm c6b" x="1256" y="1060">在途的整对象 GET。</text>
+<text class="sm c6b" x="1256" y="1076">只认数据块前缀的键；提交指针</text>
+<text class="sm c6b" x="1256" y="1088">与清单直接转发不进在途表——</text>
+<text class="sm c6b" x="1256" y="1100">Agent 在定时跟随指针，把旧值</text>
+<text class="sm c6b" x="1256" y="1112">喂给迟到者会让跟随停在旧快照。</text>
+<text class="sm c6b" x="1256" y="1128">大对象边拉边分发给所有等待者，</text>
+<text class="sm c6b" x="1256" y="1140">禁止整块缓冲完再发；环形缓冲</text>
+<text class="sm c6b" x="1256" y="1152">+ 池化复用，内存上限由并发准</text>
+<text class="sm c6b" x="1256" y="1164">入数决定。</text>
+<text class="sm c6b" x="1256" y="1180">落后超过一个缓冲的慢消费者直接</text>
+
+<rect x="1528" y="1012" width="272" height="170" rx="8" fill="#E6F7F4" stroke="#0D9488" stroke-width="1.2"/>
+<text class="bs c6t" x="1540" y="1030">三层供给 · 公平 · 失效</text>
+<text class="sm c6b" x="1540" y="1050">① 同一键在途 → 网关扇出，</text>
+<text class="sm c6b" x="1552" y="1062">0 次额外回源</text>
+<text class="sm c6b" x="1540" y="1076">② 窗口外但集群里某节点已经</text>
+<text class="sm c6b" x="1552" y="1088">有这块 → 那个节点的 Agent</text>
+<text class="sm c6b" x="1552" y="1100">给（分布式缓存组，尚未实现，</text>
+<text class="sm c6b" x="1552" y="1112">现由回源代替）</text>
+<text class="sm c6b" x="1540" y="1126">③ 集群里没人有 → 回源，付整</text>
+<text class="sm c6b" x="1552" y="1138">份字节</text>
+<text class="sm c6b" x="1540" y="1154">公平：并发额度按活跃数据集均</text>
+<text class="sm c6b" x="1540" y="1166">分，每份保底 1、封顶总额度一</text>
+<text class="sm c6b" x="1540" y="1178">半，空闲份额让给还在排队的；</text>
+
+<!-- ②→⑤ -->
+<line x1="1000" y1="936" x2="1000" y2="976" stroke="#0D9488" stroke-width="2" marker-end="url(#a5)"/>
+<text class="sm c6b" x="1016" y="952">Agent 的块 GET 交给网关（配了网关地址才走，否则直连源站）</text>
+<text class="sm c6b" x="1016" y="966">单副本是设计选择：在途合并只在一个进程内成立，多副本等于回到节点内合并</text>
+
+<!-- ⑤→③ -->
+<line x1="1548" y1="976" x2="1548" y2="936" stroke="#2F6DB5" stroke-width="2" marker-end="url(#a4)"/>
+<text class="sm c4b" x="1564" y="952">合并后回源：N 份在途 GET 压成 1 次</text>
+<text class="sm c4b" x="1564" y="966">TLS 只在网关到源站这一段终止，全集群加解密量从 N 降到 1</text>
+
+<!-- ══════════ ⑥ 三阶段 ══════════ -->
+<rect x="20" y="1230" width="1800" height="104" rx="14" fill="#FDF7FB" stroke="#F9A8D4" stroke-width="1.4"/>
+<text class="zt" x="40" y="1252">⑥ 训练全程的三个阶段 — 工业方案只做了第一段</text>
+<text class="zs" x="40" y="1252" dx="400">一个训练 Pod 从启动到结束常驻同一节点；epoch 切换、shuffle 重排、curriculum 切换全是 Pod 内部循环，不触发 K8s 调度 → 阶段切换预热必须做成节点内缓存行为，不能靠重新调度 Pod</text>
+
+<rect x="40" y="1262" width="568" height="60" rx="8" fill="#FDF2F8" stroke="#DB2777" stroke-width="1.2"/>
+<text class="bs c7t" x="52" y="1280">调度-启动预取　｜　Job 提交 → Pod 落节点</text>
+<text class="sm c7b" x="52" y="1296">触发方：Controller，经 SchedulingGate　｜　优先级：高（阻塞门控）</text>
+<text class="sm c7b" x="52" y="1310">失败兜底：超时降级，摘掉 gate 走正常调度</text>
+
+<rect x="620" y="1262" width="568" height="60" rx="8" fill="#FDF2F8" stroke="#DB2777" stroke-width="1.2"/>
+<text class="bs c7t" x="632" y="1280">训练中持续预取　｜　Pod 落地 → 训练结束</text>
+<text class="sm c7b" x="632" y="1296">触发方：Agent 自治　｜　优先级：低（可被启动预取打断）</text>
+<text class="sm c7b" x="632" y="1310">失败兜底：预取跟不上就退化成回源读，不影响正确性</text>
+
+<rect x="1200" y="1262" width="600" height="60" rx="8" fill="#FDF2F8" stroke="#DB2777" stroke-width="1.2"/>
+<text class="bs c7t" x="1212" y="1280">阶段切换重预取　｜　epoch / shuffle / curriculum 切换</text>
+<text class="sm c7b" x="1212" y="1296">触发方：DataLoader 钩子上报事件　｜　优先级：中（高于持续预取，低于新 Job 启动）</text>
+<text class="sm c7b" x="1212" y="1310">动作：旧阶段在途请求降级为背景补全、未消费的旧块移出队列腾带宽，新阶段开头 K 块高优入队，并上报新窗口就绪的预估时间</text>
+
+<line x1="608" y1="1292" x2="620" y2="1292" stroke="#DB2777" stroke-width="1.6" marker-end="url(#a3)"/>
+<line x1="1188" y1="1292" x2="1200" y2="1292" stroke="#DB2777" stroke-width="1.6" marker-end="url(#a3)"/>
+</svg>

@@ -8,7 +8,7 @@
 ## [v9.9.9] - 2026-12-01
 
 ### Added
-- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4 实验协议.md` §C。
+- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
 
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
@@ -29,7 +29,7 @@
 ### Changed
 
 - COND 契约升到 v3：只保留会变的量（数据规模、轨迹、epoch、读端形态、带宽、缓存比例与策略、采样次数、网关开关）。固定值集中在 `bench/experiments/cond.py` 的 `DEFAULTS`，派生值（数据量、缓存字节、burst、时延）由代码计算；`lock.json` 新增 `effective` 快照记录实际生效值。118 个 COND 从 11,496 行降到 6,578 行。
-- `docs/4.4 实验协议.md` 从 757 行压到 591 行：删掉与 4.1/4.2/4.3 重复的七组态表、只作诊断的 `t_origin_first_byte` 行、逐族机时算式与 C4 消费方大表；§5.4 新增网关合并一族的口径与判据。
+- `docs/4.4-experiment-protocol.md` 从 757 行压到 591 行：删掉与 4.1/4.2/4.3 重复的七组态表、只作诊断的 `t_origin_first_byte` 行、逐族机时算式与 C4 消费方大表；§5.4 新增网关合并一族的口径与判据。
 - `bench/Makefile` 的 python 解释器加回退：项目根 `.venv` 不存在时计划类目标改用系统 `python3`，不再在解析阶段报错。
 
 ### Removed
@@ -38,19 +38,19 @@
 
 ### Fixed
 
-- `docs/4.3 TrainCache启动与实验.md` 排障表两行被 `||` 连成一行，渲染错位。
+- `docs/4.3-startup-and-experiments.md` 排障表两行被 `||` 连成一行，渲染错位。
 
 ## [v0.4.0] - 2026-11-02
 
 ### Added
 
-- 新增 `traincache-gateway`：在 Agent 与对象存储之间合并在途的块 GET，同一个块只回源一次；单副本 Deployment + ClusterIP Service（`:9413`），`replicas` 固定 1。契约见 `docs/9.1 design.md`。
-- Agent 的块 GET 可经网关：新增 `gatewayEndpoint`（空表示直连）与 `gatewaySecure` 两个配置；`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站。网关不可用时按 10s→120s 退避降级直连，探测成功再切回，判据与状态机见 `docs/9.2 decisions.md` D1/D2/D5。
+- 新增 `traincache-gateway`：在 Agent 与对象存储之间合并在途的块 GET，同一个块只回源一次；单副本 Deployment + ClusterIP Service（`:9413`），`replicas` 固定 1。契约见 `docs/9.1-design.md`。
+- Agent 的块 GET 可经网关：新增 `gatewayEndpoint`（空表示直连）与 `gatewaySecure` 两个配置；`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站。网关不可用时按 10s→120s 退避降级直连，探测成功再切回，判据与状态机见 `docs/9.2-decisions.md` D1/D2/D5。
 - Agent 新增两个指标族：`traincache_source_mode`（0 直连 / 1 网关）与 `traincache_gateway_fallback_total{reason}`，启动注册的族从 40 增至 42。
 - 发布链增加到五个镜像：`hack/build-images.sh`（manager/webhook/scheduler/agent/gateway）、`controller/deploy/kustomization.yaml`、`hack/render-install.sh`、发版与 e2e 工作流均含 `traincache-gateway`；ConfigMap `traincache-config` 的 `gatewayEndpoint`、`gatewaySecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes` 四项计入下条 Changed 的 15 项。
 - bench 增加网关开关 `TRAINCACHE_GATEWAY=1`，`summary.csv` 增 `gateway` 列（1/0），汇总把开关不同的行折进 `<格>+gw` 格子；新增 `gateway/e2e/run-k8s.sh` 与 CI 的 `gateway kind e2e` 作业。
-- 新增 `bench/experiments/row_gate.py`：读侧三道过滤。`plot.py`、`summarize.py` 收 `summary.csv` 时逐行按顺序核 ① 点目录的 `version` 戳等于 `docs/4.6 实验版本记录.md` 最后一行的当前版本；② `void` 为假，倾斜两族的行还要 §1.7 三列齐且非空；③ 倾斜两族的行满足 `total_makespan ≥ fetch_bytes_run ÷ 该档实测有效带宽`（表在 `bench/config.py` 的 `TILT_EFF_BW_MB_S`，@100 取 11.95 MB/s）。只筛 `traincache-*` 行，第三条只对倾斜两族成立：其余族的预热与计算重叠，`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速，当上界会误杀。拒因只取第一条命中的，顺序是先版本戳、再 void 与证据列、最后字节地板；出图的把排除明细写 `results/summary/rejected.csv`。2026-11-01 的 9 条倾斜行缺 §1.7 三列也没有版本戳，从此进不了图和表。自检 `bench/experiments/row_gate.py --selftest`（已串进 `make -C bench selftest`）。
-- 新增 `bench/experiments/policy_table.py`：淘汰矩阵（族 `evict-policy`）的出表入口，`docs/4.4 实验协议.md` §5.3 的三档七列此前没有消费者。读 `results/policy/policy-<策略>/<run ID>/summary.csv`、套 `row_gate.py` 的三道过滤，产出 `results/summary/policy.csv` 与 `policy.md`；列顺序按 §5.3 固定，每档带一条 §1.7 判定（淘汰是否触发、热分片有没有被逐、目录峰值对声明容量的比值有没有越过按 `cache_dir_peak_period_s` 回代的上界），判据不过的那档标「只作诊断」；三栏判定只用判据全过的档，不足两档写「样本不足」。§5.3 增「出表」一条；自检 `policy_table.py --selftest`，含 2026-11-02 取证实跑那条 run 的读数，同样串进 `make -C bench selftest`。
+- 新增 `bench/experiments/row_gate.py`：读侧三道过滤。`plot.py`、`summarize.py` 收 `summary.csv` 时逐行按顺序核 ① 点目录的 `version` 戳等于 `docs/4.6-experiment-version-log.md` 最后一行的当前版本；② `void` 为假，倾斜两族的行还要 §1.7 三列齐且非空；③ 倾斜两族的行满足 `total_makespan ≥ fetch_bytes_run ÷ 该档实测有效带宽`（表在 `bench/config.py` 的 `TILT_EFF_BW_MB_S`，@100 取 11.95 MB/s）。只筛 `traincache-*` 行，第三条只对倾斜两族成立：其余族的预热与计算重叠，`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速，当上界会误杀。拒因只取第一条命中的，顺序是先版本戳、再 void 与证据列、最后字节地板；出图的把排除明细写 `results/summary/rejected.csv`。2026-11-01 的 9 条倾斜行缺 §1.7 三列也没有版本戳，从此进不了图和表。自检 `bench/experiments/row_gate.py --selftest`（已串进 `make -C bench selftest`）。
+- 新增 `bench/experiments/policy_table.py`：淘汰矩阵（族 `evict-policy`）的出表入口，`docs/4.4-experiment-protocol.md` §5.3 的三档七列此前没有消费者。读 `results/policy/policy-<策略>/<run ID>/summary.csv`、套 `row_gate.py` 的三道过滤，产出 `results/summary/policy.csv` 与 `policy.md`；列顺序按 §5.3 固定，每档带一条 §1.7 判定（淘汰是否触发、热分片有没有被逐、目录峰值对声明容量的比值有没有越过按 `cache_dir_peak_period_s` 回代的上界），判据不过的那档标「只作诊断」；三栏判定只用判据全过的档，不足两档写「样本不足」。§5.3 增「出表」一条；自检 `policy_table.py --selftest`，含 2026-11-02 取证实跑那条 run 的读数，同样串进 `make -C bench selftest`。
 
 ### Changed
 
@@ -61,48 +61,48 @@
 - `bench/compare/traincache/up.sh` 的 `traincache-ordersrc` ConfigMap 改为每次 up 都从 `agent/ordersrc/ordersrc.py` 重新 apply。原来「已存在就跳过」，改完的写端代码进不了集群，与静默复用旧镜像是同一类陈旧缺陷。
 - `bench/exp.py` 的产物目录改落数据层既有的五个分区：`compare-groups`→`results/scores/<格名>/`、`startup-surface`/`total-makespan`/`switch-recovery`/`pareto-startup` 四族→`results/figures/<COND 名>/`、`pareto-sustained`/`evict-policy` 两族→`results/policy/<COND 名>/<run ID>/`，对应表在 `results_root()`。此前它写 `results/<族 ID>/<点名>/`，与 `run_figures.py`/`run_policy.py` 写的不是同一棵树：`summarize.py` 只读 `scores/`+`baselines/`、`plot.py` 只认 `figures/fig*-*`，走统一入口跑完的点是「跑完了但出不了图」。点名寻址不变，`--point` 仍写短名，由 `FAMILY_COND_PREFIX` 还原成目录名；`exp.py selftest` 增加分区落位断言，`status` 打印每族的产物分区。
 - `bench/experiments/plot.py` 自动扫描时按一级分区挑七组对照样本（只收 `scores/`、`baselines/`、旧 `compare/`），不再按点目录名前缀排除。前缀黑名单挡不住淘汰矩阵的 run 目录名（`policy-heat-r01-*`），会把 C 轨倾斜样本混进七组柱状图。
-- 实验文档并入 4.x 系列，网关文档降为 9.x：`docs/9.2 实验协议.md`→`docs/4.4 实验协议.md`、`docs/9.1 decisions.md`→`docs/4.5 实验口径决策.md`、`docs/4.4 实验版本记录.md`→`docs/4.6 实验版本记录.md`，`docs/10.0`~`docs/10.3`→`docs/9.0`~`docs/9.3`。`bench/exp.py` 按路径读版本记录，引用这批路径的脚本注释、部署清单与 README 索引同步改完，`hack/verify-doc-refs.sh` 返回 0。
-- `docs/4.5 实验口径决策.md` 的 D13、D18、D28 三行按 `docs/4.4 实验协议.md` 的现行采样口径改写：D18 的每点次数改为 `pareto-startup` 7 次、`pareto-sustained` 2 次、三个曲面族与淘汰矩阵 1 次；D28 的 lookahead 扫点从「3 档 × 3 策略 = 9 点」改为 3 + 3 点；D13 的理由列改按预注册纪律表述。
-- `docs/4.4 实验协议.md` §1.7 的淘汰证据从两条判据增到三条。新增一条管目录峰值：`cache_dir_peak_bytes ÷ cache_bytes ≤ 1.15`，分母是 COND 声明容量，1.15 按淘汰节拍 30 s（`agent/evictor/evictor.go` 的 `defaultInterval`）乘 @100 mbit 实测有效带宽 12 MB/s、再对 2 576 980 377 算出。「拿 `capacity_bytes_final` 当分母、阈值 1.05」的旧写法作废——那是 Agent 训练结束时的在用字节末值，不是声明上限，1.05 等于要求淘汰节拍 ≤10 s。§7.4 的倾斜两族时长账按 2026-11-02 实测重写：@100 mbit 有效带宽 11.95 MB/s、单 run ≈ 37 min、9 run ≈ 5.5 h；旧的 30–33 min 与 4.6–6.0 h 作废。
+- 实验文档并入 4.x 系列，网关文档降为 9.x：`docs/9.2 实验协议.md`→`docs/4.4-experiment-protocol.md`、`docs/9.1 decisions.md`→`docs/4.5-metric-decisions.md`、`docs/4.4 实验版本记录.md`→`docs/4.6-experiment-version-log.md`，`docs/10.0`~`docs/10.3`→`docs/9.0`~`docs/9.3`。`bench/exp.py` 按路径读版本记录，引用这批路径的脚本注释、部署清单与 README 索引同步改完，`hack/verify-doc-refs.sh` 返回 0。
+- `docs/4.5-metric-decisions.md` 的 D13、D18、D28 三行按 `docs/4.4-experiment-protocol.md` 的现行采样口径改写：D18 的每点次数改为 `pareto-startup` 7 次、`pareto-sustained` 2 次、三个曲面族与淘汰矩阵 1 次；D28 的 lookahead 扫点从「3 档 × 3 策略 = 9 点」改为 3 + 3 点；D13 的理由列改按预注册纪律表述。
+- `docs/4.4-experiment-protocol.md` §1.7 的淘汰证据从两条判据增到三条。新增一条管目录峰值：`cache_dir_peak_bytes ÷ cache_bytes ≤ 1.15`，分母是 COND 声明容量，1.15 按淘汰节拍 30 s（`agent/evictor/evictor.go` 的 `defaultInterval`）乘 @100 mbit 实测有效带宽 12 MB/s、再对 2 576 980 377 算出。「拿 `capacity_bytes_final` 当分母、阈值 1.05」的旧写法作废——那是 Agent 训练结束时的在用字节末值，不是声明上限，1.05 等于要求淘汰节拍 ≤10 s。§7.4 的倾斜两族时长账按 2026-11-02 实测重写：@100 mbit 有效带宽 11.95 MB/s、单 run ≈ 37 min、9 run ≈ 5.5 h；旧的 30–33 min 与 4.6–6.0 h 作废。
 - `bench/compare/run_bench.py` 测量体等补块的轮询从 0.5 s 降到 25 ms。块落盘是临时文件 + `os.Rename`（`core/cas/store.go`），`exists` 即完整可读，所以可以加密；0.5 s 的粒度让下一块的 `read_miss` 必须等检测与读完才发出，倾斜 run 单块墙钟从抓取的 0.82 s 被抬到 1.79 s，抓取槽只占用 35%。实测单块降到 0.70 s、槽占用 94%，单 run 从 92 min 到 37 min。命中率与分阶段字节账口径不变。
-- `bench/compare/run_bench.py` 把目录峰值的采样节拍写进产物：`summary.csv` 增 `cache_dir_peak_samples`（窗口内采了几次）与 `cache_dir_peak_period_s`（相邻两次采样的时刻差均值，`docker exec` 串四个节点会把它从标称 5 s 拉长）。`docs/4.4 实验协议.md` §1.7 判据三的上界随之从 1.15 改到 1.16——盲区是淘汰节拍 30 s 加采样周期 5 s，(30 s + 5 s) × 11.95 MB/s ÷ 2 576 980 377 ≈ 16%，只看淘汰节拍会漏掉「采样格点之间涨上去没被读到」；@300 档的对应上界 1.42 作废，按同一式子改 1.48。§7.4 的 @300 那句同步改。判据一的 5% 余量说明改齐代码：预取在途的 `tmp-*` 不在目录峰值口径里（只统计写完的 `.blk`），余量只给采样间隔内的增长。目录峰值列的取值描述也改成实际命令（节点内 `find -name '*.blk'` 求和取单节点最大值），旧的「`du -sb`」写法作废。
-- tc 的 burst 口径按实挂值改齐，注释与文档里的算法不再用十进制：tc 把 `1250k` 解析成 1024 倍，即 1 280 000 字节，对 @100 的 tbf 速率 12.5 MB/s 是 102 ms 突发窗口（`bench/config.py` 的 `burst_for_rate` 注释、`bench/scripts/tc_apply.sh` 头注释、`docs/4.4 实验协议.md` §1.9 三处原来写「≈0.1 秒」按 1000 算，读者会算错）；旧固定值 `1600k` 的突发窗口 128 ms 改 131 ms（`docs/4.5 实验口径决策.md` D31 同一处）。一次性容器内实测（iproute2-6.1.0）：命令行同时给 `latency 50ms` 不覆盖这个桶，三个 latency 取值回读的 burst 不变，latency 只定队列长度。`make bench-doctor` 加第五条断言，从 MinIO Pod netns 回读的 tbf burst 折算成字节后必须等于 `config.burst_for_rate(该档 rate)`，容 ±1%（iproute2 按 32 位字取整，3750k 回读 3839962b）；`docs/4.4` §1.7 的「四条断言」改「五条」。
+- `bench/compare/run_bench.py` 把目录峰值的采样节拍写进产物：`summary.csv` 增 `cache_dir_peak_samples`（窗口内采了几次）与 `cache_dir_peak_period_s`（相邻两次采样的时刻差均值，`docker exec` 串四个节点会把它从标称 5 s 拉长）。`docs/4.4-experiment-protocol.md` §1.7 判据三的上界随之从 1.15 改到 1.16——盲区是淘汰节拍 30 s 加采样周期 5 s，(30 s + 5 s) × 11.95 MB/s ÷ 2 576 980 377 ≈ 16%，只看淘汰节拍会漏掉「采样格点之间涨上去没被读到」；@300 档的对应上界 1.42 作废，按同一式子改 1.48。§7.4 的 @300 那句同步改。判据一的 5% 余量说明改齐代码：预取在途的 `tmp-*` 不在目录峰值口径里（只统计写完的 `.blk`），余量只给采样间隔内的增长。目录峰值列的取值描述也改成实际命令（节点内 `find -name '*.blk'` 求和取单节点最大值），旧的「`du -sb`」写法作废。
+- tc 的 burst 口径按实挂值改齐，注释与文档里的算法不再用十进制：tc 把 `1250k` 解析成 1024 倍，即 1 280 000 字节，对 @100 的 tbf 速率 12.5 MB/s 是 102 ms 突发窗口（`bench/config.py` 的 `burst_for_rate` 注释、`bench/scripts/tc_apply.sh` 头注释、`docs/4.4-experiment-protocol.md` §1.9 三处原来写「≈0.1 秒」按 1000 算，读者会算错）；旧固定值 `1600k` 的突发窗口 128 ms 改 131 ms（`docs/4.5-metric-decisions.md` D31 同一处）。一次性容器内实测（iproute2-6.1.0）：命令行同时给 `latency 50ms` 不覆盖这个桶，三个 latency 取值回读的 burst 不变，latency 只定队列长度。`make bench-doctor` 加第五条断言，从 MinIO Pod netns 回读的 tbf burst 折算成字节后必须等于 `config.burst_for_rate(该档 rate)`，容 ±1%（iproute2 按 32 位字取整，3750k 回读 3839962b）；`docs/4.4` §1.7 的「四条断言」改「五条」。
 
 ### Removed
 
-- 删除 `docs/9.1 plan.md`：里程碑表（M0–M8）与任务表不再维护，验收改按实验族寻址；机时口径、带宽与容量档参数、对照层 62 run 分项与各族点数表并入 `docs/4.4 实验协议.md` §7。
-- 删除 `docs/10.4 plan.md`（按其自述：里程碑全部验收后删除）与 `docs/9.0 核心能力验收与测试.md`（内容已散在 4.x，口径合并进 `docs/4.4 实验协议.md`）。
+- 删除 `docs/9.1 plan.md`：里程碑表（M0–M8）与任务表不再维护，验收改按实验族寻址；机时口径、带宽与容量档参数、对照层 62 run 分项与各族点数表并入 `docs/4.4-experiment-protocol.md` §7。
+- 删除 `docs/10.4 plan.md`（按其自述：里程碑全部验收后删除）与 `docs/9.0 核心能力验收与测试.md`（内容已散在 4.x，口径合并进 `docs/4.4-experiment-protocol.md`）。
 
 ### Fixed
 
 - scheduler 的 `configMapKeyRef` 指到了 `traincache` 的 `traincache-config`，而它在 kube-system，取不到对象，Pod 停在 `CreateContainerConfigError`；两个 Scheduler 配置项改到 kube-system 的 `traincache-scheduler-config`。热集群一直复用旧 ReplicaSet、清单哈希不变就不 `apply -k`，这条直到 M5 前置探针第一次全量 apply 才露头；`hack/verify-config-placement.sh` 现按 namespace 校验每条引用，改回跨 namespace 引用即失败。
-- 字节维度缓存上限（`TRAINCACHE_CACHE_CAPACITY_BYTES`）的记账错在两处，导致设了上限也不会按字节淘汰。其一，口径不一致：`cas.Put` 只加数据长度，启动预扫与淘汰扣减按块文件 size（数据 + 128B 块头），删空目录后累计仍停在 −128B/块；现三个来源统一到文件 size。其二，进程重启后启动预扫只播种累计、没播种去重表，目录里的块被本进程首次打开时再加一次（8GiB 缓存读成 16GiB），淘汰每块只减一次，累计永远回不到真值并停在危险线上反复空转；预扫现同时把已有块指纹写入去重表。契约见 `docs/6.2 decisions.md` D58，判据用例 `agent/svc/capacity_wiring_test.go`。
+- 字节维度缓存上限（`TRAINCACHE_CACHE_CAPACITY_BYTES`）的记账错在两处，导致设了上限也不会按字节淘汰。其一，口径不一致：`cas.Put` 只加数据长度，启动预扫与淘汰扣减按块文件 size（数据 + 128B 块头），删空目录后累计仍停在 −128B/块；现三个来源统一到文件 size。其二，进程重启后启动预扫只播种累计、没播种去重表，目录里的块被本进程首次打开时再加一次（8GiB 缓存读成 16GiB），淘汰每块只减一次，累计永远回不到真值并停在危险线上反复空转；预扫现同时把已有块指纹写入去重表。契约见 `docs/6.2-decisions.md` D58，判据用例 `agent/svc/capacity_wiring_test.go`。
 - 字节累计的漏记还有一处：`Open` 前置观察者对**缺失块**也触发，而字节累计拿它当「这个块记过了」用——预取窗口先用 `cas.Open` 探就绪（ETA、回填、rescan 同形态），未命中就把块指纹写进 `seenFPs`，随后本进程 `Put` 同一块被当成已累计跳过。冷缓存下几乎每个块都先被探测一遍，写入字节全程漏记，`traincache_cache_capacity_bytes_total{source="bytes"}` 停在启动预扫值、淘汰增量为 0（M5 前置探针现场）。现在缺失块探测不占用去重槽，累计只在块文件确实存在或 `Put` 落地时计入；判据用例 `TestCapacitySurvivesMissOpenProbe`。
-- ring 写端的 10s 保活心跳每跳一次就把订单重铺一遍。代际的语义是「写端会话换了」，可 `ordersrc.py` 每次调用都按新会话算（`writer_generation` +1），而读端遇到代际变化会按 design §7.4 把同载荷订单也重放一次，于是每 10s 一次虚假的 sidecar 重启 → 一次 `OnStageSwitch` → 预取队列整段重铺（M5 前置探针现场：1024 块/次，字节上限生效后演变成无界回源）。新增 `--same-generation`：同一会话内的续写只推进 `write_seq`、代际不变；`agent/deploy/train-pod.yaml` 的 sidecar 循环与 bench reader 的心跳线程改用它，epoch 首写仍按新代际。契约见 `docs/6.2 decisions.md` D22/D41/D57，判据用例 `agent/ordersrc/ordersrc_test.py`。
+- ring 写端的 10s 保活心跳每跳一次就把订单重铺一遍。代际的语义是「写端会话换了」，可 `ordersrc.py` 每次调用都按新会话算（`writer_generation` +1），而读端遇到代际变化会按 design §7.4 把同载荷订单也重放一次，于是每 10s 一次虚假的 sidecar 重启 → 一次 `OnStageSwitch` → 预取队列整段重铺（M5 前置探针现场：1024 块/次，字节上限生效后演变成无界回源）。新增 `--same-generation`：同一会话内的续写只推进 `write_seq`、代际不变；`agent/deploy/train-pod.yaml` 的 sidecar 循环与 bench reader 的心跳线程改用它，epoch 首写仍按新代际。契约见 `docs/6.2-decisions.md` D22/D41/D57，判据用例 `agent/ordersrc/ordersrc_test.py`。
 
 ## [v0.3.2] - 2026-10-31
 
 ### Changed
 
-- 下载准入档位改名：`fetch.Priority` → `fetch.Admission`、`FetchWithPriority` → `FetchWithAdmission`、`PriorityForeground`/`PriorityBackground` → `AdmissionReading`（在读：需求读补块与坏块修复）/`AdmissionSpeculative`（预铺：预取含显式预热）。只影响 `traincache/core/fetch` 的导入方；半额额度、让路门、同 key 合并与回源指标口径不变。契约见 `docs/5.1 design.md` §5.3 与 `docs/6.3 decisions.md` D61。
+- 下载准入档位改名：`fetch.Priority` → `fetch.Admission`、`FetchWithPriority` → `FetchWithAdmission`、`PriorityForeground`/`PriorityBackground` → `AdmissionReading`（在读：需求读补块与坏块修复）/`AdmissionSpeculative`（预铺：预取含显式预热）。只影响 `traincache/core/fetch` 的导入方；半额额度、让路门、同 key 合并与回源指标口径不变。契约见 `docs/5.1-design.md` §5.3 与 `docs/6.3 decisions.md` D61。
 
 ## [v0.3.1] - 2026-10-30
 
 ### Added
 
-- 控制面到 Agent 的四个 RPC 新增 gRPC metadata 三键 `x-traincache-request-id`/`x-traincache-task`/`x-traincache-generation`：Controller 客户端注入，Agent 拦截器把三者写进 context logger，两端日志可按同一次请求串联。契约见 `docs/8.1 design.md` §5。
-- 钩子帧可携带任务身份 `warmup_task`/`pod`/`pod_index`/`dataset`/`generation`，缺省时行为与旧帧一致；`read_miss` 的补块日志带上这组字段。webhook 相应补注入 `TRAINCACHE_POD`。契约见 `docs/8.0 日志与监控.md` 与 `docs/6.1 design.md` §5.4。
-- 日志采样与限流：`TRAINCACHE_LOG_SAMPLE_RATE`（Info，默认 1.0）与 `TRAINCACHE_LOG_DEBUG_SAMPLE_RATE`（Debug，默认 0.01）控制级别采样，配进程内令牌桶（控制面 100 行/秒、Agent 200 行/秒）与 60s 去重窗口；Warn/Error 不采样、不被丢弃。丢弃条数由新增的 `traincache_log_dropped_total{component,level}` 暴露。契约见 `docs/8.1 design.md` §3.3。
-- 日志固定带 `sampled`/`sample_rate` 两个字段；带 `err` 的 Warn/Error 固定成对带 `err_class`（`invalid_spec`/`not_found`/`unavailable`/`permanent`/`corrupt`/`io`/`timeout`）。契约见 `docs/8.1 design.md` §3.1。
-- Agent 高频路径改为 60s 汇总：逐块下载/校验每窗口一条 Info（块数、字节、失败数、P50/P99），缓存命中/未命中/read_miss 每窗口一条 Info（按 dataset 与 reason）。逐块明细降为 Debug 1/100 采样。契约见 `docs/8.1 design.md` §3.3 与 §4.2。
-- observability 装置补齐告警与看板：五条 Prometheus 规则（门控 Hold 超时、Agent 不可达、read stall 超阈值、磁盘危险线、日志断流），每条带 `runbook_url` 指向 `docs/8.1 design.md` 附录 A；Grafana 增加控制平面、Agent、DataLoader 三层看板并从 ConfigMap 自动加载。
-- 训练侧 DataLoader 适配器 `agent/hooklib/`：包装 torch 的 `Dataset`/`IterableDataset`，发 advance/stage_switch/open_report/read_miss/read_stall 五帧，并按 `docs/8.1 design.md` §4.3 打 JSON 日志；webhook 注入 `TRAINCACHE_TASK`/`TRAINCACHE_POD`/`TRAINCACHE_POD_INDEX`/`TRAINCACHE_DATASET`/`TRAINCACHE_HOOK_SOCK`/`TRAINCACHE_GENERATION_AT_START`，参考清单把 `/run/traincache` 挂进训练容器。
+- 控制面到 Agent 的四个 RPC 新增 gRPC metadata 三键 `x-traincache-request-id`/`x-traincache-task`/`x-traincache-generation`：Controller 客户端注入，Agent 拦截器把三者写进 context logger，两端日志可按同一次请求串联。契约见 `docs/8.1-design.md` §5。
+- 钩子帧可携带任务身份 `warmup_task`/`pod`/`pod_index`/`dataset`/`generation`，缺省时行为与旧帧一致；`read_miss` 的补块日志带上这组字段。webhook 相应补注入 `TRAINCACHE_POD`。契约见 `docs/8.0-logging-and-monitoring.md` 与 `docs/6.1-design.md` §5.4。
+- 日志采样与限流：`TRAINCACHE_LOG_SAMPLE_RATE`（Info，默认 1.0）与 `TRAINCACHE_LOG_DEBUG_SAMPLE_RATE`（Debug，默认 0.01）控制级别采样，配进程内令牌桶（控制面 100 行/秒、Agent 200 行/秒）与 60s 去重窗口；Warn/Error 不采样、不被丢弃。丢弃条数由新增的 `traincache_log_dropped_total{component,level}` 暴露。契约见 `docs/8.1-design.md` §3.3。
+- 日志固定带 `sampled`/`sample_rate` 两个字段；带 `err` 的 Warn/Error 固定成对带 `err_class`（`invalid_spec`/`not_found`/`unavailable`/`permanent`/`corrupt`/`io`/`timeout`）。契约见 `docs/8.1-design.md` §3.1。
+- Agent 高频路径改为 60s 汇总：逐块下载/校验每窗口一条 Info（块数、字节、失败数、P50/P99），缓存命中/未命中/read_miss 每窗口一条 Info（按 dataset 与 reason）。逐块明细降为 Debug 1/100 采样。契约见 `docs/8.1-design.md` §3.3 与 §4.2。
+- observability 装置补齐告警与看板：五条 Prometheus 规则（门控 Hold 超时、Agent 不可达、read stall 超阈值、磁盘危险线、日志断流），每条带 `runbook_url` 指向 `docs/8.1-design.md` 附录 A；Grafana 增加控制平面、Agent、DataLoader 三层看板并从 ConfigMap 自动加载。
+- 训练侧 DataLoader 适配器 `agent/hooklib/`：包装 torch 的 `Dataset`/`IterableDataset`，发 advance/stage_switch/open_report/read_miss/read_stall 五帧，并按 `docs/8.1-design.md` §4.3 打 JSON 日志；webhook 注入 `TRAINCACHE_TASK`/`TRAINCACHE_POD`/`TRAINCACHE_POD_INDEX`/`TRAINCACHE_DATASET`/`TRAINCACHE_HOOK_SOCK`/`TRAINCACHE_GENERATION_AT_START`，参考清单把 `/run/traincache` 挂进训练容器。
 - `traincacheds gc --orphan-blocks` 清理远端孤儿块：删除不被任何快照引用、且最后修改时间早于 `--orphan-grace`（默认 24h）的块；manifest 或分片读不通时整轮放弃删除。
 - `traincacheds` 交付 `rm` 与 `gc`：`rm --path/--prefix` 经 `Writer.CommitChanges` 提交新快照完成删除，`gc` 触发一次 `Collector.Sweep` 回收旧快照；两者默认只预览，带 `--yes` 才执行。
 
 ### Changed
 
-- 节点分数注解从 Node 迁到训练 Pod，键名由 `traincache.io/scores` 改为 `traincache.io/node-scores`；controller 与 scheduler 的 `CONTROLLER_SCORE_ANNOTATION` 必须同值。放行在同一次 Pod patch 内写分数并摘 gate，Scheduler 不再有读不到分数的窗口。契约见 `docs/7.1 design.md` 与 `docs/PARAMETER-CONFIGURATION.md`（D49 取代 D27）。
+- 节点分数注解从 Node 迁到训练 Pod，键名由 `traincache.io/scores` 改为 `traincache.io/node-scores`；controller 与 scheduler 的 `CONTROLLER_SCORE_ANNOTATION` 必须同值。放行在同一次 Pod patch 内写分数并摘 gate，Scheduler 不再有读不到分数的窗口。契约见 `docs/7.1-design.md` 与 `docs/PARAMETER-CONFIGURATION.md`（D49 取代 D27）。
 - `read_stall` 归因关联窗口从固定 ±5s 改为可配：`TRAINCACHE_READ_STALL_WINDOW_MS`，默认 `5000`，表示以帧 `ts` 为中心前后各该毫秒数。契约见 `docs/PARAMETER-CONFIGURATION.md`。
 - Agent 的部署清单只剩 `controller/deploy/agent/daemonset.yaml` 一份，kind e2e 改为 apply 该清单后替换镜像引用；`agent/deploy/agentd.yaml` 删除，同名 DaemonSet 两套 request/limit 并存的问题消失。Agent 内存 limit 为 4Gi。
 
@@ -126,13 +126,13 @@
 ### Added
 
 - Agent 启动日志级别不再固定为 `info`，改由 `TRAINCACHE_LOG_LEVEL` 决定（默认 `info`）。
-- 四个进程新增 localhost-only 的 `/debug/loglevel`：`GET` 读当前级别，`PUT` 改级别即时生效，进程重启回落到 env 值。监听地址由 `CONTROLLER_DEBUG_ADDR`（controller-manager / scheduler / webhook）与 `TRAINCACHE_DEBUG_ADDR`（agentd）给出，默认 `127.0.0.1:6060`，空串关闭。契约见 `docs/8.1 design.md` §7。
+- 四个进程新增 localhost-only 的 `/debug/loglevel`：`GET` 读当前级别，`PUT` 改级别即时生效，进程重启回落到 env 值。监听地址由 `CONTROLLER_DEBUG_ADDR`（controller-manager / scheduler / webhook）与 `TRAINCACHE_DEBUG_ADDR`（agentd）给出，默认 `127.0.0.1:6060`，空串关闭。契约见 `docs/8.1-design.md` §7。
 - Agent 快照跟随循环在切换成功后补一条 Info（`catalog: 快照切换成功`），与失败侧的 Warn 成对；此前只有失败出声，「没有新快照」和「读不到」在日志里分不开。
 
 ### Changed
 
 - 控制面日志的 `assign` 字段由 `"p0=n0"` 字符串改为结构化对象（Pod → 节点数组），可按节点聚合；Agent RPC 的进程内重试循环去掉，失败日志不再带恒为 1 的 `attempt`，退避交给 controller-runtime。
-- `CancelPreheat` 撤回该任务还没下完的块：受理预热任务时结一个下载作用域，取消即取消它，块在下一个 ctx 边界（准入排队、源站读、写盘）退出并按失败回调，任务落 `ERROR`、`completed` 保留取消前已落盘的块数。作用域只在任务出表时释放，`DONE` 不释放——DONE 后仍可能收到 `UpdatePreheat` 续窗。再次提交同一 `task_id` 仍视为新任务。契约见 `docs/6.1 design.md` 的 `CancelPreheat` 条目，决策记 `docs/6.3 decisions.md` D62。
+- `CancelPreheat` 撤回该任务还没下完的块：受理预热任务时结一个下载作用域，取消即取消它，块在下一个 ctx 边界（准入排队、源站读、写盘）退出并按失败回调，任务落 `ERROR`、`completed` 保留取消前已落盘的块数。作用域只在任务出表时释放，`DONE` 不释放——DONE 后仍可能收到 `UpdatePreheat` 续窗。再次提交同一 `task_id` 仍视为新任务。契约见 `docs/6.1-design.md` 的 `CancelPreheat` 条目，决策记 `docs/6.3 decisions.md` D62。
 - bench 与现勘清单的 MinIO 镜像从 `latest` 钉到固定 release tag（`pgsty/minio:RELEASE.2026-08-04T00-00-00Z`，manifest digest 已 `docker pull` 验证），滚动升级不再带来行为漂移。
 
 ### Fixed

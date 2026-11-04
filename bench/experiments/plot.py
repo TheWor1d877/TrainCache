@@ -53,10 +53,82 @@ SAVE_DPI = 200
 # 在该家族上设 weight=bold 会被回退成更细的 Regular。
 BOLD_FAMILY = "Noto Sans CJK SC"
 
+ZH_SANS = ["Noto Sans CJK SC Medium", "Noto Sans CJK SC",
+           "Noto Sans CJK JP", "DejaVu Sans"]
+EN_SANS = ["Inter", "DejaVu Sans"]
+
+# 一次运行产出中英两套图:LANG 由渲染循环切换,图中文案统一走 t()。
+LANG = "zh"
+
+# 图中出现的中文文案 → 英文。术语 makespan / stall / fanout / epoch /
+# shuffle / lookahead 保持原样,不意译。
+EN = {
+    # 七组态对照
+    "启动 makespan（s）": "Startup makespan (s)",
+    "七组态启动 makespan": "Startup makespan, seven configurations",
+    "全程 makespan（s）": "Full-run makespan (s)",
+    "七组态全程 makespan": "Full-run makespan, seven configurations",
+    "stall 占比（%）": "Stall ratio (%)",
+    "七组态 stall 占比": "Stall ratio, seven configurations",
+    "（无有效行）": " (no valid runs)",
+    "，探点 n=1": ", n=1 probe",
+    "JuiceFS 冷": "JuiceFS cold",
+    "JuiceFS 热": "JuiceFS warm",
+    "Fluid 冷": "Fluid cold",
+    "Fluid 热": "Fluid warm",
+    "TrainCache 冷": "TrainCache cold",
+    "TrainCache 热": "TrainCache warm",
+    # 启动门控盈亏
+    "缺测": "Censored",
+    "相对自由调度的启动 makespan 变化（%）":
+        "Startup makespan change vs. free scheduling (%)",
+    "门控更快": "Gated faster",
+    "门控更慢": "Gated slower",
+    "启动门控盈亏": "Gated vs. free scheduling",
+    # 全程时长
+    "epoch 数": "Epochs",
+    "全程 makespan（s，对数轴）": "Full-run makespan (s, log scale)",
+    "全程 makespan": "Full-run makespan",
+    # 阶段切换回落
+    "回落时间（s）": "Recovery time (s)",
+    "stall 回落时间": "Stall recovery time",
+    "单次切换": "Single switch",
+    "均值": "Mean",
+    # Pareto 图
+    "启动预取字节（GB，含 fanout 重复读入）":
+        "Startup prefetch bytes (GB, incl. fanout re-reads)",
+    "启动 makespan 改善（%）": "Startup makespan improvement (%)",
+    "启动收益与启动预取字节": "Startup gain vs. startup prefetch bytes",
+    "持续预取字节（GB）": "Sustained prefetch bytes (GB)",
+    "全程 makespan 改善（%，基线 lookahead=8）":
+        "Full-run makespan improvement (%, baseline lookahead=8)",
+    "全程收益与持续预取字节": "Full-run gain vs. sustained prefetch bytes",
+    "（基线）": " (baseline)",
+    "（": " (",
+    "）": ")",
+}
+
+
+def t(s: str) -> str:
+    """中文原样返回;英文按 EN 查表,查不到的原样返回(数值/术语/格子名)。"""
+    return EN.get(s, s) if LANG == "en" else s
+
+
+def _set_language(lang: str):
+    """切换整套图的语言与字体;两趟渲染各自回到本语言的字体栈。"""
+    global LANG, BOLD_FAMILY
+    LANG = lang
+    if lang == "en":
+        plt.rcParams["font.sans-serif"] = EN_SANS
+        BOLD_FAMILY = "DejaVu Sans"
+    else:
+        plt.rcParams["font.sans-serif"] = ZH_SANS
+        BOLD_FAMILY = "Noto Sans CJK SC"
+
+
 plt.rcParams.update({
     # Medium 字重:Regular 在 200 dpi 下显细,观感像课件
-    "font.sans-serif": ["Noto Sans CJK SC Medium", "Noto Sans CJK SC",
-                        "Noto Sans CJK JP", "DejaVu Sans"],
+    "font.sans-serif": ZH_SANS,
     "axes.unicode_minus": False,
     "font.size": 10.5,
     "axes.titlesize": 12,
@@ -119,9 +191,10 @@ def _with_version(path: Path) -> Path:
 
 
 def _save(fig, path: Path):
-    """统一落盘:白底、200 dpi、裁掉空白边。"""
+    """统一落盘:白底、200 dpi、裁掉空白边。文件名带版本与语言后缀。"""
     _bolden(fig)
     path = _with_version(path)
+    path = path.with_name(f"{path.stem}.{LANG}{path.suffix}")
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=SAVE_DPI, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
@@ -129,7 +202,12 @@ def _save(fig, path: Path):
 
 
 def _write_csv(path: Path, header: list[str], rows: list[list]):
-    """把图上用到的聚合值写到 figures/data/,图与数可逐格核对。"""
+    """把图上用到的聚合值写到 figures/data/,图与数可逐格核对。
+
+    数据与语言无关,文件名只带版本号;中英两趟渲染只在中文那趟写一次。
+    """
+    if LANG != "zh":
+        return
     path = _with_version(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -439,7 +517,7 @@ def _label_cells(flat: list, n: int, ncols: int = 3):
         idx = row * ncols
         if idx < n:
             flat[idx].set_yticks(range(len(GROUP_ORDER)))
-            flat[idx].set_yticklabels([GROUP_LABELS[g] for g in GROUP_ORDER])
+            flat[idx].set_yticklabels([t(GROUP_LABELS[g]) for g in GROUP_ORDER])
             for lbl, g in zip(flat[idx].get_yticklabels(), GROUP_ORDER):
                 lbl.set_color(INK if g.startswith("traincache") else MUTED)
             flat[idx].tick_params(labelleft=True)
@@ -467,7 +545,7 @@ def plot_compare_bars(rows: list[dict], cells: list[str], metric: str,
         s = summ[cell]
         present = [g for g in GROUP_ORDER if s[g][3] > 0]
         if not present:
-            ax.set_title(f"({chr(97 + i)}) {cell}（无有效行）")
+            ax.set_title(f"({chr(97 + i)}) {cell}{t('（无有效行）')}")
             continue
         scale = 100.0 if percent else 1.0
         top = max(s[g][0] for g in present) * scale
@@ -480,10 +558,10 @@ def plot_compare_bars(rows: list[dict], cells: list[str], metric: str,
             ax.annotate(tag, (v, slots[g]), textcoords="offset points",
                         xytext=(5, 0), ha="left", va="center",
                         fontsize=9.5, color=INK)
-        probe = "，探点 n=1" if max(s[g][3] for g in present) == 1 else ""
+        probe = t("，探点 n=1") if max(s[g][3] for g in present) == 1 else ""
         ax.set_title(f"({chr(97 + i)}) {cell}{probe}")
         if i % 3 == 0:
-            ax.set_xlabel(xlabel)
+            ax.set_xlabel(t(xlabel))
         ax.set_xlim(0, top * 1.5)
         ax.set_ylim(len(GROUP_ORDER) - 0.45, -0.55)
         ax.grid(axis="x")
@@ -491,7 +569,7 @@ def plot_compare_bars(rows: list[dict], cells: list[str], metric: str,
             ax.xaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
 
     _label_cells(axes, len(cells))
-    fig.suptitle(title, x=0.005, ha="left", fontsize=11)
+    fig.suptitle(t(title), x=0.005, ha="left", fontsize=11)
     _save(fig, out_path)
     rows_out = [[c, g, summ[c][g][3], f"{summ[c][g][0]:.3f}",
                  f"{summ[c][g][1]:.3f}", f"{summ[c][g][2]:.3f}"]
@@ -578,7 +656,7 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
                 gated, _, _ = mean_ci(cell.get("gated", []))
                 free, _, _ = mean_ci(cell.get("free", []))
                 if not (gated and free):
-                    ax.text(xmin + 4, y, "缺测", va="center", fontsize=9,
+                    ax.text(xmin + 4, y, t("缺测"), va="center", fontsize=9,
                             color=MUTED)
                     continue
                 gain = 100.0 * (free - gated) / free
@@ -605,7 +683,9 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
         ax.set_xticks([-100, -50, 0, 50, 100])
         ax.set_xticklabels(["−100", "−50", "0", "+50", "+100"])
         ax.set_ylim(len(ratios) * len(rates) - 0.5, -0.55)
-        ax.set_xlabel("相对自由调度的启动 makespan 变化（%）")
+        # 共享一条横轴标题:三面各标一次时英文文案会互相压住
+        if k == len(fanouts) // 2:
+            ax.set_xlabel(t("相对自由调度的启动 makespan 变化（%）"))
         ax.set_title(f"({chr(97 + k)}) fanout={fo}")
         ax.grid(axis="x")
 
@@ -614,12 +694,12 @@ def plot_fig1(metrics: list[dict], out_dir: Path):
                              for ratio in ratios for rate in rates])
     for ax in axes[1:]:
         ax.tick_params(labelleft=False)
-    handles = [Patch(facecolor=faster, label="门控更快"),
-               Patch(facecolor=slower, label="门控更慢")]
+    handles = [Patch(facecolor=faster, label=t("门控更快")),
+               Patch(facecolor=slower, label=t("门控更慢"))]
     fig.legend(handles=handles, loc="outside lower center", ncol=2,
                frameon=False, handletextpad=0.5, columnspacing=1.8,
                handlelength=1.2)
-    fig.suptitle("启动门控盈亏", x=0.005, ha="left", fontsize=12)
+    fig.suptitle(t("启动门控盈亏"), x=0.005, ha="left", fontsize=12)
     _save(fig, out_dir / "fig1_startup_surface.png")
     _write_csv(out_dir / "data" / "fig1_startup_surface.csv",
                ["fanout", "rate_mbit", "cache_ratio", "n_gated", "n_free",
@@ -690,9 +770,9 @@ def plot_fig2(metrics: list[dict], out_dir: Path):
     ax.set_xlim(-0.55, len(epochs) - 0.45)
     ax.set_xticks(range(len(epochs)))
     ax.set_xticklabels([str(ep) for ep in epochs])
-    ax.set_xlabel("epoch 数")
-    ax.set_ylabel("全程 makespan（s，对数轴）")
-    ax.set_title("全程 makespan")
+    ax.set_xlabel(t("epoch 数"))
+    ax.set_ylabel(t("全程 makespan（s，对数轴）"))
+    ax.set_title(t("全程 makespan"))
     ax.legend(loc="upper left", ncol=3, frameon=False, handlelength=1.2,
               columnspacing=1.0)
     ax.grid(axis="y", which="major")
@@ -799,14 +879,14 @@ def plot_fig3(metrics: list[dict], out_dir: Path):
         lbl.set_color(colors[sh])
     ax.set_ylim(len(rows_plotted) - 0.45, -0.55)
     ax.set_xlim(lo_v - pad, hi_v + pad + 0.03)
-    ax.set_xlabel("回落时间（s）")
+    ax.set_xlabel(t("回落时间（s）"))
     ax.grid(axis="x")
     ax.xaxis.set_major_formatter(FormatStrFormatter("%.2f"))
-    ax.set_title("stall 回落时间")
+    ax.set_title(t("stall 回落时间"))
     handles = [Line2D([], [], marker="o", linestyle="", markersize=6,
-                      mfc="#9aa0a6", mec="none", label="单次切换"),
+                      mfc="#9aa0a6", mec="none", label=t("单次切换")),
                Line2D([], [], marker="o", linestyle="", markersize=11,
-                      mfc="#6b7280", mec="white", label="均值")]
+                      mfc="#6b7280", mec="white", label=t("均值"))]
     fig.legend(handles=handles, loc="outside lower center", ncol=2,
                frameon=False, handletextpad=0.5, columnspacing=1.8)
     _save(fig, out_dir / "fig3_recovery.png")
@@ -873,9 +953,9 @@ def plot_pareto1(metrics: list[dict], out_dir: Path):
     y_hi = max(0.0, max(p[1] for p in points))
     pad = 0.12 * max(4.0, y_hi - y_lo)
     ax.set_ylim(y_lo - pad, y_hi + pad)
-    ax.set_xlabel("启动预取字节（GB，含 fanout 重复读入）")
-    ax.set_ylabel("启动 makespan 改善（%）")
-    ax.set_title("启动收益与启动预取字节")
+    ax.set_xlabel(t("启动预取字节（GB，含 fanout 重复读入）"))
+    ax.set_ylabel(t("启动 makespan 改善（%）"))
+    ax.set_title(t("启动收益与启动预取字节"))
     ax.grid(axis="both")
     _save(fig, out_dir / "pareto1_startup_bytes.png")
     csv_rows = []
@@ -978,7 +1058,8 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
     ax.plot([p[0] for p in mean_points], [p[1] for p in mean_points],
             color="#9CA3AF", lw=1.0, zorder=1)
     for x, y, la, pol in mean_points:
-        tag = "（基线）" if la == 8 else f"（{y:+.1f}%）"
+        tag = (t("（基线）") if la == 8
+               else f"{t('（')}{y:+.1f}%{t('）')}")
         ax.annotate(f"lookahead={la}{tag}", (x, y), textcoords="offset points",
                     xytext=(12, 13), va="bottom", fontsize=9, color=INK)
 
@@ -991,9 +1072,9 @@ def plot_pareto2(metrics: list[dict], out_dir: Path):
         ax.legend(handles=handles, frameon=False, loc="lower left")
 
     ax.axhline(0, color="#9CA3AF", linestyle="--", linewidth=0.8, zorder=0)
-    ax.set_xlabel("持续预取字节（GB）")
-    ax.set_ylabel("全程 makespan 改善（%，基线 lookahead=8）")
-    ax.set_title("全程收益与持续预取字节")
+    ax.set_xlabel(t("持续预取字节（GB）"))
+    ax.set_ylabel(t("全程 makespan 改善（%，基线 lookahead=8）"))
+    ax.set_title(t("全程收益与持续预取字节"))
     ax.grid(axis="both")
     _save(fig, out_dir / "pareto2_sustained_bytes.png")
     _write_csv(out_dir / "data" / "pareto2_sustained_bytes.csv",
@@ -1060,9 +1141,7 @@ def main():
         print(f"  共 {len(rows) + len(rejected)} 条,有效 {len(mapped)} 条,"
               f"排除 {len(rejected)} 条")
         compare_rows.extend(mapped)
-    if compare_rows:
-        plot_compare_all(compare_rows, args.out_dir)
-    else:
+    if not compare_rows:
         print("[compare] 没有可读的 summary.csv,跳过五组对照图")
 
     # 六张图(数据来自各结果目录下的 metrics.csv)
@@ -1099,11 +1178,19 @@ def main():
             seen_sources.add(source)
             metrics.append(row)
     print(f"[experiments] 读取 {len(metrics)} 条 metrics/回落样本")
-    plot_fig1(metrics, args.out_dir)
-    plot_fig2(metrics, args.out_dir)
-    plot_fig3(metrics, args.out_dir)
-    plot_pareto1(metrics, args.out_dir)
-    plot_pareto2(metrics, args.out_dir)
+
+    # 中英两趟渲染:数据只读一次,每趟切换语言与字体后重跑全部图函数。
+    # _save 按 LANG 写入 .zh/.en 后缀,CSV 只在中文那趟写一次。
+    for lang in ("zh", "en"):
+        _set_language(lang)
+        print(f"[render] language={lang}")
+        if compare_rows:
+            plot_compare_all(compare_rows, args.out_dir)
+        plot_fig1(metrics, args.out_dir)
+        plot_fig2(metrics, args.out_dir)
+        plot_fig3(metrics, args.out_dir)
+        plot_pareto1(metrics, args.out_dir)
+        plot_pareto2(metrics, args.out_dir)
 
     print(f"\n[done] 图片输出到 {args.out_dir}")
     if all_rejected:

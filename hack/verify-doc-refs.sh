@@ -15,7 +15,7 @@ resolve() { # 先按文档目录解析，再按仓库根解析
   [[ -e "$(dirname "$file")/$ref" || -e "$ROOT/$ref" ]]
 }
 
-files=(README.md CHANGELOG.md CLAUDE.md)
+files=(README.md README.zh-CN.md CHANGELOG.md CLAUDE.md)
 while IFS= read -r f; do files+=("$f"); done < <(find docs -name '*.md' | sort)
 
 for f in "${files[@]}"; do
