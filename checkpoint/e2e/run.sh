@@ -106,6 +106,12 @@ build_checkpoint_image() {
     ok "checkpoint image present"
     return 0
   fi
+  # build-images 只做本地基础镜像检查，不联网；CI runner 上没有这两个名字。
+  for base in golang:1.26-alpine alpine:3.24; do
+    if ! docker image inspect "$base" >/dev/null 2>&1; then
+      docker pull "$base" >/dev/null 2>&1 || { fail "pull $base"; return 1; }
+    fi
+  done
   "$REPO_ROOT/hack/build-images.sh" --prepare-only >"$LOG_DIR/prepare.log" 2>&1 \
     || { fail "prepare base images"; tail -20 "$LOG_DIR/prepare.log"; return 1; }
   if ! TAG="$TAG" "$REPO_ROOT/hack/build-images.sh" checkpoint >"$LOG_DIR/build.log" 2>&1; then

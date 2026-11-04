@@ -2,8 +2,8 @@
 #
 # traincache-gatewayd 网关镜像(design 10.1 §3;单副本 Deployment 入口,M5 落清单)。
 #
-# 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller、./gateway,
-# 四个模块目录都需入上下文):
+# 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller、./gateway、
+# ./checkpoint，五个模块目录都需入上下文):
 #   docker build -f gateway/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-gateway:dev .
 # 本机构建用 hack/build-images.sh:构建前先把基础镜像补成官方短名。
 #
@@ -24,6 +24,7 @@ COPY core/ core/
 COPY agent/ agent/
 COPY controller/ controller/
 COPY gateway/ gateway/
+COPY checkpoint/ checkpoint/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     cd gateway \
  && go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/traincache-gateway ./cmd/gatewayd
