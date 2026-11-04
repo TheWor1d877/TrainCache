@@ -8,8 +8,9 @@ import (
 )
 
 // poll_bitmap_recovery_test.go pins the malformed-bitmap behaviour from
-// docs/7.3 §4: the entry keeps its previous state (never Failed), the table is
-// untouched, and the next poll round with a valid bitmap updates readiness.
+// docs/7.3 §3 的 internal/controller/warmup 包: the entry keeps its previous
+// state (never Failed), the table is untouched, and the next poll round with a
+// valid bitmap updates readiness.
 func TestPollBitmapMismatchKeepsPollingAndRecovers(t *testing.T) {
 	// K=9 asks for 9 chunks, so a 1-byte bitmap is malformed (want 2).
 	task := fixtureTask(1, 9, [][]int32{{0, 1, 2, 3, 4, 5, 6, 7, 8}})

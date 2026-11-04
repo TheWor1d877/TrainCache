@@ -541,7 +541,7 @@ func (t *PreheatTasks) Cancel(ctx context.Context, req *agentpb.CancelPreheatReq
 	}
 	tk.advanceGeneration(req.GetGeneration())
 	tk.canceled.Store(true)
-	// 「停止调度新块」(6.1 §CancelPreheat,D62):撤回=取消本任务的下载生存期 ctx,
+	// 「停止调度新块」(docs/6.1-design.md 附录 A.2 的 CancelPreheat 语义,D62):撤回=取消本任务的下载生存期 ctx,
 	// 卡在 core fetch 准入门口的块立刻退出;已在途的块不保证跑完。
 	pending := len(tk.unfinishedRefs())
 	tk.cancelDownloads()
