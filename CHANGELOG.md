@@ -19,6 +19,13 @@
 
 # Changelog正文
 
+## [v0.5.0] - 2026-11-05
+
+### Added
+
+- checkpoint 异步 sidecar（`checkpoint/` 模块）：训练 Pod 内按 Pod 搬整份 checkpoint，保存到 S3 兼容后端并在本地留缓存；恢复在训练容器启动前完成。设计与决策见 `docs/10.1-design.md`、`docs/10.2-decisions.md`。
+- 发布新增镜像 `traincache-checkpointd`，内含 checkpointd 与 s3/local 两个插件；该镜像不进 `install.yaml`，由准入按 Pod 注入。
+
 ## [v0.4.2] - 2026-11-04
 
 ### Added

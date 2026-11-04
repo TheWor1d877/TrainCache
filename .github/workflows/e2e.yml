@@ -37,6 +37,28 @@ jobs:
           path: .traincachedata/controller/e2e/results/
           if-no-files-found: ignore
 
+  # checkpoint 独立演练：自建一次性 kind 集群，验证保存到 MinIO 与换 Pod 后恢复。
+  # 不依赖 controller e2e 的集群状态。
+  checkpoint:
+    name: checkpoint kind e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: checkpoint/go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: install kind
+        run: go install sigs.k8s.io/kind@v0.33.0
+      - name: run checkpoint e2e
+        env:
+          NODE_IMAGE: docker.io/kindest/node:v1.37.0
+        run: ./checkpoint/e2e/run.sh
+      - name: show log on failure
+        if: failure()
+        run: cat /tmp/traincheckpoint-e2e/run.log || true
+
   # 网关独立演练：自建一个一次性 kind 集群，不依赖 controller e2e 的集群状态。
   # 覆盖部署、探针、五路并发合并与源站字节比对、rollout 排水。
   gateway:

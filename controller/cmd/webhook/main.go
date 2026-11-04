@@ -80,6 +80,12 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) erro
 	}
 	mgr.GetWebhookServer().Register(tcwebhook.MutatePodPath, &admission.Webhook{Handler: mutator})
 
+	checkpointMutator := &tcwebhook.CheckpointMutator{
+		Client: mgr.GetClient(),
+		Log:    log.With("webhook", "checkpoint"),
+	}
+	mgr.GetWebhookServer().Register(tcwebhook.MutateCheckpointPath, &admission.Webhook{Handler: checkpointMutator})
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add health check: %w", err)
 	}

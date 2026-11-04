@@ -1,0 +1,28 @@
+# Per-task checkpoint configuration and object-store credentials
+# (design 10.1 §4.2, §5.4). Keys mirror the webhook's ConfigMap contract so the
+# same values would be read by the CheckpointMutator.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: traincache-checkpoint
+  namespace: traincache
+type: Opaque
+stringData:
+  accessKey: traincache
+  secretKey: traincache-probe
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ckpt-config
+  namespace: traincache
+data:
+  plugin: s3
+  backendEndpoint: minio:9000
+  backendBucket: traincache
+  backendPrefix: e2e
+  partSizeBytes: "8388608"
+  concurrency: "2"
+  secure: "false"
+  nvmeEnabled: "false"
+  worldSize: "1"
