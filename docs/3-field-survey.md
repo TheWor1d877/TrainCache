@@ -1,15 +1,15 @@
 # P1 现勘报告(Fluid / JuiceFS 机制现勘)
 ## 0. 摘要与闸门判定
 
-这次现勘一共验证了三个问题,结论如下:
+现勘验证三个问题,结论如下:
 
-1. **Fluid 到底有没有做"预热—调度"联动?** 没有,而且比 P1 笔记预想的更彻底:开源 Fluid 1.1.0-alpha.9 在 JuiceFSRuntime 上**连 webhook 的粗粒度注入都消失了**(实测注入前后 diff 为零,见 §2.2),预热(DataLoad)和调度(Pod 一创建就被调度,时间戳同秒)完全独立。
-2. **JuiceFS 社区版的能力边界在哪?** 确认:CE 只有本地缓存;分布式缓存组、IORPC、RDMA 都是企业版(5.2/5.3+)的能力,有官方文档佐证。
-3. **对手有没有"阶段感知/按消费顺序持续预取"的能力?** **判定:没有**(见 §2.6):三 epoch 换序读实验在三个切换点 × 三个观测点(客户端块级日志、Dataset cached 抬升、UFS 流量)上全部被动,观测窗口内零超前于读取的自动预取动作;手动 DataLoad 预热可行,但必须外部显式触发。
+1. Fluid 没有"预热—调度"联动:Fluid 1.1.0-alpha.9 在 JuiceFSRuntime 上 webhook 零注入(实测注入前后 diff 为零,见 §2.2),预热(DataLoad)与调度(Pod 一创建就被调度,时间戳同秒)完全独立(见 §2.3)。
+2. JuiceFS 社区版的能力边界:CE 只有本地缓存;分布式缓存组、IORPC、RDMA 都是企业版(5.2/5.3+)的能力,有官方文档佐证(见 §4)。
+3. 对手没有"阶段感知/按消费顺序持续预取"的能力(见 §2.6):三 epoch 换序读实验在三个切换点 × 三个观测点(客户端块级日志、Dataset cached 抬升、UFS 流量)上全部被动,观测窗口内零超前于读取的自动预取动作;手动 DataLoad 预热可行,只能由外部显式触发。
 
-**闸门判定:缺口成立 → 核心1 按"闭环"叙事推进**(P1 现勘闸门 ①)。对手"无阶段感知"同样成立(§2.6),"阶段感知/按消费顺序持续预取"列为缺口项,证据已并入 §4 的边界表。
+闸门判定:缺口成立,核心1 按预热—调度联动的方向推进(P1 现勘闸门 ①);"阶段感知/按消费顺序持续预取"列为缺口项,证据已并入 §4 的边界表。
 
-## 1. 现勘环境与部署(动作1)
+## 1. 现勘环境与部署
 
 全部组件镜像都在宿主机上拉好,再用 `kind load` 送进集群:
 
@@ -20,42 +20,29 @@
 | Fluid 组件     | dataset-controller / juicefsruntime-controller / fluid-webhook / fluidapp-controller / fluid-csi(DaemonSet×3)全部 Running | `evidence/fluid-pods.txt`、`evidence/fluid-pods-after-reinstall.txt`                            |
 | JuiceFS 客户端 | ce-v1.3.0(挂载镜像 juicedata/mount:ce-v1.3.0)                                                                             | `evidence/standalone-baseline.txt` 首行、`evidence/juicefsruntime-log-3epoch.txt`(mount 版本行) |
 | JuiceFSRuntime | jfsdemo:tieredstore path=/dev/shm、MEM、quota **1Gi**(自 3Gi 下调,见 §1.1)                                                | `evidence/jfsruntime-describe.yaml`                                                             |
-| 元数据引擎     | redis:7-alpine(单实例,AOF 未开)                                                                                           | 集群内 `default/redis-*`                                                                        |
-| 对象存储       | MinIO(latest),bucket `train-data`,16×126MB tar 裸对象(1.97GiB)                                                            | 阶段二上传,2GB;2026-10-13 重传见 `evidence/kind-repair-log.txt`                                 |
+| 元数据服务     | redis:7-alpine(单实例,AOF 未开)                                                                                           | 集群内 `default/redis-*`                                                                        |
+| 对象存储       | MinIO(latest),bucket `train-data`,16×126MB tar 裸对象(1.97GiB)                                                            | 阶段二上传,2GB;重传证据见 `evidence/kind-repair-log.txt`                                        |
 | 训练 Pod       | busybox `train-demo`,三 epoch 换序读(读序字面量内嵌,见 §2.6)                                                              | `evidence/train-pod-3epoch.log`                                                                 |
 
 装置和探针阶段共用同一批 16×126MB tar 数据(种子固定可复现)。
 
-### 1.1 集群修复与重装(2026-10-13 轻修)
+### 1.1 装法与装置配置
 
-**现象与根因**:kind 节点容器重启之后,containerd 里残留着旧容器条目,造成 name reservation 冲突(kubelet 日志:"check if another CreateContainer request is in progress: name ... is reserved for ..."),kube-system 和 minio 命名空间里多个 Pod(修复前约 10 个)报 CreateContainerError,整个 Fluid 也不见了(没有 fluid-system ns、没有 CRD、helm list 为空)。
+**镜像**:宿主机到不了 docker hub,全部组件镜像先拉在宿主机,再用 `kind load` 送进集群(redis:7-alpine、busybox:latest,外加 9 个 Fluid/JuiceFS 镜像:7 个 fluidcloudnative:v1.1.0-36f0467 全套 + juicefs-csi-driver:v0.32.0 + mount:ce-v1.3.0)。
 
-**修复选择**:我们选了**第一档轻修**,逐个节点删掉 Exited 容器条目,再重启 kubelet:
+**Fluid 安装**:官方 helm repo index 没收录 alpha 版本,从 GitHub release 下离线 tgz(`helm-chart-fluid-1.1.0-alpha.9`),`helm install` 到 fluid-system(带 `--set runtime.juicefs.enabled=true`);chart 的 appVersion 1.1.0-36f0467 与本地镜像 tag 一致,`helm list` 状态 deployed(`evidence/fluid-install-helm.txt`)。
 
-```
-for n in traincache-control-plane traincache-worker traincache-worker2; do
-  docker exec $n bash -c "crictl ps -a | grep Exited | cut -d' ' -f1 | xargs -r crictl rm -f"
-  docker exec $n systemctl restart kubelet
-done
-```
+**数据**:16 个分片共 1.97GiB 通过 `kubectl port-forward` 通道上传(耗时 5s);之后照序 apply(redis → jfs-secret → dataset → juicefsruntime),JuiceFSRuntime 的 Worker/FUSE Ready、Dataset Bound、PVC Bound。
 
-一共删掉 12 个残留条目(control-plane 7 + worker 2 + worker2 3),修完之后 `kubectl get pods -A` = 23/23 Running。**没有走第二档重建**:重建得先把 kindest/node:v1.37.0 的镜像 tag 恢复回来(宿主机上现在只剩 dangling 状态,见 §6),而且有 docker hub 拉不通的风险。
+**装置配置:quota 1Gi**。Runtime 的缓存配额设 1Gi(低于数据集总量 ≈2GB),设计意图是让每次 epoch 切换都必然产生缓存 miss,给主动预取留出可观测的空间。实际节点 /dev/shm 只有 64MB,这个意图没有生效,限定见 §2.6。
 
-**镜像**:docker hub 到不了,所以全部走 `kind load`(redis:7-alpine、busybox:latest,外加 9 个 Fluid/JuiceFS 镜像:7 个 fluidcloudnative:v1.1.0-36f0467 全套 + juicefs-csi-driver:v0.32.0 + mount:ce-v1.3.0)。
-
-**Fluid 重装**:官方 helm repo index 没收录 alpha 版本(/tmp/fluid 的残留也早没了),所以改成从 GitHub release 直接下离线 tgz(`helm-chart-fluid-1.1.0-alpha.9`),再 `helm install` 到 fluid-system(带 `--set runtime.juicefs.enabled=true`);chart 的 appVersion 1.1.0-36f0467 和本地镜像 tag 一致,`helm list` 状态 deployed(`evidence/fluid-install-helm.txt`)。
-
-**数据恢复**:MinIO 里的 train-data bucket 不见了(不是重建引起的,minio Pod 从 3d20h 前就一直存在),我们通过 `kubectl port-forward` 通道重传了 16 个分片共 1.97GiB(耗时 5s);之后照序 apply(redis → jfs-secret → dataset → juicefsruntime),JuiceFSRuntime 的 Worker/FUSE Ready、Dataset Bound、PVC Bound。
-
-**装置改动:quota 3Gi→1Gi**。我们把 Runtime 的缓存配额从 3Gi 下调到 1Gi(低于数据集总量 ≈2GB),设计意图是**让每次 epoch 切换都必然产生缓存 miss**,好给"主动预取"留出可观测的发挥空间。这个改动的装置副作用见 §2.6(节点 /dev/shm 只有 64MB,配额名存实亡)。
-
-## 2. 官方 demo 与证据抓取(动作2)
+## 2. 官方 demo 与证据抓取
 
 ### 2.1 链路与数据导入
 
-Dataset `jfsdemo` + JuiceFSRuntime(同名绑定)→ format(元数据进 redis,数据块落 MinIO)→ **数据导入**(裸对象→JuiceFS 文件系统)→ DataLoad(warmup)→ 训练 Pod。
+Dataset `jfsdemo` + JuiceFSRuntime(同名绑定)→ format(元数据进 redis,数据块落 MinIO)→ 数据导入(裸对象→JuiceFS 文件系统)→ DataLoad(warmup)→ 训练 Pod。
 
-导入方式(踩坑后定稿):`juicefs sync` 以 `jfs://` 协议直写文件系统,源 URI 为路径式 `minio://AK:SK@endpoint/bucket`。这个镜像里的客户端(ce-v1.3.0)已经移除了 `juicefs import` 命令;Fluid 的 PVC 只读,挂载写不可行。
+导入方式:`juicefs sync` 以 `jfs://` 协议直写文件系统,源 URI 为路径式 `minio://AK:SK@endpoint/bucket`。这个镜像里的客户端(ce-v1.3.0)已经移除了 `juicefs import` 命令;Fluid 的 PVC 只读,挂载写不可行。
 
 ### 2.2 发现一:webhook 注入前后 diff 为零
 
@@ -64,12 +51,12 @@ dry-run(绕过 webhook)和实际创建(经过 webhook)的 Pod spec 对比(`evide
 | 观察项                           | 结果                                                                                                                                                 |
 |----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
 | FUSE sidecar 容器注入            | **无**——容器列表里只有用户的 busybox。FUSE 由 Fluid CSI(node plugin)+ `jfsdemo-fuse` Pod(每节点一个)在 kubelet 层完成挂载,Pod 内只见普通 volumeMount |
-| nodeAffinity / nodeSelector 注入 | **无**——P1 笔记描述的"webhook 注入亲和"在这个版本 + Runtime 组合下不复现                                                                             |
+| nodeAffinity / nodeSelector 注入 | **无**——这个版本 + JuiceFSRuntime 组合下不注入 nodeAffinity/nodeSelector                                                     |
 | 其他注入                         | 仅 k8s 默认字段(serviceaccount projected volume、默认 tolerations)                                                                                   |
 
 而 `JuiceFSRuntime.status` 里 Fluid 维护着 `cacheAffinity`(`evidence/runtime-status.txt`):worker 节点被打上 `fluid.io/f-default-jfsdemo=true` 标签,亲和策略为 `preferredDuringSchedulingIgnoredDuringExecution`(weight 100),**required 项为空,而且没有注入到任何 Pod**。
 
-**解读**:Fluid 1.1 把 JuiceFS 访问全面 CSI 化之后,传统的 webhook sidecar 注入路径就不走了;缓存亲和退化成了 runtime status 里的"软偏好 + 节点标签",既不强制也不自动。跟 P1 笔记里的外部事实"粗粒度二进制 + 事后注入"比,注入这一环已经弱化了不少,但粒度问题还在——它只看"节点有没有缓存 worker"这种二值信息,看不到块级进度。
+**解读**:Fluid 1.1 把 JuiceFS 访问全面 CSI 化之后,webhook sidecar 注入路径不再走,缓存亲和只剩 runtime status 里的"软偏好 + 节点标签",不强制、不自动。粒度仍是二值信息("节点有没有缓存 worker"),没有块级进度;背景文档(1 介绍·外部事实)记的"粗粒度二进制 + 事后注入"里,注入环节在这个版本已不存在。
 
 ### 2.3 发现二:Pod 不等 DataLoad(时序证据)
 
@@ -81,9 +68,9 @@ dry-run(绕过 webhook)和实际创建(经过 webhook)的 Pod spec 对比(`evide
 | 08:33:39  | PodScheduled 条件生效        |
 | 08:33:39  | startTime(容器启动)          |
 
-Pod 从创建,到被调度到 `traincache-worker`,再到启动,**同一秒就完成,零等待**。DataLoad 是之后手动创建的独立资源(10:00 和 16:26 各跑了一次),**没有任何机制让 Pod 等预热完成**——"先被调度、再等数据"的 P1 论断成立(而且在这套装置上数据已经在文件系统里,连"等数据"都由 FUSE 冷读承担,调度器一无所知)。
+Pod 创建、调度到 `traincache-worker`、启动在同一秒完成,零等待。DataLoad 是之后手动创建的独立资源(10:00 和 16:26 各跑了一次),没有机制让 Pod 等预热完成;这套装置上数据已经在文件系统里,"等数据"由 FUSE 冷读承担,调度器不感知数据状态。
 
-### 2.4 发现三:两次 warmup 的结果差异与 3.9G 污染事件
+### 2.4 发现三:两次 warmup 的结果差异与 3.9G 污染数据
 
 DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载点>`,两次运行结果不一样:
 
@@ -92,17 +79,17 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 | 02:00:12(10:00 CST) | **0 files (0 B)**       | `evidence/loader-jfs-load.log`、`dataload-timing.txt` |
 | 08:26:55(16:26 CST) | **548 files (3.9 GiB)** | 执行时终端日志(用户记录)                              |
 
-10:00 那次 warmup 是 0 files,但同一脚本里 `ls` 挂载点能看到 shard-00000/00001.tar——两次的差异跟 worker 生命周期有关(jfsdemo-worker-0 在 12:38 重启过,16:26 的 warmup 跑在重启后的 worker 上),**结论按实记录:warmup 行为依赖 worker 挂载状态,失败时 DataLoad 仍会以 Complete 结束**(10:00 那次 DataLoad PHASE=Complete、DURATION 6s,`evidence/dataload-status.txt`)。
+10:00 那次 warmup 是 0 files,但同一脚本里 `ls` 挂载点能看到 shard-00000/00001.tar。两次差异与 worker 生命周期有关(jfsdemo-worker-0 在 12:38 重启过,16:26 的 warmup 跑在重启后的 worker 上)。结论:warmup 行为依赖 worker 挂载状态,失败时 DataLoad 仍会以 Complete 结束(10:00 那次 DataLoad PHASE=Complete、DURATION 6s,`evidence/dataload-status.txt`)。
 
-**3.9G 污染事件(装置侧教训,如实记录)**:导入时源 URI 拼重了(`train-data//train-data/`),导致 sync 把 JuiceFS 自己的数据块对象也镜像进了文件系统本身,文件系统 = 16 tar(1.97GiB)+ `traincache-demo/chunks/` 垃圾镜像(1.97GiB)≈ 3.9G(`evidence/import-pod.log`)。这直接让 warmup 的 3.9GiB 超过了 3Gi 缓存配额、热读被 LRU 淘汰打了折——**这恰好是"预热成本无人记账"的装置侧缩影:多拉 2 倍数据,系统一点提示都没有**。垃圾目录的清理状态见 §6 遗留事项(2026-10-13 已随元数据重建消解)。
+污染数据:导入时源 URI 拼重了(`train-data//train-data/`),sync 把 JuiceFS 自己的数据块对象也镜像进了文件系统本身,文件系统 = 16 tar(1.97GiB)+ `traincache-demo/chunks/` 垃圾镜像(1.97GiB)≈ 3.9G(`evidence/import-pod.log`)。warmup 的 3.9GiB 因此超过 3Gi 缓存配额,热读被 LRU 淘汰打了折;多拉 2 倍数据,系统不上报任何错误——预热成本没有记录。垃圾镜像已随元数据重建消解;§3 基线数字含这批污染数据,§2.6 的阶段感知实验在干净数据(16 分片,1.97GiB)上做。
 
-### 2.5 训练 Pod 读数据(端到端成立)
+### 2.5 训练 Pod 读数据(链路可用)
 
-`evidence/train-pod.log`:经 Fluid 挂载的 `/data` 能看到 16 个 shard-*.tar,`du -sh` 是 3.9G(含垃圾),读 tar 前 1MB 成功——Fluid 链路端到端可用。
+`evidence/train-pod.log`:经 Fluid 挂载的 `/data` 能看到 16 个 shard-*.tar,`du -sh` 是 3.9G(含垃圾),读 tar 前 1MB 成功——从挂载到读取的完整链路可用。
 
 ### 2.6 发现四:对手无阶段感知(三 epoch 换序读实验)
 
-这一节回答一个新问题:**对手(Fluid + JuiceFS)到底有没有"阶段感知"——也就是随着训练读取的阶段/读序变化,它会自动、持续、超前于消费地去预取下一批数据吗?** 装置与版本同 §1(轻修恢复后重装,见 §1.1)。
+本节验证:Fluid + JuiceFS 会不会随训练阶段/读序变化,自动、超前于消费地预取下一批数据。装置与版本同 §1 与 §1.1。
 
 **装置**:
 
@@ -146,20 +133,19 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 | ③ MinIO netns 流量      | B:E0→E1     | 切换点前后无 UFS 批量流量回升,相对增量≈0                                                                                       | `evidence/minio-traffic-counters.txt`                                             |
 | ③ MinIO netns 流量      | C:E1→E2     | 同 B;切换后至窗口结束仅 ~30KB/s 级后台抖动                                                                                     | 同上                                                                              |
 
-**手动 DataLoad 对照(窗口外)**:手动预热**可行,但没有任何自动触发机制,必须外部显式发起**——① 整卷预热(19 files,2.0GiB):warmup 实测 **1.0656s**,DataLoad ~6s Complete;② 两分片子集(shard-00013.tar、shard-00003.tar,253MiB):**126.7ms**;③ 受控单分片探针(126.4MiB):**46.7ms**,而且这 126.4MiB 是由本地路径就地填入块缓存(两端 eth0 各仅 ~9KB 抖动)。两轮手动预热产生的 2.52GB 缓存填充,在 MinIO pod eth0 计数上不可见(同节点路径;正好和 E0 跨节点冷读 +2.1237GB 清晰可见形成对照),这是装置级的观测口径差异,我们如实记录(`evidence/dataload-manual-check.txt`)。
+手动 DataLoad 对照(窗口外):手动预热可行,只能由外部显式发起——① 整卷预热(19 files,2.0GiB):warmup 实测 1.0656s,DataLoad ~6s Complete;② 两分片子集(shard-00013.tar、shard-00003.tar,253MiB):126.7ms;③ 受控单分片探针(126.4MiB):46.7ms,这 126.4MiB 由本地路径就地填入块缓存(两端 eth0 各仅 ~9KB 抖动)。两轮手动预热产生的 2.52GB 缓存填充,在 MinIO pod eth0 计数上不可见(同节点路径),而 E0 跨节点冷读 +2.1237GB 清晰可见,这是装置级的观测口径差异(`evidence/dataload-manual-check.txt`)。
 
-**判定:无阶段感知。** 三个切换点 × 三个观测点全部被动(见上表),观测窗口内预热/预取零动作;预热只能由外部显式触发(手动 DataLoad)。结论:开源 Fluid(1.1.0-alpha.9)+ JuiceFS CE 1.3.0 这个组合**不存在任何"按训练阶段/读序切换自动预取下一批数据"的机制**,更谈不上"按消费顺序持续预取"。
+判定:无阶段感知。三个切换点 × 三个观测点全部被动(见上表),观测窗口内预热/预取零动作;预热只能由外部显式触发(手动 DataLoad)。开源 Fluid(1.1.0-alpha.9)+ JuiceFS CE 1.3.0 这个组合没有按训练阶段/读序切换自动预取下一批数据的机制,也没有按消费顺序持续预取。
 
-**装置混杂与证据强度限定(如实记录)**:
+装置混杂与证据强度限定:
 
-1. **页缓存吸收,切换点"没有可预热的缺失"**:E1/E2 每 epoch 只有 ≈0.19s / ≈0.18s、分片瞬时 11-15GB/s,零 UFS 流量——数据全部命中内核页缓存,消费端在 JuiceFS 层没产生任何 miss(消费端 fuse `read` ops≈16207,约等于 E0 一次全量读取在 128KB 粒度下的次数,E1/E2 基本没经过 FUSE)。所以观测点③在切换点的区分力受限:即便真有"按 miss 触发"的预取,切换点也没有可被激励的 miss。E0 冷读只用 0.90s(分片 1.7-2.7GB/s),也是因为 kind 内网直连 MinIO,冷热差被压缩了。
-2. **/dev/shm 只有 64MB**:kind 节点的 /dev/shm 是 64MB,JuiceFS 客户端按 freeratio 把 1GiB 的声明配额又压到 **60,397,976B(≈57.6MB)**——"quota 3Gi→1Gi 欠配"的设计名存实亡(容量小到连单个 126MiB 分片都装不下);证据:`evidence/fluid-runtime-log-3epoch.txt`(Adjusted cache capacity 行)。
-3. **证据强度分级**:日志级证据(窗口内零自动预热动作、零 warmup/prefetch 关键词;fuse 客户端 miss 全部由 E0 读取同步产生,而且此后不增长)属于**强**;"UFS 流量在切换点被动"这一条因为页缓存混杂而被**削弱**(手动预热对照还暴露了流量观测口径的盲区);Dataset `cached` 首次非空晚于读取完成只能算**弱佐证**(Fluid 统计刷新滞后,基线时这个字段甚至是空串)。
-4. **(可选)补测方向**:放大 /dev/shm,或者改用 O_DIRECT 绕过页缓存,做一次"切换级纯 UFS 缺失"实验,就能把观测点③在切换点的区分力补满。
+1. 页缓存吸收,切换点没有可预热的缺失:E1/E2 每 epoch 只有 ≈0.19s / ≈0.18s、分片瞬时 11-15GB/s,零 UFS 流量——数据全部命中内核页缓存,消费端在 JuiceFS 层没产生任何 miss(消费端 fuse `read` ops≈16207,约等于 E0 一次全量读取在 128KB 粒度下的次数,E1/E2 基本没经过 FUSE)。观测点③在切换点的区分力因此受限:即便真有"按 miss 触发"的预取,切换点也没有可被激励的 miss。E0 冷读只用 0.90s(分片 1.7-2.7GB/s),同样是 kind 内网直连 MinIO 把冷热差压缩了。
+2. /dev/shm 只有 64MB:JuiceFS 客户端按 freeratio 把 1GiB 声明配额压到 60,397,976B(≈57.6MB),1 节"欠配制造缓存 miss"的设计意图没有生效,有效容量连单个 126MiB 分片都装不下;证据:`evidence/fluid-runtime-log-3epoch.txt`(Adjusted cache capacity 行)。
+3. 证据强度分级:日志级证据(窗口内零自动预热动作、零 warmup/prefetch 关键词;fuse 客户端 miss 全部由 E0 读取同步产生,而且此后不增长)属于强;"UFS 流量在切换点被动"这一条因页缓存混杂被削弱(手动预热对照还暴露了流量观测口径的盲区);Dataset `cached` 首次非空晚于读取完成只算弱佐证(Fluid 统计刷新滞后,基线时这个字段甚至是空串)。
 
-**实验后装置状态**:train-demo、手动 DataLoad(及其 loader Job)、import pod 都已清理;PVC/Dataset/Runtime 完好;未回收的 fuse pod 与节点标签、镜像 dangling 等见 §6。
+实验后装置状态:train-demo、手动 DataLoad(及其 loader Job)、import pod 已清理;PVC/Dataset/Runtime 完好。
 
-## 3. 独立 JuiceFS CE 对照组与 warmup 基线(动作4)
+## 3. 独立 JuiceFS CE 对照组与 warmup 基线
 
 不经过 Fluid,用挂载镜像直接裸挂载同一个文件系统(`../survey/manifests/jfs-standalone.yaml`),装置与结果(`evidence/standalone-baseline.txt`):
 
@@ -172,9 +158,9 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 | 热读(重读)                         | **354 ms**(≈5.6 GB/s,本地缓存命中)                                                                            |
 | 缓存占用                           | 2.9G(3.9GiB 数据超出 3GiB 配额,LRU 已淘汰部分)                                                                |
 
-**基线解读**:① 冷热差只有 2.9×——这套装置没有 tc 限速,集群内网太快,冷读已经接近内存速度,冷热差被压缩了(探针阶段在限速装置下是 817×);② warmup 本身开销极小(秒级"通知式"拉取),真正的成本在缓存容量和重复预热的字节上;③ 这个数字是"含污染数据"的基线——污染数据后来随 redis 元数据重建消解了(§6),§2.6 的阶段感知实验就是在干净数据(16 分片,1.97GiB)上做的。
+基线解读:冷热差只有 2.9×——这套装置没有 tc 限速,集群内网太快,冷读已经接近内存速度,冷热差被压缩(探针阶段在限速装置下是 817×);warmup 本身开销极小(秒级通知式拉取),成本在缓存容量和重复预热的字节上;本表是含污染数据的基线,污染已随 redis 元数据重建消解,§2.6 的阶段感知实验在干净数据(16 分片,1.97GiB)上做。
 
-## 4. 能力边界表(动作3,四方对比)
+## 4. 能力边界表(四方对比)
 
 每条判断都附版本号与证据来源(实测/CRD/官方文档):
 
@@ -188,20 +174,18 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 | 分布式缓存组                | 无                                                                                                                            | —                                                                                           | **无(仅本地缓存)**                                            | **有**:一致性哈希缓存组、IORPC(5.2+)、RDMA(5.3+,Beta)                |
 | 加速运行时                  | 开源 Runtime(Alluxio/JuiceFS/Jindo/Thin 等)                                                                                   | 阿里云自研 JindoRuntime、EFCRuntime;ECI 本地盘缓存 v1.0.2+                                  | —                                                             | —                                                                    |
 
-**对照结论**:
+对照结论:
 
-1. "预热—调度"联动在**四方中没有任何一方做到块级**;ACK 做得最接近(亲和感知调度),但仍是"节点有没有缓存"的粗粒度,而且是商业版,不含块级进度门控,也不含按 Job 子集预热。
-2. 开源 Fluid 的注入行为比 P1 笔记预想的更弱(CSI 化后 webhook 零注入)——TrainCache 的闭环设计("Job 即将调度→按需块级预热→SchedulingGate 门控→超时降级")放在这个对比里就是一块**真空地带**,谈不上重复造轮子。
-3. **"阶段感知/按消费顺序持续预取"在四方中同样未见**:开源 Fluid 和 JuiceFS CE 经三 epoch 换序读实测判定为无(§2.6);ACK/EE 维持原文档级判断(来源为官方文档,没有实测)。
+1. 预热—调度联动，四方都没有做到块级;ACK 最接近(亲和感知调度),粒度仍是"节点有没有缓存",且是商业版,没有块级进度门控,也没有按 Job 子集预热。
+2. 开源 Fluid CSI 化后 webhook 零注入,缓存亲和只剩 status 里的软偏好。TrainCache 的设计("Job 即将调度→按需块级预热→SchedulingGate 门控→超时降级")在四方里没有对应实现。
+3. 阶段感知/按消费顺序持续预取,四方中同样未见:开源 Fluid 和 JuiceFS CE 经三 epoch 换序读实测判定为无(§2.6);ACK/EE 维持文档级判断(来源为官方文档,没有实测)。
 
-## 5. 缺口判定(P1 三个"缝")与叙事方向
+## 5. P1 三个缺口判定与叙事方向
 
-| 缝                 | 判定            | 现勘证据                                                                                  |
+| 缺口                 | 判定            | 现勘证据                                                                                  |
 |--------------------|-----------------|-------------------------------------------------------------------------------------------|
-| ① 预热与调度不闭环 | **成立,且强化** | 注入 diff 为零;Pod 不等 DataLoad;ACK 仅有粗粒度亲和(文档);无阶段感知(§2.6,属于运行期延伸) |
+| ① 预热与调度不联动 | **成立,且强化** | 注入 diff 为零;Pod 不等 DataLoad;ACK 仅有粗粒度亲和(文档);无阶段感知(§2.6,属于运行期延伸) |
 | ② 就绪度粒度错配   | **成立**        | cacheAffinity 为二进制(节点有无 worker),没有"该 Job 要读的分片就绪比例"这个概念           |
 | ③ 预热成本无人记账 | **成立**        | 3.9G 污染事件:多拉 2 倍字节,系统零提示;warmup 超配额静默 LRU                              |
 
-**闸门判定:缺口被证据确认 → 核心1 按"闭环"叙事推进,不带假设开工。**
-
-§2.6 的"无阶段感知"判定,是缝①在运行期语义上的延伸:对手既没有"Job→预热→调度"的闭环,也没有"读序/阶段切换→预取"的闭环。
+§2.6 的"无阶段感知"判定是缺口①在运行期的延伸:调度期没有"Job→预热→放行"的联动,运行期也没有"读序/阶段切换→预取"的接续。

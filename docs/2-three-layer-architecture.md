@@ -1,101 +1,61 @@
 ## 层1 k8s control plane
-#### 资源预热
-定义两种新资源: DataSet与WarmupTask的CRD
-一个Controller(reconcile)负责对比资源与期望状态,进行调谐这些CRD资源
 
-manifest(用来声明资源或者软件包的元数据)引用子集与消费顺序hint,明确需要预热哪些块以及他们的顺序是什么
-Controller向节点上面的Agent下达命令去预热某些块
-Agent将块预热完毕之后通过`Dataset.status`反馈给Controller
+#### 资源预热
+
+定义 DataSet 与 WarmupTask 两种 CRD，一个 Controller（reconcile）对比资源与期望状态，调谐这些 CRD。
+
+manifest 引用数据子集与消费顺序 hint，声明需要预热哪些块以及顺序。Controller 向节点上的 Agent 下达预热命令，Agent 完成块预热后通过 `Dataset.status` 反馈给 Controller。
 
 #### 筛选、门控与打分
-- 筛选： 筛选出那些节点能有资格参与，粗粒度看数据
-- 宽预热： 对筛选出的一批节点提前开始预热
-- 门控： 现在能不能放行调度，中粒度看数据
-- 打分： 放行之后选择哪个节点：细粒度看数据
 
-筛选： 从集群所有节点中，排除根本没法参与这次调度的节点，得到候选集合
-查看资源条件是否满足，数据是否可到达，节点健康状态，是否满足Job的亲和性
-输出候选节点集合的前N个节点进行宽预热
+筛选（粗粒度看数据）：从集群所有节点中排除没资格参与本次调度的节点，查看资源条件、数据可达性、节点健康状态、Job 亲和性，输出候选节点集合的前 N 个进入宽预热。
 
-宽预热：筛选出候选节点后，Controller 按 Job 消费顺序向这些节点预热数据块
-顺序：严格按训练消费顺序（块 0, 1, 2, ...）
-粒度：块级别
-触发：Job 提交时开始，持续到门控放行（甚至训练中继续）
+宽预热：Controller 按 Job 消费顺序向候选节点预热数据块。顺序严格按训练消费顺序（块 0, 1, 2, ...），粒度是块级别，Job 提交时开始，持续到门控放行（训练中继续）。
 
-门控： 决定现在能不能放行 Pod 调度
-Pod 上挂着 SchedulingGate，只要 gate 在，K8s 调度器就不调度它，Pod 一直 Pending
-看启动窗口就绪度：窗口内的块就绪个数
-启动窗口：前 W 个块（覆盖从训练开始到 GPU 打满的那段，这个数据设计成可选提供 + 默认推导 + 兜底三层）
-放行条件： 
-（1）存在至少M个候选节点，其 S_startup ≥ 门控阈值
-（2）边际收益 < 成本（下一个候选预估分差 <  Δ_score）
-（3）超时t_max
-任意满足即可移除Gate
+门控（中粒度看数据）：决定现在能不能放行 Pod 调度。Pod 上挂着 SchedulingGate，gate 在则 K8s 调度器不调度它，Pod 保持 Pending。判据是启动窗口就绪度：窗口内块就绪个数。启动窗口取前 W 个块，覆盖从训练开始到 GPU 打满的那段，这个数据按可选提供 + 默认推导 + 兜底三层设计。放行条件三选一，任意满足即移除 Gate：
 
-打分: 全局位置衰减就绪度
-打分看全局（启动 + 全程），因为要选出"对整体数据流加速最好"的节点
-窗口内权重是1，窗口外按距离指数衰减
-越靠后权重越低，权重低到某个阈值就不再计算（防止数据需要的时候缓存淘汰，节省计算）
-选 S(node) 最高的节点
- 
-- 补充
-M是在启动延迟与选择质量上面做出的权衡
+（1）存在至少 M 个候选节点，其 S_startup ≥ 门控阈值
+（2）边际收益 < 成本（下一个候选预估分差 < Δ_score）
+（3）超时 t_max
+
+M 是在启动延迟与选择质量之间的权衡。
+
+打分（细粒度看数据）：放行后选哪个节点，用全局位置衰减就绪度，覆盖启动加全程，选对整体数据流加速最好的节点。窗口内权重为 1，窗口外按距离指数衰减，权重低于阈值就不再计算（防止数据用到时缓存已淘汰，同时省计算），选 S(node) 最高的节点。
 
 #### 训练中的三阶段
 
 | 阶段           | 时机                              | 触发方                         | 优先级                              | 失败兜底                                      |
 |:---------------|:----------------------------------|:-------------------------------|:------------------------------------|:----------------------------------------------|
 | 调度-启动预取  | Job 提交到 Pod 落节点             | Controller 通过 SchedulingGate | 高（阻塞门控）                      | 超时降级，去 gate 正常调度                    |
-| 训练中持续预取 | Pod 落地到训练结束                | Agent 自治                     | 低（可被启动预取打断）              | 预取跟不上就退化成回源读，不影响正确性        |
-| 阶段切换重预取 | epoch / shuffle / curriculum 切换 | DataLoader 钩子上报事件        | 中（高于持续预取，低于新 Job 启动） | 切换瞬间允许 stall 短暂回升，重新铺数据后回落 |
-
+| 训练中持续预取 | Pod 调度完成到训练结束                | Agent 自治                     | 低（可被启动预取打断）              | 预取跟不上就退化成回源读，不影响正确性        |
+| 阶段切换重预取 | epoch / shuffle / curriculum 切换 | DataLoader 钩子上报事件        | 中（高于持续预取，低于新 Job 启动） | 切换瞬间允许 stall 短暂回升，重新预取后回落   |
 
 ## 层2 节点层
+
 #### 缓存Agent DaemonSet
-Agent以DaemonSet的形式部署，每个节点一个
-Agent 的职责：接收 Controller 的预热指令，去源站下载数据，落到本地盘，回报进度。
-启动时候根据启动窗口预取
-训练中持续预取（按消费顺序、低优先级、可取消）
-阶段切换重预取（新顺序、降级旧阶段在途请求）
 
-Agent的抓取指令: 
-1. 有界并发(按照字节与信号量来限制在途的字节数)
-2. 多个相同指令合并
-3. 设置缓存,缓存命中就不触及数据源
+Agent 以 DaemonSet 部署，每个节点一个，职责是接收 Controller 的预热指令、去源站下载数据、落到本地盘、回报进度。三类工作：启动时按启动窗口预取；训练中持续预取（按消费顺序、低优先级、可取消）；阶段切换重预取（按新顺序，降级旧阶段的在途请求）。
 
-#### 训练Pod:真正跑训练任务的Pod
-训练 Pod 通过 hostPath（只读）挂载 Agent 下载数据的目录（/var/cache/traincache/）。
-训练 Pod 直接读本地盘与Page Cache，不经过 Agent。这就是"preheat 模型"——读路径零额外延迟。
-DataLoader 钩⼦（已插桩）上报：实际打开的块、当前 epoch、shuffle seed
-阶段切换事件： 新的epoch / shuffle / curriculum通过Unix Socket通知Agent
+抓取指令三条约束：有界并发（按字节与信号量限制在途字节数）；多个相同指令合并；查本地缓存，命中就不触及数据源。
+
+#### 训练Pod
+
+训练 Pod 通过 hostPath 只读挂载 Agent 下载数据的目录 `/var/cache/traincache/`，直接读本地盘与 page cache，不经过 Agent，读路径零额外延迟（preheat 模型，见下文数据面约定）。
+
+DataLoader 钩子（已插桩）上报实际打开的块、当前 epoch、shuffle seed。新的 epoch / shuffle / curriculum 切换事件通过 Unix Socket 通知 Agent。
 
 #### 消费顺序的来源
-训练 Pod ⾥跑⼀个轻量的”消费顺序⽣成器”sidecar（或DataLoader 内的钩⼦），
-按 Job 配置（dataset、epochs、shuffle_seed、batch_size、prefetch_factor）算出当前阶段按消费顺序排列的块列表，
-通过共享内存或 Unix socket 喂给同节点的 Agent。
-Agent 拿到顺序之后，把启动窗⼝（默认前 K 块，K = batch_size × prefetch_factor）作为⾼优先级队列送进抓取管线，
-剩余块作为低优先级持续预取队列。
 
-#### 可选: 分布式缓存组
-JuiceFS 社区版（CE）没有分布式缓存组，只有单机缓存。
-EE 缓存组语义：JuiceFS 企业版（EE）有分布式缓存组
-我们可以在 CE 基线上，用 Go 自研组件复现 EE 的缓存组语义
+训练 Pod 里跑一个轻量的消费顺序生成器 sidecar（或 DataLoader 内的钩子），按 Job 配置（dataset、epochs、shuffle_seed、batch_size、prefetch_factor）算出当前阶段按消费顺序排列的块列表，通过共享内存或 Unix socket 传给同节点的 Agent。
 
+Agent 拿到顺序后，把启动窗口（默认前 K 块，K = batch_size × prefetch_factor）作为高优先级队列送进抓取管线，剩余块进低优先级持续预取队列。
 
 ## 层3 数据源
-使用 S3 对象存储作为数据源，在 kind 集群里开发演练时可部署 MinIO 或其他 S3 兼容存储做测试，真实环境直接连腾讯云 COS / 阿里云 OSS / AWS S3。
-S3合并网关常驻，Agent 的回源一律经它转发；同机房自搭 MinIO 也挂，网关与 MinIO 允许同节点，须是两个独立 Pod
 
-- 实验装置
-  在这上面使用tc检测流量
-  使用tbf与netem进行人为限速
+数据源使用 S3 对象存储。kind 集群开发演练时部署 MinIO 或其他 S3 兼容存储做测试，真实环境直接连腾讯云 COS / 阿里云 OSS / AWS S3，接入配置见 0 部署指南 §1。
 
+合并回源网关常驻集群内，Agent 的块回源一律经它转发，网关契约见 9.1。自搭 MinIO 也挂在网关后面，网关与 MinIO 允许同节点，须是两个独立 Pod。
 
 ## 数据面约定
-我们采⽤ preheat 模型——Agent 把数据块落到
-/var/cache/traincache/<ds>/blocks/ ，训练 Pod 通过 hostPath PV 只读挂载这个⽬录，读数据时直接
-⾛内核的 page cache，Agent 完全不参与读 I/O 路径，所以读路径上没有任何额外延迟。代价是读侧的信
-号只能靠旁路采集。FUSE read-through 降级为可选的 stretch ⽬标
 
-
-、
+preheat 模型：Agent 把数据块落到 `/var/cache/traincache/<ds>/blocks/`，训练 Pod 通过 hostPath PV 只读挂载这个目录，读数据直接走内核 page cache，Agent 不参与读 I/O 路径，读路径没有额外延迟。代价是读侧信号只能靠旁路（DataLoader 钩子）采集。

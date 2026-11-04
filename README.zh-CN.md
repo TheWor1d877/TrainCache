@@ -2,7 +2,7 @@
 
 # TrainCache
 
-TrainCache 是运行在 Kubernetes 上的训练数据加速器：Pod 调度前按块预热数据集，用预热进度决定 Pod 落到哪个节点，训练中按数据消费顺序持续预取后续块。
+TrainCache 运行在 Kubernetes 上。Pod 调度前，它把数据集的块拉到节点本地盘，用预热进度决定 Pod 调度到哪个节点，训练中按数据消费顺序持续预取后续块。
 
 [![verify](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml) ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white) ![Kubernetes 1.28+](https://img.shields.io/badge/Kubernetes-1.28%2B-326CE5?logo=kubernetes&logoColor=white) ![S3 compatible](https://img.shields.io/badge/S3-compatible-569A31?logo=amazons3&logoColor=white) ![License Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-4C8EDA)
 
@@ -18,21 +18,21 @@ make e2e    # 建 kind 集群、加载镜像、跑六项断言
 
 ## 背景
 
-Fluid 1.1.0-alpha.9 的 DataLoad 与调度互不影响：Pod 创建后立刻进入调度，预热进度不参与选点（[现勘报告](docs/3-field-survey.md) §2.2）。JuiceFS 社区版只提供本地缓存，分布式缓存组、IORPC 与 RDMA 属于企业版（同上 §0）。训练 Pod 从 epoch 0 跑到结束常驻同一节点，epoch 与 shuffle 切换发生在 Pod 内，不触发重新调度；启动阶段铺好的数据在后续 epoch 失效后，没有组件提前拉取。
+Fluid 1.1.0-alpha.9 的 DataLoad 与调度互不影响：Pod 创建后立刻进入调度，预热进度不参与选点（[现勘报告](docs/3-field-survey.md) §2.2）。JuiceFS 社区版只提供本地缓存，分布式缓存组、IORPC 与 RDMA 属于企业版（同上 §0）。训练 Pod 从 epoch 0 跑到结束常驻同一节点，epoch 与 shuffle 切换发生在 Pod 内，不触发重新调度；启动阶段写入节点本地盘的块在后续 epoch 不再命中，也没有组件提前拉取。
 
 ## 功能
 
 - 提交 `WarmupTask` 后，webhook 给匹配的训练 Pod 注入 `traincache.io/warmup` SchedulingGate，Pod 停在 Pending；controller 按 Pod 分片向候选节点拉块，块级就绪度达到门控阈值 `M` 后移除 gate。
-- 超过 `t_max` 仍未就绪，controller 移除 gate，Pod 按普通调度放行（[实验协议](docs/4.4-experiment-protocol.md) §2）。
+- 超过 `t_max` 仍未就绪，controller 移除 gate，Pod 走默认调度放行（[实验协议](docs/4.4-experiment-protocol.md) §2）。
 - scheduler 插件读 Pod 注释 `traincache.io/node-scores`，按全局位置衰减后的就绪度给候选节点打分，选分数最高的节点。
-- Pod 调度到节点后，agentd 按训练实际消费顺序预取后续块；epoch、shuffle、curriculum 切换事件到达时，按新顺序重铺（`agent/ordersrc/`）。
+- Pod 调度到节点后，agentd 按训练实际消费顺序预取后续块；epoch、shuffle、curriculum 切换事件到达时，按新顺序继续预取（`agent/ordersrc/`）。
 - 每次预热到候选节点的字节记入 `startup_warmup_bytes`，持续预取的字节记入 `sustained_prefetch_bytes`，同一格的所有组态共用这套口径（[实验协议](docs/4.4-experiment-protocol.md) §1.5）。
 
 ## 快速开始
 
 前置条件：Kubernetes 1.28+ 集群、kubectl、openssl、一个 S3 兼容桶。发布物为 linux/amd64，e2e 在 `kindest/node:v1.37.0` 上通过。
 
-**1. 控制面安装。** 五个镜像按 digest 固定：
+**1. 控制面安装。** 镜像按 digest 固定：
 
 ```bash
 curl -LO https://github.com/TheWor1d877/TrainCache/releases/download/v0.4.1/install.yaml
@@ -72,7 +72,7 @@ traincache-gateway-<hash>                        1/1     Running
 traincache-webhook-<hash>                        1/1     Running
 ```
 
-Pod 名后缀随节点与 ReplicaSet 变化。scheduler 运行在 `kube-system`，用 `kubectl -n kube-system rollout status deploy/traincache-scheduler` 查看。训练 Pod 的样例清单是 `agent/deploy/train-pod.yaml`，`DataSet` 与 `WarmupTask` 的字段见 [4.3 启动与实验](docs/4.3-startup-and-experiments.md)。
+scheduler 运行在 `kube-system`，用 `kubectl -n kube-system rollout status deploy/traincache-scheduler` 查看。训练 Pod 的样例清单是 `agent/deploy/train-pod.yaml`，`DataSet` 与 `WarmupTask` 的字段见 [4.3 启动与实验](docs/4.3-startup-and-experiments.md)。
 
 卸载：
 
@@ -92,12 +92,12 @@ kubectl delete -f install.yaml
 | M-1000 | 83.4 | 122.6 | 106.8 | — | 3 |
 | L-1000 | — | 302.4 | 287.9 | — | 1 |
 
-- S-100（100 mbit、2 GiB 数据）：direct 576.7 s，TrainCache 冷 412.9 s，少 163.7 s（28.4%）；TrainCache 热 349.8 s。Fluid 冷 352.0 s，比 TrainCache 冷快 60.9 s。
+- S-100（100 mbit、2 GiB 数据）：TrainCache 冷比 direct 少 163.7 s（28.4%），Fluid 冷比 TrainCache 冷少 60.9 s；TrainCache 热 349.8 s。
 - 同格 stall 占比从 direct 的 52.9% 降到 TrainCache 冷的 0.1%。冷启动预热花了 124.3 s，总时长仍低于 direct。
 - 1000 mbit 下门控预热是净开销：S-1000 从 258.4 s 涨到 272.7 s（5.6%），M-1000 从 83.4 s 涨到 106.8 s（28.1%）。
 - 六个格子切换后 stall 回落时间在 2.24 至 2.36 s 之间，最大差 0.11 s（4.9%），低于协议规定的 20% 判据。
 
-![图 2：七种组态全程 makespan](docs/assets/figures/compare_total_v0.4.0.zh.png)
+![图 2：makespan 组态对比](docs/assets/figures/compare_total_v0.4.0.zh.png)
 
 *图 2：五个格子、七种组态的全程 makespan，柱长为该组均值，越短越好。*
 
@@ -105,7 +105,7 @@ kubectl delete -f install.yaml
 
 *图 3：启动门控相对自由调度的 makespan 变化，按 fanout 分三面。右向蓝柱表示门控更快，左向橙柱表示门控更慢；−443.9% 的格子截断到轴端并用 `◀` 标出真实值。*
 
-![图 4：全程 makespan 随带宽与 epoch 数](docs/assets/figures/fig2_total_makespan_v0.4.0.zh.png)
+![图 4：makespan 随带宽与 epoch 数](docs/assets/figures/fig2_total_makespan_v0.4.0.zh.png)
 
 *图 4：三档带宽下 1、3、6 个 epoch 的全程 makespan，柱顶标实测值，纵轴为对数刻度。*
 
@@ -117,22 +117,22 @@ kubectl delete -f install.yaml
 
 ![图 6：控制面、节点与对象存储](docs/assets/figures/architecture_v0.4.1.zh.svg)
 
-*图 6：每个 Node 跑一个 Agent DaemonSet，把块写到节点本地盘；训练 Pod 以 hostPath 只读挂载。*
+*图 6：控制面、节点面与对象存储。*
 
-控制面下发预热任务、门控释放与节点打分，不进入数据路径。agentd 常驻每个节点，块写到节点本地盘，训练 Pod 以 hostPath 只读挂载；agentd 不在读 I/O 路径上，读延迟与读本地盘一致。读侧信号由 DataLoader 钩子与 inotify 旁路采集。
+控制面下发预热任务、门控释放与节点打分，不进入数据路径。agentd 常驻每个节点，把块写到节点本地盘；训练 Pod 以 hostPath 只读挂载该目录，读取不经过 agentd。读侧信号由 DataLoader 钩子与 inotify 旁路采集。
 
 块的来源有两种。`gatewayEndpoint` 为空时 agentd 直连对象存储；配置后 agentd 把块 GET 交给网关，网关把重复请求合并成一次回源。网关是单副本 Deployment，默认监听 `:9413`，契约与取舍见 [9.1 design](docs/9.1-design.md)。
 
 ## 上游关系
 
-Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里真实部署并跑分，作为七种组态中的对照组（[现勘报告](docs/3-field-survey.md)、[4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md)）。`DataSet` 与 `Runtime` 的命名、nodeAffinity 注入方式参考 Fluid。块级就绪度在 `controller/cmd/controller-manager`，SchedulingGate 注入在 `controller/cmd/webhook`，节点打分在 `controller/cmd/scheduler`，预取在 `agent/cmd/agentd`。上游代码未内嵌，两个项目均为 Apache-2.0：[fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid)、[juicedata/juicefs](https://github.com/juicedata/juicefs)。
+Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里部署并测得基准数据，作为七种组态中的对照组（[现勘报告](docs/3-field-survey.md)、[4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md)）。`DataSet` 与 `Runtime` 的命名、nodeAffinity 注入方式参考 Fluid。块级就绪度在 `controller/cmd/controller-manager`，SchedulingGate 注入在 `controller/cmd/webhook`，节点打分在 `controller/cmd/scheduler`，预取在 `agent/cmd/agentd`。上游代码未内嵌，两个项目均为 Apache-2.0：[fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid)、[juicedata/juicefs](https://github.com/juicedata/juicefs)。
 
 ## 已知限制
 
 - 实验只覆盖 kind 五节点集群、2/8/32 GiB 三档数据集与 1 GiB 缓存；跨集群、多租户与 GPU 训练未测。
-- 1000 mbit 下门控预热不回本：M-1000 慢 28.1%，S-1000 慢 5.6%。门控只在带宽受限且工作集超过缓存时有效。
+- 1000 mbit 下门控预热增加总时长：M-1000 慢 28.1%，S-1000 慢 5.6%。门控只在带宽受限且工作集超过缓存时有效。
 - 读路径要求节点有本地盘。agentd 不在读 I/O 路径上，读侧信号靠旁路采集，精度受钩子覆盖率影响。
-- 持续预取 lookahead 16 与 32 相对 8 的全程收益为 −7.4% 与 −17.3%（n=2），正向档位未找到。
+- 持续预取 lookahead 16 与 32 相对 8 的全程收益为 −7.4% 与 −17.3%（n=2），各 lookahead 档位都没有正收益。
 - 网关单副本，多副本扩容未实现。
 - 不调度 epoch。epoch、shuffle 与 curriculum 切换只改节点内预取顺序，不进入调度路径。
 
@@ -141,7 +141,7 @@ Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里真实部署并跑分
 ```bash
 make verify           # 三个模块的 build、vet、go test -race 与 gofmt
 make verify-metadata  # 版本口径、镜像名、文档相对链接
-hack/build-images.sh  # 五个开发镜像（:dev）
+hack/build-images.sh  # 开发镜像（:dev）
 make e2e              # kind 集群中的六项断言
 ```
 
@@ -158,10 +158,10 @@ make e2e              # kind 集群中的六项断言
 | [3 现勘报告](docs/3-field-survey.md) | Fluid/JuiceFS 的机制现勘与缺口证据 |
 | [4.0 bench 文档导览](docs/4.0-bench-guide.md) | 4.1–4.6 的分工与常驻命令 |
 | [4.1 bench 装置与禁令](docs/4.1-bench-setup-and-rules.md) | 装置构成、参数、数据落点与禁令 |
-| [4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md) | 对照组的镜像、起组、预热、跑分与拆组 |
+| [4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md) | 对照组的镜像、起组、预热、运行与拆组 |
 | [4.3 TrainCache 启动与实验](docs/4.3-startup-and-experiments.md) | 镜像构建、控制面拉起、实验族启动 |
 | [4.4 实验协议](docs/4.4-experiment-protocol.md) | 预注册假设、口径、条件矩阵与判据 |
-| [4.5 实验口径决策](docs/4.5-metric-decisions.md) | 验收与实验口径的裁决 |
+| [4.5 实验口径决策](docs/4.5-metric-decisions.md) | 已定的验收判据与实验口径 |
 | [4.6 实验版本记录](docs/4.6-experiment-version-log.md) | 版本 × 实验族矩阵与产物路径 |
 | [5.x 缓存核心库](docs/5.1-design.md) | 设计要求、计划、决策与测试 |
 | [6.x Agent 服务化](docs/6.1-design.md) | 节点面的接口与决策 |
