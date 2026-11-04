@@ -578,6 +578,49 @@ tc_out="$(show_tc 2>/dev/null || true)"
 if printf '%s' "$tc_out" | grep -q 'tbf'; then
     pass "tc qdisc 在位(MinIO Pod eth0)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'
+    # burst 的单位坑(D31;2026-11-03 一次性容器实测):tc 把 1250k 解析成 1 280 000
+    # 字节、回读打印成 1250Kb,命令行同时给的 latency 50ms 不覆盖这个桶。回读值折算
+    # 成字节后必须等于 config.burst_for_rate(该档 rate),±1% 容纳 iproute2 按 32 位字
+    # 取整掉下的零头(3750k 实测回读 3839962b)。
+    tbf_line="$(printf '%s\n' "$tc_out" | grep -m1 'qdisc tbf' || true)"
+    rate_tok="$(printf '%s\n' "$tbf_line" | sed -n 's/.*rate \([0-9.][0-9.]*[A-Za-z]*\).*/\1/p')"
+    burst_tok="$(printf '%s\n' "$tbf_line" | sed -n 's/.*burst \([0-9.][0-9.]*[A-Za-z]*\).*/\1/p')"
+    if [ -n "$rate_tok" ] && [ -n "$burst_tok" ]; then
+        bmsg="$("$PY" - "$ROOT" "$rate_tok" "$burst_tok" <<'PYEOF' 2>&1
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import config
+
+BYTE_UNITS = {"b": 1, "k": 1024, "kb": 1024, "mb": 1024 * 1024}
+BIT_UNITS = {"bit": 1, "kbit": 1000, "mbit": 10 ** 6, "gbit": 10 ** 9}
+
+
+def to_bytes(tok, units):
+    m = re.fullmatch(r"([0-9.]+)([a-z]+)", tok.strip().lower())
+    if not m or m.group(2) not in units:
+        raise ValueError("无法解析: " + tok)
+    return float(m.group(1)) * units[m.group(2)]
+
+
+mbit = round(to_bytes(sys.argv[2], BIT_UNITS) / 10 ** 6)
+want = to_bytes(config.burst_for_rate(mbit), BYTE_UNITS)
+got = to_bytes(sys.argv[3], BYTE_UNITS)
+print("@%dmbit 实挂 burst=%dB,推导 %s=%dB,差 %+.2f%%"
+      % (mbit, got, config.burst_for_rate(mbit), want,
+         100.0 * (got - want) / want))
+sys.exit(0 if abs(got - want) <= 0.01 * want else 1)
+PYEOF
+)"
+        if [ $? -eq 0 ]; then
+            pass "tbf burst 与该档 rate 的推导值一致: $bmsg"
+        else
+            fail "tbf burst 对不上 rate 的推导值(档位或 burst 口径漂了): $bmsg"
+        fi
+    else
+        warn "tc qdisc 在位但读不到 rate/burst 字段,跳过 burst 断言: $tbf_line"
+    fi
 else
     warn "tc qdisc 未挂(跑分前 make tc-up 或 cold_reset 会挂)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'

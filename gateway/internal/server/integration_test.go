@@ -1,7 +1,7 @@
 package server
 
 // integration_test.go：真实 minio-go 客户端 → 网关 HTTP → httptest 假源站 的
-// 端到端合并用例（docs/9.3 test.md §4）。与 block_test.go 不同，这里不直接
+// 端到端合并用例（docs/9.3-test.md §4）。与 block_test.go 不同，这里不直接
 // 调 handler，也不注入假 Origin：网关持有真实的 minio-go 源站客户端，客户端侧
 // 也走完整 HTTP/SigV4。
 

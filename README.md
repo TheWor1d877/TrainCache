@@ -1,105 +1,175 @@
+English | [简体中文](README.zh-CN.md)
+
 # TrainCache
 
-面向 Kubernetes 训练 Job 的数据流加速器。
+TrainCache speeds up training data access on Kubernetes. It fetches dataset blocks into node-local disk before a Pod is scheduled, uses warmup progress to decide which node the Pod lands on, and keeps prefetching the blocks training reads next.
 
-工业界把数据预热做成启动时的一次性动作：预热完就撒手，训练 Pod 落地后靠 page cache 和回源读数据。epoch 中后期缓存失效、shuffle 打乱顺序、热子集被换出，都会再次出现 data stall，此时没有任何组件再帮它把数据提前铺好。TrainCache 把预热从启动动作扩展成贯穿训练全程的闭环，并把"预热了哪些块"接进调度决策。
+[![verify](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml) ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white) ![Kubernetes 1.28+](https://img.shields.io/badge/Kubernetes-1.28%2B-326CE5?logo=kubernetes&logoColor=white) ![S3 compatible](https://img.shields.io/badge/S3-compatible-569A31?logo=amazons3&logoColor=white) ![License Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-4C8EDA)
 
-## 解决什么
-
-现有方案（以 Fluid 为代表）用两点回答"节点上有没有这个 Dataset"：Runtime 存在与否，以及事后注入的 nodeAffinity。它不知道缓存了哪几块、拉了多少比例，也不知道接下来这个 Job 要读哪些分片。预热 CRD 与调度决策不闭环，重复预热到多个候选节点的字节成本也没人记账。
-
-TrainCache 在块粒度上补这三段：Job 提交时向候选节点按消费顺序预热它真正要读的块；块级就绪度决定何时放行 Pod、给哪个节点打分；Pod 落地后继续按训练实际消费顺序预取。
-
-## 三个阶段
-
-| 阶段 | 时机 | 触发方 | 失败兜底 |
-|---|---|---|---|
-| 启动预取 | Job 提交到 Pod 落节点 | Controller 用 SchedulingGate 挡住 Pod，按块预热候选节点 | 超过 `t_max` 去掉 gate，按普通调度放行 |
-| 持续预取 | Pod 落地到训练结束 | 节点上的 Agent 自治 | 预取跟不上就退化成回源读，不影响正确性 |
-| 阶段切换重预取 | epoch、shuffle、curriculum 切换 | 训练侧钩子上报事件 | 切换瞬间允许 stall 短暂回升，重新铺数据后回落 |
-
-调度侧四步：筛选出数据可达、资源够的候选节点，宽预热前 N 个，启动窗口就绪度决定门控放行，全局位置衰减就绪度给剩下的节点打分。门控阈值 `M` 是启动延迟与选点质量之间的权衡。
-
-读路径用 preheat 模型：Agent 把块落到节点本地盘 `/var/cache/traincache/blocks/`，训练 Pod 以 hostPath 只读挂载，直接读本地盘和 page cache，Agent 不在读 I/O 路径上，读延迟与平时一致。代价是读侧信号只能旁路采集，靠 DataLoader 钩子与 inotify 兜底。
-
-## 组成
-
-| 目录 | 内容 |
-|---|---|
-| `controller/` | 控制面：`DataSet`、`WarmupTask` 两个 CRD，预热编排 Controller，调度器评分插件，Pod 注入 webhook |
-| `agent/` | 节点面：`traincache-agentd` DaemonSet，块级缓存、预热执行、gRPC 服务、消费顺序 sidecar |
-| `core/` | 缓存库：内容寻址存储、索引分片、S3 兼容对象存储读写与条件写 |
-| `bench/` | 实验装置：kind 集群、MinIO、tc 限速与五组对照跑分 |
-| `docs/` | 设计、决策、实验协议与发布口径 |
-
-数据源是任意 S3 兼容对象存储（MinIO、COS、OSS、S3）。控制面只记录 endpoint 与凭据引用，Agent 直连桶拉块。
-
-## 快速开始
-
-前置条件：Kubernetes 集群、kubectl、一个 S3 兼容桶。实验与 e2e 在 kind v1.37.0 上验证。
-
-**1. 装控制面。** 用发布包里的 `install.yaml`，五个镜像按 digest 固定：
+<img src="docs/assets/logo/traincache-lockup.svg" alt="TrainCache" width="420">
 
 ```bash
+make e2e    # create a kind cluster, load images, run six assertions
+```
+
+![Figure 1: resources after e2e](docs/assets/screenshots/e2e-demo_v0.4.1.gif)
+
+*Figure 1: resources queried after `make e2e`. The WarmupTask is Released, both training Pods sit on nodes labeled `traincache.io/s3-access=true`, and the Pod annotation `node-scores` reads 100.*
+
+## Background
+
+Fluid 1.1.0-alpha.9 runs DataLoad independently of scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md) §2.2). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid. §0). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and never trigger rescheduling, so data laid down at startup goes stale in later epochs and nothing fetches ahead.
+
+## Features
+
+- After a `WarmupTask` is submitted, the webhook injects the `traincache.io/warmup` SchedulingGate into matching training Pods, which stay Pending. The controller requests blocks from candidate nodes per Pod shard and removes the gate once block readiness reaches the threshold `M`.
+- If readiness is still below `M` after `t_max`, the controller removes the gate and the Pod schedules normally ([protocol](docs/4.4-experiment-protocol.md) §2).
+- The scheduler plugin reads the Pod annotation `traincache.io/node-scores`, scores candidate nodes by readiness with global position decay, and picks the highest score.
+- Once the Pod is scheduled, agentd prefetches the next blocks in the order training consumes them. When an epoch, shuffle or curriculum switch arrives, it re-lays blocks in the new order (`agent/ordersrc/`).
+- Bytes fetched to candidate nodes during warmup are counted in `startup_warmup_bytes`; bytes fetched during sustained prefetch are counted in `sustained_prefetch_bytes`. Every configuration in a cell shares these definitions ([protocol](docs/4.4-experiment-protocol.md) §1.5).
+
+## Quick start
+
+Requirements: Kubernetes 1.28+, kubectl, openssl and an S3-compatible bucket. Release artifacts target linux/amd64; e2e passes on `kindest/node:v1.37.0`.
+
+**1. Install the control plane.** Five images are pinned by digest:
+
+```bash
+curl -LO https://github.com/TheWor1d877/TrainCache/releases/download/v0.4.1/install.yaml
 kubectl apply -f install.yaml
 ```
 
-从源码开发时用 `kubectl apply -k controller/deploy`，镜像 tag 为 `dev`，需先 `kind load docker-image` 导入。webhook 依赖 `traincache` namespace 里的 TLS Secret `traincache-webhook-tls` 和 caBundle，需自备。
-
-**2. 建桶与凭据。** `DataSet.spec` 写 `endpoint`（不带 scheme）、`bucket`、`secretRef`；Secret 的字段是 `accessKey` 与 `secretKey`，与 DataSet 同 namespace。桶的接入方式见 [云对象存储部署指南](docs/0.云对象存储部署指南.md)。
-
-**3. 提交 Job。** webhook 给匹配 `WarmupTask` 的 Pod 注入 SchedulingGate，Controller 收 `WarmupTask` 后按块向候选节点预热；训练 Pod 自己以 hostPath 只读挂载 `/var/cache/traincache/blocks/`，样例见 `agent/deploy/train-pod.yaml`。运行时参数集中在 ConfigMap `traincache-config`，见[参数配置](docs/PARAMETER-CONFIGURATION.md)。
-
-**4. 命令行。** 发布包含两个 linux/amd64 静态二进制：`traincache`（gRPC 客户端）与 `trainpublish`（快照发布器）。
+**2. Webhook certificate.** `caBundle` in the manifest is empty. Generate a server certificate and patch it in:
 
 ```bash
-sha256sum --ignore-missing -c SHA256SUMS
-install -m 0755 traincache-linux-amd64 /usr/local/bin/traincache
-install -m 0755 trainpublish-linux-amd64 /usr/local/bin/trainpublish
-traincache help
+NS=traincache; SVC=traincache-webhook
+TLS=$(mktemp -d)
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout "$TLS/ca.key" -out "$TLS/ca.crt" -subj "/CN=traincache-ca"
+openssl req -newkey rsa:2048 -nodes -keyout "$TLS/tls.key" -out "$TLS/tls.csr" -subj "/CN=$SVC"
+printf 'subjectAltName=DNS:%s,DNS:%s.%s.svc.cluster.local\n' "$SVC" "$SVC" "$NS" >"$TLS/san.ext"
+openssl x509 -req -in "$TLS/tls.csr" -CA "$TLS/ca.crt" -CAkey "$TLS/ca.key" -CAcreateserial -out "$TLS/tls.crt" -days 365 -extfile "$TLS/san.ext"
+kubectl -n "$NS" create secret tls traincache-webhook-tls --cert="$TLS/tls.crt" --key="$TLS/tls.key"
+kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
+  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$(base64 -w0 "$TLS/ca.crt")\"}]"
 ```
 
-CLI 默认连 `127.0.0.1:9410`，访问集群内 Agent 先做端口转发。参数见 [CLI 接口](docs/CLI-INTERFACE.md)。
+The certificate is valid for 365 days. The SAN covers the Service name and the DNS name inside the namespace.
 
-## 实验
+**3. Bucket and credentials.** `DataSet.spec` takes `endpoint` (no scheme), `bucket` and `secretRef`. The Secret holds `accessKey` and `secretKey` and lives in the same namespace as the DataSet. For bucket setup see [cloud object storage deployment](docs/0-cloud-object-storage-deployment.md).
 
-`bench/` 是本项目的正式实验装置：kind 起的 5 节点集群、MinIO 源站、tc 限速，七组态对照（direct 直读、JuiceFS 冷/热、Fluid 冷/热、TrainCache 冷/热）在同一负载形态下跑分。
+**4. Verify the control plane.**
 
 ```bash
-cd bench
-make bench-up                        # 建 kind 集群、MinIO、控制面，挂 tc
-make bench-status && make bench-doctor
-python3 bench/exp.py run <族>        # 跑一个实验族，族名见 exp.py status
+kubectl -n traincache rollout status deploy/traincache-controller-manager --timeout=300s
+kubectl -n traincache get pods
 ```
 
-数据与产物一律落在 `~/tcd/`，仓库内只存脚本与清单。装置细节见 [bench 文档导览](docs/4.0%20bench文档导览.md)，条件与判据见[实验协议](docs/4.4%20实验协议.md)。
+```text
+NAME                                             READY   STATUS
+traincache-agentd-<hash>                         1/1     Running
+traincache-controller-manager-<hash>             1/1     Running
+traincache-gateway-<hash>                        1/1     Running
+traincache-webhook-<hash>                        1/1     Running
+```
 
-## 构建与测试
+Pod name suffixes vary with node and ReplicaSet. The scheduler runs in `kube-system`; check it with `kubectl -n kube-system rollout status deploy/traincache-scheduler`. A sample training Pod is in `agent/deploy/train-pod.yaml`; `DataSet` and `WarmupTask` fields are in [4.3 startup and experiments](docs/4.3-startup-and-experiments.md).
+
+Uninstall:
 
 ```bash
-make verify        # build + vet + go test -race + gofmt，三个模块
-make verify-metadata   # 版本口径、镜像名、文档相对链接
-hack/build-images.sh   # 四个开发镜像（:dev），构建前先补基础镜像官方短名
-make e2e           # kind 里的端到端
+kubectl delete -f install.yaml
 ```
 
-## 文档
+## Results
 
-| 文档 | 内容 |
+Seven configurations: direct, JuiceFS cold/hot, Fluid cold/hot and TrainCache cold/hot, three runs per workload shape. Values are means; bootstrap 95% intervals are in the `ci_low` and `ci_high` columns of the CSV. Data version `v0.4.0`; aggregates used in the figures are in [`compare_total_v0.4.0.csv`](docs/assets/data/compare_total_v0.4.0.csv). L-1000 has a single run.
+
+| Cell | direct | Fluid cold | TrainCache cold | TrainCache hot | n |
+|---|---:|---:|---:|---:|---:|
+| S-100 | 576.7 | 352.0 | 412.9 | 349.8 | 3 |
+| S-300 | 297.0 | 255.8 | 302.4 | — | 3 |
+| S-1000 | 258.4 | 251.6 | 272.7 | 264.4 | 3 |
+| M-1000 | 83.4 | 122.6 | 106.8 | — | 3 |
+| L-1000 | — | 302.4 | 287.9 | — | 1 |
+
+- S-100 (100 mbit, 2 GiB): direct 576.7 s, TrainCache cold 412.9 s, 163.7 s less (28.4%); TrainCache hot 349.8 s. Fluid cold 352.0 s, 60.9 s faster than TrainCache cold.
+- Stall share in the same cell drops from 52.9% (direct) to 0.1% (TrainCache cold). Cold warmup took 124.3 s, and the total still beats direct.
+- At 1000 mbit, gated warmup is net overhead: S-1000 goes from 258.4 s to 272.7 s (5.6%), M-1000 from 83.4 s to 106.8 s (28.1%).
+- After a switch, stall recovery lands between 2.24 s and 2.36 s across six cells. The 0.11 s spread (4.9%) stays below the 20% criterion in the protocol.
+
+![Figure 2: full-run makespan for seven configurations](docs/assets/figures/compare_total_v0.4.0.en.png)
+
+*Figure 2: full-run makespan for five cells and seven configurations. Bars are configuration means; shorter is better.*
+
+![Figure 3: startup gating versus free scheduling](docs/assets/figures/fig1_startup_surface_v0.4.0.en.png)
+
+*Figure 3: makespan change from startup gating against free scheduling, split by fanout. Blue bars to the right mean gating is faster, orange bars to the left mean slower. The −443.9% cell is clipped at the axis end and marked `◀`.*
+
+![Figure 4: full-run makespan by bandwidth and epoch count](docs/assets/figures/fig2_total_makespan_v0.4.0.en.png)
+
+*Figure 4: full-run makespan at three bandwidths and 1, 3 and 6 epochs. Measured values sit above the bars; the y-axis is log scale.*
+
+![Figure 5: stall recovery after a switch](docs/assets/figures/fig3_recovery_v0.4.0.en.png)
+
+*Figure 5: stall recovery after a shuffle × epoch switch, six cells. Small dots are single switch events, large dots are means, and values are labeled on the right.*
+
+## Architecture
+
+![Figure 6: control plane, nodes and object storage](docs/assets/figures/architecture_v0.4.1.en.svg)
+
+*Figure 6: each node runs one Agent DaemonSet that writes blocks to node-local disk; training Pods mount it read-only through hostPath.*
+
+The control plane issues warmup tasks, gate releases and node scores, and stays out of the data path. agentd runs on every node, writes blocks to node-local disk, and training Pods mount that disk read-only through hostPath. agentd sits off the read I/O path, so read latency matches reading a local disk. Read-side signals come from a DataLoader hook and an inotify side channel.
+
+Blocks come from one of two paths. With `gatewayEndpoint` empty, agentd talks to object storage directly. Once the field is set, agentd sends block GETs to the gateway, which merges duplicate requests into one origin fetch. The gateway is a single-replica Deployment listening on `:9413`; the contract and trade-offs are in [9.1 design](docs/9.1-design.md).
+
+## Relationship to upstream
+
+Fluid 1.1.0-alpha.9 and JuiceFS CE 1.3.0 were deployed and benchmarked on a kind cluster as control groups among the seven configurations ([field survey](docs/3-field-survey.md), [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md)). The `DataSet` and `Runtime` naming and the nodeAffinity injection follow Fluid. Block readiness lives in `controller/cmd/controller-manager`, SchedulingGate injection in `controller/cmd/webhook`, node scoring in `controller/cmd/scheduler`, and prefetch in `agent/cmd/agentd`. No upstream code is vendored. Both projects are Apache-2.0: [fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid), [juicedata/juicefs](https://github.com/juicedata/juicefs).
+
+## Known limitations
+
+- Experiments cover a five-node kind cluster, 2/8/32 GiB datasets and a 1 GiB cache. Cross-cluster, multi-tenant and GPU training are untested.
+- Gated warmup does not pay off at 1000 mbit: M-1000 is 28.1% slower and S-1000 5.6% slower. Gating only helps when bandwidth is limited and the working set exceeds the cache.
+- The read path needs a local disk on each node. agentd stays off the read I/O path, and read signals come from a side channel, so accuracy depends on hook coverage.
+- Sustained prefetch with lookahead 16 and 32 loses 7.4% and 17.3% against lookahead 8 (n=2). No positive setting was found.
+- The gateway runs a single replica; multi-replica scaling is not implemented.
+- Epochs are not scheduled. Epoch, shuffle and curriculum switches only change prefetch order inside a node and stay out of scheduling.
+
+## Build and test
+
+```bash
+make verify           # build, vet, go test -race and gofmt for three modules
+make verify-metadata  # version fields, image names, relative doc links
+hack/build-images.sh  # five development images (:dev)
+make e2e              # six assertions in a kind cluster
+```
+
+`make e2e` covers six assertions: webhook gate injection, warmup progress and gate release, Pod binding to the custom scheduler, `node-scores` annotation parsing, the scheduler reading that annotation, and the `NodeDeviation` event. The `verify` workflow in CI runs the same unit tests plus the MinIO integration test.
+
+## Documents
+
+Documents under `docs/` are written in Chinese.
+
+| Document | Contents |
 |---|---|
-| [1 TrainCache介绍与背景](docs/1 TrainCache介绍与背景.md) | 问题定义、外部事实、与 Fluid/JuiceFS 的定位差异 |
-| [2 TrainCache三层架构](docs/2 TrainCache三层架构.md) | 控制面、节点面、数据源的分工与数据面约定 |
-| [3 现勘报告](docs/3 现勘报告.md) | 现场勘查数据与缺口证据 |
-| [4.0 bench文档导览](docs/4.0%20bench文档导览.md) | 4.1–4.6 的分工与常驻命令 |
-| [4.1 bench装置与禁令](docs/4.1%20bench装置与禁令.md) | 装置构成、文件作用、参数、数据落点、禁令、装置级故障 |
-| [4.2 juicefs与fluid](docs/4.2%20juicefs与fluid.md) | 两类对照组的镜像、起组、预热、跑分、拆组 |
-| [4.3 TrainCache启动与实验](docs/4.3%20TrainCache启动与实验.md) | 镜像构建、控制面拉起、新版本自跑、实验族启动 |
-| [4.4 实验协议](docs/4.4%20实验协议.md) | 预注册假设、口径、条件矩阵、COND 契约与机时 |
-| [4.5 实验口径决策](docs/4.5%20实验口径决策.md) | 验收与实验口径的裁决（D 号） |
-| [4.6 实验版本记录](docs/4.6%20实验版本记录.md) | 版本 × 实验族矩阵，记录产物路径 |
-| [5.x 缓存核心库](docs/5.1 design.md) | 设计要求、计划、决策、测试 |
-| [6.x Agent 服务化](docs/6.1 design.md) | 同上，对应节点面 |
-| [7.x Controller & Scheduler](docs/7.1 design.md) | 同上，对应控制面 |
-| [8.x 日志与监控](docs/8.1 design.md) | 指标、日志契约与使用说明 |
-| [9.x 合并回源网关](docs/9.1 design.md) | 网关的接口契约、决策与测试 |
-| [发布约束](docs/RELEASE-CONSTRAINTS.md) | 版本、镜像、发布物与 CI 口径 |
+| [1 Introduction and background](docs/1-introduction-and-background.md) | Problem statement, external facts, positioning against Fluid and JuiceFS |
+| [2 Three-layer architecture](docs/2-three-layer-architecture.md) | Control plane, node plane, data sources and data-plane conventions |
+| [3 Field survey](docs/3-field-survey.md) | How Fluid and JuiceFS work, and the gaps found |
+| [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.6 and standing commands |
+| [4.1 Bench setup and rules](docs/4.1-bench-setup-and-rules.md) | Rig, parameters, data locations and prohibitions |
+| [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md) | Images, startup, warmup, runs and teardown for the control groups |
+| [4.3 Startup and experiments](docs/4.3-startup-and-experiments.md) | Image builds, control plane startup, experiment families |
+| [4.4 Experiment protocol](docs/4.4-experiment-protocol.md) | Pre-registered hypotheses, metric definitions, condition matrix and criteria |
+| [4.5 Metric decisions](docs/4.5-metric-decisions.md) | Rulings on acceptance and metric definitions |
+| [4.6 Experiment version log](docs/4.6-experiment-version-log.md) | Version × experiment family matrix and artifact paths |
+| [5.x Cache core library](docs/5.1-design.md) | Requirements, plan, decisions and tests |
+| [6.x Agent service](docs/6.1-design.md) | Node-plane interfaces and decisions |
+| [7.x Controller and Scheduler](docs/7.1-design.md) | Control-plane interfaces and decisions |
+| [8.x Logging and monitoring](docs/8.1-design.md) | Metrics, log contract and usage |
+| [9.x Merge gateway](docs/9.1-design.md) | Gateway contract, decisions and tests |
+| [Release constraints](docs/RELEASE-CONSTRAINTS.md) | Versions, images, artifacts and CI rules |
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE).

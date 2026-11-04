@@ -17,7 +17,7 @@ const (
 	m12StatusLimit      = 1 << 20
 )
 
-// TestWarmupTaskStatusSize is S15 (docs/7.3 test.md): the worst WarmupTask
+// TestWarmupTaskStatusSize is S15 (docs/7.3-test.md): the worst WarmupTask
 // status at the Q11 limits P=64, N=256 must serialize below 1 MiB.
 //
 // Every field that the controller writes to PodNodeReadiness/status is

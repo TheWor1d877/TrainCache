@@ -1,0 +1,47 @@
+{
+  "fixed/ep1": {
+    "recovered": 0,
+    "censored": 0,
+    "censored_ratio": null
+  },
+  "fixed/ep3": {
+    "recovered": 2,
+    "censored": 0,
+    "censored_ratio": 0.0
+  },
+  "fixed/ep6": {
+    "recovered": 5,
+    "censored": 0,
+    "censored_ratio": 0.0
+  },
+  "per-epoch/ep1": {
+    "recovered": 0,
+    "censored": 0,
+    "censored_ratio": null
+  },
+  "per-epoch/ep3": {
+    "recovered": 2,
+    "censored": 0,
+    "censored_ratio": 0.0
+  },
+  "per-epoch/ep6": {
+    "recovered": 5,
+    "censored": 0,
+    "censored_ratio": 0.0
+  },
+  "curriculum/ep1": {
+    "recovered": 0,
+    "censored": 0,
+    "censored_ratio": null
+  },
+  "curriculum/ep3": {
+    "recovered": 2,
+    "censored": 0,
+    "censored_ratio": 0.0
+  },
+  "curriculum/ep6": {
+    "recovered": 5,
+    "censored": 0,
+    "censored_ratio": 0.0
+  }
+}

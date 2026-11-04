@@ -1,4 +1,4 @@
-"""JSON 行日志：字段按 docs/8.1 design.md §3.1 公共字段 + §4.3 DataLoader 契约。
+"""JSON 行日志：字段按 docs/8.1-design.md §3.1 公共字段 + §4.3 DataLoader 契约。
 
 只写 stdout，不改 handler、不加依赖；component 固定 dataloader，log_schema_version
 从 1 起只增不改。

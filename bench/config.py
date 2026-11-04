@@ -4,6 +4,7 @@
 bash 侧取值:python3 config.py --sh <KEY>
 """
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -89,8 +90,9 @@ TRACK_D_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
 
 # ---- tc 限速档位(扫点实验的自变量)----
 TC_RATE = "100mbit"
-TC_BURST = "1600k"          # 旧固定值;跨带宽档复用会让突发窗口从 128ms 缩到 13ms(D31)
-TC_LATENCY = "50ms"
+TC_BURST = "1600k"          # 旧固定值。tc 把 k 解析成 1024:1 638 400 字节,对 @100 的
+                            # tbf 速率 12.5 MB/s 是 131 ms 突发窗口,对 @1000 只剩 13 ms
+TC_LATENCY = "50ms"         # tbf 的 latency 决定队列长度,不覆盖 burst(容器内实测)
 TC_DELAY = "20ms"
 
 # ---- 带宽档口径(D31:带宽是实验自变量)----
@@ -114,11 +116,51 @@ def bw_over_r(tier: str, rate_mbit: int) -> float:
 
 
 def burst_for_rate(rate_mbit: int) -> str:
-    """burst ≈ 0.1 秒的传输量:rate_mbit × 125 KB/s × 0.1 s。
+    """burst 取「0.1 秒的传输量」:rate_mbit × 125 KB/s × 0.1 s,带 k 后缀交给 tc。
 
     100mbit → 1250k、300mbit → 3750k、1000mbit → 12500k。
+
+    两处按十进制算会读错的地方:
+    · tc 把 k 解析成 1024 不是 1000:1250k 挂上后是 1 280 000 字节,
+      `tc qdisc show` 回读打印成 burst 1250Kb(KiB,不是 kilobit);对 @100 的
+      tbf 速率 12.5 MB/s 突发窗口是 102 ms,对实测有效带宽 11.95 MB/s 是 107 ms。
+    · 命令行同时给的 `latency 50ms` 不覆盖这个桶:同一容器内实测 latency 取
+      5ms / 50ms / 500ms,回读的 burst 恒为命令行给的 1250Kb;latency 只定队列
+      长度上限。
+    `make bench-doctor` 把这两条钉住:从节点 netns 回读的 burst 折算成字节后
+    必须等于本函数的返回值(±1%,容纳 iproute2 按 32 位字取整的零头,实测
+    3750k 回读成 3839962b)。
     """
     return f"{round(rate_mbit * 125 * 0.1)}k"
+
+
+# ---- 倾斜两族的字节地板(4.4 §7.4;读侧过滤 row_gate.py 的除数)----
+# 倾斜两族的 COND 前缀。两族统一 @100 mbit(D31),回源是串行阻塞,所以
+# 「跑完 time ÷ 有效带宽」才是这一族成立的物理下界;其余族的预热与计算
+# 重叠,同一比值普遍高于线速,不套这道地板。
+TILT_COND_PREFIXES = ("policy-", "pareto2-")
+# 每档实测有效带宽(MB/s)。@100 = 2026-11-02 集群内只读探针,同一对象四种
+# 取法同值;@300 = §7.4 的 35.6(95% 线速)。表里没有的档位给不出地板,
+# 读侧跳过第三条而不是猜一个值。
+TILT_EFF_BW_MB_S = {100: 11.95, 300: 35.6}
+
+
+def rate_mbit(value) -> int | None:
+    """'100mbit' / 100 / '100' → 100;解析不出给 None。"""
+    m = re.search(r"(\d+)", str(value or ""))
+    return int(m.group(1)) if m else None
+
+
+def tilt_floor_seconds(row: dict) -> float | None:
+    """该行回源字节走完整整形链路所需的最短秒数;取不到给 None。"""
+    if not str(row.get("cond", "")).startswith(TILT_COND_PREFIXES):
+        return None
+    bw = TILT_EFF_BW_MB_S.get(rate_mbit(row.get("rate")))
+    try:
+        fetch = float(row.get("fetch_bytes_run") or "")
+    except ValueError:
+        return None
+    return fetch / (bw * 1e6) if bw and fetch > 0 else None
 
 
 # ---- 冷态规程与验证 ----

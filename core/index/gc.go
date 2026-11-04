@@ -13,7 +13,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// Collector 回收旧快照/分片/块（docs/5.0 步骤 7、design.md §7.3）。
+// Collector 回收旧快照/分片/块（docs/5.0-cache-core-design-method.md 步骤 7、docs/5.1-design.md §7.3）。
 // 内部持有 objectstore.Store（快照对象枚举与删除）与 *cas.Store（块枚举与删除）。
 type Collector struct {
 	store objectstore.Store

@@ -10,7 +10,7 @@
 #      traincache-objstore（accessKey / secretKey 两个键）。
 #   4. 镜像 traincache-gateway:dev 已 kind load；清单里的 ghcr 引用会被
 #      `kubectl set image` 替换。
-#   5. busybox:latest 已 kind load（步骤 3/4 的临时探针 Pod 使用）。
+#   5. 探针镜像已在集群内（默认 busybox:latest，TC_PROBE_IMAGE 可换）。
 #   6. 对象键：优先 E2E_KEY='<bucket 内完整 key>'；未设置时用 mc 递归列桶取
 #      第一个对象。两者都拿不到时步骤 3/4/5 标记 SKIP，不判 FAIL。
 #
@@ -293,7 +293,7 @@ if [[ $HAVE_KEY -ne 1 ]]; then
 else
   POD_GET="tc-gw-get-$$-$RANDOM"
   if ! run_probe_pod "$POD_GET" sleep 3600; then
-    fail "临时探针 Pod $POD_GET 未 ready（busybox:latest 是否已 kind load？）"
+    fail "临时探针 Pod $POD_GET 未 ready（$PROBE_IMAGE 是否已载入集群？）"
   else
     GET_SCRIPT='
 set -u

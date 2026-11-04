@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// 采样与限流的固定参数(docs/8.1 design.md §3.3 冻结,暂不开放配置)。
+// 采样与限流的固定参数(docs/8.1-design.md §3.3 冻结,暂不开放配置)。
 const (
 	controlRate  = 100.0
 	controlBurst = 200.0

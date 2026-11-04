@@ -1,55 +1,4 @@
 # 参数配置
-
-面向部署和提交训练任务的人。只列可改的参数、默认值和生效方式；内部实现见 [6.1 design](6.1%20design.md) 与 [7.1 design](7.1%20design.md)。
-
-## 修改入口速查
-
-集群运行时配置只有三个入口：ConfigMap `traincache-config`（namespace `traincache`，15 个配置项）、ConfigMap `traincache-scheduler-config`（namespace `kube-system`，scheduler 的 `schedulerScoreTTL`、`schedulerLogLevel` 两项，同一个对象还挂 `scheduler.yaml` 这份调度器配置）与 Secret `traincache-objstore`（`accessKey`、`secretKey` 两把凭证）。scheduler 单独一份 CM，是因为 `configMapKeyRef` 只在 Pod 自己的 namespace 找对象，而它在 kube-system。除此之外没有第四个可改的地方，下表几项看着像入口，实际各归别处。
-
-| 看起来像入口 | 实际是什么 |
-|---|---|
-| 清单里的 `value:` 字面量 env | 五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）一条都没有；再写回去被 `hack/verify-config-placement.sh` 判失败 |
-| `kubectl set env`、`kubectl edit` | 改的是集群里的 live 副本，下次 `kubectl apply -k controller/deploy` 盖回仓库清单；只用来临时试一次 |
-| `agent/svc/config.go`、`controller/internal/config/config.go` | 代码默认值。要永久改默认档才动源码，否则等于默认的值哪里都不写 |
-| Downward API `fieldRef`（`NODE_NAME`） | 集群按节点给出的每 Pod 身份，没有可填的值 |
-| DataSet / WarmupTask 的 `spec`、`trainpublish` 的 flag | 数据集层与训练任务层的参数，见 §3、§4，不进 ConfigMap |
-
-先定改哪里，再看后文取默认值。
-
-| 想改什么                                     | 改哪里                                                                                                                                                                      | 生效方式                                                        |
-|----------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| 缓存字节上限 `cacheCapacityBytes`            | ConfigMap `traincache-config`（`controller/deploy/agent/configmap.yaml`）                                                                                                   | 改 key 后重启 Agent Pod，不重启不生效                           |
-| 预取提前量 `prefetchLookahead`               | 同上                                                                                                                                                                        | 同上                                                            |
-| 淘汰策略 `evictPolicy`                       | 同上                                                                                                                                                                        | 同上                                                            |
-| 指标数据集白名单 `datasetMetricsWhitelist`   | 同上                                                                                                                                                                        | 同上                                                            |
-| 对象存储端点、桶、是否 TLS                   | ConfigMap `traincache-config` 的 `objstoreEndpoint` / `objstoreBucket` / `objstoreSecure`；AK/SK 取自 Secret `traincache-objstore`；控制面：DataSet YAML 的 `spec.endpoint` / `spec.bucket` / `spec.secretRef` | 改 ConfigMap 后滚动重启 Agent；DataSet 改动对之后创建的任务生效       |
-| 组件资源 requests/limits                     | `manager/deployment.yaml`、`webhook/deployment.yaml`、`scheduler/deployment.yaml`、`agent/daemonset.yaml`                                                                   | apply，Pod 重建                                                 |
-| Agent 校验级别、缓存目录、监听端口           | 清单里没有这些 env，取 `agent/svc/config.go` 的默认值；临时改一次用 `kubectl set env`，长期改见 §2.4                                                                        | 见 §2.4                                                       |
-| Agent 热度衰减与磁盘水位                     | 同上：11 个 `TRAINCACHE_HEAT_*` 都不在清单里，取 `agent/svc/config.go` 的默认值                                                                                             | 见 §2.4                                                       |
-| Controller 与 Scheduler 参数                 | 等于默认值的不写清单，取 `controller/internal/config/config.go`；`controllerPollInterval`、`controllerScoreTTL` 在 `traincache-config`，`schedulerScoreTTL`、`schedulerLogLevel` 在 kube-system 的 `traincache-scheduler-config`        | 改 ConfigMap 后滚动重启对应工作负载；见 §2.5                   |
-| 块大小                                       | `trainpublish --chunk-size`，只在空桶首次发布时写入 `_traincache/format.json`                                                                                               | 之后每次发布沿用；改值要清空桶或换新桶                          |
-| DataSet 字段                                 | DataSet YAML                                                                                                                                                                | 重新 apply；发布新快照后同步 `spec.snapshotID` 与 `spec.shards` |
-| 预热任务参数                                 | WarmupTask YAML 的 `spec`                                                                                                                                                   | 重新 apply；`dataSetRef` 与 `podCount` 不可改                   |
-| 发布器并发、临时目录、校验开关               | `trainpublish` 命令行 flag                                                                                                                                                  | 下次发布生效                                                    |
-
-### 落位判据
-
-一个参数写在哪个对象里，按下面五问从上往下问，问到「是」就停：
-
-| 顺序 | 问 | 落位 | 本项目实例 |
-|---|---|---|---|
-| 1 | 是凭证吗 | Secret + `secretKeyRef` | `accessKey`、`secretKey` |
-| 2 | 是每个 Pod 各不相同的身份信息吗 | Downward API `fieldRef` | `NODE_NAME`（`spec.nodeName`） |
-| 3 | 换集群或换实验轮次要改吗 | 该工作负载自己 namespace 里的 ConfigMap + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入在 `traincache-config`；`controllerPollInterval`、`controllerScoreTTL` 同在 `traincache-config`；两个 Scheduler 项在 kube-system 的 `traincache-scheduler-config` |
-| 4 | 值与代码默认不同，但基本不动吗 | 同上，写进 ConfigMap | 同上后四项 |
-| 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go` 与 `controller/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
-
-五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）里因此没有任何一条 `value:` 字面量 env，全部取值走引用或走代码默认。引用还有一个方向要守：`configMapKeyRef` 只在本 Pod 的 namespace 里找对象，跨不过去，所以 kube-system 的 scheduler 用不了 `traincache-config`。这条由 `hack/verify-config-placement.sh` 逐条按 namespace 校验，写错即失败。要覆盖第 5 类默认值：临时一次用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把它盖回仓库清单；长期改在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef` 引用，两处一起提交。
-
-ConfigMap `traincache-config` 现在装 15 项，见 §2.1；scheduler 的两项在 `traincache-scheduler-config`，同节末尾。往 ConfigMap 加一项而同 namespace 的清单里没有对应引用，进程读不到它。
-
-长期修改要改仓库 YAML 再 apply。`kubectl edit` 只改集群副本，下次 apply 会被覆盖。
-
 ## 1. 配置分三层
 
 | 层 | 改哪里 | 生效方式 |
@@ -342,28 +291,3 @@ spec:
     cutoff: 8   # 64MiB 块时 K_window=8，cutoff 取同值，启动阶段不多预热
 ```
 
-## 5. 不能改的部分
-
-这些没有参数入口，改了会破坏数据或组件之间的约定：
-
-- 对象键布局：`dataset/<name>/snapshots/<id>/`、`<name>/blocks/<path>#<chunk>`、`_traincache/format.json`。
-- 块编号：按 shard 顺序累计，发布后固定。
-- 已发布桶的块大小：写在 `_traincache/format.json`，发布器拒绝改值；只能清空桶重灌或换新桶。
-- 已创建任务的 `dataSetRef` 与 `podCount`：API server 按 `self == oldSelf` 拒绝修改，要改只能删掉重建。
-- gate 名 `traincache.io/warmup`、训练 Pod 上的分数注解 `traincache.io/node-scores`：webhook、scheduler、训练 Pod 共用。
-- 镜像名与 tag：发布物决定，用户不通过参数改；离线部署用 `docker save` / `kind load`。
-
-## 6. 改完后的检查
-
-```bash
-# 集群参数
-kubectl -n traincache get cm traincache-config -o yaml
-kubectl -n traincache rollout status ds/traincache-agentd
-
-# 数据集
-trainpublish --dataset <name> --bucket <bucket> --check-dataset <dataset.yaml>
-kubectl -n <ns> get dataset <name> -o jsonpath='{.status.conditions}'
-
-# 任务
-kubectl -n <ns> get warmuptask <name> -o yaml
-```

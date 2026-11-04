@@ -40,7 +40,7 @@ docker build -f agent/Dockerfile \
 - 仓库内清单写 `:dev`，用 `kustomize build controller/deploy` 渲染。
 - 发布清单由 kustomize `images:` 把五个镜像改成 `@sha256:<digest>`，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
-- kind 环境用 `kind load docker-image` 导入同名镜像，清单的 `imagePullPolicy` 是 `IfNotPresent`。
+- kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。
 
 ## 3. 发布
 
@@ -102,14 +102,14 @@ main 上打 tag vX.Y.Z 并推送
 
 ### 4.1 触发矩阵
 
-| 触发                     | 内容                                                                                                    | 是否阻塞         |
-|--------------------------|---------------------------------------------------------------------------------------------------------|------------------|
-| push `dev` / 任意 PR     | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染                      | 必须过           |
-| PR `dev`→`main`          | 同上 + 版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 对齐）+ 文档引用完整性 | 必须过           |
-| PR `dev`→`main`          | kind e2e                                                                                                | 必须过，合并门禁 |
-| 手动 `release-candidate` | 五个镜像推 `:sha-<7 位短 sha>` → 渲染 `install.yaml` → 编译 CLI → 上传候选 artifact                     | 发版前置         |
-| 候选构建成功             | release-smoke：候选文件齐全且哈希对得上、五个 digest 可解析、临时 kind 装机链路通                       | 由 `release.yml` 断言 |
-| push tag `v*`            | 断言候选 version 与 tag 一致 → 断言同 sha 有成功 smoke → 候选 digest 晋升 `:vX.Y.Z` → 打单 tar → 建 draft Release | 发布本身         |
+| 触发                     | 内容                                                                                                              | 是否阻塞              |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------|-----------------------|
+| push `dev` / 任意 PR     | 三模块 build + vet + test `-race`；gofmt；禁用符号检查；`kubectl kustomize` 可渲染                                | 必须过                |
+| PR `dev`→`main`          | 同上 + 版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 对齐）+ 文档引用完整性           | 必须过                |
+| PR `dev`→`main`          | kind e2e                                                                                                          | 必须过，合并门禁      |
+| 手动 `release-candidate` | 五个镜像推 `:sha-<7 位短 sha>` → 渲染 `install.yaml` → 编译 CLI → 上传候选 artifact                               | 发版前置              |
+| 候选构建成功             | release-smoke：候选文件齐全且哈希对得上、五个 digest 可解析、临时 kind 装机链路通                                 | 由 `release.yml` 断言 |
+| push tag `v*`            | 断言候选 version 与 tag 一致 → 断言同 sha 有成功 smoke → 候选 digest 晋升 `:vX.Y.Z` → 打单 tar → 建 draft Release | 发布本身              |
 
 ### 4.2 纪律
 
@@ -221,5 +221,3 @@ CLI 默认连 `127.0.0.1:9410`。访问集群内的 Agent 先做端口转发：
 ```bash
 kubectl -n traincache port-forward pod/<agentd-pod> 9410:9410
 ```
-
-只发布 linux/amd64，不提供包管理器与 Windows 制品；其他平台自行 `go build ./agent/cmd/traincache` 或 `go build ./core/cmd/trainpublish`。两个命令的参数见 [CLI 接口](CLI-INTERFACE.md)。

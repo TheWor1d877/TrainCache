@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-// 错误分类枚举(docs/8.1 design.md §3.1 冻结,只增不改)。
+// 错误分类枚举(docs/8.1-design.md §3.1 冻结,只增不改)。
 //
 // err 给人看,err_class 给聚合与告警;两者必须成对出现。各层特有错误
 // (cas/objectstore/agentclient)在各自包内先映射,再回退到这里的通用分类,

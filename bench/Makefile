@@ -97,6 +97,8 @@ selftest:
 	@$(PY) $(ROOT)/compare/run_bench.py --selftest
 	@$(PY) $(ROOT)/experiments/cond.py --selftest
 	@$(PY) $(ROOT)/compare/summarize.py --selftest
+	@$(PY) $(ROOT)/experiments/row_gate.py --selftest
+	@$(PY) $(ROOT)/experiments/policy_table.py --selftest
 	@$(PY) $(ROOT)/experiments/lock.py --selftest
 	@$(PY) $(ROOT)/experiments/collect.py --selftest
 	# C 轨两个 mock 自检只验产物字段与统计形态，不是产品淘汰生效的证据(4.4 §1.7)

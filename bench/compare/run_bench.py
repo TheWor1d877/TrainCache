@@ -327,7 +327,8 @@ AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
 AGENTD_CLEAN_TIMEOUT_S = 60  # 等 degraded=0 且 fetch 计数停增
 
 POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
-# 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、逐块 0.5s 轮询与 A/B 抢带宽。
+# 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
+# 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
 
 
@@ -1238,10 +1239,12 @@ def read_shard(shard, phase):
             with counter_lock:
                 demand_miss_phase[phase] = demand_miss_phase.get(phase, 0) + size
             _hook_read_miss(name, chunk_idx)
-            waited = 0.0
-            while not os.path.exists(blk) and waited < 180:
-                time.sleep(0.5)
-                waited += 0.5
+            # 块落盘是临时文件 + rename(core/cas/store.go 的 CreateTemp/os.Rename),
+            # exists 即完整可读,所以轮询可以直接加密:0.5 s 每块平均多等 0.25 s,
+            # 3000 块就是 12 分钟;改成 25 ms 纯 stat,等待量级降到秒。
+            deadline = time.perf_counter() + 180
+            while not os.path.exists(blk) and time.perf_counter() < deadline:
+                time.sleep(0.025)
             if os.path.exists(blk):
                 nbytes += read_file_bytes(blk)
                 n_hits += 1
@@ -2372,6 +2375,18 @@ def eviction_guard_columns(guard_base, guard_final, dir_peaks):
     return evict_run, cap_final, dir_peak
 
 
+def dir_peak_sampling_stats(peaks, times, nominal_s):
+    """4.4 §1.7 判据三的采样落点：采样点数与实际平均间隔（秒）。
+
+    间隔取相邻采样时刻的均值：docker exec 串四个节点会把节拍拉长，判据三上界
+    1.16 里 5 s 那一项以产物落的这个数为准，不拿标称值当实测。
+    时刻不足两个时退回标称周期。
+    """
+    gaps = [b - a for a, b in zip(list(times or []), list(times or [])[1:])]
+    return len(list(peaks or [])), (round(sum(gaps) / len(gaps), 2)
+                                    if gaps else nominal_s)
+
+
 def evict_not_engaged(evict_run, dir_peak, cache_bytes):
     """目录装过容量而淘汰零增量 → 淘汰闸门没生效，本轮容量口径不成立。
 
@@ -2622,10 +2637,11 @@ def _cache_phase_ratio(cache_base, cache_final, phase):
 def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries,
                       cache_base=None, cache_final=None, pre_up_snap=None,
                       origin_egress=None, guard_base=None, guard_final=None,
-                      dir_peaks=None):
+                      dir_peaks=None, dir_peak_times=None):
     """6.16：把 D25 命中率口径与 D5 三笔字节成本写进 metrics 行。
 
-    4.4 增补：预热字节实测、分阶段命中率、源站出站字节对账、淘汰证据三列。
+    4.4 增补：预热字节实测、分阶段命中率、源站出站字节对账、淘汰证据三列，
+    以及目录峰值的采样点数与实际节拍两列（判据三的盲区读得出）。
     """
     # ---- 第一笔：启动预热字节（模型值 + 实测值并列）----
     if group == "traincache-warm":
@@ -2733,6 +2749,8 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
         metrics["evict_blocks_run"] = evict_run
         metrics["capacity_bytes_final"] = cap_final
         metrics["cache_dir_peak_bytes"] = dir_peak
+        metrics["cache_dir_peak_samples"], metrics["cache_dir_peak_period_s"] = \
+            dir_peak_sampling_stats(dir_peaks, dir_peak_times, SAMPLE_INTERVAL_S)
         # 判据 2：Agent 记的字节账对不上目录真实字节 → 重复记账或漏记，只告警。
         # 用最后一次目录采样，与 gauge 末值同一时刻；峰值是窗口最大值，不同刻。
         dir_last = next((v for v in reversed(dir_peaks or [])
@@ -2772,6 +2790,8 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
         metrics["evict_blocks_run"] = ""
         metrics["capacity_bytes_final"] = ""
         metrics["cache_dir_peak_bytes"] = ""
+        metrics["cache_dir_peak_samples"] = ""
+        metrics["cache_dir_peak_period_s"] = ""
     metrics["hit_rate_diag"] = ""
     return metrics
 
@@ -2953,6 +2973,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         # 4.4 §1.7：淘汰证据基线与目录峰值采样序列
         guard_base = eviction_guard_snapshot() if is_tc else None
         dir_peaks = []
+        dir_peak_times = []
         samples = [base_snap] if base_snap else []
         # 4.4：源站出站字节基线（MinIO cluster metrics；抓不到为 None）
         origin_base = minio_egress_snapshot()
@@ -2988,6 +3009,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 if stop_sample.is_set():
                     break
                 dir_peaks.append(peak)
+                dir_peak_times.append(time.time())
 
         # 测量期间每 5s 采一次 degraded；测量 Pod 一结束就停，避免训练结束
         # 30s 后 sidecar 退出导致的必然降级被误判进本轮。
@@ -3131,7 +3153,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 cache_base=cache_base, cache_final=cache_final,
                 pre_up_snap=pre_up_snap, origin_egress=origin_egress,
                 guard_base=guard_base, guard_final=guard_final,
-                dir_peaks=list(dir_peaks))
+                dir_peaks=list(dir_peaks), dir_peak_times=list(dir_peak_times))
             # 4.4 §1.7：目录装过容量而淘汰没删过一个块 → 容量口径不成立，作废。
             # 已有更具体的作废原因时保留原原因。
             if (not metrics.get("void")
@@ -3306,9 +3328,11 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "startup_warmup_model_bytes",
                   "origin_egress_bytes", "origin_reconcile_diff",
                   "prefetch_fanout", "measure_shards",
-                  # 4.4 §1.7 淘汰证据三列（traincache 组才有值，其余留空）
+                  # 4.4 §1.7 淘汰证据三列（traincache 组才有值，其余留空）；
+                  # 后两列记目录峰值的采样点数与实际平均间隔，判据三的上界要靠它读盲区
                   "evict_blocks_run", "capacity_bytes_final",
                   "cache_dir_peak_bytes",
+                  "cache_dir_peak_samples", "cache_dir_peak_period_s",
                   # 4.4 §1.10：每个点可回溯到 COND 与 run ID；曲面与字节族的
                   # 自变量列必须随产物落盘，否则出图只能靠目录名猜。
                   "cond", "run_id", "epochs", "shuffle",
@@ -3749,6 +3773,18 @@ def selftest():
     if "-name \"*.blk\"" not in _BLOCKS_DIR_BYTES_SCRIPT \
             or "tmp-" in _BLOCKS_DIR_BYTES_SCRIPT:
         raise AssertionError("自测：目录峰值脚本应只统计 .blk，不计 tmp-* 半成品")
+    # 判据三的采样落产物（4.4 §1.7）：点数照实记，节拍取相邻时刻的均值，
+    # docker exec 拖长时不能用标称 5 s 冒充；时刻不足两个退回标称值。
+    if dir_peak_sampling_stats([1 << 30, 2 << 30, None], [0.0, 5.0, 10.0], 5.0) != (3, 5.0):
+        raise AssertionError("自测：目录峰值采样点数与节拍应落产物（3 点、间隔 5.0 s）")
+    if dir_peak_sampling_stats([1 << 30, None, 2 << 30], [0.0, 7.3, 14.6], 5.0) != (3, 7.3):
+        raise AssertionError("自测：docker exec 把节拍拖长到 7.3 s，应报实测均值不是 5.0")
+    if dir_peak_sampling_stats([], [], 5.0) != (0, 5.0) \
+            or dir_peak_sampling_stats([1 << 30], [1.0], 5.0) != (1, 5.0):
+        raise AssertionError("自测：单次或零次采样取不到间隔，应退回标称周期")
+    _n_pk, _per_pk = dir_peak_sampling_stats([1 << 30] * 3, [0.0, 5.0, 10.0], 5.0)
+    if _per_pk * (_n_pk - 1) != 10.0:
+        raise AssertionError("自测：节拍 ×（点数−1）应等于采样覆盖的窗口跨度")
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "summary.csv"
         saved_rate = TC_RATE_EFF
@@ -3756,7 +3792,9 @@ def selftest():
         try:
             write_csv(p, [{"group": "traincache-cold", "rep": 0,
                            "evict_blocks_run": 37, "capacity_bytes_final": 805306368,
-                           "cache_dir_peak_bytes": 1100000000},
+                           "cache_dir_peak_bytes": 1100000000,
+                           "cache_dir_peak_samples": 421,
+                           "cache_dir_peak_period_s": 5.13},
                           {"group": "direct", "rep": 0}])
         finally:
             globals()["TC_RATE_EFF"] = saved_rate
@@ -3765,13 +3803,17 @@ def selftest():
         other = next(r for r in back if r["group"] == "direct")
         if (tc_row["evict_blocks_run"], tc_row["capacity_bytes_final"],
                 tc_row["cache_dir_peak_bytes"]) != ("37", "805306368", "1100000000") \
+                or (tc_row["cache_dir_peak_samples"],
+                    tc_row["cache_dir_peak_period_s"]) != ("421", "5.13") \
                 or any(other[k] != "" for k in ("evict_blocks_run",
                                                 "capacity_bytes_final",
-                                                "cache_dir_peak_bytes")):
-            raise AssertionError("自测：淘汰证据三列没进 summary.csv，"
+                                                "cache_dir_peak_bytes",
+                                                "cache_dir_peak_samples",
+                                                "cache_dir_peak_period_s")):
+            raise AssertionError("自测：淘汰证据三列与采样节拍两列没进 summary.csv，"
                                  "或非 traincache 组没留空")
-    print("[selftest] 10) 淘汰证据三列（4.4 §1.7）：指标解析、归零起算、留空口径、"
-          "作废判据边界与产物列落盘均自洽")
+    print("[selftest] 10) 淘汰证据三列 + 目录峰值采样节拍两列（4.4 §1.7）："
+          "指标解析、归零起算、留空口径、作废判据边界、节拍实测均值与产物列落盘均自洽")
 
     # ---- 11) C 轨挤占口径与 A 步预算（4.4 §C3）----
     _hot_ns = {}

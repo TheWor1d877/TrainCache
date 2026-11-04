@@ -1,6 +1,6 @@
 // Package warmup implements the WarmupTask reconcile loop for M4: candidate
 // filtering, consume-order resolution, window expansion and preheat submission
-// (docs/7.1 design.md §5.3, §5.4, §7.2). Polling, readiness tables, GWAA,
+// (docs/7.1-design.md §5.3, §5.4, §7.2). Polling, readiness tables, GWAA,
 // gating and scoring belong to M5-M8 and are intentionally absent.
 package warmup
 

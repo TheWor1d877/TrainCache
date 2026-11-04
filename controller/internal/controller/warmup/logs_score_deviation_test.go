@@ -1,6 +1,6 @@
 package warmup
 
-// Log assertions for docs/8.1 design.md §4.1: the Pod score annotation is
+// Log assertions for docs/8.1-design.md §4.1: the Pod score annotation is
 // written in the same patch that removes the gate, and a failed patch leaves
 // the Pod gated; released Pods landing off their GWAA assignment (Warn log
 // paired with the NodeDeviation event).

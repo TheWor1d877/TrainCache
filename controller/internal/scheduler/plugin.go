@@ -3,7 +3,7 @@
 // The plugin only reads the score annotation written by the controller on the
 // training Pod itself. It never mutates Nodes, Pods, or any other API object.
 // Every failure mode returns a score of 0 with a nil status so a malformed
-// annotation can never make a Pod unschedulable (docs/7.1 design.md §5.8/D18).
+// annotation can never make a Pod unschedulable (docs/7.1-design.md §5.8/D18).
 package scheduler
 
 import (
@@ -26,14 +26,14 @@ const (
 	Name = "TrainCacheScore"
 
 	// AnnotationWarmupTask is injected by the mutating webhook and holds
-	// "<namespace>/<name>" (docs/7.1 design.md §6.3).
+	// "<namespace>/<name>" (docs/7.1-design.md §6.3).
 	AnnotationWarmupTask = "traincache.io/warmup-task"
 
 	defaultTTL = 5 * time.Minute
 )
 
 // Options configures the plugin. Zero values fall back to the defaults that
-// match docs/7.1 design.md §8.
+// match docs/7.1-design.md §8.
 type Options struct {
 	// Annotation is the Pod score annotation key (CONTROLLER_SCORE_ANNOTATION).
 	Annotation string

@@ -1,7 +1,7 @@
 package svc
 
 // gateway_integration_test.go：Assemble 装配后的选择器 + 真实 HTTP 网关的降级与
-// 恢复用例（docs/9.3 test.md §4）。网关关停时第一次取数降级直连源站，网关恢复
+// 恢复用例（docs/9.3-test.md §4）。网关关停时第一次取数降级直连源站，网关恢复
 // 后由探测把模式切回 1；全程不 sleep，用状态机的假时钟推进 nextProbe。
 
 import (

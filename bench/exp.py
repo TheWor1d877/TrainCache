@@ -3,7 +3,7 @@
 
 产物落数据层的五个分区(scores / baselines / summary / figures / policy),分区由
 `results_root()` 按族给出;点目录名一律是完整 COND 名(compare-groups 用格名)。
-每族跑完按产物回填 docs/4.6 实验版本记录.md 的最后一行。
+每族跑完按产物回填 docs/4.6-experiment-version-log.md 的最后一行。
 """
 import argparse
 import csv
@@ -24,7 +24,7 @@ import lock as lock_mod  # noqa: E402
 
 CONDS_DIR = EXPERIMENTS_DIR / "conds"
 RUNNER = BENCH_ROOT / "compare" / "run_bench.py"
-REGISTRY = bench_config.REPO_ROOT / "docs" / "4.6 实验版本记录.md"
+REGISTRY = bench_config.REPO_ROOT / "docs" / "4.6-experiment-version-log.md"
 LOCK_FILE = Path("/tmp/traincache-exp.lock")
 
 COMPARE_FAMILY = "compare-groups"
