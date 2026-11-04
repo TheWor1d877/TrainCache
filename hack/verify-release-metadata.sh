@@ -75,10 +75,12 @@ if [[ "$unreleased" -gt 1 ]]; then
   fail "CHANGELOG 有 $unreleased 个未发布小节"
 fi
 if [[ "$unreleased" -eq 1 ]]; then
+  # 只看未发布与版本标题这两类,说明区自己的 ## 标题不参与排序判定。
   first_heading="$(awk '
     /^[[:space:]]*```/ { fence = !fence; next }
     fence { next }
-    /^## / { print; exit }
+    /^## (\[未发布\]|未发布)$/ { print; exit }
+    /^## \[/ { print; exit }
   ' CHANGELOG.md)"
   case "$first_heading" in
     '## [未发布]' | '## 未发布') ;;
