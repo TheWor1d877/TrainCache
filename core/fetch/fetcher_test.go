@@ -494,7 +494,7 @@ func TestRetryExhausted(t *testing.T) {
 }
 
 // TestFetcherMaxTasksLimit：从 Fetcher.Fetch 入口验证 MaxTasks 任务数上限语义
-// （docs/5.3 §5）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
+// （docs/5.1 §5.3 的 MaxTasks 任务数上限）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
 // （每个在途任务上报进入/离开并记录峰值并发），断言峰值恰为 2（既不超过 MaxTasks，
 // 也确实制造了并发）；放行后 5 个 key 全部落盘成功、任务额度全部归还、无死锁。
 // ctx 取消路径已由 TestCtxCancel 与 TestLimiterTaskSemaphore 覆盖，本用例不重复。

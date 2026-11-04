@@ -29,7 +29,7 @@
 #
 # The s3-access Node label is NEVER written by TrainCache components. This
 # script performs the labelling once in setup as an explicit simulation of the
-# cluster administrator's manual action (docs/7.0, D30). Set
+# cluster administrator's manual action (docs/7.2 D30). Set
 # SKIP_NODE_LABELS=1 and label the workers yourself to avoid it entirely.
 #
 # Exit codes: 0 all assertions passed; 1 an assertion/deployment failed;

@@ -3,7 +3,11 @@
 #
 # 前置:复用已部署的 kind 集群(traincache),镜像 traincache-agentd:dev /
 #       traincache-ordersrc:dev / busybox:latest 已 kind load(见 agent/deploy/*.yaml 头注释)。
-#       脚本先 kubectl apply 三个清单(幂等:已存在则不改),再逐条演练验收。
+#       脚本先 kubectl apply 四个清单(namespace、configmap、daemonset、train-pod;
+#       幂等:已存在则不改),再逐条演练验收。configmap 必须排在 daemonset 之前,
+#       DaemonSet 用 configMapKeyRef 取值,ConfigMap 缺失时 Pod 卡在
+#       CreateContainerConfigError。已存在的 ConfigMap 不重 apply:bench 改过的
+#       objstoreBucket、cacheCapacityBytes 等会被仓库清单盖回默认。
 # 覆盖验收:2 / 3 / 8 / 10(1/5/9 需 MinIO 对象存储 + 测试数据,见 DECISIONS 与回传)。
 # 用法:
 #   bash agent/e2e/run-k8s.sh        # 由 bench/Makefile 的 e2e-k8s 调用
