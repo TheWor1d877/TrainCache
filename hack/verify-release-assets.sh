@@ -2,7 +2,8 @@
 # verify-release-assets.sh — 校验一个候选产物目录的完整性。
 #
 # 查四件事：install.yaml 里恰好五个 digest 引用、SHA256SUMS 逐项对得上、
-# 目录内每个文件都被 SHA256SUMS 覆盖、五个 GHCR digest 匿名可解析
+# 目录内每个文件都被 SHA256SUMS 覆盖、install.yaml 的每个 GHCR digest 匿名可解析。
+# candidate.json 比 install.yaml 多一个 checkpointd（由准入注入，不进清单）。
 # （docker manifest inspect，只看 manifest 不下载层；包不是 Public 这里就报
 # not pullable，层数据的真拉由 release-smoke 的装机段负责）。
 #
@@ -38,11 +39,12 @@ if [[ -f "$DIR/candidate.json" && "${#refs[@]}" -eq 5 ]]; then
   printf '\n== candidate digests match install.yaml\n'
   mapfile -t cand < <(jq -r '.images[]' "$DIR/candidate.json" | sed 's/^sha256://' | sort)
   mapfile -t have < <(printf '%s\n' "${refs[@]}" | sed 's/.*@//; s/^sha256://' | sort)
-  if [[ "${#cand[@]}" -eq 5 && "${cand[*]}" == "${have[*]}" ]]; then
-    ok "install.yaml 的五个 digest 与 candidate.json 一致"
+  missing="$(comm -23 <(printf '%s\n' "${have[@]}") <(printf '%s\n' "${cand[@]}"))"
+  if [[ "${#cand[@]}" -ge 5 && -z "$missing" ]]; then
+    ok "install.yaml 的五个 digest 都出现在 candidate.json 中"
   else
-    fail "install.yaml 的 digest 与 candidate.json 不一致"
-    diff <(printf '%s\n' "${cand[@]}") <(printf '%s\n' "${have[@]}") || true
+    fail "install.yaml 的 digest 未全部出现在 candidate.json 中"
+    printf 'missing:\n%s\n' "$missing"
   fi
 fi
 

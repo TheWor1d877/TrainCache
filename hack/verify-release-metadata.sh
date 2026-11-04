@@ -22,7 +22,9 @@ while IFS= read -r img; do
   esac
 done <<<"$images"
 
-# 2. kustomization 的 images 必须覆盖全部五个组件，且发布前都指向 dev。
+# 2. kustomization 的 images 必须覆盖全部部署组件，且发布前都指向 dev。
+#    checkpointd 由准入按 Pod 注入，不进 kustomization，因此这五个组件的
+#    循环保持五行；它的 Dockerfile/main 在第 3、4 节单独校验。
 for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
   if ! grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
       | grep -q 'newTag: dev'; then
@@ -30,19 +32,37 @@ for comp in controller-manager webhook kube-scheduler traincache-agentd traincac
   fi
 done
 
-# 3. Dockerfile 不设镜像站参数,VERSION 默认 dev 并由 ldflags 注入。
-for df in agent/Dockerfile controller/deploy/manager/Dockerfile \
-          controller/deploy/webhook/Dockerfile controller/deploy/scheduler/Dockerfile \
-          gateway/Dockerfile; do
+# 3. 组件清单从五变六：五个部署组件加 checkpointd（由准入注入的 sidecar）。
+#    Dockerfile 不设镜像站参数,VERSION 默认 dev 并由 ldflags 注入。
+dockerfiles=(
+  agent/Dockerfile
+  checkpoint/Dockerfile
+  controller/deploy/manager/Dockerfile
+  controller/deploy/webhook/Dockerfile
+  controller/deploy/scheduler/Dockerfile
+  gateway/Dockerfile
+)
+mains=(
+  agent/cmd/agentd/main.go
+  checkpoint/cmd/checkpointd/main.go
+  controller/cmd/controller-manager/main.go
+  controller/cmd/webhook/main.go
+  controller/cmd/scheduler/main.go
+  gateway/cmd/gatewayd/main.go
+)
+# 组件数门槛：checkpointd 不进 kustomization，但仍是随版本构建的第六个组件，
+# 两条清单都必须覆盖它，避免新增组件只改了 build-images.sh。
+[[ ${#dockerfiles[@]} -ge 6 && ${#mains[@]} -ge 6 ]] \
+  || fail "组件少于 6 个（Dockerfile ${#dockerfiles[@]}，main ${#mains[@]}）"
+
+for df in "${dockerfiles[@]}"; do
   ! grep -q 'ARG REGISTRY' "$df" || fail "$df: 不应有镜像站参数,基础镜像写官方短名"
   grep -qx 'ARG VERSION=dev' "$df" || fail "$df: ARG VERSION 默认值不是 dev"
   grep -q -- '-X main.version=\${VERSION}' "$df" || fail "$df: 未用 ldflags 注入 main.version"
 done
 
-# 4. 五个 main 包必须暴露可被 -X 覆盖的 version 变量。
-for f in controller/cmd/controller-manager/main.go controller/cmd/webhook/main.go \
-         controller/cmd/scheduler/main.go agent/cmd/agentd/main.go \
-         gateway/cmd/gatewayd/main.go; do
+# 4. 六个 main 包必须暴露可被 -X 覆盖的 version 变量。
+for f in "${mains[@]}"; do
   grep -qx 'var version = "dev"' "$f" || fail "$f: 缺少 var version = \"dev\""
 done
 

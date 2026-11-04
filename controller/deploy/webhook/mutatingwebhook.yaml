@@ -34,3 +34,28 @@ webhooks:
         path: /mutate-v1-pod
         port: 443
       caBundle: ""
+  # Checkpoint sidecar injection (docs/10.1 §4.2). This rule rejects Pods that
+  # opt in but cannot be resolved, so its failurePolicy is Fail.
+  - name: pods-checkpoint.traincache.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    reinvocationPolicy: Never
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: "*"
+    objectSelector:
+      matchLabels:
+        traincache.io/checkpoint: enabled
+    clientConfig:
+      service:
+        namespace: traincache
+        name: traincache-webhook
+        path: /mutate-checkpoint
+        port: 443
+      caBundle: ""

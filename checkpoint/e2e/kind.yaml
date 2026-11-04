@@ -1,0 +1,15 @@
+# kind cluster for the checkpoint end-to-end run.
+#
+# One node is enough: the e2e exercises a single Pod with one rank, so there
+# is no scheduling choice to make. The control-plane taint is tolerated by the
+# Pod/MinIO manifests so the workload runs on the only node.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: KubeletConfiguration
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        containerLogMaxSize: 50Mi
+        containerLogMaxFiles: 3

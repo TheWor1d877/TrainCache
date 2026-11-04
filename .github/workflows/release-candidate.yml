@@ -77,6 +77,7 @@ jobs:
           kube-scheduler|controller/deploy/scheduler/Dockerfile|D_SCHEDULER
           traincache-agentd|agent/Dockerfile|D_AGENT
           traincache-gateway|gateway/Dockerfile|D_GATEWAY
+          traincache-checkpointd|checkpoint/Dockerfile|D_CHECKPOINT
           IMAGES
 
       - name: render install.yaml
@@ -104,7 +105,7 @@ jobs:
             --arg sha "$SHA" --arg short "$SHORT_SHA" --arg version "$VERSION" \
             --arg dm "$D_MANAGER" --arg dw "$D_WEBHOOK" \
             --arg ds "$D_SCHEDULER" --arg da "$D_AGENT" \
-            --arg dg "$D_GATEWAY" \
+            --arg dg "$D_GATEWAY" --arg dc "$D_CHECKPOINT" \
             --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{sha: $sha, short_sha: $short, version: $version,
               images: {
@@ -112,10 +113,13 @@ jobs:
                 "webhook": $dw,
                 "kube-scheduler": $ds,
                 "traincache-agentd": $da,
-                "traincache-gateway": $dg
+                "traincache-gateway": $dg,
+                "traincache-checkpointd": $dc
               },
               created_at: $created}' >candidate.json
-          jq -e '.images | length == 5' candidate.json >/dev/null
+          # install.yaml 只有五个部署组件；checkpointd 是第六个镜像，由准入注入，
+          # 因此 candidate.json 记六个 digest，install.yaml 仍是五个引用。
+          jq -e '.images | length == 6' candidate.json >/dev/null
           sha256sum install.yaml traincache-linux-amd64 trainpublish-linux-amd64 \
             candidate.json >SHA256SUMS
 
