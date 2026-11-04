@@ -2,9 +2,9 @@
 
 ## 前置：minio-go SDK 是什么
 
-`core/objectstore/s3.go` 引入了 `github.com/minio/minio-go/v7`。名字里带 minio，容易被理解成项目跟 MinIO 绑定。实际不会。它只是一个 Go 语言的 S3 客户端库。
+`core/objectstore/s3.go` 引入 `github.com/minio/minio-go/v7`。它是 MinIO 公司发布的 Go S3 客户端库，TrainCache 用它访问任意 S3 兼容后端，不依赖 MinIO Server 存在。
 
-MinIO 公司开源三样东西，本项目各用在一处：
+MinIO 公司开源三样东西，在 TrainCache 里各用在一处：
 
 | 项目 | 是什么 | 本项目用法 |
 |---|---|---|
@@ -12,32 +12,27 @@ MinIO 公司开源三样东西，本项目各用在一处：
 | minio-go SDK | Go 的 S3 客户端库 | `core/objectstore/s3.go` 引入 |
 | mc | 命令行 S3 客户端 | 验证连通性与条件写 |
 
-minio-go 把 S3 的 REST 接口封装成 Go 方法。它负责四件事：
+minio-go 把 S3 的 REST 接口封装成 Go 方法，负责四件事：
 
-- **AWS V4 签名**：按时间戳和 SecretKey 算出签名头。
-- **URL 风格选择**：本地 MinIO 用 `endpoint/bucket/key`，AWS 用 `bucket.endpoint/key`。
-- **错误码映射**：把服务端返回的 XML 错误码转成 Go error。
-- **条件写**：`SetMatchETag()` 发 `If-Match`，`SetMatchETagExcept()` 发 `If-None-Match`。
+- AWS V4 签名：按时间戳和 SecretKey 算出签名头。
+- URL 风格选择：本地 MinIO 用 `endpoint/bucket/key`，AWS 用 `bucket.endpoint/key`。
+- 错误码映射：把服务端返回的 XML 错误码转成 Go error。
+- 条件写：`SetMatchETag()` 发 `If-Match`，`SetMatchETagExcept()` 发 `If-None-Match`。
 
-SDK 不知道服务端是谁。它只发带签名的标准 S3 请求，对方是谁它不管：
+SDK 只发带签名的标准 S3 请求，endpoint 换成任何 S3 兼容后端行为一致：
 
 ```go
-// endpoint 换成任何 S3 兼容后端都能用，SDK 行为一致
 client, err := minio.New(endpoint, &minio.Options{
     Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
     Secure: secure, // true 走 HTTPS，false 走 HTTP
 })
 ```
 
-选 minio-go 而不是 AWS 官方 SDK，两个原因：模块小、依赖少；对非 AWS 的 S3 实现兼容覆盖最全。另外条件写有一级封装，我们的 CAS 提交和孤儿清理正好要用。
-
-小结：MinIO 只是本地开发用的后端。SDK 层面，任何 S3 兼容存储都是等价的。
-
----
+选 minio-go 相对 AWS 官方 SDK 的两个依据：模块小、依赖少，对非 AWS 的 S3 实现兼容覆盖最全；条件写有一级封装，CAS 提交和孤儿清理要用。
 
 ## 1. 六个环境变量
 
-Agent 启动时读这六个值，解析在 `agent/svc/config.go` 的 `Load()`。都有默认值。缺省连本地 MinIO：`127.0.0.1:9000`、匿名、单桶 `traincache`、HTTP。
+Agent 启动时读这六个值，解析在 `agent/svc/config.go` 的 `Load()`。都有默认值，缺省连本地 MinIO：`127.0.0.1:9000`、匿名、单桶 `traincache`、HTTP。
 
 | 变量 | 含义 | 默认 |
 |---|---|---|
@@ -48,13 +43,11 @@ Agent 启动时读这六个值，解析在 `agent/svc/config.go` 的 `Load()`。
 | `TRAINCACHE_OBJSTORE_SECURE` | `1`/`true`/`yes` 走 HTTPS，其余走 HTTP | false |
 | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | 启动时探测后端是否支持条件写 | false |
 
-**协议和地址分开填。** endpoint 只写域名。加密与否由 `SECURE` 控制。
+- 协议与地址分开：endpoint 只写域名或 `host:port`，加密与否由 `SECURE` 控制。
+- 凭证留空即匿名访问。Agent 只用六个普通客户端操作：Get、Put、Delete、GetETag、PutIfMatch、List，本地桶开匿名读就能跑。
+- v1 单桶：所有数据放一个桶，靠对象键前缀隔离 dataset（口径见 6.2 D26）。键布局：
 
-**凭证留空就是匿名。** Agent 只用六个普通客户端操作：Get、Put、Delete、GetETag、PutIfMatch、List。本地桶开匿名读就能跑。
-
-**v1 用单桶。** 所有数据放一个桶，靠对象键前缀隔离 dataset（口径见 6.2 D26）。键布局：
-
-```
+```text
 dataset/<dataset>/CURRENT                            ← 当前快照指针
 dataset/<dataset>/snapshots/<id>/manifest.json       ← 索引 manifest
 dataset/<dataset>/snapshots/<id>/shard-<fp8>.idx     ← 索引分片
@@ -66,17 +59,9 @@ dataset/<dataset>/readers/<nodeid>.json              ← 读者心跳声明
 
 桶根另有 `_traincache/format.json`，内容是 `{"version":1,"chunkSize":N}`，记录整个桶的块大小。发布器首次写数据时创建，之后只读；改块大小必须清空桶重灌或换桶。
 
-S3 的 prefix 天然提供逻辑隔离。v1 不需要一 dataset 一桶。以后真要拆，在 Controller 层加映射，`Store` 接口签名不动。
-
-**条件写探测。** 打开开关后，Agent 启动时写一个临时 key，再用不匹配的 ETag 调 `PutIfMatch`，期望返回 412。如果竟然写成功，说明这个后端不支持条件写。Agent 会告警，但不阻止启动。
-
-条件写是 CAS 提交和孤儿清理的依赖。后端不支持时走回退路径：乐观写 + 读回校验 + 冲突重试。
-
-探测结果上报指标 `traincache_objectstore_conditional_write_supported`，取值 0 或 1。上公有云建议开。
+- 条件写探测：打开开关后，Agent 启动时写一个临时 key，再用不匹配的 ETag 调 `PutIfMatch`，期望返回 412。写成功说明后端不支持条件写，Agent 告警但不阻止启动。条件写是 CAS 提交和孤儿清理的依赖，后端不支持时走回退路径：乐观写 + 读回校验 + 冲突重试。探测结果上报指标 `traincache_objectstore_conditional_write_supported`，取值 0 或 1。上公有云建议开。
 
 云厂商生产环境必须开 HTTPS，否则请求会被云侧 WAF 拒绝。
-
-小结：换云端只改 endpoint、bucket、secure 三项。凭证走 Secret，其余保持默认。
 
 ## 1.1 可选的合并回源网关路径
 
@@ -87,12 +72,9 @@ Agent 的块 GET 可以经集群内的合并回源网关，其余 S3 方法仍�
 | `TRAINCACHE_GATEWAY_ENDPOINT` | 网关地址，`host:port`，不带 scheme；空表示全部直连源站 | 空 |
 | `TRAINCACHE_GATEWAY_SECURE` | `1`/`true`/`yes` 时 Agent 用 HTTPS 连网关，其余走 HTTP | false |
 
-- `TRAINCACHE_OBJSTORE_ENDPOINT` / `TRAINCACHE_OBJSTORE_SECURE` 仍指向源站，两套地址与加密开关互不影响：源站可以是 HTTPS、网关明文，反之亦然。
-- 只有块 GET 走网关；`Put`、`Delete`、`GetETag`、`PutIfMatch`、`List` 仍直连源站。
+- 只有块 GET 走网关；`Put`、`Delete`、`GetETag`、`PutIfMatch`、`List` 直连源站。不配 `TRAINCACHE_GATEWAY_ENDPOINT` 时块 GET 也直连源站。
+- `TRAINCACHE_OBJSTORE_ENDPOINT` / `TRAINCACHE_OBJSTORE_SECURE` 始终指向源站，网关与源站的地址和加密开关各自独立，可以一侧 HTTPS 一侧明文。
 - 网关与 Agent 共用 Secret `traincache-objstore` 的 `accessKey`、`secretKey`。
-- 不配 `TRAINCACHE_GATEWAY_ENDPOINT` 时行为与以前完全一致。
-
----
 
 ## 2. 三大云厂商的 endpoint 与凭证
 
@@ -102,19 +84,15 @@ Agent 的块 GET 可以经集群内的合并回源网关，其余 S3 方法仍�
 | 阿里云 OSS | `oss-<region>.aliyuncs.com` | `oss-cn-hangzhou.aliyuncs.com` |
 | AWS S3 | `s3.<region>.amazonaws.com` | `s3.ap-northeast-1.amazonaws.com` |
 
-region 选离训练集群最近的。跨区读会吃满网络延迟。
+region 选离训练集群最近的，跨区读会吃满网络延迟。
 
-凭证获取：在云控制台建一个专用子用户，不要用主账号密钥。给它生成 AccessKey/SecretKey 二元组，权限只授目标桶（见第 6 节）。三家叫法不同，作用一样。
+凭证：在云控制台建一个专用子用户，生成 AccessKey/SecretKey 二元组，权限只授目标桶（见第 6 节）。腾讯云与阿里云的字段名对应关系见上面 env 表。
 
-桶不会自动创建。先在控制台建好，再把桶名填进 `TRAINCACHE_OBJSTORE_BUCKET`。
-
----
+桶要先在控制台建好，再把桶名填进 `TRAINCACHE_OBJSTORE_BUCKET`。
 
 ## 3. 凭证配置
 
-密钥不能明码写进 Pod spec。两个原因：任何能 `kubectl describe pod` 的人都看得到；YAML 进了 Git 就删不掉。
-
-用 K8s Secret 传：
+密钥经 K8s Secret 传递，不写明文进 Pod spec：字面值对所有能 `kubectl describe pod` 的人可见，YAML 进了 Git 历史就删不掉。
 
 ```bash
 # 命令行直接建，避免密钥落到文件里
@@ -140,7 +118,7 @@ env:
       key: secret-key
 ```
 
-Secret 里的 base64 是编码，不是加密。它能防误读，防不了有心访问。
+Secret 内容是 base64 编码，能防误读，防不了有心访问。
 
 本地开发直接在 shell 里 export，密钥不落盘即可：
 
@@ -155,11 +133,9 @@ export TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE="yes"
 go run agent/cmd/traincache-agentd/main.go
 ```
 
----
-
 ## 4. 最小部署示例
 
-Agent 以 DaemonSet 部署，每个节点一个。下面是最小可用配置。仓库自带的 `controller/deploy/agent/daemonset.yaml` 不写这些字面量：端点、桶、TLS 开关取自 ConfigMap `traincache-config` 的 `objstoreEndpoint` / `objstoreBucket` / `objstoreSecure`，接云端时改那三个配置项即可（[参数配置](PARAMETER-CONFIGURATION.md) §2.1、§2.2）；这段示例说的是自建 DaemonSet 的写法。
+Agent 以 DaemonSet 部署，每个节点一个。下面是自建 DaemonSet 的最小可用配置。仓库自带的 `controller/deploy/agent/daemonset.yaml` 不写这些字面量：端点、桶、TLS 开关取自 ConfigMap `traincache-config` 的 `objstoreEndpoint` / `objstoreBucket` / `objstoreSecure`，接云端时改那三个配置项即可（[参数配置](PARAMETER-CONFIGURATION.md) §2.1、§2.2）。
 
 ```yaml
 apiVersion: apps/v1
@@ -227,27 +203,25 @@ spec:
           type: DirectoryOrCreate
 ```
 
----
-
 ## 5. 验证
 
-**第一步看日志。** endpoint 不通或凭证错，Agent 启动就报错退出。正常输出：
+第一步看日志。endpoint 不通或凭证错，Agent 启动就报错退出。正常输出：
 
-```
+```text
 level=info msg="objectstore connected" endpoint=cos.ap-guangzhou.myqcloud.com bucket=my-train-data secure=true
 level=info msg="conditional write probe result" supported=yes
 ```
 
-**第二步查条件写指标。** COS、OSS、S3 三个都完整支持条件写，期望值为 1：
+第二步查条件写指标。COS、OSS、S3 三家都完整支持条件写，期望值为 1：
 
 ```bash
 curl -s localhost:9411/metrics | grep conditional_write_supported
 # 期望：traincache_objectstore_conditional_write_supported 1
 ```
 
-如果为 0，说明 endpoint 前面有代理层不转发 `If-Match`。此时 CAS 提交走回退路径。
+指标为 0 说明 endpoint 前面有代理层不转发 `If-Match`，CAS 提交走回退路径。
 
-**第三步可选，用 mc 手测。** mc 是纯 S3 客户端，三家通吃：
+第三步可选，用 mc 手测，三家通用：
 
 ```bash
 mc alias set mycos https://cos.ap-guangzhou.myqcloud.com '<SecretId>' '<SecretKey>'
@@ -257,13 +231,9 @@ mc put mycos/my-train-data/test-key.txt "hello world"
 mc --etag="00000000000000000000000000000000" put mycos/my-train-data/test-key.txt "should fail"
 ```
 
----
-
 ## 6. 最小权限
 
-凭证只授权目标桶和必要动作，不给管理员权限。
-
-腾讯云 COS 的策略示例，在 CAM 控制台附加给那个子用户：
+凭证只授目标桶和必要动作。腾讯云 COS 的策略示例，在 CAM 控制台附加给那个子用户：
 
 ```json
 {

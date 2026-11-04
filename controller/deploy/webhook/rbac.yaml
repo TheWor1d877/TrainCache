@@ -1,5 +1,6 @@
-# The mutating webhook only reads WarmupTasks and patches their status when it
-# records GateInjectionDegraded. It never touches Nodes or Secrets.
+# The mutating webhook reads WarmupTasks, ConfigMaps and Jobs, and patches
+# WarmupTask status when it records GateInjectionDegraded. It never reads
+# Secrets: checkpoint credentials are injected as secretKeyRef references.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -22,6 +23,12 @@ rules:
   - apiGroups: ["traincache.io"]
     resources: ["warmuptasks/status"]
     verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch", "update"]

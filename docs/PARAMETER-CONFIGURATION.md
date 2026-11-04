@@ -7,6 +7,22 @@
 | 数据集 | `trainpublish` 参数、DataSet CRD | 发布新快照；DataSet 重新 apply |
 | 训练任务 | WarmupTask CRD | 重新 apply；`dataSetRef` 与 `podCount` 不可改 |
 
+### 落位判据
+
+一个参数写在哪个对象里，按下面五问从上往下问，问到「是」就停：
+
+| 顺序 | 问 | 落位 | 本项目实例 |
+|---|---|---|---|
+| 1 | 是凭证吗 | Secret + `secretKeyRef` | `accessKey`、`secretKey` |
+| 2 | 是每个 Pod 各不相同的身份信息吗 | Downward API `fieldRef` | `NODE_NAME`（`spec.nodeName`） |
+| 3 | 换集群或换实验轮次要改吗 | 该工作负载自己 namespace 里的 ConfigMap + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入在 `traincache-config`；`controllerPollInterval`、`controllerScoreTTL` 同在 `traincache-config`；两个 Scheduler 项在 kube-system 的 `traincache-scheduler-config` |
+| 4 | 值与代码默认不同，但基本不动吗 | 同上，写进 ConfigMap | 同上后四项 |
+| 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go` 与 `controller/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
+
+五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）因此没有任何一条 `value:` 字面量 env，取值全部走引用或走代码默认。引用还有一个方向要守：`configMapKeyRef` 只在本 Pod 的 namespace 里找对象，跨不过去，所以 kube-system 的 scheduler 用不了 `traincache-config`。这两条由 `hack/verify-config-placement.sh` 逐条校验，写错即失败。往 ConfigMap 加一项而同 namespace 的清单里没有对应引用时，进程读不到那一项。
+
+第 5 问那批默认值要临时覆盖，用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把 DaemonSet 改回仓库那份；要长期覆盖，在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef`，两处一起提交。
+
 ## 2. 集群运行时
 
 ### 2.1 ConfigMap traincache-config
@@ -16,19 +32,19 @@
 | 配置项 | 默认 | 读取方 | 说明 |
 |---|---|---|---|
 | `cacheCapacityBytes` | `"0"` | Agent + manager | 本地缓存字节上限，必须 `>=0`。`0` 关闭字节维度，只按磁盘水位（80% 触发、90% 紧急）淘汰；填字节数（1GiB = `"1073741824"`）后，字节占用先到阈值就先淘汰 |
-| `prefetchLookahead` | `"16"` | Agent | 节点侧游标之后持续预取的块数。调大提前量，预热流量和缓存占用随之增加。它不是 WarmupTask 的 `podDetails[].k` |
+| `prefetchLookahead` | `"16"` | Agent | 节点侧游标之后持续预取的块数。调大提前量，预热流量和缓存占用随之增加。启动窗口块数是 WarmupTask 的 `podDetails[].k`，见 §4.1 |
 | `evictPolicy` | `"heat"` | Agent | 缓存淘汰顺序，取 `heat`、`lru`、`lfu`。非法值使 Agent 拒绝启动 |
-| `datasetMetricsWhitelist` | `""` | Agent | 逗号分隔的 DataSet 名，只决定指标 `dataset` 标签是否保留原名；为空时全部归并 `other`。不影响 Agent 读哪个数据集 |
+| `datasetMetricsWhitelist` | `""` | Agent | 逗号分隔的 DataSet 名，只决定指标 `dataset` 标签是否保留原名；为空时全部归并 `other` |
 | `startupWindowBytes` | `"536870912"` | manager | 启动窗口字节数，默认 512MiB，必须 `>0`。只用于自动算 K：`K_window = ceil(startupWindowBytes / chunkSize)` |
 | `maxFillFraction` | `"0.125"` | manager | 全部 Pod 的预热总量占缓存容量的上限，默认八分之一，取值必须在 `(0,0.25]`。按 `podCount` 均摊：`K_cache = floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`；`cacheCapacityBytes=0` 时不参与计算 |
 | `objstoreEndpoint` | `"minio.minio.svc.cluster.local:9000"` | Agent | 源站端点，不带 scheme。清单里是集群内 MinIO 的 Service 地址；接 COS/OSS/S3 时改这一处 |
 | `objstoreBucket` | `"traincache"` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`：`SubmitPreheat` 不带桶名，不一致时每个块读取都失败。bench 按数据集改写它 |
 | `objstoreSecure` | `"false"` | Agent | `true` / `1` / `yes` 时用 HTTPS 连源站，其余取值（含空）走明文 |
 | `gatewayEndpoint` | `""` | Agent | 合并回源网关地址，形如 `traincache-gateway.traincache.svc.cluster.local:9413`，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关，`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站 |
-| `gatewaySecure` | `"false"` | Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真；与 `objstoreSecure` 无关（源站可以 HTTPS、网关明文，反之亦然） |
+| `gatewaySecure` | `"false"` | Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真，取值独立于 `objstoreSecure`，源站与网关的 TLS 各设一次 |
 | `gatewayBucketConcurrency` | `"32"` | 网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动。改它会重启网关 Deployment |
 | `gatewayBlockBufferBytes` | `"10485760"` | 网关 | 每个在途块环形缓冲的字节数（默认 10MiB），正整数；非法值使网关拒绝启动。改它会重启网关 Deployment |
-| `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；1s 把门控放行延迟压进 bench 的测量窗口 |
+| `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；清单写 1s，让门控放行延迟落在 bench 的测量窗口内 |
 | `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
 
 `cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。改仓库文件后 apply，再重启读取方：
@@ -41,11 +57,7 @@ kubectl -n traincache rollout restart deploy/traincache-controller-manager
 kubectl -n traincache rollout status deploy/traincache-controller-manager
 ```
 
-只在集群里 `kubectl edit` 也能生效，但下次 apply 会被仓库文件覆盖。
-
-被引用的配置项都必须存在。缺任一项，引用它的高负载 Pod 停在 `CreateContainerConfigError`，不回退到默认值。Agent 缺 `objstoreEndpoint` 时连桶都摸不到，manager 缺 `cacheCapacityBytes` 时算不出自动 K，所以先 apply ConfigMap，再 apply 工作负载；`kubectl apply -k controller/deploy` 一次带全，顺序问题只出现在单独 apply `daemonset.yaml` 的场合（`agent/e2e/run-k8s.sh` 为此在缺失时才补 apply 一份 ConfigMap，已存在则不动，免得把 bench 改过的桶和容量盖回默认）。
-
-`datasetMetricsWhitelist` 只控制指标标签。清空后所有带 `dataset` 标签的指标都记到 `other`，按数据集拆的看板看不出差异；排查单个数据集时把名字加回来。
+被引用的配置项都必须存在。缺任一项，引用它的 Pod 停在 `CreateContainerConfigError`，不会回退到代码默认值：Agent 缺 `objstoreEndpoint` 时访问不到对象存储，manager 缺 `cacheCapacityBytes` 时算不出自动 K。先 apply ConfigMap，再 apply 工作负载；`kubectl apply -k controller/deploy` 同时带上两者，只有单独 apply `daemonset.yaml` 才需要留意顺序。
 
 #### ConfigMap traincache-scheduler-config
 
@@ -56,7 +68,7 @@ kubectl -n traincache rollout status deploy/traincache-controller-manager
 | `schedulerScoreTTL` | `"10m"` | scheduler | scheduler 判定分数过期的有效期，代码默认 5m，必须与 `traincache-config` 的 `controllerScoreTTL` 同值 |
 | `schedulerLogLevel` | `"debug"` | scheduler | 只有 scheduler 用 `debug`：每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info`。`controller/e2e/run.sh` 断言这行日志，改成 `info` 会让该项失败 |
 
-这两项为什么不并进 `traincache-config`：`configMapKeyRef` 只在 Pod 自己的 namespace 找对象，scheduler 跑在 kube-system，引用 `traincache` 里的 ConfigMap 取不到值，Pod 停在 `CreateContainerConfigError`。清单哈希不变就不执行 `kubectl apply -k`，一直复用的热集群要把这个缺陷留到第一次全量 apply 才露头；`hack/verify-config-placement.sh` 现在逐条按 namespace 校验引用落点。改值后重启 scheduler：
+这两项单独放在 kube-system：`configMapKeyRef` 只在 Pod 自己的 namespace 找对象，scheduler 跑在 kube-system，引用 `traincache` 里的 ConfigMap 取不到值，Pod 停在 `CreateContainerConfigError`。`hack/verify-config-placement.sh` 逐条按 namespace 校验每条引用指向的对象，写错即失败。改值后重启 scheduler：
 
 ```bash
 kubectl apply -f controller/deploy/scheduler/kube-scheduler-config.yaml
@@ -77,7 +89,7 @@ Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK �
 | Agent | `TRAINCACHE_OBJSTORE_SECURE` | ConfigMap `objstoreSecure` | `false` | `true` 时用 HTTPS |
 | Agent | `TRAINCACHE_GATEWAY_ENDPOINT` | ConfigMap `gatewayEndpoint` | 空 | 合并回源网关地址，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关 |
 | Agent | `TRAINCACHE_GATEWAY_SECURE` | ConfigMap `gatewaySecure` | `false` | `true` 时用 HTTPS 连网关；与 `TRAINCACHE_OBJSTORE_SECURE` 无关 |
-| Agent | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | 清单未设，取代码默认 | `false` | 启动时探测后端条件写；临时开一次用 `kubectl set env`，长期开按 §2.1 的加项做法 |
+| Agent | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | 清单未设，取代码默认 | `false` | 启动时探测后端条件写；临时开一次用 `kubectl set env`，长期开按「落位判据」第 5 问的加项做法 |
 | DataSet | `spec.endpoint` / `spec.bucket` / `spec.secretRef` | DataSet YAML | 无 | 控制面读这三个字段；Secret 字段 `accessKey`、`secretKey`，与 DataSet 同 namespace |
 
 默认列是程序内置值。`objstoreEndpoint` 与 `objstoreBucket` 在 ConfigMap 里按集群覆盖成实际端点与桶名，以 ConfigMap 为准。
@@ -86,7 +98,7 @@ Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK �
 
 ### 2.3 资源
 
-五个组件各改自己的清单，按集群规模调整：
+各组件各改自己的清单，按集群规模调整：
 
 | 组件 | 改哪里 | requests | limits |
 |---|---|---|---|
@@ -100,7 +112,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 
 ### 2.4 Agent 高级参数
 
-这些参数在清单里不出现，进程取 `agent/svc/config.go` 的默认值，下表「默认」列就是运行值。改法两条：临时一次 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把 DaemonSet 盖回仓库那份；长期改在 ConfigMap 加一项、在 DaemonSet 加一条 `configMapKeyRef`，两处一起提交（§2.1 末尾）。
+这些参数在清单里不出现，进程取 `agent/svc/config.go` 的默认值，下表「默认」列就是运行值。覆盖办法见「落位判据」第 5 问。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -132,7 +144,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 
 ### 2.5 控制面参数
 
-manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap——manager 与 webhook 在 `traincache-config`，scheduler 在自己 namespace 的 `traincache-scheduler-config`。webhook 六条全部等于默认，env 块已删空。
+manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。manager 与 webhook 的项在 `traincache-config`，scheduler 的项在自己 namespace 的 `traincache-scheduler-config`。webhook 的六条取值全部等于默认，清单里没有 env 块。
 
 | 变量 | 生效值 | 写在哪里 | 说明 |
 |---|---|---|---|
@@ -150,9 +162,7 @@ manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等�
 | `CONTROLLER_WEBHOOK_ADDR` | `:9443` | 代码默认 | webhook server 监听，Service 443 转发到这里 |
 | `CONTROLLER_NAMESPACE` | 空 | 代码默认 | 只校验格式并记进启动日志，不改变任何监听范围：manager 始终 watch 全部 namespace，webhook 的准入范围由 `objectSelector` 的 `traincache.io/warmup: enabled` 决定；留空即可 |
 
-manager、webhook、scheduler 三个 Deployment 分别在 `controller/deploy/manager/`、`webhook/`、`scheduler/` 下的 `deployment.yaml`。
-
-`CONTROLLER_GATE_NAME` 与 `CONTROLLER_SCORE_ANNOTATION` 是 webhook、scheduler、训练 Pod 共用的约定，不要改。
+`CONTROLLER_GATE_NAME` 与 `CONTROLLER_SCORE_ANNOTATION` 是 webhook、scheduler、训练 Pod 三端共用的约定键，改动要三端同步。
 
 ## 3. 数据集参数
 
@@ -166,8 +176,8 @@ manager、webhook、scheduler 三个 Deployment 分别在 `controller/deploy/man
 
 - 第一次往空桶发布时，用 `trainpublish --chunk-size` 写入；默认 64 MiB。
 - 之后每次发布先读这个文件。不传 `--chunk-size` 就沿用；传了不同的值直接失败。
-- 改块大小必须清空桶重灌，或换一个新桶。原地改会让旧块名和索引偏移对不上。
-- 老桶里已有数据但没有这个文件时，第一次发布显式传历史块大小。
+- 改块大小要清空桶重新发布，或换一个新桶。原地改会让旧块名和索引偏移对不上。
+- 桶里已有数据但没有这个文件时，第一次发布显式传历史块大小。
 
 ### 3.2 DataSet 字段
 
@@ -220,7 +230,7 @@ WarmupTask 在提交训练任务时创建，字段都在 `spec` 下，只改 War
 | `podDetails[].index` | WarmupTask YAML | 无 | 0..podCount-1，必须连续 |
 | `podDetails[].resources` | WarmupTask YAML | 无 | 用于节点容量筛选 |
 | `podDetails[].initialConsumeFiles` | WarmupTask YAML | 空 | tar 分片名列表，如 `shard-000.tar`。全部 Pod 合起来覆盖全部分片、每个分片只出现一次；为空、未知分片、重复或没覆盖全部分片时整组回退默认均分，`totalChunks < podCount` 例外（见 §4.2） |
-| `podDetails[].k` | WarmupTask YAML | 空 | 启动窗口块数，CRD 下限 0；0 或省略表示自动，按 §4.1 计算；显式有效范围 1..该 Pod 的 `W_i`，超出时置 `Condition InvalidSpec=False` 并拒绝。门控阈值按这个窗口算；它不是节点侧的 `prefetchLookahead`（默认 16） |
+| `podDetails[].k` | WarmupTask YAML | 空 | 启动窗口块数，CRD 下限 0；0 或省略表示自动，按 §4.1 计算；显式有效范围 1..该 Pod 的 `W_i`，超出时置 `Condition InvalidSpec=False` 并拒绝。门控阈值按这个窗口算；节点侧的持续预取块数是 `prefetchLookahead`（默认 16，§2.1） |
 | `gate.threshold` | WarmupTask YAML | 无 | 就绪比例阈值，0..1 |
 | `gate.gapMin` / `gate.slopeMin` | WarmupTask YAML | 无 | 边际收益阈值 |
 | `gate.tMax` | WarmupTask YAML | 无 | 门控绝对超时 |
@@ -230,7 +240,7 @@ WarmupTask 在提交训练任务时创建，字段都在 `spec` 下，只改 War
 | `candidate.ignoreNoSchedule` | WarmupTask YAML | `false` | 忽略 NoSchedule 污点 |
 | `candidate.minFreeDiskBytes` | WarmupTask YAML | `0` | 候选节点最小剩余磁盘 |
 
-`preheatFanout` 是上限，不是必须凑满：预热不占调度容量，一个候选节点只服务一个 Pod 的预热，所以要让每个 Pod 都有落点，候选节点数得 ≥ `podCount × preheatFanout`。不足时排在前面的 Pod 把节点认领干净，其余 Pod 记 `MinUnmet`、一个块都没被预热，它们的速率恒为 0 会把门控推向 `marginal_gain_insufficient` 提前放行。介意成本或候选节点少，就显式写 `preheatFanout: 1`。
+`preheatFanout` 是每个 Pod 的预热节点数上限。预热不计入调度容量，一个候选节点只服务一个 Pod 的预热，所以要给 `podCount` 个 Pod 各分配 `preheatFanout` 个节点，候选节点数需 ≥ `podCount × preheatFanout`。候选不足时，排在前面的 Pod 取走候选节点，其余 Pod 记 `MinUnmet`，预热块数为 0。这些 Pod 的读速率恒为 0，门控指标 `marginal_gain_insufficient` 会提前放行。候选节点少或者不接受翻倍预热流量时，显式写 `preheatFanout: 1`。
 
 ### 4.1 启动窗口 K 的计算
 
@@ -247,19 +257,18 @@ WarmupTask 在提交训练任务时创建，字段都在 `spec` 下，只改 War
 
 例：8 MiB 块、1 GiB 缓存、1 个 Pod，`startupWindowBytes` 用默认 512MiB、`maxFillFraction` 用默认 0.125 → `K_window=64`、`K_cache=16`，`W_0` 足够时 `K_0=16`。
 
-预热请求的块数是 `min(max(K_i, score.cutoff), W_i)`，不是 `K_i`。`score.cutoff` 大于 `K_i` 时启动前按 `cutoff` 展开，但不超过 `W_i`；流量与耗时随 `cutoff` 增长。启动阶段只想预热 `K_i` 块，就把 `score.cutoff` 设成 `K_i` 或更小。
+预热请求的块数是 `min(max(K_i, score.cutoff), W_i)`。`score.cutoff` 大于 `K_i` 时启动前按 `cutoff` 展开，上限是 `W_i`；流量与耗时随 `cutoff` 增长。启动阶段只想预热 `K_i` 块，就把 `score.cutoff` 设成 `K_i` 或更小。
 
-显式填 `k` 时按填写值执行，不做钳制或截断。`k` 的 CRD 下限是 0，`0` 或省略表示自动；显式有效范围是 1..`W_i`，`k > W_i` 时 Controller 置 `Condition InvalidSpec=False` 并拒绝该任务。全部 Pod 的实际请求块数（`min(max(K_i, score.cutoff), W_i)`）合计超过 `cacheCapacityBytes × maxFillFraction` 时，Controller 发 Warning 事件 `KExceedsFillLimit`，任务照常执行。
+显式填 `k` 时按填写值执行，不做钳制或截断。全部 Pod 的实际请求块数（`min(max(K_i, score.cutoff), W_i)`）合计超过 `cacheCapacityBytes × maxFillFraction` 时，Controller 发 Warning 事件 `KExceedsFillLimit`，任务照常执行。
 
 ### 4.2 消费文件清单
 
-`podDetails[].initialConsumeFiles` 填 tar 分片名，不填块号。名字照抄 DataSet 的 `spec.shards[].name`，或用 `traincache ls --dataset <name>` 查看文件。
+`podDetails[].initialConsumeFiles` 填 tar 分片名，块序按分片列出顺序展开。名字照抄 DataSet 的 `spec.shards[].name`，或用 `traincache ls --dataset <name>` 查看文件。
 
-- 每个 Pod 只写自己的分片，块序按分片列出顺序展开。
+- 每个 Pod 写自己那批分片，一次列全。
 - 全部 Pod 合起来必须覆盖 DataSet 的全部分片，每个分片只出现一次。
 - 任一 Pod 缺失、写了未知分片、分片重复，或合起来没覆盖全部分片时，整组回退默认均分，`status.consumeOrderSource=Default`。
 - `totalChunks < podCount` 时无法均分，Controller 置 `Condition InvalidSpec=False` 并拒绝，不回退。
-- 没有"只写前几个再追加"的写法：本 Pod 的分片必须一次列全。
 
 最小任务示例：
 

@@ -1,11 +1,11 @@
 # CLI 接口
 ## 1. 定位与连接模型
 
-- 四条子命令：`prefetch`、`node status`、`status`、`ls`，没有本地操作模式。
-- `--endpoint` 决定连哪台 Agent，默认 `127.0.0.1:9410`，明文 gRPC 无 TLS，惰性建连：首次 RPC 才拨号；每条 RPC 的 context 超时 10 秒。
-- `--node` 只是请求里的校验字段，告诉服务端"预期操作哪台机器"，不做地址解析；填错节点名由 Agent 拒绝。
+- 四条子命令：`prefetch`、`node status`、`status`、`ls`，全部通过 gRPC 访问 Agent。
+- `--endpoint` 决定连哪台 Agent，默认 `127.0.0.1:9410`，明文 gRPC 无 TLS。首次 RPC 才拨号，每条 RPC 的 context 超时 10 秒。
+- `--node` 是请求里的校验字段，告诉服务端预期操作哪台机器，CLI 不做地址解析；填错节点名由 Agent 拒绝。
 - `--endpoint` 由各子命令自己注册，必须写在子命令之后。`traincache --endpoint X prefetch ...` 被当成未知子命令，退出码 2。
-- 进度靠反复调用 `status` 轮询，不用长连接。
+- 任务进度用反复调用 `status` 的方式获取。
 
 ## 2. traincache prefetch
 
@@ -23,7 +23,7 @@
 
 输出固定一行 `accepted=<bool> task_id=<id> <message>`，字段取自响应。`accepted=false` 仍退出 0，拒绝原因看 `message`；`message` 为空时行尾留一个空格。
 
-`--chunks` 与 `--files` 二选一。`--chunks` 直接给块，格式 `path:chunk`；`--files` 按 tar 分片名选范围，先用 `traincache ls` 查分片名，再由 CLI 调 `ListSnapshot` 展开成块。`--path` 始终作为 `prefixes` 的唯一元素提交。
+`--files` 的分片名用 §5 的 `traincache ls` 查。
 
 ## 3. traincache node status
 
@@ -51,7 +51,7 @@
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `--endpoint` | string | 否 | `127.0.0.1:9410` | Agent gRPC 地址 |
-| `--node` | string | 是 | 空 | 只做非空校验，**不进入请求**；请求里只有 `task_id` |
+| `--node` | string | 是 | 空 | 只做非空校验；请求里只带 `task_id` |
 | `--task-id` | string | 是 | 空 | 原样填入 `task_id` |
 
 两列表格，行序固定：
@@ -59,7 +59,7 @@
 | 键 | 值 |
 |---|---|
 | `TASK_ID` | 任务 id |
-| `NODE` | 响应里的 `node`，不是命令行传的 `--node` |
+| `NODE` | 响应里的 `node` 字段值 |
 | `PATHS` | 响应 `paths` 用逗号拼接，无空格 |
 | `STATE` | `QUEUED` / `RUNNING` / `DONE` / `ERROR` |
 | `TOTAL_BLOCKS` / `COMPLETED_BLOCKS` / `FAILED_BLOCKS` | 十进制整数 |
@@ -67,7 +67,7 @@
 
 ## 5. traincache ls
 
-只读查询：列出某个 dataset 快照的条目。默认按文件聚合，用来看有哪些 tar 分片、各多少块多少字节；`--chunks` 展开到块级明细。不改缓存、不触发预热、不推进 CURRENT。
+列出某个 dataset 快照的条目，只发一次 `ListSnapshot` 请求，返回值即全部输出。默认按文件聚合，用来看有哪些 tar 分片、各多少块多少字节；`--chunks` 展开到块级明细。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
@@ -164,7 +164,7 @@ traincache node status --node worker-01 --endpoint 127.0.0.1:1
 
 ## 9. 版本与兼容
 
-CLI 与 `traincache-agentd` 同源码、同 git tag 构建，随 Agent 镜像分发，版本以镜像 tag 为准；CLI 没有 `--version`。flag 名、输出字段、退出码属于实现细节，不承诺跨大版本兼容；跨版本混用时以 Agent 镜像内的同一份二进制为准。
+CLI 与 `traincache-agentd` 同源码、同 git tag 构建，随 Agent 镜像分发，版本号以镜像 tag 为准，`traincache` 自身不提供版本查询。跨版本混用时以 Agent 镜像内的同一份二进制为准。flag 名、输出字段与退出码随大版本可能变动，版本历史记在 `CHANGELOG.md`。
 
 ## 10. trainpublish
 
@@ -183,7 +183,7 @@ trainpublish --dataset NAME --check-dataset PATH
 | `--secret-key` | string | 否 | `TRAINCACHE_OBJSTORE_SECRET_KEY` | 静态 SK |
 | `--bucket` | string | 否 | `TRAINCACHE_OBJSTORE_BUCKET` 或 `traincache` | 单桶 |
 | `--secure` | bool | 否 | `TRAINCACHE_OBJSTORE_SECURE` | 用 TLS 连对象存储 |
-| `--chunk-size` | int64 | 否 | `67108864`（64 MiB） | 切块字节数，必须 >0；**仅空桶首次发布有效**，桶里已有格式声明时忽略（显式传不同值直接报错），须与 DataSet 的 `spec.chunkSize` 一致 |
+| `--chunk-size` | int64 | 否 | `67108864`（64 MiB） | 切块字节数，必须 >0；只在空桶首次发布生效，桶里已有格式声明时沿用声明值，显式传不同值直接报错。须与 DataSet 的 `spec.chunkSize` 一致 |
 | `--concurrency` | int | 否 | `4` | 并发上传数，必须 >0 |
 | `--work-dir` | string | 否 | 系统临时目录下的 `trainpublish-*` | 切块临时目录 |
 | `--keep-work-dir` | bool | 否 | `false` | 保留临时目录，排障用 |
@@ -192,7 +192,11 @@ trainpublish --dataset NAME --check-dataset PATH
 
 flag 显式值优先于环境变量；环境变量名与 Agent 的五个 `TRAINCACHE_OBJSTORE_*` 相同，口径一致。
 
-**桶格式声明**：切块粒度按桶固定，同一桶内所有 dataset 共用，块名与索引偏移都依赖它。首次发布在创建 store 之后、上传之前，用条件写（`If-None-Match: *`）写入对象键 `_traincache/format.json`，内容为 `{"version":1,"chunkSize":<int64>}`；并发首次发布只有一个进程能写成功，其余回读已有声明。之后的发布只读这份声明：`--chunk-size` 不再生效，未显式传就沿用声明值，显式传入且与声明不同则退出 1。**改块大小必须清空桶重新灌数据，或换一个桶重新发布**——原地改会让旧块名/偏移与新索引对不上。已有数据但桶里还没有声明的旧桶，第一次发布时显式传历史块大小，否则会按默认 64 MiB 写入声明。后端不支持条件写时直接报错，不做覆盖式初始化。
+桶格式声明。块大小按桶固定，同一桶内所有 dataset 共用，块名与索引偏移都由它推出。
+
+首次发布在创建 store 之后、上传之前，用条件写（`If-None-Match: *`）写入对象键 `_traincache/format.json`，内容为 `{"version":1,"chunkSize":<int64>}`。并发首次发布只有一个进程写成功，其余进程回读已有声明。后端不支持条件写时直接报错退出。
+
+之后的发布只读这份声明：`--chunk-size` 沿用声明值，显式传入与声明不同的值则退出 1。桶里已有数据但还没有声明时，第一次发布要显式传历史块大小，否则会按默认 64 MiB 写入声明。块大小要改动时，清空桶重新发布，或者换一个新桶：原地改值会让旧块名和偏移与新索引对不上。
 
 每个 tar 的 `Path` 取文件名（`filepath.Base`），重复文件名直接报 `ErrDuplicatePath`。全部块上传成功后提交索引并推进 CURRENT。发布成功时 stdout 只有一行：
 
