@@ -1,0 +1,7 @@
+shuffle,epochs,n,mean_s,ci_low,ci_high,censored
+fixed,3,2,2.357,2.338,2.375,0
+fixed,6,5,2.328,2.295,2.362,0
+per-epoch,3,2,2.286,2.264,2.308,0
+per-epoch,6,5,2.264,2.247,2.287,0
+curriculum,3,2,2.244,2.233,2.255,0
+curriculum,6,5,2.324,2.302,2.346,0

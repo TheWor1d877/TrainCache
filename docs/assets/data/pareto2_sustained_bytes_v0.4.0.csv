@@ -1,0 +1,4 @@
+lookahead,evict,n,prefetch_gb,gb_ci_low,gb_ci_high,improve_pct,pct_ci_low,pct_ci_high,makespan_s,baseline_s
+8,heat,2,4.003,3.603,4.403,0.00,-8.93,8.20,2178.7,2178.7
+16,heat,2,6.244,5.502,6.985,-7.40,-20.01,4.17,2340.0,2178.7
+32,heat,2,8.468,8.158,8.778,-17.29,-26.59,-8.75,2555.4,2178.7
