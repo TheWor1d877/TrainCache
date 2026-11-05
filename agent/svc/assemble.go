@@ -128,7 +128,7 @@ func Assemble(cfg Config) (*Agent, error) {
 }
 
 // assembleWith 是 Assemble 的可测内核(objectstore 注入:生产 S3 兼容后端,测试 objectstore.Mock)。
-// 构造序(主对话裁决):cas → fetch → metrics(带 node 标签)→ PrefetchManager(+回调注入)
+// 构造序(设计裁决):cas → fetch → metrics(带 node 标签)→ PrefetchManager(+回调注入)
 // → PreheatTasks → Rescan(catalogFor 复用 bundle)→ HookSock → Evictor → OrderDiscovery
 // (+首 ring 回调);collector 由该回调在首个 ring 发现时构造并启动。
 func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {

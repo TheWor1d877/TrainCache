@@ -45,7 +45,7 @@ type heatmapEntry struct {
 	AccessCount int64   `json:"access_count"`
 }
 
-// decay 执行一轮周期衰减(D24):超过 HeatDecayAge 未 touch 的条目 h 置 0(主对话冻结
+// decay 执行一轮周期衰减(D24):超过 HeatDecayAge 未 touch 的条目 h 置 0(设计冻结
 // "直接衰减"口径),其余条目 h × HeatDecayFactor。
 func (c *Collector) decay() {
 	now := c.clock()

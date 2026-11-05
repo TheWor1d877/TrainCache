@@ -13,7 +13,7 @@
 // 否则按未命中走下载路径——下载会覆盖坏块)。
 //
 // 类型 ChunkRef/ConsumeOrder 是 ordersource(M2 冻结)的类型别名,prefetch 只取类型、
-// 不依赖读端;下载与簿记契约见主对话裁决(D25 对象键;不 Acquire/不 Pin——引用是写快照
+// 不依赖读端;下载与簿记契约见 6.2 D25(对象键;不 Acquire/不 Pin——引用是写快照
 // 方的簿记,Agent 只拉副本)。
 package prefetch
 
@@ -78,7 +78,7 @@ type Config struct {
 	// P0 块两回调并存,先 OnP0Done 后 OnDone);nil 表示无回调。collector 的 t_touch
 	// "预取写入"来源。
 	OnDone func(ref ChunkRef, err error)
-	// OnCorrupt 是本地坏块回源回调(主对话追加冻结,并入 D28 语义):本地命中判定遇
+	// OnCorrupt 是本地坏块回源回调(追加冻结,并入 D28 语义):本地命中判定遇
 	// cas.Open 返回 ErrCorrupt 时调用(在工作协程内,可阻塞;内部应为 Quarantine+RepairOne
 	// 组合,接线阶段注入 rescan 包装)。返回 nil 且随后按索引指纹重新 Open 成功 → 视为就绪
 	// (跳过下载);nil 回调 / 返回错误 / 重开失败 → 按未命中走下载路径(下载覆盖坏块)。

@@ -21,7 +21,7 @@
 
 五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）因此没有任何一条 `value:` 字面量 env，取值全部走引用或走代码默认。引用还有一个方向要守：`configMapKeyRef` 只在本 Pod 的 namespace 里找对象，跨不过去，所以 kube-system 的 scheduler 用不了 `traincache-config`。这两条由 `hack/verify-config-placement.sh` 逐条校验，写错即失败。往 ConfigMap 加一项而同 namespace 的清单里没有对应引用时，进程读不到那一项。
 
-第 5 问那批默认值要临时覆盖，用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把 DaemonSet 改回仓库那份；要长期覆盖，在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef`，两处一起提交。
+第 5 问那批默认值要临时覆盖，用 `kubectl -n traincache set env ds/traincache-agentd TRAINCACHE_VERIFY=xxh3+sha256`，下次 `kubectl apply -k controller/deploy` 会把 DaemonSet 改回仓库那份；要长期覆盖，在 `traincache-config` 加一项、在 DaemonSet 加一条 `configMapKeyRef`，两处都要改。
 
 ## 2. 集群运行时
 

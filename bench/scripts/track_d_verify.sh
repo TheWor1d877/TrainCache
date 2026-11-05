@@ -14,13 +14,13 @@
 #      跑 bench_track_d.py --epochs 3,轮输出
 #      TRACK_D_RESULTS_DIR/verify_<轮>/(per_step_*.jsonl + epochs_meta.json)。
 #      两轮结束后恢复内存限制 128GiB(EXIT trap 兜底)。
-#   ③ 判据(epoch 级聚合;主对话 2026-10-13 裁决):两轮 per-epoch median_stall
+#   ③ 判据(epoch 级聚合;设计裁决):两轮 per-epoch median_stall
 #      逐 epoch 相对差 |a-b|/max(a,b) ≤ COLD_VERIFY_TOLERANCE(10%)且两轮全轮
 #      median_stall 相对差 ≤ 10% 判"对上";判据函数在
 #      bench_track_d.compare_epoch_medians(= --selftest)。
 #   ④ 报告项(不参与 verdict):两轮 per-epoch 窗口 stall 均值曲线(窗口=20 步,
 #      epoch0 前 warmup 步不计,口径同第一步)逐点相对差继续计算并写入 json
-#      (bench_track_d.compare_window_curves)—— 主对话裁决:窗口均值被 wait 分布
+#      (bench_track_d.compare_window_curves)—— 设计裁决:窗口均值被 wait 分布
 #      重尾毛刺主导,同一冷启内相邻 epoch 逐点最大相对差已达 37%~56%,低于指标
 #      噪声底、无判别力(实测两轮聚合口径仅差 0.6%,与第一步判据③降级同模式)。
 #   ⑤ 输出 TRACK_D_RESULTS_DIR/verify_<ts>.json(epoch 级聚合对账 + 窗口曲线
@@ -358,7 +358,7 @@ res = bt.compare_epoch_medians([s["median_stall"] for s in st1],
                                [s["median_stall"] for s in st2],
                                rs1["median_stall"], rs2["median_stall"], tol)
 
-# ---- 报告项:窗口曲线逐点对账(主对话裁决降级,不参与 verdict)----
+# ---- 报告项:窗口曲线逐点对账(设计裁决降级,不参与 verdict)----
 c1 = bt.window_curves(r1, epochs, steps, window)
 c2 = bt.window_curves(r2, epochs, steps, window)
 wres = bt.compare_window_curves(c1, c2, tol)
@@ -436,7 +436,7 @@ out = {
         "max_rel_diff": wres["max_rel_diff"],
         "n_points": wres["n_points"], "n_missing": wres["n_missing"],
         "downgrade_reason": (
-            "主对话裁决(2026-10-13):窗口均值被 wait 分布重尾毛刺主导"
+            "设计裁决:窗口均值被 wait 分布重尾毛刺主导"
             "(同一冷启内相邻 epoch 逐点最大相对差已达 37%~56%,高于指标噪声底),"
             "原始逐点判据无判别力,降级为报告项;verdict 改由 epoch 级聚合对账决定。"),
         "note": "本报告项数值仍计算并留档,不参与 verdict。",

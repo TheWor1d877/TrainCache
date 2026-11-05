@@ -6,7 +6,7 @@
 #     stall 是否回升正是本探针的测量对象,中间清缓存会污染测量;
 #   * 仅"每组开跑前"做一次组前冷态(清 Agent 缓存目录 + drop_caches);
 #   * 组间只 sleep 5;
-#   * 开跑计时测量前做 kind 节点负载检查(与 kind 上其他子代理互斥)。
+#   * 开跑计时测量前做 kind 节点负载检查(与 kind 上其他任务互斥)。
 #
 # sudo 说明:本机 sudo 无法非交互取证(无 NOPASSWD、无 tty)。脚本优先尝试
 # `sudo -n`,不可用时回退为特权/带 NET_ADMIN 的 docker 容器(在源站 netns 内

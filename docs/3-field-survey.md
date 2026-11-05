@@ -15,13 +15,13 @@
 
 | 组件           | 版本/形态                                                                                                                 | 证据                                                                                            |
 |----------------|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| kind 集群      | 3 节点(control-plane + worker + worker2),k8s **v1.37.0**(containerd 2.3.4)                                                | `evidence/kubectl-get-nodes.txt`(集群在线可复核)、`evidence/kind-repair-log.txt`                |
+| kind 集群      | 3 节点(control-plane + worker + worker2),k8s **v1.37.0**(containerd 2.3.4)                                                | `evidence/kubectl-get-nodes.txt`、`evidence/kind-repair-log.txt`                                |
 | Fluid          | helm chart fluid-1.1.0-alpha.9,APP VERSION 1.1.0-36f0467                                                                  | `evidence/fluid-version.txt`、`evidence/fluid-install-helm.txt`                                 |
 | Fluid 组件     | dataset-controller / juicefsruntime-controller / fluid-webhook / fluidapp-controller / fluid-csi(DaemonSet×3)全部 Running | `evidence/fluid-pods.txt`、`evidence/fluid-pods-after-reinstall.txt`                            |
 | JuiceFS 客户端 | ce-v1.3.0(挂载镜像 juicedata/mount:ce-v1.3.0)                                                                             | `evidence/standalone-baseline.txt` 首行、`evidence/juicefsruntime-log-3epoch.txt`(mount 版本行) |
 | JuiceFSRuntime | jfsdemo:tieredstore path=/dev/shm、MEM、quota **1Gi**(自 3Gi 下调,见 §1.1)                                                | `evidence/jfsruntime-describe.yaml`                                                             |
 | 元数据服务     | redis:7-alpine(单实例,AOF 未开)                                                                                           | 集群内 `default/redis-*`                                                                        |
-| 对象存储       | MinIO(latest),bucket `train-data`,16×126MB tar 裸对象(1.97GiB)                                                            | 阶段二上传,2GB;重传证据见 `evidence/kind-repair-log.txt`                                        |
+| 对象存储       | MinIO(latest),bucket `train-data`,16×126MB tar 裸对象(1.97GiB)                                                            | `evidence/kind-repair-log.txt`                                                                  |
 | 训练 Pod       | busybox `train-demo`,三 epoch 换序读(读序字面量内嵌,见 §2.6)                                                              | `evidence/train-pod-3epoch.log`                                                                 |
 
 装置和探针阶段共用同一批 16×126MB tar 数据(种子固定可复现)。
@@ -77,7 +77,7 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 | 时间(UTC)           | warmup 结果             | 证据                                                  |
 |---------------------|-------------------------|-------------------------------------------------------|
 | 02:00:12(10:00 CST) | **0 files (0 B)**       | `evidence/loader-jfs-load.log`、`dataload-timing.txt` |
-| 08:26:55(16:26 CST) | **548 files (3.9 GiB)** | 执行时终端日志(用户记录)                              |
+| 08:26:55(16:26 CST) | **548 files (3.9 GiB)** | 执行时终端日志                                    |
 
 10:00 那次 warmup 是 0 files,但同一脚本里 `ls` 挂载点能看到 shard-00000/00001.tar。两次差异与 worker 生命周期有关(jfsdemo-worker-0 在 12:38 重启过,16:26 的 warmup 跑在重启后的 worker 上)。结论:warmup 行为依赖 worker 挂载状态,失败时 DataLoad 仍会以 Complete 结束(10:00 那次 DataLoad PHASE=Complete、DURATION 6s,`evidence/dataload-status.txt`)。
 
@@ -143,8 +143,6 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 2. /dev/shm 只有 64MB:JuiceFS 客户端按 freeratio 把 1GiB 声明配额压到 60,397,976B(≈57.6MB),1 节"欠配制造缓存 miss"的设计意图没有生效,有效容量连单个 126MiB 分片都装不下;证据:`evidence/fluid-runtime-log-3epoch.txt`(Adjusted cache capacity 行)。
 3. 证据强度分级:日志级证据(窗口内零自动预热动作、零 warmup/prefetch 关键词;fuse 客户端 miss 全部由 E0 读取同步产生,而且此后不增长)属于强;"UFS 流量在切换点被动"这一条因页缓存混杂被削弱(手动预热对照还暴露了流量观测口径的盲区);Dataset `cached` 首次非空晚于读取完成只算弱佐证(Fluid 统计刷新滞后,基线时这个字段甚至是空串)。
 
-实验后装置状态:train-demo、手动 DataLoad(及其 loader Job)、import pod 已清理;PVC/Dataset/Runtime 完好。
-
 ## 3. 独立 JuiceFS CE 对照组与 warmup 基线
 
 不经过 Fluid,用挂载镜像直接裸挂载同一个文件系统(`../survey/manifests/jfs-standalone.yaml`),装置与结果(`evidence/standalone-baseline.txt`):
@@ -167,7 +165,7 @@ DataLoad 的 loader Job 在 worker Pod 里执行 `juicefs warmup <worker挂载�
 | 能力                        | 开源 Fluid(实测 1.1.0-alpha.9,镜像 36f0467)                                                                                   | ACK ack-fluid(阿里云文档,版本标注)                                                          | JuiceFS CE(实测 1.3.0)                                        | JuiceFS EE(文档,5.2/5.3+)                                            |
 |-----------------------------|-------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|---------------------------------------------------------------|----------------------------------------------------------------------|
 | 预热与调度联动              | **无**:webhook 注入 diff 为零(实测);Pod 创建即调度(实测同秒);DataLoad 独立手动                                                | 缓存亲和感知调度(调度器与缓存引擎交互);多级亲和调度 v1.0.5+;FUSE 客户端亲和调度语义 v1.0.7+ | 无(无调度概念)                                                | 无(无调度概念)                                                       |
-| 预热机制                    | DataLoad CRD 含 `schedule`、`target[].replicas` 字段(CRD 实证,`/tmp/fluid/crds/data.fluid.io_dataloads.yaml`);warmup 实测可用 | 定时 DataLoad(Once/Cron,v1.0.2+);target 可配副本数;预热资源限额 v1.0.6+;定时回收 v1.0.5+    | `juicefs warmup` 命令(实测)                                   | 同命令,配合缓存组语义                                                |
+| 预热机制                    | DataLoad CRD 含 `schedule`、`target[].replicas` 字段(CRD 实证,fluid chart 的 `data.fluid.io_dataloads.yaml`);warmup 实测可用 | 定时 DataLoad(Once/Cron,v1.0.2+);target 可配副本数;预热资源限额 v1.0.6+;定时回收 v1.0.5+    | `juicefs warmup` 命令(实测)                                   | 同命令,配合缓存组语义                                                |
 | 块级进度/就绪度门控         | **无**(无 SchedulingGate、无块级就绪概念)                                                                                     | 未见(亲和调度仍为"有无缓存"级)                                                              | 无                                                            | 无                                                                   |
 | 阶段感知/按消费顺序持续预取 | **无**(三 epoch 换序读实测:三观测点×三切换点全被动、零自动预热动作,§2.6)                                                      | 未见(维持原判断;依据阿里云官方文档,未见过"阶段/消费顺序"语义的预取特性)                     | **无**(实测:`juicefs warmup` 仅手动触发,观测窗口内零自动预取) | 未见(维持原判断;依据 JuiceFS 企业版文档,缓存组/IORPC 为数据放置语义) |
 | 缓存亲和注入                | status.cacheAffinity(preferred weight 100,required 空,**未注入 Pod**,实测)                                                    | Serverless 场景 FUSE Sidecar 注入(文档);标准集群走 CSI                                      | —                                                             | —                                                                    |

@@ -157,7 +157,7 @@ make e2e              # kind 集群中的六项断言
 | [2 TrainCache 三层架构](docs/2-three-layer-architecture.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3-field-survey.md) | Fluid/JuiceFS 的机制现勘与缺口证据 |
 | [4.0 bench 文档导览](docs/4.0-bench-guide.md) | 4.1–4.6 的分工与常驻命令 |
-| [4.1 bench 装置与禁令](docs/4.1-bench-setup-and-rules.md) | 装置构成、参数、数据落点与禁令 |
+| [4.1 bench 装置与规则](docs/4.1-bench-setup-and-rules.md) | 装置构成、参数与数据落点 |
 | [4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md) | 对照组的镜像、起组、预热、运行与拆组 |
 | [4.3 TrainCache 启动与实验](docs/4.3-startup-and-experiments.md) | 镜像构建、控制面拉起、实验族启动 |
 | [4.4 实验协议](docs/4.4-experiment-protocol.md) | 预注册假设、口径、条件矩阵与判据 |

@@ -157,7 +157,7 @@ Documents under `docs/` are written in Chinese.
 | [2 Three-layer architecture](docs/2-three-layer-architecture.md) | Control plane, node plane, data sources and data-plane conventions |
 | [3 Field survey](docs/3-field-survey.md) | How Fluid and JuiceFS work, and the gaps found |
 | [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.6 and standing commands |
-| [4.1 Bench setup and rules](docs/4.1-bench-setup-and-rules.md) | Rig, parameters, data locations and prohibitions |
+| [4.1 Bench setup and rules](docs/4.1-bench-setup-and-rules.md) | Rig, parameters and data locations |
 | [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md) | Images, startup, warmup, runs and teardown for the control groups |
 | [4.3 Startup and experiments](docs/4.3-startup-and-experiments.md) | Image builds, control plane startup, experiment families |
 | [4.4 Experiment protocol](docs/4.4-experiment-protocol.md) | Pre-registered hypotheses, metric definitions, condition matrix and criteria |

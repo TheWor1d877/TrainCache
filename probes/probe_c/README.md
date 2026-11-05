@@ -28,7 +28,7 @@ python3.12 probes/probe_c/judge_c.py  # 判定,输出 verdict.json(exit 0 绿 / 
 ## 测量纪律(勿违反)
 
 - epoch 之间不清缓存、不重启容器、不 drop_caches:epoch 切换后 stall 是否回升正是测量对象。只在每组开跑前做一次组前冷态(`rm -rf probes/.cache/agent` + `sync` + `drop_caches`),组间只 sleep 5;
-- 互斥:kind 集群上可能有其他子代理(修复/安装)占用宿主资源。run_c.sh 在每组计时测量前用 `docker stats` 检查 `traincache-control-plane/worker*` 容器 CPU,>30% 则等 2 分钟再查(最多 15 轮),结论写入该组 environment JSON;持续繁忙则放弃本轮测量;
+- 互斥:kind 集群上可能有其他任务(修复/安装)占用宿主资源。run_c.sh 在每组计时测量前用 `docker stats` 检查 `traincache-control-plane/worker*` 容器 CPU,>30% 则等 2 分钟再查(最多 15 轮),结论写入该组 environment JSON;持续繁忙则放弃本轮测量;
 - hot_w4 是装置判别力哨兵:本地热读在四个窗口的尾占比应全部低于冷组阈值 6.5%。哨兵 FAIL 视为装置污染(宿主负载/tc 状态),本轮冷组结论不可用。
 
 ## 判定口径(judge_c.py)

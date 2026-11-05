@@ -41,7 +41,7 @@
     compare_epoch_medians —— 两轮 per-epoch median_stall 逐 epoch 相对差
     ≤ 阈值 且 两轮全轮 median_stall 相对差 ≤ 阈值,判"对上";
   * 报告项(不参与 verdict):window_curves / compare_window_curves —— 窗口
-    stall 均值曲线逐点相对差。主对话裁决(2026-10-13):窗口均值被 wait 分布
+    stall 均值曲线逐点相对差。设计裁决:窗口均值被 wait 分布
     重尾毛刺主导,同一冷启内相邻 epoch 曲线逐点最大相对差已达 37%~56%,低于
     指标噪声底、无判别力,故降级为报告项(数值仍计算并写入 verify json)。
 
@@ -238,7 +238,7 @@ def rel_diff(a, b):
 def compare_window_curves(curves_a, curves_b, tol=VERIFY_TOL):
     """[报告项]两轮窗口曲线逐点相对差统计(不参与 verify verdict)。
 
-    主对话裁决(2026-10-13):窗口均值被 wait 分布重尾毛刺主导,同一冷启内
+    设计裁决:窗口均值被 wait 分布重尾毛刺主导,同一冷启内
     相邻 epoch 的曲线逐点最大相对差已达 37%~56%,低于指标噪声底、无判别力,
     故降级为报告项;数值(逐点相对差/max_rel_diff)继续写入 verify json,
     verdict 以 compare_epoch_medians(epoch 级聚合)为准。本函数返回结构不变
