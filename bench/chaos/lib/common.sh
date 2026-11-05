@@ -119,12 +119,12 @@ chaos_agentd_pod_rows() {
     2>/dev/null || true
 }
 
-# 抓 agentd /metrics 的某个 family 值(无标签或首条样本)
+# 抓 agentd /metrics 的某个 family 值(无标签族按空格分隔,带标签族取首条样本)
 chaos_metric() {
   local ns="$1" pod="$2" family="$3" v
   v="$(chaos_kubectl -n "$ns" exec "$pod" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
         wget -qO- "http://127.0.0.1:${CHAOS_METRICS_PORT_DEFAULT}/metrics" 2>/dev/null \
-      | awk -v f="$family" '$0 ~ "^"f"\\{" {print $2; exit}' 2>/dev/null || true)"
+      | awk -v f="$family" '$0 ~ "^"f"(\\{| )" {print $2; exit}' 2>/dev/null || true)"
   printf '%s' "${v}"
 }
 

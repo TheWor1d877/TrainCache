@@ -8,14 +8,11 @@
 #   改的是数据区不是块头:块头被改会撞 magic/version 解析失败(另一种失败路径),
 #   数据区被改才是"读时校验发现内容与指纹不符"的路径(cas.Open 重算 xxh3/sha256)。
 #
-# 前置硬条件(不满足就拒绝执行):
-#   agent DaemonSet 的 TRAINCACHE_VERIFY 必须是 xxh3+sha256。
-#   默认档位只有 xxh3(agent/svc/config.go:18-19,171-176);sha256 是更强的第二道对照,
-#   本注入按"本地盘数据被改动也能被校验层抓住"的口径做,故要求双校验档位。
-#   需要开双校验时执行(脚本会原样打印这条命令):
-#     kubectl -n <ns> set env ds/<ds> TRAINCACHE_VERIFY=xxh3+sha256
-#   注:该 env 覆盖会被下次 kubectl apply -k controller/deploy 盖回默认值
-#   (docs/PARAMETER-CONFIGURATION.md:24)。
+# 校验档位:
+#   默认档 xxh3 就能检出改字节:core/cas/store.go 的 Open 流式重算数据 xxh3,
+#   与块头里的指纹不符即返回 ErrCorrupt。双校验档(xxh3+sha256)只在切换之后
+#   新写的块上生效(docs/5.2-decisions.md D13),改老块时 sha256 不参与比对。
+#   所以本注入在任意档位都能执行,脚本只读取当前档位记进证据,不据此拒绝。
 #
 # 可重复性:
 #   改之前先把原块文件原样拷到缓存里的旁文件(<block>.chaos-orig),
@@ -34,8 +31,10 @@ CACHE_ROOT="$CHAOS_CACHE_ROOT_DEFAULT"
 OFFSET=""          # 空 = 自动取数据区第一个字节(块头 128B 之后)
 NBYTES=1
 BLOCK_REL=""       # 空 = 自动挑第一个 .blk
+TRIGGER="rescan"   # rescan = 改完后重启 agentd 触发全量校验; none = 只等外部重读
 RESTORE=0
 OBSERVE=60
+AGENTD_READY_TIMEOUT=120
 DRY_RUN=0
 KUBECONFIG_ARG=""
 OUT_DIR=""
@@ -44,6 +43,7 @@ usage() {
   cat <<'EOF'
 用法: tamper_block.sh [--ns NAMESPACE] [--ds AGENTD_DS] [--cache-root DIR]
                       [--block REL_PATH] [--offset N] [--bytes N] [--observe SECONDS]
+                      [--trigger rescan|none] [--ready-timeout SECONDS]
                       [--restore]
                       [--out DIR] [--kubeconfig PATH] [--dry-run] [--help]
   --ns           agentd 所在 namespace(默认 traincache)
@@ -53,13 +53,16 @@ usage() {
   --offset       改写起点(块文件内绝对偏移);不给则取块头之后的第一个字节
   --bytes        改写字节数(默认 1)
   --observe      改坏后等校验层反应的上限秒数(默认 60),期间轮询隔离/修复指标
+  --trigger      改坏之后怎么让校验层发现:rescan(默认,重启 agentd 触发全量校验)
+                 或 none(只等训练侧重读该块)
+  --ready-timeout  等 agentd 替代 Pod 就绪的上限秒数(默认 120,只在 --trigger rescan 时用)
   --restore      用证据目录里的备份把字节写回去
   --out          证据目录(写 tampered_block.txt / tamper_backup/ / assertions.txt)
   --kubeconfig   本轮 kubeconfig 副本;不给则要求环境变量 KUBECONFIG
   --dry-run      只打印将执行的命令,不碰集群
   --help         本用法
-拒绝条件: agent DaemonSet 的 TRAINCACHE_VERIFY 不是 xxh3+sha256 时直接拒绝执行,
-          并打印开启双校验的 kubectl set env 命令。
+校验档位: 只读取 agent DaemonSet 的 TRAINCACHE_VERIFY 记进证据,任意档位都执行。
+          默认 xxh3 由 core/cas/store.go 的 Open 重算摘要检出改字节。
 EOF
 }
 
@@ -81,6 +84,10 @@ while [ "$#" -gt 0 ]; do
     --bytes=*) NBYTES="${1#--bytes=}"; shift ;;
     --observe) [ "$#" -ge 2 ] || { echo "错误:--observe 缺值" >&2; exit 2; }; OBSERVE="$2"; shift 2 ;;
     --observe=*) OBSERVE="${1#--observe=}"; shift ;;
+    --trigger) [ "$#" -ge 2 ] || { echo "错误:--trigger 缺值" >&2; exit 2; }; TRIGGER="$2"; shift 2 ;;
+    --trigger=*) TRIGGER="${1#--trigger=}"; shift ;;
+    --ready-timeout) [ "$#" -ge 2 ] || { echo "错误:--ready-timeout 缺值" >&2; exit 2; }; AGENTD_READY_TIMEOUT="$2"; shift 2 ;;
+    --ready-timeout=*) AGENTD_READY_TIMEOUT="${1#--ready-timeout=}"; shift ;;
     --restore) RESTORE=1; shift ;;
     --out) [ "$#" -ge 2 ] || { echo "错误:--out 缺值" >&2; exit 2; }; OUT_DIR="$2"; shift 2 ;;
     --out=*) OUT_DIR="${1#--out=}"; shift ;;
@@ -92,13 +99,10 @@ done
 
 chaos_resolve_kubeconfig "$KUBECONFIG_ARG"
 
-SETENV_CMD="kubectl -n $NS set env ds/$DS TRAINCACHE_VERIFY=xxh3+sha256"
-
 if [ "$DRY_RUN" = 1 ]; then
   chaos_note "[dry-run] 故障:tamper_block(原地改坏 agent 本地缓存里的一个块文件)$([ "$RESTORE" = 1 ] && echo ' [恢复模式]')"
   chaos_show_cmd -n "$NS" get ds "$DS" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_VERIFY")].value}'
-  chaos_note "[dry-run]   ↑ 当前校验档位(空 = 用代码默认 xxh3);非 xxh3+sha256 时本脚本拒绝执行"
-  chaos_show_raw "拒绝时会打印: $SETENV_CMD"
+  chaos_note "[dry-run]   ↑ 当前校验档位(空 = 用代码默认 xxh3);只记进证据,不据此拒绝"
   chaos_show_cmd -n "$NS" get pods -l "$CHAOS_AGENTD_LABEL_DEFAULT" \
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
   chaos_note "[dry-run]   ↑ agentd Pod 列表(取与训练 Pod 同节点的那个;hostPath 是节点级的)"
@@ -117,6 +121,13 @@ if [ "$DRY_RUN" = 1 ]; then
   chaos_show_cmd -n "$NS" exec "\$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
     wget -qO- "http://127.0.0.1:${CHAOS_METRICS_PORT_DEFAULT}/metrics"
   chaos_note "[dry-run]   ↑ 改坏前后各取一次 /metrics:quarantined_blocks / repair_queue_depth / fetch_requests_total{reason=\"repair\"}"
+  if [ "$TRIGGER" = "rescan" ]; then
+    chaos_show_cmd -n "$NS" delete pod "\$AGENTD_POD" --grace-period=0 --wait=false
+    chaos_note "[dry-run]   ↑ 触发方式:rescan(重启 agentd,等替代 Pod 就绪后 rescan 逐块校验)"
+    chaos_note "[dry-run]   ↑ 替代 Pod 就绪上限 ${AGENTD_READY_TIMEOUT}s,之后轮询隔离与修复指标 ${OBSERVE}s"
+  else
+    chaos_note "[dry-run]   ↑ 触发方式:none(只等训练侧重读该块)"
+  fi
   exit 0
 fi
 
@@ -130,20 +141,10 @@ fail() { printf 'FAIL %s\n' "$*" | tee -a "$ASSERT_FILE" >&2; }
 ctx="$(chaos_record_context)"
 chaos_note "kubeconfig=$CHAOS_KUBECONFIG context=$ctx ns=$NS ds=$DS"
 
-# ---- 硬条件:校验档位必须是 xxh3+sha256 ----
+# ---- 校验档位:只记录,不据此拒绝 ----
 VERIFY="$(chaos_kubectl -n "$NS" get ds "$DS" \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRAINCACHE_VERIFY")].value}' 2>/dev/null || true)"
-if [ "$VERIFY" != "xxh3+sha256" ]; then
-  {
-    echo "错误: agent DaemonSet $DS 的 TRAINCACHE_VERIFY=${VERIFY:-<未设置,取代码默认 xxh3>},不是 xxh3+sha256,拒绝执行。"
-    echo "      本注入验证的是「本地盘数据被改动也能被校验层抓住」,双校验档位才有这道对照。"
-    echo "      开启双校验(会触发 agentd 滚动重启):"
-    echo "        $SETENV_CMD"
-    echo "      注:该 env 覆盖会被下次 kubectl apply -k controller/deploy 盖回默认值。"
-  } >&2
-  exit 3
-fi
-chaos_note "校验档位 TRAINCACHE_VERIFY=$VERIFY(满足前置)"
+chaos_note "校验档位 TRAINCACHE_VERIFY=${VERIFY:-<未设置,取代码默认 xxh3>}(默认 xxh3 由 cas.Open 重算摘要检出改字节)"
 
 # ---- 选 agentd Pod:与训练 Pod 同节点优先(hostPath 是节点级的) ----
 ROWS="$(chaos_agentd_pod_rows "$NS")"
@@ -264,6 +265,26 @@ if [ -n "$AFTER_SUM" ] && [ "$AFTER_SUM" != "$BEFORE_SUM" ]; then
   pass "块内容确实变了(改前 sha256 != 改后 sha256)"
 else
   fail "块内容没变,注入无效(改前=$BEFORE_SUM 改后=$AFTER_SUM)"
+fi
+
+# ---- 触发校验层发现:重启 agentd 走 rescan 全量校验(agent/rescan/rescan.go 的 verify)----
+if [ "$TRIGGER" = "rescan" ]; then
+  OLD_POD="$AGENTD_POD"
+  chaos_note "触发方式:rescan(重启 agentd Pod $OLD_POD,等它 rescan 时逐块校验)"
+  chaos_kubectl -n "$NS" delete pod "$OLD_POD" --grace-period=0 --wait=false >/dev/null 2>&1 || true
+  READY_END=$(( $(date +%s) + AGENTD_READY_TIMEOUT ))
+  NEW_POD=""
+  while [ "$(date +%s)" -lt "$READY_END" ]; do
+    NEW_POD="$(chaos_agentd_pod_rows "$NS" | awk -v old="$OLD_POD" '$1!=old && $3=="True" {print $1; exit}')"
+    [ -n "$NEW_POD" ] && break
+    sleep 3
+  done
+  if [ -z "$NEW_POD" ]; then
+    fail "agentd 替代 Pod 在 ${AGENTD_READY_TIMEOUT}s 内没就绪,rescan 触发没生效"
+  else
+    AGENTD_POD="$NEW_POD"
+    chaos_note "agentd 替代 Pod=$AGENTD_POD,开始轮询隔离与修复指标"
+  fi
 fi
 
 printf 'block=%s\noffset=%s\nbytes=%s\nsha256_before=%s\nsha256_after=%s\nbackup_local=%s\nbackup_in_cache=%s.chaos-orig\n' \

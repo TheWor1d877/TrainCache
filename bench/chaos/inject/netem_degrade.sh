@@ -40,6 +40,9 @@ LOSS="1%"
 DISTRIBUTION="normal"
 HANDLE="1:"
 DEV="eth0"
+RATE=""            # 空 = 只挂 netem(档 2A);给了速率 = tbf 限速 + netem(档 2B)
+BURST=""           # 空 = 按 0.1 秒传输量推导(与 bench/scripts/tc_apply.sh 同一口径)
+NETEM_HANDLE="10:"
 FORCE=0
 RESTORE=0
 OBSERVE=30
@@ -54,6 +57,7 @@ usage() {
 用法: netem_degrade.sh [--ns NAMESPACE] [--pod MINIO_POD] [--label app=minio]
                        [--delay 50ms] [--jitter 20ms] [--loss 1%]
                        [--distribution normal|uniform|pareto]
+                       [--rate 300mbit] [--burst 3750k]
                        [--handle HANDLE] [--dev eth0] [--restore]
                        [--observe SECONDS] [--train-ns NAMESPACE] [--train-pod POD]
                        [--force] [--out DIR] [--kubeconfig PATH]
@@ -65,9 +69,11 @@ usage() {
   --jitter       抖动幅度(默认 20ms;随 delay 一起给,netem 第二参数)
   --loss         丢包率(默认 1%)
   --distribution 抖动分布(默认 normal)
-  --handle       netem 的 handle(默认 1:)
+  --rate         限速档:给了速率就挂 tbf root + netem 子队列(档 2B);不给只挂 netem(档 2A)
+  --burst        tbf 突发桶;不给按 0.1 秒传输量推导(与 bench/scripts/tc_apply.sh 同一口径)
+  --handle       root qdisc 的 handle(默认 1:)
   --dev          网卡(默认 eth0)
-  --restore      拆掉本脚本挂的 netem(按 handle 精确删,不碰别的 qdisc)
+  --restore      拆掉本脚本挂的 qdisc(按 handle 精确删,不碰别的 qdisc)
   --observe      挂上之后的采样窗口秒数(默认 30),期间采在途字节/读等待
   --train-ns     训练 Pod 所在 namespace(默认 traincache)
   --train-pod    训练 Pod 名(默认 traincache-train)
@@ -96,6 +102,10 @@ while [ "$#" -gt 0 ]; do
     --jitter=*) JITTER="${1#--jitter=}"; shift ;;
     --loss) [ "$#" -ge 2 ] || { echo "错误:--loss 缺值" >&2; exit 2; }; LOSS="$2"; shift 2 ;;
     --loss=*) LOSS="${1#--loss=}"; shift ;;
+    --rate) [ "$#" -ge 2 ] || { echo "错误:--rate 缺值" >&2; exit 2; }; RATE="$2"; shift 2 ;;
+    --rate=*) RATE="${1#--rate=}"; shift ;;
+    --burst) [ "$#" -ge 2 ] || { echo "错误:--burst 缺值" >&2; exit 2; }; BURST="$2"; shift 2 ;;
+    --burst=*) BURST="${1#--burst=}"; shift ;;
     --distribution) [ "$#" -ge 2 ] || { echo "错误:--distribution 缺值" >&2; exit 2; }; DISTRIBUTION="$2"; shift 2 ;;
     --distribution=*) DISTRIBUTION="${1#--distribution=}"; shift ;;
     --handle) [ "$#" -ge 2 ] || { echo "错误:--handle 缺值" >&2; exit 2; }; HANDLE="$2"; shift 2 ;;
@@ -120,6 +130,43 @@ done
 
 chaos_resolve_kubeconfig "$KUBECONFIG_ARG"
 
+# ---- burst 推导:与 bench/scripts/tc_apply.sh 同一口径(约 0.1 秒的传输量)----
+# bench/config.py 由 bench 拥有,这里只调用它的 burst_for_rate,不自写公式。
+BENCH_DIR="$(cd "$CHAOS_ROOT/../" && pwd)"
+PY="${PY:-/usr/bin/python3}"
+
+rate_to_mbit() {   # 只认带单位的写法(mbit/kbit/gbit),与 tc 自身语义对齐
+  local r="$1" n u m
+  r="${r//[[:space:]]/}"
+  n="${r%%[!0-9.]*}"
+  [ -n "$n" ] || return 1
+  u="$(printf '%s' "${r#"$n"}" | tr 'A-Z' 'a-z')"
+  case "$u" in
+    mbit|mbps) m="$n" ;;
+    kbit|kbps) m="$(awk -v x="$n" 'BEGIN{printf "%.6f", x/1000}')" ;;
+    gbit|gbps) m="$(awk -v x="$n" 'BEGIN{printf "%.6f", x*1000}')" ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$m"
+}
+
+derive_burst() {   # $1 = rate(带单位) → "1250k"/"3750k" 这类 tbf 突发桶
+  local rate="$1" mbit
+  mbit="$(rate_to_mbit "$rate")" || return 1
+  "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.burst_for_rate(float(sys.argv[2])))' \
+    "$BENCH_DIR" "$mbit" 2>/dev/null
+}
+
+if [ -n "$RATE" ]; then
+  if [ -z "$BURST" ]; then
+    BURST="$(derive_burst "$RATE" || true)"
+    if [ -z "$BURST" ]; then
+      echo "错误:解析不出 rate=$RATE 的 burst,请显式给 --burst(例:--burst 3750k)" >&2
+      exit 2
+    fi
+  fi
+fi
+
 # ---- netem 参数拼装 ----
 # delay 带抖动:netem 的 delay 参数形态是 "delay <基础> <抖动>",抖动跟着基础时延给。
 NETEM_ARGS="delay $DELAY"
@@ -143,7 +190,13 @@ if [ "$DRY_RUN" = 1 ]; then
   chaos_show_raw '[ -n "$NETNS" ] || { echo "找不到 Pod sandbox netns"; exit 1; }'
   chaos_show_raw 'nsenter --net="$NETNS" tc qdisc show dev eth0'
   chaos_show_raw '# 已有 root qdisc 且非 --force → 拒绝覆盖(tc_apply.sh 的 tbf 会被保留)'
-  chaos_show_raw 'nsenter --net="$NETNS" tc qdisc replace dev eth0 root handle 1: netem <netem 参数>'
+  if [ -n "$RATE" ]; then
+    chaos_show_raw "nsenter --net=\"\$NETNS\" tc qdisc del dev eth0 root 2>/dev/null || true"
+    chaos_show_raw "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 root handle $HANDLE tbf rate $RATE burst $BURST latency 50ms"
+    chaos_show_raw "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent ${HANDLE}1 handle $NETEM_HANDLE netem $NETEM_ARGS"
+  else
+    chaos_show_raw "nsenter --net=\"\$NETNS\" tc qdisc replace dev eth0 root handle $HANDLE netem $NETEM_ARGS"
+  fi
   chaos_show_raw 'nsenter --net="$NETNS" tc qdisc show dev eth0'
   chaos_show_raw '# --restore:只删本脚本的 handle'
   chaos_show_raw 'nsenter --net="$NETNS" tc qdisc del dev eth0 root handle 1:'
@@ -153,6 +206,7 @@ if [ "$DRY_RUN" = 1 ]; then
   chaos_show_cmd -n "$TRAIN_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}'
   chaos_note "[dry-run]   ↑ 训练 Pod 存活判据(期望 Running)"
   chaos_note "[dry-run] 生效 netem 参数: $NETEM_ARGS"
+  [ -n "$RATE" ] && chaos_note "[dry-run] 生效限速档: tbf rate=$RATE burst=$BURST(档 2B)"
   exit 0
 fi
 
@@ -174,9 +228,9 @@ fi
 NODE="$(chaos_kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}')"
 chaos_note "源站 Pod=$POD 节点容器=$NODE netem 参数=$NETEM_ARGS"
 
-QDISCS="$(docker exec -i "$NODE" bash -s -- "$POD" "$NETEM_ARGS" "$HANDLE" "$DEV" "$RESTORE" "$FORCE" <<'EOS'
+QDISCS="$(docker exec -i "$NODE" bash -s -- "$POD" "$NETEM_ARGS" "$HANDLE" "$DEV" "$RESTORE" "$FORCE" "$RATE" "$BURST" "$NETEM_HANDLE" <<'EOS'
 set -euo pipefail
-POD="$1"; NETEM="$2"; HANDLE="$3"; DEV="$4"; RESTORE="$5"; FORCE="$6"
+POD="$1"; NETEM="$2"; HANDLE="$3"; DEV="$4"; RESTORE="$5"; FORCE="$6"; RATE="$7"; BURST="$8"; NETHANDLE="$9"
 CID=$(crictl pods --state Ready --name "$POD" -q | head -1)
 NETNS=$(crictl inspectp "$CID" | grep -oE '"/var/run/netns/[^"]+"' | head -1 | tr -d '"')
 [ -n "$NETNS" ] || { echo "找不到 Pod sandbox netns(CID=$CID)"; exit 1; }
@@ -202,7 +256,16 @@ if [ -n "$EXIST" ]; then
     nsenter --net="$NETNS" tc qdisc del dev "$DEV" root 2>/dev/null || true
   fi
 fi
-nsenter --net="$NETNS" tc qdisc replace dev "$DEV" root handle "$HANDLE" netem $NETEM
+if [ -n "$RATE" ]; then
+  # 档 2B:tbf 挂 root 限速,netem 挂子队列做时延与抖动
+  nsenter --net="$NETNS" tc qdisc del dev "$DEV" root 2>/dev/null || true
+  nsenter --net="$NETNS" tc qdisc add dev "$DEV" root handle "$HANDLE" \
+    tbf rate "$RATE" burst "$BURST" latency 50ms
+  nsenter --net="$NETNS" tc qdisc add dev "$DEV" parent "${HANDLE}1" handle "$NETHANDLE" netem $NETEM
+else
+  # 档 2A:只挂 netem
+  nsenter --net="$NETNS" tc qdisc replace dev "$DEV" root handle "$HANDLE" netem $NETEM
+fi
 echo "--- 已挂载 ---"
 nsenter --net="$NETNS" tc qdisc show dev "$DEV"
 EOS
@@ -254,10 +317,33 @@ else
   fail "训练 Pod $TRAIN_NS/$TRAIN_POD phase=${TRAIN_PHASE:-<取不到>}(期望 Running)"
 fi
 
+# 有界性:全部读等待落在 60s 桶内(bucket le=60 的计数等于 _count)
+if [ -n "${STALL_COUNT:-}" ] && [ -n "${STALL_BUCKET60:-}" ]; then
+  if [ "$STALL_BUCKET60" = "$STALL_COUNT" ]; then
+    pass "读等待全部在 60s 内(count=$STALL_COUNT,le60=$STALL_BUCKET60)"
+  else
+    fail "有读等待超过 60s(count=$STALL_COUNT,le60=$STALL_BUCKET60)"
+  fi
+else
+  fail "取不到读等待指标,无法判有界性"
+fi
+
+# 限速档:带宽上限指标生效(core/fetch 的字节信号量上限)
+BWLIMIT="$(chaos_metric "$TRAIN_NS" "${AGENTD_POD:-}" traincache_fetch_bandwidth_limit_bytes)"
+if [ -n "$RATE" ]; then
+  if [ -n "$BWLIMIT" ] && [ "$BWLIMIT" != "0" ]; then
+    pass "带宽上限指标生效:traincache_fetch_bandwidth_limit_bytes=$BWLIMIT"
+  else
+    fail "取不到 traincache_fetch_bandwidth_limit_bytes(限速档判据缺一项)"
+  fi
+fi
+
 printf 'delay=%s\njitter=%s\nloss=%s\ndistribution=%s\nhandle=%s\ndev=%s\npod=%s\nnode=%s\n' \
   "$DELAY" "$JITTER" "$LOSS" "$DISTRIBUTION" "$HANDLE" "$DEV" "$POD" "$NODE" >"$OUT_DIR/params.txt"
-printf 'max_fetch_inflight_bytes=%s\nread_stall_count=%s\nread_stall_bucket_le60=%s\ntrain_pod=%s\ntrain_pod_phase=%s\nagentd_pod=%s\nobserve_s=%s\n' \
+[ -n "$RATE" ] && printf 'rate=%s\nburst=%s\ntier=2B\n' "$RATE" "$BURST" >>"$OUT_DIR/params.txt"
+[ -z "$RATE" ] && printf 'tier=2A\n' >>"$OUT_DIR/params.txt"
+printf 'max_fetch_inflight_calls=%s\nread_stall_count=%s\nread_stall_bucket_le60=%s\ntrain_pod=%s\ntrain_pod_phase=%s\nagentd_pod=%s\nobserve_s=%s\nbandwidth_limit_bytes=%s\n' \
   "$MAX_INFLIGHT" "${STALL_COUNT:-0}" "${STALL_BUCKET60:-0}" "$TRAIN_POD" "${TRAIN_PHASE:-}" \
-  "${AGENTD_POD:-}" "$OBSERVE" >>"$OUT_DIR/params.txt"
-chaos_note "采样:${OBSERVE}s 内 max_fetch_inflight_bytes=$MAX_INFLIGHT read_stall_count=${STALL_COUNT:-0} bucket_le60=${STALL_BUCKET60:-0}"
+  "${AGENTD_POD:-}" "$OBSERVE" "${BWLIMIT:-}" >>"$OUT_DIR/params.txt"
+chaos_note "采样:${OBSERVE}s 内 max_fetch_inflight_calls=$MAX_INFLIGHT read_stall_count=${STALL_COUNT:-0} bucket_le60=${STALL_BUCKET60:-0}"
 chaos_note "qdisc 已回读并落证据:$OUT_DIR/qdisc.txt"

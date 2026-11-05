@@ -14,11 +14,11 @@
 #   run-id = UTC 时间戳 + 四位随机后缀(同一秒并发跑也不撞目录)
 #
 # 强制集(mandatory set)的口径:
-#   四个必跑故障 —— kill_agent(agentd 被 SIGKILL)、netem_degrade(源站网络降级)、
-#   minio_down(源站整体下线)、stop_ordersrc(订单写端停摆)。
-#   tamper_block 不在强制集里:它要求 agentd 跑在 TRAINCACHE_VERIFY=xxh3+sha256
-#   档位(否则改坏的块可能不被校验层发现,注入就没有判据意义),该前置由使用者
-#   显式开好再用 --fault tamper_block 单跑。
+#   五个必跑故障 —— kill_agent(agentd 被 SIGKILL)、netem_degrade(源站网络降级:
+#   档 2A,只挂 netem)、netem_degrade_rate(档 2B,netem 加 tbf 限速)、
+#   minio_down(源站整体下线)、tamper_block(改坏本地块)、stop_ordersrc(订单写端停摆)。
+#   tamper_block 在默认 xxh3 档位就能检出改字节(core/cas/store.go 的 Open 重算
+#   摘要),所以它进强制集;双校验档只覆盖切换之后新写的块(docs/5.2-decisions.md D13)。
 #
 # 集群安全:
 #   · 必须显式给 KUBECONFIG(环境变量)或 --kubeconfig <本轮副本>;不给就拒绝跑。
@@ -40,8 +40,9 @@ KEEP_RUN_DIR=0
 EXTRA_ARGS=()
 PASSTHRU=0
 
-MANDATORY_FAULTS="kill_agent netem_degrade minio_down stop_ordersrc"
-ALL_FAULTS="kill_agent netem_degrade minio_down tamper_block stop_ordersrc"
+MANDATORY_FAULTS="kill_agent netem_degrade netem_degrade_rate minio_down tamper_block stop_ordersrc"
+ALL_FAULTS="$MANDATORY_FAULTS"
+RATE_TIER_DEFAULT="300mbit"
 
 usage() {
   cat <<'EOF'
@@ -51,19 +52,19 @@ usage() {
   --list           列出故障与一句话含义(默认模式)
   --dry-run        打印每个故障将要执行的命令,不碰集群(可与 --fault 组合)
   --fault NAME     只跑一个故障(注入 + 断言)
-  --all            跑强制集:kill_agent netem_degrade minio_down stop_ordersrc
+  --all            跑强制集:kill_agent netem_degrade netem_degrade_rate minio_down tamper_block stop_ordersrc
   --kubeconfig     本轮 kubeconfig 副本;不给则要求环境变量 KUBECONFIG
   --data-root      证据根目录(默认 ~/tcd/chaos,即 $CHAOS_DATA_ROOT)
   --keep-run-dir   保留本轮 run-id 目录(默认也保留:数据层只增不删)
   -- <参数...>     其后参数原样透传给注入脚本(如 -- --timeout 60)
   --help           本用法
 故障清单:
-  kill_agent     SIGKILL agentd Pod,等 DaemonSet 拉起替代 Pod,记录重建耗时
-  netem_degrade  源站容器 eth0 egress 挂 netem(时延+抖动+丢包),测链路降级
-  minio_down     MinIO Deployment 缩到 0 副本,测源站整体不可用
-  tamper_block   原地改坏 agent 本地缓存里的一个块文件,测数据面校验
-                 (需 TRAINCACHE_VERIFY=xxh3+sha256,不在强制集内)
-  stop_ordersrc  冻结 ordersrc sidecar 写端,让订单 ring 停摆,测降级判定
+  kill_agent        SIGKILL agentd Pod,等 DaemonSet 拉起替代 Pod,记录重建耗时
+  netem_degrade     源站容器 eth0 egress 挂 netem(时延+抖动+丢包),档 2A
+  netem_degrade_rate  档 2B:在 2A 之上加 tbf 限速(默认 300mbit,--rate 可改)
+  minio_down        MinIO Deployment 缩到 0 副本,测源站整体不可用
+  tamper_block      原地改坏 agent 本地缓存里的一个块文件,测数据面校验
+  stop_ordersrc     冻结 ordersrc sidecar 写端,让订单 ring 停摆,测降级判定
 EOF
 }
 
@@ -92,19 +93,31 @@ chaos_resolve_kubeconfig "$KUBECONFIG_ARG"
 
 fault_meaning() {
   case "$1" in
-    kill_agent)    printf 'SIGKILL agentd Pod,等 DaemonSet 拉起替代 Pod,记录重建耗时' ;;
-    netem_degrade) printf '源站容器 eth0 egress 挂 netem(时延+抖动+丢包),测链路降级' ;;
-    minio_down)    printf 'MinIO Deployment 缩到 0 副本,测源站整体不可用' ;;
-    tamper_block)  printf '原地改坏 agent 本地缓存里的一个块文件,测数据面校验(需 xxh3+sha256 档位)' ;;
-    stop_ordersrc) printf '冻结 ordersrc sidecar 写端,让订单 ring 停摆,测降级判定' ;;
-    *)             printf '<未知故障>' ;;
+    kill_agent)         printf 'SIGKILL agentd Pod,等 DaemonSet 拉起替代 Pod,记录重建耗时' ;;
+    netem_degrade)      printf '源站容器 eth0 egress 挂 netem(时延+抖动+丢包),档 2A' ;;
+    netem_degrade_rate) printf '档 2B:netem 加 tbf 限速(默认 %s)' "$RATE_TIER_DEFAULT" ;;
+    minio_down)         printf 'MinIO Deployment 缩到 0 副本,测源站整体不可用' ;;
+    tamper_block)       printf '原地改坏 agent 本地缓存里的一个块文件,测数据面校验' ;;
+    stop_ordersrc)      printf '冻结 ordersrc sidecar 写端,让订单 ring 停摆,测降级判定' ;;
+    *)                  printf '<未知故障>' ;;
   esac
 }
 
 fault_script() {
   case "$1" in
-    kill_agent|netem_degrade|minio_down|tamper_block|stop_ordersrc)
-      printf '%s/inject/%s.sh' "$CHAOS_ROOT" "$1" ;;
+    kill_agent|netem_degrade|netem_degrade_rate|minio_down|tamper_block|stop_ordersrc)
+      case "$1" in
+        netem_degrade_rate) printf '%s/inject/netem_degrade.sh' "$CHAOS_ROOT" ;;
+        *)                  printf '%s/inject/%s.sh' "$CHAOS_ROOT" "$1" ;;
+      esac ;;
+    *) printf '' ;;
+  esac
+}
+
+# 每个故障自带的额外参数(档 2B 的限速档)
+fault_extra_args() {
+  case "$1" in
+    netem_degrade_rate) printf -- '--rate %s' "$RATE_TIER_DEFAULT" ;;
     *) printf '' ;;
   esac
 }
@@ -116,9 +129,9 @@ is_known_fault() {
 list_faults() {
   printf '== TrainCache 韧性套件:故障清单 ==\n'
   printf '强制集(--all):%s\n' "$MANDATORY_FAULTS"
-  printf 'tamper_block 不在强制集(需 TRAINCACHE_VERIFY=xxh3+sha256 才有判据意义)\n\n'
+  printf '网络劣化分两档:2A 只挂 netem,2B 在 netem 之上加 tbf 限速\n\n'
   for f in $ALL_FAULTS; do
-    printf '  %-16s %s\n' "$f" "$(fault_meaning "$f")"
+    printf '  %-20s %s\n' "$f" "$(fault_meaning "$f")"
   done
   printf '\n用法: run.sh --list | --dry-run | --fault <name> | --all\n'
 }
@@ -137,12 +150,13 @@ if [ "$DRY_RUN" = 1 ]; then
   for f in $TARGETS; do
     is_known_fault "$f" || { echo "错误:未知故障 '$f'" >&2; usage >&2; exit 2; }
     printf '\n---- %s: %s ----\n' "$f" "$(fault_meaning "$f")"
+    fault_extra="$(fault_extra_args "$f")"
     if [ -n "$KUBECONFIG_ARG" ]; then
-      bash "$(fault_script "$f")" --dry-run --kubeconfig "$KUBECONFIG_ARG" ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"}
+      bash "$(fault_script "$f")" --dry-run --kubeconfig "$KUBECONFIG_ARG" ${fault_extra:+$fault_extra} ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"}
     elif [ -n "${CHAOS_KUBECONFIG:-}" ]; then
-      bash "$(fault_script "$f")" --dry-run --kubeconfig "$CHAOS_KUBECONFIG" ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"}
+      bash "$(fault_script "$f")" --dry-run --kubeconfig "$CHAOS_KUBECONFIG" ${fault_extra:+$fault_extra} ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"}
     else
-      bash "$(fault_script "$f")" --dry-run ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"}
+      bash "$(fault_script "$f")" --dry-run ${fault_extra:+$fault_extra} ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"}
     fi
   done
   exit 0
@@ -186,15 +200,16 @@ FAILED=0
 
 run_one_fault() {
   local f="$1"
-  local script dir rc
+  local script dir rc extra
   script="$(fault_script "$f")"
   dir="$RUN_DIR/$f"
   mkdir -p "$dir"
   printf '\n---- %s: %s ----\n' "$f" "$(fault_meaning "$f")"
   TOTAL=$((TOTAL + 1))
+  extra="$(fault_extra_args "$f")"
   set +e
   bash "$script" --out "$dir" --kubeconfig "$CHAOS_KUBECONFIG" \
-    ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"} >"$dir/output.log" 2>&1
+    ${extra:+$extra} ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"} >"$dir/output.log" 2>&1
   rc=$?
   set -e
   cat "$dir/output.log"
