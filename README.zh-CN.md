@@ -190,7 +190,6 @@ make e2e              # kind 集群中的六项断言
 | [4.3 TrainCache 启动与实验](docs/4.3-startup-and-experiments.md) | 镜像构建、控制面拉起、实验族启动 |
 | [4.4 实验协议](docs/4.4-experiment-protocol.md) | 预注册假设、口径、条件矩阵与判据 |
 | [4.5 实验口径决策](docs/4.5-metric-decisions.md) | 已定的验收判据与实验口径 |
-| [4.6 实验版本记录](docs/4.6-experiment-version-log.md) | 版本 × 实验族矩阵与产物路径 |
 | [5.x 缓存核心库](docs/5.1-design.md) | 设计要求、计划、决策与测试 |
 | [6.x Agent 服务化](docs/6.1-design.md) | 节点面的接口与决策 |
 | [7.x Controller 与 Scheduler](docs/7.1-design.md) | 控制面的接口与决策 |

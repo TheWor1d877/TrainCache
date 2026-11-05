@@ -190,7 +190,6 @@ Documents under `docs/` are written in Chinese.
 | [4.3 Startup and experiments](docs/4.3-startup-and-experiments.md) | Image builds, control plane startup, experiment families |
 | [4.4 Experiment protocol](docs/4.4-experiment-protocol.md) | Pre-registered hypotheses, metric definitions, condition matrix and criteria |
 | [4.5 Metric decisions](docs/4.5-metric-decisions.md) | Decided acceptance criteria and metric definitions |
-| [4.6 Experiment version log](docs/4.6-experiment-version-log.md) | Version × experiment family matrix and artifact paths |
 | [5.x Cache core library](docs/5.1-design.md) | Requirements, plan, decisions and tests |
 | [6.x Agent service](docs/6.1-design.md) | Node-plane interfaces and decisions |
 | [7.x Controller and Scheduler](docs/7.1-design.md) | Control-plane interfaces and decisions |
