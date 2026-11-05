@@ -38,6 +38,7 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_READ_STALL_MIN_WAIT_MS",
 		"TRAINCACHE_READ_STALL_WINDOW_MS",
 		"TRAINCACHE_INDEX_REFRESH_INTERVAL",
+		"TRAINCACHE_LOCAL_GC_INTERVAL",
 		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
 		"TRAINCACHE_GATEWAY_ENDPOINT",
 		"TRAINCACHE_GATEWAY_SECURE",
@@ -136,6 +137,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.IndexRefreshInterval != defaultIndexRefreshInterval {
 		t.Errorf("IndexRefreshInterval = %v, want %v(6.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
 	}
+	if cfg.LocalGCInterval != defaultLocalGCInterval {
+		t.Errorf("LocalGCInterval = %v, want %v(§11.5 默认)", cfg.LocalGCInterval, defaultLocalGCInterval)
+	}
 	if cfg.ObjstoreProbeConditionalWrite {
 		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
 	}
@@ -205,6 +209,46 @@ func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
 	}
 	if !cfg.ObjstoreProbeConditionalWrite {
 		t.Error("ObjstoreProbeConditionalWrite = false, want true(envBool yes)")
+	}
+}
+
+// TestLoadLocalGCInterval:TRAINCACHE_LOCAL_GC_INTERVAL 解析(§11.5)——未设置取默认
+// 10m;合法值覆盖;非法取值与其余 duration 参数同口径判启动错误。
+func TestLoadLocalGCInterval(t *testing.T) {
+	cases := []struct {
+		name    string
+		set     bool
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "缺省", want: defaultLocalGCInterval},
+		{name: "显式配置", set: true, value: "30m", want: 30 * time.Minute},
+		{name: "非法非duration", set: true, value: "abc", wantErr: true},
+		{name: "非法零", set: true, value: "0s", wantErr: true},
+		{name: "非法负值", set: true, value: "-1m", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			if tc.set {
+				t.Setenv("TRAINCACHE_LOCAL_GC_INTERVAL", tc.value)
+			}
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load 未报错，期望拒绝非法清扫周期 %q", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.LocalGCInterval != tc.want {
+				t.Fatalf("LocalGCInterval = %v, want %v", cfg.LocalGCInterval, tc.want)
+			}
+		})
 	}
 }
 

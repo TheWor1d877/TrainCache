@@ -72,8 +72,10 @@ func listObjectKeys(t *testing.T, store objectstore.Store, prefix string) []stri
 	return keys
 }
 
-// TestSweepKeepsLiveBlocks：保留窗口内的一切都不删——CURRENT 引用的块、窗口内旧快照
-// 引用的块、窗口内快照的 manifest 与分片对象，以及 CURRENT 对象本身。
+// TestSweepKeepsLiveBlocks：保留窗口内的一切快照对象都不删——CURRENT 与窗口内旧
+// 快照的 manifest、分片对象，以及 CURRENT 对象本身。本地副本按节点口径算活块
+// （CURRENT ∪ 有效 claim，见 LocalGC）：CURRENT 引用的块保留，仅窗口内旧快照引用、
+// 无 claim 保护的块不再是活块，其本地副本被回收（对象仍在，可再回源）。
 func TestSweepKeepsLiveBlocks(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
@@ -96,22 +98,30 @@ func TestSweepKeepsLiveBlocks(t *testing.T) {
 		t.Fatalf("快照对象 = %v，期望 4 个", objKeys)
 	}
 
-	col := NewCollector(env.store, env.cs, cfg)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	col := NewCollector(env.store, cfg)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if removedBlocks != 0 || removedObjects != 0 {
-		t.Fatalf("Sweep 删除 (%d, %d)，期望 (0, 0)：两个快照均在 RetainSnapshots=3 窗口内",
-			removedBlocks, removedObjects)
+	if removedObjects != 0 {
+		t.Fatalf("Sweep 删除对象 %d 个，期望 0：两个快照均在 RetainSnapshots=3 窗口内", removedObjects)
 	}
 
-	// CURRENT 引用的块（b2）与窗口内旧快照（s1）引用的块（b1）一个不删。
-	if !blockExists(t, env.cs, b1) {
-		t.Fatal("窗口内旧快照引用的块被删除")
+	// CURRENT 引用的块（b2）是活块，保留；仅窗口内旧快照（s1）引用、无 claim 保护
+	// 的块（b1）不是活块，本地副本被 LocalGC 回收。
+	g := NewLocalGC(env.store, env.cs, cfg)
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep: %v", err)
+	}
+	if removedBlocks != 1 {
+		t.Fatalf("LocalGC 删除块 %d 个，期望 1（b1）", removedBlocks)
 	}
 	if !blockExists(t, env.cs, b2) {
 		t.Fatal("CURRENT 引用的块被删除")
+	}
+	if blockExists(t, env.cs, b1) {
+		t.Fatal("非活块（仅窗口内旧快照引用、无 claim）的本地副本未被回收")
 	}
 	// 窗口内快照的对象（manifest + 分片）一个不删。
 	for _, k := range objKeys {
@@ -134,10 +144,11 @@ func TestSweepKeepsLiveBlocks(t *testing.T) {
 	}
 }
 
-// TestSweepRemovesOrphans：CURRENT + 最近 1 个快照（RetainSnapshots=2）之外的对象与
-// 块被回收——3 次 Commit 后第一次快照出窗口：其 manifest 与不再被引用的分片被删、
-// 仅其引用的块被删；被后续保留快照复用的分片（D18 完整键指向 s1 目录）跨窗口保留；
-// 仍被保留快照引用的旧块不删。
+// TestSweepRemovesOrphans：CURRENT + 最近 1 个快照（RetainSnapshots=2）之外的对象被
+// 回收——3 次 Commit 后第一次快照出窗口：其 manifest 与不再被引用的分片被删；被后续
+// 保留快照复用的分片（D18 完整键指向 s1 目录）跨窗口保留。本地副本按节点口径回收
+// （LocalGC）：活块 = CURRENT 引用的块 ∪ 有效 claim 保护的块，仅被窗口内旧快照引用、
+// 无 claim 的块（b1）本地副本同样被回收。
 func TestSweepRemovesOrphans(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
@@ -189,21 +200,32 @@ func TestSweepRemovesOrphans(t *testing.T) {
 		t.Fatalf("s1 的两个分片都被复用，测试构造错误：%+v", m1.Shards)
 	}
 
-	col := NewCollector(env.store, env.cs, cfg)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	col := NewCollector(env.store, cfg)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	// 对象：s1 manifest + s1 弃用分片 = 2；块：仅 s1 引用的 a1 = 1。
-	if removedBlocks != 1 || removedObjects != 2 {
-		t.Fatalf("Sweep 删除 (%d, %d)，期望 (1, 2)", removedBlocks, removedObjects)
+	// 对象：s1 manifest + s1 弃用分片 = 2。
+	if removedObjects != 2 {
+		t.Fatalf("Sweep 删除对象 %d 个，期望 2", removedObjects)
 	}
 
-	// 孤儿块 a1 被删；仍被保留快照引用的块（b1 被 s2 引用、c1/a2/b2 被窗口内快照引用）不删。
-	if blockExists(t, env.cs, a1) {
-		t.Fatal("孤儿块 a1 未被删除")
+	// 块：本地活块 = CURRENT(s3) 引用的 {a2, b2, c1}；a1、b1 只被非 CURRENT 快照
+	// 引用且无 claim，本地副本被 LocalGC 回收。
+	g := NewLocalGC(env.store, env.cs, cfg)
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep: %v", err)
 	}
-	for _, fp := range []cas.Fingerprint{b1, c1, a2, b2} {
+	if removedBlocks != 2 {
+		t.Fatalf("LocalGC 删除块 %d 个，期望 2（a1、b1）", removedBlocks)
+	}
+	for _, fp := range []cas.Fingerprint{a1, b1} {
+		if blockExists(t, env.cs, fp) {
+			t.Fatalf("非活块 %s 的本地副本未被回收", fp)
+		}
+	}
+	for _, fp := range []cas.Fingerprint{c1, a2, b2} {
 		if !blockExists(t, env.cs, fp) {
 			t.Fatalf("活块 %s 被删除", fp)
 		}
@@ -239,8 +261,9 @@ func TestSweepRemovesOrphans(t *testing.T) {
 	}
 }
 
-// TestSweepSkipsPinned：不在活块集合、但 pin>0（读者持有）或 refcount>0（逻辑引用
-// 未释放）的块本次跳过不删；Unpin/Release 后再 Sweep 才删。
+// TestSweepSkipsPinned：块回收归 LocalGC，删除走 cas.Evict——pin>0（正在被读）的孤儿块
+// 返回 ErrInUse、本轮跳过不报错，留待下轮；引用计数（Acquire）不挡 Evict（逻辑簿记与
+// 本地副本无关），refs>0 的孤儿块本地副本照样被回收。Collector 只回收对象存储快照对象。
 func TestSweepSkipsPinned(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
@@ -261,45 +284,54 @@ func TestSweepSkipsPinned(t *testing.T) {
 		t.Fatalf("Acquire(%s): %v", acquired, err)
 	}
 
-	col := NewCollector(env.store, env.cs, cfg)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	col := NewCollector(env.store, cfg)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if removedBlocks != 0 || removedObjects != 0 {
-		t.Fatalf("Sweep 删除 (%d, %d)，期望 (0, 0)：孤儿块仍被引用或正在被读，应跳过", removedBlocks, removedObjects)
+	if removedObjects != 0 {
+		t.Fatalf("Sweep 删除对象 %d 个，期望 0：CURRENT 快照在保留窗口内", removedObjects)
+	}
+
+	g := NewLocalGC(env.store, env.cs, cfg)
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep: %v", err)
+	}
+	// pin>0 跳过不报错；refs>0 不挡 Evict，acquired 本轮被回收。
+	if removedBlocks != 1 {
+		t.Fatalf("LocalGC 删除块 %d 个，期望 1（acquired）：pin>0 应跳过，引用计数不挡 Evict", removedBlocks)
 	}
 	if !blockExists(t, env.cs, pinned) {
 		t.Fatal("pin>0 的孤儿块被删除")
 	}
-	if !blockExists(t, env.cs, acquired) {
-		t.Fatal("refcount>0 的孤儿块被删除")
+	if blockExists(t, env.cs, acquired) {
+		t.Fatal("refs>0 的孤儿块未被 Evict（Evict 应无视引用计数）")
 	}
 	if !blockExists(t, env.cs, live) {
 		t.Fatal("活块被删除")
 	}
 
-	// 释放后（pin=0、refcount=0）再 Sweep：两个孤儿块本次被删，活块保留。
+	// Unpin 后再扫一轮：pin 释放，孤儿块本轮被删，活块保留。
 	env.cs.Unpin(pinned)
-	env.cs.Release(acquired)
-	removedBlocks, removedObjects, err = col.Sweep(ctx, dataset)
+	removedBlocks, err = g.Sweep(ctx, []string{dataset})
 	if err != nil {
-		t.Fatalf("second Sweep: %v", err)
+		t.Fatalf("second LocalGC Sweep: %v", err)
 	}
-	if removedBlocks != 2 || removedObjects != 0 {
-		t.Fatalf("second Sweep 删除 (%d, %d)，期望 (2, 0)", removedBlocks, removedObjects)
+	if removedBlocks != 1 {
+		t.Fatalf("second LocalGC 删除块 %d 个，期望 1（pinned）", removedBlocks)
 	}
-	if blockExists(t, env.cs, pinned) || blockExists(t, env.cs, acquired) {
-		t.Fatal("Unpin/Release 后孤儿块未被删除")
+	if blockExists(t, env.cs, pinned) {
+		t.Fatal("Unpin 后孤儿块未被删除")
 	}
 	if !blockExists(t, env.cs, live) {
 		t.Fatal("活块被删除")
 	}
 }
 
-// TestSweepNeverDeletesCurrent：RetainSnapshots=1 时窗口外对象与孤儿块被回收，但
-// CURRENT 指向的快照、其 manifest/分片对象与 CurrentKey 对象始终在；无 CURRENT 的
-// 数据集 Sweep 返回 ErrNoCurrent 且不删任何东西。
+// TestSweepNeverDeletesCurrent：RetainSnapshots=1 时窗口外对象被回收，本地非活块副本由
+// LocalGC 回收，但 CURRENT 指向的快照、其 manifest/分片对象与 CurrentKey 对象始终在；
+// 无 CURRENT 的数据集 Collector.Sweep 返回 ErrNoCurrent 且不删任何对象。
 func TestSweepNeverDeletesCurrent(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
@@ -314,14 +346,23 @@ func TestSweepNeverDeletesCurrent(t *testing.T) {
 	v3 := env.putBlock(t, "current-v3")
 	s3, m3 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v3)})
 
-	col := NewCollector(env.store, env.cs, cfg)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	col := NewCollector(env.store, cfg)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	// 保留窗口 = {CURRENT}：s1/s2 各 1 manifest + 1 分片全删；块 v1、v2 成孤儿。
-	if removedBlocks != 2 || removedObjects != 4 {
-		t.Fatalf("Sweep 删除 (%d, %d)，期望 (2, 4)", removedBlocks, removedObjects)
+	// 保留窗口 = {CURRENT}：s1/s2 各 1 manifest + 1 分片全删 = 4 对象。
+	if removedObjects != 4 {
+		t.Fatalf("Sweep 删除对象 %d 个，期望 4", removedObjects)
+	}
+	// 块：活块 = CURRENT 引用的 v3；v1、v2 成孤儿，本地副本被 LocalGC 回收。
+	g := NewLocalGC(env.store, env.cs, cfg)
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep: %v", err)
+	}
+	if removedBlocks != 2 {
+		t.Fatalf("LocalGC 删除块 %d 个，期望 2", removedBlocks)
 	}
 	if blockExists(t, env.cs, v1) || blockExists(t, env.cs, v2) {
 		t.Fatal("窗口外孤儿块未被删除")
@@ -351,31 +392,37 @@ func TestSweepNeverDeletesCurrent(t *testing.T) {
 	}
 
 	// 再次 Sweep 幂等：无更多可删，CURRENT 仍在其位。
-	rb, ro, err := col.Sweep(ctx, dataset)
-	if err != nil || rb != 0 || ro != 0 {
-		t.Fatalf("第二次 Sweep %v，删除 (%d, %d)，期望 (0, 0)", err, rb, ro)
+	ro, err := col.Sweep(ctx, dataset)
+	if err != nil || ro != 0 {
+		t.Fatalf("第二次对象 Sweep %v，删除 %d 个，期望 (0, nil)", err, ro)
+	}
+	rb, err := g.Sweep(ctx, []string{dataset})
+	if err != nil || rb != 0 {
+		t.Fatalf("第二次块 Sweep %v，删除 %d 个，期望 (0, nil)", err, rb)
 	}
 	if !objectExists(t, env.store, CurrentKey(dataset)) {
 		t.Fatal("CURRENT 对象第二次 Sweep 后被删除")
 	}
 
-	// 无 CURRENT 的数据集：Sweep 返回 ErrNoCurrent，块与对象一律不删。
+	// 无 CURRENT 的数据集：对象 Sweep 返回 ErrNoCurrent，快照对象一律不删；
+	// Collector 不碰本地块，孤儿块仍在（LocalGC 对无 CURRENT 数据集的口径见
+	// local_gc_test.go）。
 	const empty = "no-current"
 	orphan := env.putBlock(t, "no-current-orphan")
 	garbageKey := snapshotsPrefix(empty) + "garbage/blob"
 	if _, err := env.store.Put(ctx, garbageKey, strings.NewReader("junk"), int64(len("junk"))); err != nil {
 		t.Fatalf("Put(%q): %v", garbageKey, err)
 	}
-	col2 := NewCollector(env.store, env.cs, cfg)
-	rb, ro, err = col2.Sweep(ctx, empty)
+	col2 := NewCollector(env.store, cfg)
+	ro, err = col2.Sweep(ctx, empty)
 	if !errors.Is(err, ErrNoCurrent) {
 		t.Fatalf("无 CURRENT 的 Sweep = %v，期望 ErrNoCurrent", err)
 	}
-	if rb != 0 || ro != 0 {
-		t.Fatalf("无 CURRENT 的 Sweep 删除 (%d, %d)，期望 (0, 0)", rb, ro)
+	if ro != 0 {
+		t.Fatalf("无 CURRENT 的 Sweep 删除对象 %d 个，期望 0", ro)
 	}
 	if !blockExists(t, env.cs, orphan) {
-		t.Fatal("无 CURRENT 时块被删除")
+		t.Fatal("对象回收把本地块删掉了（Collector 不应碰本地 CAS）")
 	}
 	if !objectExists(t, env.store, garbageKey) {
 		t.Fatal("无 CURRENT 时对象被删除")
@@ -407,14 +454,23 @@ func TestSweepRetainSnapshotsOne(t *testing.T) {
 	s3, _ := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v3)})
 	s4, m4 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", v4)})
 
-	col := NewCollector(env.store, env.cs, cfg)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	col := NewCollector(env.store, cfg)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	// 出窗口快照数 = 3（s1, s2, s3），各 1 manifest + 1 分片 = 6 对象；块 v1/v2/v3 成孤儿 = 3。
-	if removedBlocks != 3 || removedObjects != 6 {
-		t.Fatalf("Sweep 删除 (%d, %d)，期望 (3, 6)", removedBlocks, removedObjects)
+	// 出窗口快照数 = 3（s1, s2, s3），各 1 manifest + 1 分片 = 6 对象。
+	if removedObjects != 6 {
+		t.Fatalf("Sweep 删除对象 %d 个，期望 6", removedObjects)
+	}
+	// 块：活块 = CURRENT 引用的 v4；v1/v2/v3 成孤儿，本地副本被 LocalGC 回收。
+	g := NewLocalGC(env.store, env.cs, cfg)
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep: %v", err)
+	}
+	if removedBlocks != 3 {
+		t.Fatalf("LocalGC 删除块 %d 个，期望 3", removedBlocks)
 	}
 
 	// 孤儿块 v1/v2/v3 全删；CURRENT 引用的 v4 保留。
@@ -452,9 +508,10 @@ func TestSweepRetainSnapshotsOne(t *testing.T) {
 }
 
 // TestSweepRetainSnapshotsFive 覆盖 RetainSnapshots 边界较大值 5——保护窗口
-// CURRENT + 最近 4 个旧快照，窗口相当宽。提交 3 次快照（全部在窗口内），
-// 同时放一个不被任何快照引用的孤儿块 → 对象一个不删（所有快照都还活着），
-// 只有孤儿块被删；再加一次提交让最老的快照刚好出窗口，验证窗口边界切换。
+// CURRENT + 最近 4 个旧快照，窗口相当宽。提交 3 次快照（对象全部在窗口内、一个不删）；
+// 保留窗口只庇护对象存储，不庇护本地副本：活块 = CURRENT ∪ 有效 claim，窗口内旧快照
+// 独有的块与孤儿块的本地副本一并被 LocalGC 回收。再提交 3 次让最老的快照刚好出窗口，
+// 验证对象侧窗口边界切换。
 func TestSweepRetainSnapshotsFive(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
@@ -469,31 +526,43 @@ func TestSweepRetainSnapshotsFive(t *testing.T) {
 		b3 = env.putBlock(t, "r5-v3")
 	)
 
-	// 3 次 Commit，全部在 RetainSnapshots=5 窗口内。
+	// 3 次 Commit，全部对象在 RetainSnapshots=5 窗口内。
 	s1, m1 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b1)})
 	s2, m2 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b2)})
 	s3, m3 := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b3)})
 
-	// 放一个孤儿块：不被任何快照引用 → Sweep 应删。
+	// 放一个孤儿块：不被任何快照引用。
 	orphan := env.putBlock(t, "r5-orphan")
 
-	col := NewCollector(env.store, env.cs, cfg)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	col := NewCollector(env.store, cfg)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	// 保护窗口宽 → 3 个快照都活，窗口外无对象；仅孤儿块被删。
-	if removedBlocks != 1 || removedObjects != 0 {
-		t.Fatalf("Sweep 删除 (%d, %d)，期望 (1, 0)：孤儿块应删，窗口宽不应删任何快照对象",
-			removedBlocks, removedObjects)
+	// 保护窗口宽 → 3 个快照对象都活，窗口外无对象。
+	if removedObjects != 0 {
+		t.Fatalf("Sweep 删除对象 %d 个，期望 0：窗口宽不应删任何快照对象", removedObjects)
+	}
+	// 本地副本按 CURRENT ∪ claim 算：活块 = {b3}；orphan 与仅被窗口内旧快照引用的
+	// b1、b2 都不是活块，本地副本被回收（对象仍在，需要时可再回源）。
+	g := NewLocalGC(env.store, env.cs, cfg)
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep: %v", err)
+	}
+	if removedBlocks != 3 {
+		t.Fatalf("LocalGC 删除块 %d 个，期望 3（orphan、b1、b2）", removedBlocks)
 	}
 	if blockExists(t, env.cs, orphan) {
 		t.Fatal("孤儿块未被删除")
 	}
-	for _, fp := range []cas.Fingerprint{b1, b2, b3} {
-		if !blockExists(t, env.cs, fp) {
-			t.Fatalf("窗口内快照引用的块 %s 被误删", fp)
+	for _, fp := range []cas.Fingerprint{b1, b2} {
+		if blockExists(t, env.cs, fp) {
+			t.Fatalf("非活块（窗口内旧快照独有、无 claim）%s 的本地副本未被回收", fp)
 		}
+	}
+	if !blockExists(t, env.cs, b3) {
+		t.Fatal("CURRENT 引用的块被删除")
 	}
 
 	// 全部 3 个快照的 manifest + 分片都保留。
@@ -512,9 +581,7 @@ func TestSweepRetainSnapshotsFive(t *testing.T) {
 	}
 
 	// 再加 3 次 Commit（s4, s5, s6）→ 总共 6 个快照，RetainSnapshots=5 →
-	// s1 刚好出窗口（s2..s6 保留）。s1 引用的 b1 仍被 s2 复用？不一定，
-	// 因为每次 Commit 都换了不同的块。让 s4/s5/s6 继续用新块，保证 s1
-	// 完全不被复用，b1 也成孤儿被删。
+	// s1 刚好出窗口（s2..s6 的对象保留）。s4/s5/s6 各用新块。
 	b4 := env.putBlock(t, "r5-v4")
 	b5 := env.putBlock(t, "r5-v5")
 	b6 := env.putBlock(t, "r5-v6")
@@ -522,14 +589,21 @@ func TestSweepRetainSnapshotsFive(t *testing.T) {
 	_, _ = commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b5)})
 	s6, _ := commitSnapshot(t, w, env.store, dataset, []Entry{mkEntry("/d/a", b6)})
 
-	removedBlocks, removedObjects, err = col.Sweep(ctx, dataset)
+	removedObjects, err = col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("second Sweep: %v", err)
 	}
-	// s1 出窗口：1 manifest + 1 分片 = 2 对象；b1 不再被保留快照引用 = 1 块。
-	if removedBlocks != 1 || removedObjects != 2 {
-		t.Fatalf("second Sweep 删除 (%d, %d)，期望 (1, 2)：s1 刚出 RetainSnapshots=5 窗口",
-			removedBlocks, removedObjects)
+	// s1 出窗口：1 manifest + 1 分片 = 2 对象。
+	if removedObjects != 2 {
+		t.Fatalf("second Sweep 删除对象 %d 个，期望 2：s1 刚出 RetainSnapshots=5 窗口", removedObjects)
+	}
+	// 本地副本：活块 = {b6}，上一轮留下的 b3（原 CURRENT）、b4、b5 均不再是活块。
+	removedBlocks, err = g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("second LocalGC Sweep: %v", err)
+	}
+	if removedBlocks != 3 {
+		t.Fatalf("second LocalGC 删除块 %d 个，期望 3（b3、b4、b5）", removedBlocks)
 	}
 	if blockExists(t, env.cs, b1) {
 		t.Fatal("RetainSnapshots=5 窗口刚外的孤儿块 b1 未被删除")
@@ -537,7 +611,7 @@ func TestSweepRetainSnapshotsFive(t *testing.T) {
 	if objectExists(t, env.store, ManifestKey(dataset, s1)) {
 		t.Fatal("RetainSnapshots=5 窗口刚外的 manifest s1 未被删除")
 	}
-	// s2..s6 全保留。
+	// s2..s6 对象全保留。
 	for _, id := range []string{s2, s3, s6} {
 		if !objectExists(t, env.store, ManifestKey(dataset, id)) {
 			t.Fatalf("RetainSnapshots=5 窗口内 manifest %s 被误删", id)

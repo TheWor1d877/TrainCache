@@ -28,33 +28,33 @@ TrainCache targets training workloads where data has to be fetched from remote s
 
 | Workload | Dataset size | Consumption pattern | Where TrainCache sits |
 |---|---|---|---|
-| Large-scale pretraining | TB to PB | Mostly single-pass | Weak area: the working set does not fit the node cache, reuse ratio is low |
-| Intermediate training, large-scale fine-tuning | Hundreds of GB to a few TB | Repeated across runs and epochs | Strong area |
-| Task-specific fine-tuning, domain training | A few GB to hundreds of GB | Repeated iterations | Edge of the strong area: reuse from iterations offsets part of the fixed system cost |
-| Streaming, online data | No fixed total | Consumption order cannot be derived ahead of time | Not applicable: neither order-based prefetch nor the gate has a premise |
+| Large-scale pretraining | TB to PB | Mostly consumed once | Disadvantage region: the working set does not fit the node cache, reuse ratio is low |
+| Intermediate training, large-scale fine-tuning | Hundreds of GB to a few TB | Consumed repeatedly across runs and epochs | Advantage region |
+| Task-specific fine-tuning, domain training | A few GB to hundreds of GB | Repeated iterations | Edge of the advantage region: reuse from the iterations offsets part of the fixed system cost |
+| Streaming, online data | No fixed total | Consumption order cannot be computed | Not applicable: neither order-based prefetch nor the gate can be set up from the Job spec |
 
-### Conditions for the strong area
+### Conditions for the advantage region
 
 Four conditions hold at once:
 
 1. Data has to be fetched from remote storage. The local disk cannot hold the whole working set, or the cold start has no local copy.
-2. The consumption order can be derived ahead of time. Epoch, shuffle seed and batch size are known from the Job spec.
+2. The consumption order can be computed ahead of time. Epoch, shuffle seed and batch size are known from the Job spec.
 3. Fetch bandwidth is the bottleneck. Going straight to the data source stalls the trainer when it reads a block.
 4. The same data is consumed repeatedly: across epochs, across runs, and across cold starts on different nodes.
 
 Two benefit paths cover different dataset sizes:
 
 - **Reuse**: the dataset size (basis: total bytes of the whole dataset) falls between a fraction and a few multiples of the cache space available per node (basis: per node, taken as 8 to 12 TB), that is hundreds of GB to a few TB. The node cache holds most of the working set, so repeated consumption no longer goes back to remote storage.
-- **Overlap**: when the working set exceeds the node cache, order-based prefetch overlaps the download with the compute. The gain comes from pipelining, and the cache reuse ratio is low there. The current experiments cover this path; see "Known limitations" for their scale.
+- **Overlap**: when the working set exceeds the node cache, order-based prefetch makes the download and the compute run at the same time. The gain comes from that, and the cache reuse ratio is low there. The current experiments cover this path; see "Known limitations" for their scale.
 
-One order of magnitude more data pushes the reuse ratio down and leaves only plain order-based prefetch; one order of magnitude less data leaves the fixed cost of the controller, the gate, agentd, the order sidecar and the hook instrumentation above the gain.
+One order of magnitude more data pushes the reuse ratio down and leaves only the overlap from order-based prefetch; one order of magnitude less data leaves the fixed cost of the controller, the gate, agentd, the order sidecar and the hook instrumentation above the gain.
 
-### Conditions for the weak area
+### Conditions for the disadvantage region
 
 - Large-scale pretraining with mostly single-pass consumption: the working set does not fit the node cache, the data is not consumed twice, and the cache reuse ratio stays low.
-- Streaming and online data: the consumption order cannot be derived ahead of time, so neither order-based prefetch nor the gate has a premise.
+- Streaming and online data: the consumption order cannot be computed ahead of time, so neither order-based prefetch nor the gate can be set up from the Job spec.
 - The node already has a copy: the image ships the data, or another job on the same node left a usable cache, which makes warmup a redundant action.
-- The dataset is far larger than the cache space of the whole cluster: the cache degrades into a streaming buffer and the reuse ratio approaches zero.
+- The dataset is far larger than the cache space of the whole cluster: the cache only serves as a streaming buffer and the reuse ratio approaches zero.
 
 ## Features
 
@@ -89,7 +89,7 @@ kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategi
   -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}}]}"
 ```
 
-The certificate is valid for 365 days. The SAN covers the Service name and the DNS name inside the namespace. The CA goes into both webhook entries: the checkpoint entry has `failurePolicy: Fail`, so a Pod with the `traincache.io/checkpoint: enabled` label is rejected when its `caBundle` is empty.
+The certificate is valid for 365 days. The SAN covers the Service name and the DNS name inside the namespace. The CA goes into both webhook entries: the checkpoint entry has `failurePolicy: Fail`, so a Pod labeled `traincache.io/checkpoint` (the label value names a ConfigMap in the same namespace) is rejected when its `caBundle` is empty.
 
 **3. Bucket and credentials.** `DataSet.spec` takes `endpoint` (no scheme), `bucket` and `secretRef`. The Secret holds `accessKey` and `secretKey` and lives in the same namespace as the DataSet. For bucket setup see [cloud object storage deployment](docs/0-cloud-object-storage-deployment.md).
 
@@ -163,14 +163,6 @@ Blocks come from one of two paths. With `gatewayEndpoint` empty, agentd sends ev
 
 Fluid 1.1.0-alpha.9 and JuiceFS CE 1.3.0 were deployed and benchmarked on a kind cluster as control groups among the seven configurations ([field survey](docs/3-field-survey.md), [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md)). The `DataSet` and `Runtime` naming and the nodeAffinity injection follow Fluid. Block readiness lives in `controller/cmd/controller-manager`, SchedulingGate injection in `controller/cmd/webhook`, node scoring in `controller/cmd/scheduler`, and prefetch in `agent/cmd/agentd`. No upstream code is vendored. Both projects are Apache-2.0: [fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid), [juicedata/juicefs](https://github.com/juicedata/juicefs).
 
-## Known limitations
-
-- Experiments cover a five-node kind cluster, 2/8/32 GiB datasets and a 1 GiB cache. Cross-cluster, multi-tenant and GPU training are untested.
-- Gated warmup costs time at 1000 mbit: M-1000 is 28.1% slower and S-1000 5.6% slower. Gating helps only when bandwidth is limited and the working set exceeds the cache.
-- The read path needs a local disk on each node. agentd stays out of the read I/O path, and read signals come from a side channel, so accuracy depends on hook coverage.
-- Sustained prefetch with lookahead 16 and 32 loses 7.4% and 17.3% against lookahead 8 (n=2). No lookahead setting gained anything.
-- The gateway runs a single replica; multi-replica scaling is not implemented.
-- Epochs are not scheduled. Epoch, shuffle and curriculum switches change prefetch order inside a node only and stay out of scheduling.
 
 ## Build and test
 
@@ -198,7 +190,6 @@ Documents under `docs/` are written in Chinese.
 | [4.3 Startup and experiments](docs/4.3-startup-and-experiments.md) | Image builds, control plane startup, experiment families |
 | [4.4 Experiment protocol](docs/4.4-experiment-protocol.md) | Pre-registered hypotheses, metric definitions, condition matrix and criteria |
 | [4.5 Metric decisions](docs/4.5-metric-decisions.md) | Decided acceptance criteria and metric definitions |
-| [4.6 Experiment version log](docs/4.6-experiment-version-log.md) | Version × experiment family matrix and artifact paths |
 | [5.x Cache core library](docs/5.1-design.md) | Requirements, plan, decisions and tests |
 | [6.x Agent service](docs/6.1-design.md) | Node-plane interfaces and decisions |
 | [7.x Controller and Scheduler](docs/7.1-design.md) | Control-plane interfaces and decisions |

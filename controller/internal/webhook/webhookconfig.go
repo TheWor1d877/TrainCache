@@ -23,7 +23,7 @@ func NewMutatingWebhookConfiguration(name, namespace, serviceName string, caBund
 	none := admissionregistrationv1.SideEffectClassNone
 	equivalent := admissionregistrationv1.Equivalent
 
-	entry := func(webhookName, path string, policy admissionregistrationv1.FailurePolicyType, timeout int32, selector map[string]string) admissionregistrationv1.MutatingWebhook {
+	entry := func(webhookName, path string, policy admissionregistrationv1.FailurePolicyType, timeout int32, selector *metav1.LabelSelector) admissionregistrationv1.MutatingWebhook {
 		return admissionregistrationv1.MutatingWebhook{
 			Name:                    webhookName,
 			AdmissionReviewVersions: []string{"v1"},
@@ -48,7 +48,7 @@ func NewMutatingWebhookConfiguration(name, namespace, serviceName string, caBund
 					Scope:       ptr(admissionregistrationv1.AllScopes),
 				},
 			}},
-			ObjectSelector: &metav1.LabelSelector{MatchLabels: selector},
+			ObjectSelector: selector,
 		}
 	}
 
@@ -56,9 +56,17 @@ func NewMutatingWebhookConfiguration(name, namespace, serviceName string, caBund
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			entry(WebhookName, MutatePodPath, admissionregistrationv1.Ignore, 5,
-				map[string]string{warmup.WarmupEnabledLabel: warmup.WarmupEnabledValue}),
+				&metav1.LabelSelector{MatchLabels: map[string]string{
+					warmup.WarmupEnabledLabel: warmup.WarmupEnabledValue,
+				}}),
+			// objectSelector 用 Exists 而不是限定取值（D24）：label 值是
+			// 每个任务的 ConfigMap 名，不可枚举，限定取值时写错值的 Pod 会
+			// 静默绕过 webhook；键存在即进准入，值的合法性由 mutator 判。
 			entry(CheckpointWebhookName, MutateCheckpointPath, admissionregistrationv1.Fail, 10,
-				map[string]string{CheckpointEnabledLabel: CheckpointEnabledValue}),
+				&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key:      CheckpointEnabledLabel,
+					Operator: metav1.LabelSelectorOpExists,
+				}}}),
 		},
 	}
 }

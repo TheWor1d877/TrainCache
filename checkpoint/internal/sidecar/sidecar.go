@@ -38,6 +38,11 @@ const (
 	defaultRestoreDeadline = 10 * time.Minute
 	defaultSlowRestore     = 5 * time.Minute
 	defaultRetention       = 1
+
+	// DefaultRestoreGiveUpAfter 是恢复放弃期限（10.2 D14）。cmd 的装配序把
+	// RESTORE_DEADLINE 合进 Options 后才调 New，所以「必须大于恢复期限」
+	// 在 New 里判定，非法值走退出码 2 的配置错误路径。
+	DefaultRestoreGiveUpAfter = 60 * time.Minute
 )
 
 var (
@@ -51,6 +56,7 @@ type Options struct {
 	TaskID    string
 	Rank      int
 	WorldSize int
+	Job       string // JOB，owner Job 名；裸 Pod 时为空串（design 10.2 D26）
 
 	TaskDir   string // TRAINCACHE_CHECKPOINT_DIR，指向 <work>/<task_id>
 	NVMEDir   string // NVME_DIR，缓存根目录；为空表示关闭缓存
@@ -71,6 +77,7 @@ type Options struct {
 	ScanStable            int
 	SaveDeadline          time.Duration
 	RestoreDeadline       time.Duration
+	RestoreGiveUpAfter    time.Duration // 到点仍未恢复成功则放弃并退出（D14）
 	SaveRetryIntervals    []time.Duration
 	RestoreRetryIntervals []time.Duration
 	RestoreSlowInterval   time.Duration
@@ -174,6 +181,13 @@ func New(opts Options, factory Factory) (*Sidecar, error) {
 	if opts.CheckpointStep != nil && *opts.CheckpointStep < 0 {
 		return nil, fmt.Errorf("sidecar: checkpoint step=%d 不能为负", *opts.CheckpointStep)
 	}
+	// 放弃期限必须大于恢复期限：慢速重试段的存在以恢复期限到点为起点，
+	// 前者不大于后者时慢速段长度为零，恢复一失败就退出，等于绕过了
+	// 「保留现场让人排障」的设计（design 10.2 D14）。这里判非法而不是取大。
+	if opts.RestoreGiveUpAfter <= opts.RestoreDeadline {
+		return nil, fmt.Errorf("sidecar: 恢复放弃期限 %s 需大于恢复期限 %s",
+			opts.RestoreGiveUpAfter, opts.RestoreDeadline)
+	}
 	log := opts.Logger
 	if log == nil {
 		log = slog.Default()
@@ -234,6 +248,9 @@ func normalize(o Options) Options {
 	}
 	if o.RestoreSlowInterval <= 0 {
 		o.RestoreSlowInterval = defaultSlowRestore
+	}
+	if o.RestoreGiveUpAfter <= 0 {
+		o.RestoreGiveUpAfter = DefaultRestoreGiveUpAfter
 	}
 	if o.NVMERetention <= 0 {
 		o.NVMERetention = defaultRetention

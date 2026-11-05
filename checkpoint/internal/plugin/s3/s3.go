@@ -188,20 +188,22 @@ func loadBackend(raw json.RawMessage) (*backend, error) {
 	}, nil
 }
 
-// resolve 只把 world_size 个 rank 的 manifest 全部存在且能 Unmarshal 的
-// step 视为完整。latest 从大到小找第一个完整 step，step 模式只认指定值。
+// resolve 把 rank 集合恰好等于 {0 … world_size-1} 且 world_size 份 manifest
+// 全部能 Unmarshal 的 step 视为完整（design 10.2 D25）。latest 从大到小找第一个
+// 完整 step，step 模式只认指定值；两者都把枚举期间看到过的最大多余 rank 编号经
+// MaxExtraRank 带回，供 checkpointd 记 reason=rank_beyond_world_size 的 WARN。
 func resolve(ctx context.Context, b *backend, p plugin.ResolveParams) (plugin.ResolveResult, error) {
 	if err := validateResolve(p); err != nil {
 		return plugin.ResolveResult{}, err
 	}
 
 	if p.Policy.Mode == "step" {
-		epoch, ok, err := b.completeStep(ctx, p.TaskID, p.Policy.Step, p.WorldSize)
+		epoch, maxExtra, ok, err := b.completeStep(ctx, p.TaskID, p.Policy.Step, p.WorldSize)
 		if err != nil {
 			return plugin.ResolveResult{}, err
 		}
 		if !ok {
-			return plugin.ResolveResult{}, nil
+			return plugin.ResolveResult{MaxExtraRank: maxExtra}, nil
 		}
 		return plugin.ResolveResult{Found: true, Step: p.Policy.Step, Complete: true, Epoch: epoch}, nil
 	}
@@ -227,57 +229,111 @@ func resolve(ctx context.Context, b *backend, p plugin.ResolveParams) (plugin.Re
 	}
 	sort.Slice(steps, func(i, j int) bool { return steps[i] > steps[j] })
 
+	var maxExtra int
 	for _, step := range steps {
-		epoch, ok, err := b.completeStep(ctx, p.TaskID, step, p.WorldSize)
+		epoch, extra, ok, err := b.completeStep(ctx, p.TaskID, step, p.WorldSize)
 		if err != nil {
 			return plugin.ResolveResult{}, err
 		}
 		if ok {
-			return plugin.ResolveResult{Found: true, Step: step, Complete: true, Epoch: epoch}, nil
+			// 选中 step 自身没有多余份（有的话就判不完整了），带回去的是
+			// 更靠新 step 上的编号：异常拓扑只要在本次枚举里出现过就要报。
+			return plugin.ResolveResult{Found: true, Step: step, Complete: true, Epoch: epoch, MaxExtraRank: maxExtra}, nil
+		}
+		if extra > maxExtra {
+			maxExtra = extra
 		}
 	}
-	return plugin.ResolveResult{}, nil
+	return plugin.ResolveResult{MaxExtraRank: maxExtra}, nil
 }
 
-func (b *backend) completeStep(ctx context.Context, taskID string, step int64, worldSize int) (int, bool, error) {
+// completeStep 按 design 10.2 D25 判完整性：实际存在的 rank 集合必须恰好
+// 等于 {0 … worldSize-1}。缺任一份判不完整；编号 ≥ worldSize 的已提交份
+// 同样判不完整，经 maxExtra 带回看到过的最大编号（0 表示没有多余份）。
+// 多余份的编号在既有的那一次非递归 LIST 里就能看到，不额外请求；只有真
+// 出现候选时才为每个候选付一次 GET，用来确认它是否已提交。
+func (b *backend) completeStep(ctx context.Context, taskID string, step int64, worldSize int) (epoch int, maxExtra int, complete bool, err error) {
 	stepPrefix := plugin.StepPrefix(b.prefix, taskID, step)
 	objs, err := b.listPrefix(ctx, stepPrefix+"/", false)
 	if err != nil {
-		return 0, false, toPluginError(err)
+		return 0, 0, false, toPluginError(err)
 	}
 
 	ranks := make(map[int]struct{}, worldSize)
+	var extra []int
 	for _, obj := range objs {
-		if rank, ok := parseRankPrefix(obj.Key, stepPrefix); ok && rank < worldSize {
-			ranks[rank] = struct{}{}
+		rank, ok := parseRankPrefix(obj.Key, stepPrefix)
+		if !ok {
+			continue
 		}
+		if rank < worldSize {
+			ranks[rank] = struct{}{}
+			continue
+		}
+		extra = append(extra, rank)
+	}
+	// 期望集合缺份与多余份都判不完整，但先确认多余份：它决定 WARN 的取值，
+	// 两侧插件的判定顺序一致，同一个 step 才能给出同样的 MaxExtraRank。
+	maxExtra, err = b.committedMaxExtra(ctx, taskID, step, extra)
+	if err != nil {
+		return 0, maxExtra, false, err
+	}
+	if maxExtra > 0 {
+		return 0, maxExtra, false, nil
 	}
 	if len(ranks) < worldSize {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 
 	// rank 0 的 epoch 优先；其余 rank 只用于确认 manifest 可用且彼此一致。
-	epoch := 0
 	for rank := 0; rank < worldSize; rank++ {
 		data, err := b.getManifest(ctx, plugin.ManifestKey(b.prefix, taskID, step, rank))
 		if err != nil {
 			if plugin.CodeOf(err) == plugin.CodeNotFound {
-				return 0, false, nil
+				return 0, 0, false, nil
 			}
-			return 0, false, err
+			return 0, 0, false, err
 		}
 		m, err := manifest.Unmarshal(data)
 		if err != nil {
-			return 0, false, nil
+			return 0, 0, false, nil
 		}
 		if m.TaskID != taskID || m.Step != step || m.Rank != rank || m.WorldSize != worldSize {
-			return 0, false, nil
+			return 0, 0, false, nil
 		}
 		if rank == 0 {
 			epoch = m.Epoch
 		}
 	}
-	return epoch, true, nil
+	return epoch, 0, true, nil
+}
+
+// committedMaxExtra 确认候选 rank 是否真的提交过：manifest 存在、能解析且
+// task_id/step/rank 与请求相符才算。有意不比对 world_size——副本数变小正是
+// 这里要发现的异常本身，按请求值比对只会把它藏起来。
+// 缺 manifest 是在途半成品，按 D25 不影响完整性。
+func (b *backend) committedMaxExtra(ctx context.Context, taskID string, step int64, candidates []int) (int, error) {
+	maxRank := 0
+	for _, rank := range candidates {
+		data, err := b.getManifest(ctx, plugin.ManifestKey(b.prefix, taskID, step, rank))
+		if err != nil {
+			if plugin.CodeOf(err) == plugin.CodeNotFound {
+				continue
+			}
+			return 0, err
+		}
+		m, err := manifest.Unmarshal(data)
+		if err != nil {
+			continue
+		}
+		if m.TaskID != taskID || m.Step != step || m.Rank != rank {
+			continue
+		}
+		if rank > maxRank {
+			maxRank = rank
+		}
+	}
+	return maxRank, nil
 }
 
 // save 先扫描并哈希本地文件，再逐个分片上传，最后写 manifest。

@@ -642,3 +642,173 @@ func TestScanLocalFiltersMarkersAndRejectsSymlink(t *testing.T) {
 		t.Fatalf("符号链接错误 = %v，期望 INVALID_ARGUMENT", err)
 	}
 }
+
+// requestCounter 只统计 GET 与 LIST 次数，用来锁住 D25 的枚举成本：多余份的
+// 编号来自既有的那一次非递归 LIST，确认提交才按候选多付一次 GET。
+type requestCounter struct {
+	objectAPI
+	mu    sync.Mutex
+	gets  int
+	lists int
+}
+
+func (c *requestCounter) GetObject(ctx context.Context, bucket, object string, opts minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error) {
+	c.mu.Lock()
+	c.gets++
+	c.mu.Unlock()
+	return c.objectAPI.GetObject(ctx, bucket, object, opts)
+}
+
+func (c *requestCounter) ListObjects(ctx context.Context, bucket string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo {
+	c.mu.Lock()
+	c.lists++
+	c.mu.Unlock()
+	return c.objectAPI.ListObjects(ctx, bucket, opts)
+}
+
+func (c *requestCounter) counts() (gets, lists int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gets, c.lists
+}
+
+// TestResolveRequiresExactRankSet 锁住 D25 在 S3 侧的三种 rank 集合：
+// world_size=3 时 {0,1,2} 完整、{0,1,3} 不完整（缺 2）、{0,1,2,3} 不完整（多出 3）。
+func TestResolveRequiresExactRankSet(t *testing.T) {
+	cases := []struct {
+		name         string
+		ranks        []int
+		wantFound    bool
+		wantMaxExtra int
+	}{
+		{"集合 {0,1,2} 完整", []int{0, 1, 2}, true, 0},
+		{"集合 {0,1,3} 缺 2", []int{0, 1, 3}, false, 3},
+		{"集合 {0,1,2,3} 多出 3", []int{0, 1, 2, 3}, false, 3},
+		{"多份取最大编号", []int{0, 1, 2, 3, 5}, false, 5},
+		{"只缺份没有多余", []int{0, 1}, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			b := testBackend(store)
+			for _, rank := range tc.ranks {
+				worldSize := 3
+				if rank >= worldSize {
+					// 多余份来自副本数更大的上一轮，manifest 自身要过校验。
+					worldSize = rank + 1
+				}
+				putTestManifest(t, store, b.prefix, "task", 4, rank, worldSize, 7)
+			}
+			res, err := resolve(context.Background(), b, plugin.ResolveParams{
+				TaskID: "task", Rank: 0, WorldSize: 3, Policy: plugin.Policy{Mode: "step", Step: 4},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Found != tc.wantFound || res.Complete != tc.wantFound {
+				t.Fatalf("resolve = %+v, want found=%v", res, tc.wantFound)
+			}
+			if res.MaxExtraRank != tc.wantMaxExtra {
+				t.Fatalf("max_extra_rank = %d, want %d", res.MaxExtraRank, tc.wantMaxExtra)
+			}
+		})
+	}
+}
+
+// TestResolveExtraRankWithoutManifest 锁住「多余份只在已提交时才算」：
+// rank-3/ 只有文件对象、没有 manifest 时是在途半成品，step 仍判完整。
+func TestResolveExtraRankWithoutManifest(t *testing.T) {
+	store := newFakeStore()
+	b := testBackend(store)
+	for _, rank := range []int{0, 1, 2} {
+		putTestManifest(t, store, b.prefix, "task", 4, rank, 3, 7)
+	}
+	store.putObject(plugin.FileKey(b.prefix, "task", 4, 3, "a.bin"), []byte("x"))
+
+	res, err := resolve(context.Background(), b, plugin.ResolveParams{
+		TaskID: "task", Rank: 0, WorldSize: 3, Policy: plugin.Policy{Mode: "latest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Found || !res.Complete || res.Step != 4 {
+		t.Fatalf("在途多余份不该判不完整: %+v", res)
+	}
+	if res.MaxExtraRank != 0 {
+		t.Fatalf("max_extra_rank = %d, want 0", res.MaxExtraRank)
+	}
+}
+
+// TestResolveIgnoresNonRankPrefixes 确认 step 目录下的杂项前缀不会被当成
+// 多余份：标记文件、临时名与不认识的名字都不参与集合比对（design 10.1 §5）。
+func TestResolveIgnoresNonRankPrefixes(t *testing.T) {
+	store := newFakeStore()
+	b := testBackend(store)
+	for _, rank := range []int{0, 1, 2} {
+		putTestManifest(t, store, b.prefix, "task", 4, rank, 3, 7)
+	}
+	stepPrefix := plugin.StepPrefix(b.prefix, "task", 4)
+	for _, key := range []string{
+		stepPrefix + "/.done",
+		stepPrefix + "/.complete/x",
+		stepPrefix + "/manifest.json.tmp-1",
+		stepPrefix + "/rank-x/manifest.json",
+		stepPrefix + "/rank-/a.bin",
+		stepPrefix + "/rank-99999999999/manifest.json",
+	} {
+		store.putObject(key, []byte("junk"))
+	}
+
+	res, err := resolve(context.Background(), b, plugin.ResolveParams{
+		TaskID: "task", Rank: 0, WorldSize: 3, Policy: plugin.Policy{Mode: "latest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Found || !res.Complete || res.MaxExtraRank != 0 {
+		t.Fatalf("杂项前缀不应影响完整性: %+v", res)
+	}
+}
+
+// TestResolveExtraRankRequestCost 把 D25 的成本钉住：干净 step 上枚举不多付
+// 请求；出现多余候选前缀时按候选各付至多一次确认 GET，LIST 次数不变。
+func TestResolveExtraRankRequestCost(t *testing.T) {
+	costFor := func(withExtra bool) (gets, lists, maxExtra int) {
+		t.Helper()
+		base := newFakeStore()
+		counter := &requestCounter{objectAPI: base}
+		b := testBackend(counter)
+		for _, rank := range []int{0, 1, 2} {
+			putTestManifest(t, base, b.prefix, "task", 4, rank, 3, 7)
+		}
+		if withExtra {
+			putTestManifest(t, base, b.prefix, "task", 4, 3, 4, 7)
+		}
+		res, err := resolve(context.Background(), b, plugin.ResolveParams{
+			TaskID: "task", Rank: 0, WorldSize: 3, Policy: plugin.Policy{Mode: "latest"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, l := counter.counts()
+		return g, l, res.MaxExtraRank
+	}
+
+	// latest 模式：1 次任务根 LIST + 1 次 step LIST + world_size 次 manifest GET。
+	cleanGets, cleanLists, cleanExtra := costFor(false)
+	if cleanLists != 2 || cleanGets != 3 || cleanExtra != 0 {
+		t.Fatalf("干净 step = gets %d lists %d extra %d, want 3/2/0", cleanGets, cleanLists, cleanExtra)
+	}
+
+	extraGets, extraLists, extraRank := costFor(true)
+	if extraLists != cleanLists {
+		t.Fatalf("多余份的检测不应增加 LIST 次数: %d vs %d", extraLists, cleanLists)
+	}
+	if extraRank != 3 {
+		t.Fatalf("max_extra_rank = %d, want 3", extraRank)
+	}
+	// 确认到多余份就判不完整，期望集合的 manifest 一次都不取：一个候选一次 GET。
+	if extraGets != 1 {
+		t.Fatalf("多余份确认 = %d 次 GET, want 1", extraGets)
+	}
+}

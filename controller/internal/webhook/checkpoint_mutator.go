@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -22,10 +23,12 @@ const MutateCheckpointPath = "/mutate-checkpoint"
 
 // Pod selection and injection annotations (docs/10.1 §4.2).
 const (
+	// CheckpointEnabledLabel 的值是同 namespace 的 ConfigMap 名（D24）。
+	// 启用与配置来源合在这一个 label 上：objectSelector 只按键是否存在匹配，
+	// annotation 进不了选择器，两个标记并列时「配了配置忘配 label」是无声
+	// 失败，合一个之后写错的下一步是准入拒绝。
 	CheckpointEnabledLabel = "traincache.io/checkpoint"
-	CheckpointEnabledValue = "enabled"
 
-	AnnotationCheckpoint     = "traincache.io/checkpoint"
 	AnnotationTaskID         = "traincache.io/task-id"
 	AnnotationWorldSize      = "traincache.io/world-size"
 	AnnotationRank           = "traincache.io/rank"
@@ -33,11 +36,12 @@ const (
 	AnnotationCheckpointImg  = "traincache.io/checkpoint-image"
 )
 
-// The sidecar image comes from the ConfigMap key checkpointImage or the Pod
-// annotation traincache.io/checkpoint-image. The sidecar is a release
-// artifact whose digest changes with every version, so there is no default
-// image to fall back to: a Pod without one is rejected, the same way a Pod
-// whose ConfigMap cannot be read is rejected.
+// The sidecar image comes from the Pod annotation traincache.io/checkpoint-image,
+// the ConfigMap key checkpointImage, or the release default the webhook
+// Deployment carries in CHECKPOINT_IMAGE, in that order. The release default
+// changes with every version, so there is no image to fall back to when all
+// three are empty: such a Pod is rejected, the same way a Pod whose ConfigMap
+// cannot be read is rejected.
 
 const (
 	checkpointContainerName = "checkpointd"
@@ -78,17 +82,20 @@ const (
 )
 
 // CheckpointMutator injects a checkpointd sidecar into Pods labeled
-// traincache.io/checkpoint=enabled. It reads backend configuration from the
-// ConfigMap named by AnnotationCheckpoint. Unlike PodMutator it rejects Pods
-// that look enabled but cannot be resolved, because a half-configured sidecar
-// would silently lose checkpoints.
+// traincache.io/checkpoint, whose value names the ConfigMap to read backend
+// configuration from (D24). Unlike PodMutator it rejects Pods that look
+// enabled but cannot be resolved, because a half-configured sidecar would
+// silently lose checkpoints.
 type CheckpointMutator struct {
 	// Client 直连 API server，不走 manager 的缓存 client：webhook 的 RBAC
 	// 只给 configmaps/jobs 的 get，没有 list/watch，缓存 informer 起不来，
 	// 读操作会一直阻塞到准入超时。
 	Client client.Reader
 	Log    *slog.Logger
-	Image  string
+	// DefaultImage 是本次发布里 checkpointd 镜像的取值（webhook Deployment
+	// 从环境变量读）。它排在用户给的值之后：Pod 注解、用户 ConfigMap 键都
+	// 能覆盖它。
+	DefaultImage string
 }
 
 type checkpointConfig struct {
@@ -137,14 +144,18 @@ func (m *CheckpointMutator) Handle(ctx context.Context, req admission.Request) a
 	}
 	log = log.With("pod", pod.Name, "namespace", pod.Namespace)
 
-	if pod.Labels[CheckpointEnabledLabel] != CheckpointEnabledValue {
+	// 没有 label 的 Pod 不该走到这里（objectSelector 按键存在匹配挡住了），
+	// 放行不改是 mutator 侧的同一判据；到了这里的 label 值必须先过
+	// ConfigMap 名的合法性（DNS-1123 label），旧写法 label=enabled 会按
+	// 「找名为 enabled 的 ConfigMap」处理，读不到即拒绝，不给特判。
+	rawCMName, ok := pod.Labels[CheckpointEnabledLabel]
+	if !ok {
 		return admission.Allowed("pod is not selected")
 	}
-
-	cmName := strings.TrimSpace(pod.Annotations[AnnotationCheckpoint])
-	if cmName == "" {
-		return deniedf("pod has %s=%s but is missing annotation %s",
-			CheckpointEnabledLabel, CheckpointEnabledValue, AnnotationCheckpoint)
+	cmName := strings.TrimSpace(rawCMName)
+	if errs := validation.IsDNS1123Label(cmName); len(errs) > 0 {
+		return deniedf("label %s=%q is not a valid ConfigMap name: %s",
+			CheckpointEnabledLabel, rawCMName, strings.Join(errs, "; "))
 	}
 
 	if m.Client == nil {
@@ -162,16 +173,16 @@ func (m *CheckpointMutator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Denied(err.Error())
 	}
 
-	image := m.Image
-	if image == "" {
-		image = cfg.Image
-	}
+	image := strings.TrimSpace(cfg.Image)
 	if override := strings.TrimSpace(pod.Annotations[AnnotationCheckpointImg]); override != "" {
 		image = override
 	}
 	if image == "" {
-		return deniedf("checkpoint image is not configured: set ConfigMap %q key %s or Pod annotation %s",
-			cmName, keyCheckpointImage, AnnotationCheckpointImg)
+		image = strings.TrimSpace(m.DefaultImage)
+	}
+	if image == "" {
+		return deniedf("checkpoint image is not configured: set Pod annotation %s, ConfigMap %q key %s, or the webhook deployment's %s",
+			AnnotationCheckpointImg, cmName, keyCheckpointImage, "CHECKPOINT_IMAGE")
 	}
 
 	if hasContainer(pod.Spec.Containers, checkpointContainerName) ||
@@ -241,10 +252,7 @@ func (m *CheckpointMutator) resolveWorldSize(ctx context.Context, pod *corev1.Po
 		return cmWorldSize, nil
 	}
 
-	jobName := pod.Labels["batch.kubernetes.io/job-name"]
-	if jobName == "" {
-		jobName = pod.Labels["job-name"]
-	}
+	jobName := podJobName(pod)
 	if jobName == "" {
 		return 1, nil
 	}
@@ -263,10 +271,7 @@ func resolveTaskID(pod *corev1.Pod) string {
 	if v := strings.TrimSpace(pod.Annotations[AnnotationTaskID]); v != "" {
 		return v
 	}
-	if v := pod.Labels["batch.kubernetes.io/job-name"]; v != "" {
-		return v
-	}
-	if v := pod.Labels["job-name"]; v != "" {
+	if v := podJobName(pod); v != "" {
 		return v
 	}
 	uid := string(pod.UID)
@@ -274,6 +279,15 @@ func resolveTaskID(pod *corev1.Pod) string {
 		uid = uid[:8]
 	}
 	return fmt.Sprintf("%s-%s", pod.Namespace, uid)
+}
+
+// podJobName 取 owner Job 名：Job controller 给受管 Pod 打
+// batch.kubernetes.io/job-name，更早的集群只有 job-name。裸 Pod 返回空串。
+func podJobName(pod *corev1.Pod) string {
+	if v := pod.Labels["batch.kubernetes.io/job-name"]; v != "" {
+		return v
+	}
+	return pod.Labels["job-name"]
 }
 
 func resolveRank(pod *corev1.Pod) (int, bool, error) {
@@ -491,6 +505,11 @@ func applyCheckpointInjection(pod *corev1.Pod, cmName string, cfg checkpointConf
 			{Name: "TASK_ID", Value: taskID},
 			{Name: "RANK", Value: strconv.Itoa(rank)},
 			{Name: "WORLD_SIZE", Value: strconv.Itoa(worldSize)},
+			// D26：checkpointd 没有 API server 访问，读不到自己的 Pod label，
+			// 跨链路日志对账要的 Job 名由准入写成字面量。裸 Pod 两个 label
+			// 都没有时写空串而不省略：消费侧不必分支判断变量存在性，也没有
+			// 可猜的默认值，空串明确表示「该 Pod 不属于任何 Job」。
+			{Name: "JOB", Value: podJobName(pod)},
 			{Name: "TRAINCACHE_CHECKPOINT_DIR", Value: taskDir},
 			{Name: "STATE_DIR", Value: checkpointRunDir + "/state"},
 			{Name: "PROBE_FILE", Value: checkpointRunDir + "/ready"},

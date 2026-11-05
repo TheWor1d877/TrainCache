@@ -36,6 +36,7 @@ func TestFieldNames(t *testing.T) {
 		Task("t").Key:             "task_id",
 		Step(1).Key:               "step",
 		Rank(0).Key:               "rank",
+		Job("job-a").Key:          "job",
 		Plugin("s3").Key:          "plugin",
 		Bytes(1).Key:              "bytes",
 		Retry(2).Key:              "retry",
@@ -45,5 +46,17 @@ func TestFieldNames(t *testing.T) {
 		if got != want {
 			t.Fatalf("field = %q, want %q", got, want)
 		}
+	}
+}
+
+// TestJobKeepsEmptyValue 锁住 D26 的口径：裸 Pod 时 job 为空串，
+// 字段仍然出现，日志侧才能按「有字段但为空」判断该 Pod 不属于 Job。
+func TestJobKeepsEmptyValue(t *testing.T) {
+	attr := Job("")
+	if attr.Key != FieldJob {
+		t.Fatalf("key = %q, want %q", attr.Key, FieldJob)
+	}
+	if attr.Value.String() != "" {
+		t.Fatalf("job = %q, want 空串", attr.Value.String())
 	}
 }

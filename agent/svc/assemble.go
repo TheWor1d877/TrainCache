@@ -70,6 +70,10 @@ type Agent struct {
 	// 本地块读取先 Mark,collector 的 inotify 兜底以 SelfOpened 过滤。nil 安全。
 	selfOpen *prefetch.SelfOpenGuard
 
+	// localGCOnce 保证本地副本清扫循环只起一次(StartBackground 可能被重复调用;
+	// 循环生命周期取首次注入的 signal ctx)。
+	localGCOnce sync.Once
+
 	// M9 阶段/归因骨架(D46/D47;装配期构造,业务逻辑由 M9 填写)。
 	phase *phaseTracker
 	stall *stallAttributor

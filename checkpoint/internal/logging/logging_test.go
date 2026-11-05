@@ -64,3 +64,75 @@ func TestNewRedactsAccessKey(t *testing.T) {
 		t.Fatalf("accessKey 未脱敏: %v", got["accessKey"])
 	}
 }
+
+// decodeLines 按行解析 JSON 输出。
+func decodeLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var got map[string]any
+		if err := json.Unmarshal(line, &got); err != nil {
+			t.Fatalf("第 %d 行不是 JSON 对象: %v: %q", len(lines)+1, err, line)
+		}
+		lines = append(lines, got)
+	}
+	return lines
+}
+
+// TestJobOnEveryLine 锁住 D26 的注入方式：job 作为 logger 公共字段挂一次，
+// 之后每一行都带上它，调用点不需要各写一遍。
+func TestJobOnEveryLine(t *testing.T) {
+	t.Setenv("JOB", "train-job-7f9c")
+	buf := captureOutput(t)
+	oldDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldDefault) })
+
+	log := New("checkpointd", "dev", "debug")
+	log.Info("第一条")
+	log.Warn("第二条")
+	slog.Default().Error("第三条")
+
+	lines := decodeLines(t, buf)
+	if len(lines) != 3 {
+		t.Fatalf("行数 = %d, want 3: %q", len(lines), buf.String())
+	}
+	for i, line := range lines {
+		if line["job"] != "train-job-7f9c" {
+			t.Fatalf("第 %d 行 job = %v, want train-job-7f9c", i+1, line["job"])
+		}
+	}
+}
+
+// TestEmptyJobFieldIsPresent 锁住 D26 的另一半：JOB 未设置或为空串时
+// job 仍以空串出现，日志一行都不能少——字段存在性是按 Job 名对账的前提。
+func TestEmptyJobFieldIsPresent(t *testing.T) {
+	for name, value := range map[string]string{"未设置": "", "空串": "   "} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("JOB", value)
+			buf := captureOutput(t)
+			oldDefault := slog.Default()
+			t.Cleanup(func() { slog.SetDefault(oldDefault) })
+
+			log := New("checkpointd", "dev", "debug")
+			log.Info("启动")
+			log.Warn("退出")
+
+			lines := decodeLines(t, buf)
+			if len(lines) != 2 {
+				t.Fatalf("行数 = %d, want 2: %q", len(lines), buf.String())
+			}
+			for i, line := range lines {
+				raw, ok := line["job"]
+				if !ok {
+					t.Fatalf("第 %d 行缺 job 字段: %v", i+1, line)
+				}
+				if raw != "" {
+					t.Fatalf("第 %d 行 job = %v, want 空串", i+1, raw)
+				}
+			}
+		})
+	}
+}

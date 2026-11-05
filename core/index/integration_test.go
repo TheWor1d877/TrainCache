@@ -16,8 +16,9 @@ import (
 //
 //	写块（fetch.Fetch 经 mock 下载）→ 测试代码扮演调用方 cas.Acquire(fp)+1（§7.1 步骤 1）
 //	→ Writer.Commit → Catalog.Refresh → Lookup 命中 → cas.Open 读回与源数据逐字节一致
-//	→ 数据集合更新（新条目可见、旧条目保留）→ Sweep 回收窗口外块/对象（复用分片保留）
-//	→ 后台刷新运行中（go c.Start）Pin 持有的孤儿块 Sweep 不删，Unpin 后才删。
+//	→ 数据集合更新（新条目可见、旧条目保留）→ Collector 回收窗口外对象（复用分片保留）、
+//		LocalGC 按节点口径回收本地副本（活块 = CURRENT ∪ 有效 claim）
+//	→ 后台刷新运行中（go c.Start）Pin 持有的孤儿块 LocalGC 跳过不删，Unpin 后才删。
 func TestEndToEndLifecycle(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
@@ -137,23 +138,36 @@ func TestEndToEndLifecycle(t *testing.T) {
 	}
 	readBack(t, catalog, "/data/train.bin", train3)
 
-	col := NewCollector(env.store, env.cs, cfg)
+	col := NewCollector(env.store, cfg)
+	g := NewLocalGC(env.store, env.cs, cfg)
 
 	// 调用方记账：train v1 所属快照已出保留窗口，Release 其逻辑引用。
 	env.cs.Release(trainFP1)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep 1: %v", err)
 	}
-	// s1：manifest + 其独占的 [train-v1] 分片被删（[eval,meta] 分片被保留快照复用）；train v1 块被删。
-	if removedBlocks != 1 || removedObjects != 2 {
-		t.Fatalf("Sweep 1 删除 (%d, %d)，期望 (1, 2)", removedBlocks, removedObjects)
+	// s1：manifest + 其独占的 [train-v1] 分片被删（[eval,meta] 分片被保留快照复用）。
+	if removedObjects != 2 {
+		t.Fatalf("Sweep 1 删除对象 %d 个，期望 2", removedObjects)
+	}
+	// 块：活块 = CURRENT(s3) 引用的 {eval, meta, train v3}；train v1（出窗孤儿）与
+	// train v2（仅窗口内 s2 引用、无 claim）的本地副本都被 LocalGC 回收。
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep 1: %v", err)
+	}
+	if removedBlocks != 2 {
+		t.Fatalf("LocalGC Sweep 1 删除块 %d 个，期望 2", removedBlocks)
 	}
 	if blockExists(t, env.cs, trainFP1) {
 		t.Fatal("窗口外 train v1 块未被删除")
 	}
-	// 活块：eval/meta（跨所有快照）、train v2（窗口内的 s2）、train v3（CURRENT）。
-	for _, fp := range []cas.Fingerprint{evalFP, metaFP, trainFP2, trainFP3} {
+	if blockExists(t, env.cs, trainFP2) {
+		t.Fatal("仅窗口内旧快照引用、无 claim 的 train v2 本地副本未被回收")
+	}
+	// 活块：eval/meta（跨所有快照）、train v3（CURRENT）。
+	for _, fp := range []cas.Fingerprint{evalFP, metaFP, trainFP3} {
 		if !blockExists(t, env.cs, fp) {
 			t.Fatalf("活块 %s 被删除", fp)
 		}
@@ -182,28 +196,33 @@ func TestEndToEndLifecycle(t *testing.T) {
 		catalog.Start(bgCtx)
 	}()
 
-	// 模拟在途读者：train v2 已出窗口且引用已释放，Pin 令其生命周期延长。
-	env.cs.Release(trainFP2)
-	if err := env.cs.Pin(trainFP2); err != nil {
-		t.Fatalf("Pin(%s): %v", trainFP2, err)
+	// 模拟在途读者：train v3 因 commit 4 不再是活块，Pin 令其生命周期延长，
+	// LocalGC 本轮 Evict 得 ErrInUse、跳过不报错。
+	env.cs.Release(trainFP3)
+	if err := env.cs.Pin(trainFP3); err != nil {
+		t.Fatalf("Pin(%s): %v", trainFP3, err)
 	}
-	removedBlocks, removedObjects, err = col.Sweep(ctx, dataset)
+	removedObjects, err = col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep 2: %v", err)
 	}
-	// s2 的 manifest 与独占分片被删；train v2 块因 pin>0 跳过。
+	removedBlocks, err = g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep 2: %v", err)
+	}
+	// s2 的 manifest 与独占分片被删 = 2 对象；train v3 块因 pin>0 跳过。
 	if removedBlocks != 0 || removedObjects != 2 {
 		t.Fatalf("Sweep 2 删除 (%d, %d)，期望 (0, 2)", removedBlocks, removedObjects)
 	}
-	if !blockExists(t, env.cs, trainFP2) {
-		t.Fatal("pin 持有的块被 Sweep 删除")
+	if !blockExists(t, env.cs, trainFP3) {
+		t.Fatal("pin 持有的块被 LocalGC 删除")
 	}
 	// 持 pin 期间仍可完整读回（并发读），且后台刷新未受影响。
 	readBackPinned := func() {
 		t.Helper()
-		gotTrain2 := readBackFromFP(t, env, trainFP2)
-		if !bytes.Equal(gotTrain2, train2) {
-			t.Fatalf("pin 期间读回 train v2 不一致：%d 字节", len(gotTrain2))
+		gotTrain3 := readBackFromFP(t, env, trainFP3)
+		if !bytes.Equal(gotTrain3, train3) {
+			t.Fatalf("pin 期间读回 train v3 不一致：%d 字节", len(gotTrain3))
 		}
 	}
 	readBackPinned()
@@ -216,19 +235,23 @@ func TestEndToEndLifecycle(t *testing.T) {
 		t.Fatalf("CURRENT snapID = %q，期望 %q", gotSnap, s4)
 	}
 
-	// Unpin 后再 Sweep：train v2 孤儿块本次被删，其余活块保留。
-	env.cs.Unpin(trainFP2)
-	removedBlocks, removedObjects, err = col.Sweep(ctx, dataset)
+	// Unpin 后再扫一轮：train v3 孤儿块本轮被删，其余活块保留。
+	env.cs.Unpin(trainFP3)
+	removedObjects, err = col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep 3: %v", err)
+	}
+	removedBlocks, err = g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("LocalGC Sweep 3: %v", err)
 	}
 	if removedBlocks != 1 || removedObjects != 0 {
 		t.Fatalf("Sweep 3 删除 (%d, %d)，期望 (1, 0)", removedBlocks, removedObjects)
 	}
-	if blockExists(t, env.cs, trainFP2) {
+	if blockExists(t, env.cs, trainFP3) {
 		t.Fatal("Unpin 后孤儿块未被删除")
 	}
-	for _, fp := range []cas.Fingerprint{evalFP, metaFP, trainFP3, trainFP4} {
+	for _, fp := range []cas.Fingerprint{evalFP, metaFP, trainFP4} {
 		if !blockExists(t, env.cs, fp) {
 			t.Fatalf("活块 %s 被删除", fp)
 		}
@@ -242,9 +265,13 @@ func TestEndToEndLifecycle(t *testing.T) {
 	readBack(t, catalog, "/data/train.bin", train4)
 	readBack(t, catalog, "/data/eval.bin", eval1)
 	readBack(t, catalog, "/data/meta.json", meta1)
-	removedBlocks, removedObjects, err = col.Sweep(ctx, dataset)
-	if err != nil || removedBlocks != 0 || removedObjects != 0 {
-		t.Fatalf("收尾 Sweep 删除 (%d, %d) err=%v，期望 (0, 0)", removedBlocks, removedObjects, err)
+	removedObjects, err = col.Sweep(ctx, dataset)
+	if err != nil || removedObjects != 0 {
+		t.Fatalf("收尾对象 Sweep %v，删除 %d 个，期望 (0, nil)", err, removedObjects)
+	}
+	removedBlocks, err = g.Sweep(ctx, []string{dataset})
+	if err != nil || removedBlocks != 0 {
+		t.Fatalf("收尾块 Sweep %v，删除 %d 个，期望 (0, nil)", err, removedBlocks)
 	}
 	if !objectExists(t, env.store, CurrentKey(dataset)) {
 		t.Fatal("收尾后 CURRENT 对象缺失")

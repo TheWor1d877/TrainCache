@@ -1,0 +1,16 @@
+# The checkpointd image the webhook injects into training Pods.
+#
+# Released manifests rewrite this value to the digest of the same release, so
+# the sidecar a Pod gets is the version this release pinned. A Pod annotation
+# traincache.io/checkpoint-image or the user's own ConfigMap key
+# checkpointImage takes precedence over this value.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-checkpoint-image
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+    app.kubernetes.io/part-of: traincache
+data:
+  checkpointImage: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev

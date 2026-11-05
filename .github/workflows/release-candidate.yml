@@ -85,7 +85,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           ./hack/render-install.sh "$VERSION" \
-            "$D_MANAGER" "$D_WEBHOOK" "$D_SCHEDULER" "$D_AGENT" "$D_GATEWAY" install.yaml
+            "$D_MANAGER" "$D_WEBHOOK" "$D_SCHEDULER" "$D_AGENT" "$D_GATEWAY" \
+            "$D_CHECKPOINT" install.yaml
 
       - name: build cli
         run: |
@@ -117,8 +118,9 @@ jobs:
                 "traincache-checkpointd": $dc
               },
               created_at: $created}' >candidate.json
-          # install.yaml 只有五个部署组件；checkpointd 是第六个镜像，由准入注入，
-          # 因此 candidate.json 记六个 digest，install.yaml 仍是五个引用。
+          # install.yaml 记六个 digest：五个部署组件加 checkpointd。
+          # checkpointd 不进任何 Deployment，由准入注入，它的 digest 写进
+          # traincache-checkpoint-image ConfigMap。
           jq -e '.images | length == 6' candidate.json >/dev/null
           sha256sum install.yaml traincache-linux-amd64 trainpublish-linux-amd64 \
             candidate.json >SHA256SUMS

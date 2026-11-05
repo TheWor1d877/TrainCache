@@ -13,6 +13,7 @@ const (
 	FieldTaskID     = "task_id"
 	FieldStep       = "step"
 	FieldRank       = "rank"
+	FieldJob        = "job"
 	FieldPlugin     = "plugin"
 	FieldBytes      = "bytes"
 	FieldBytesTotal = "bytes_total"
@@ -36,11 +37,15 @@ const (
 	StateFailed    State = "failed"
 )
 
-// Task / Step / Rank / Plugin / Bytes / Retry / State 返回常用字段属性，
+// Task / Step / Rank / Job / Plugin / Bytes / Retry / State 返回常用字段属性，
 // 业务代码不直接写字段名，避免拼写漂移。
-func Task(id string) slog.Attr     { return slog.String(FieldTaskID, id) }
-func Step(n int64) slog.Attr       { return slog.Int64(FieldStep, n) }
-func Rank(n int) slog.Attr         { return slog.Int(FieldRank, n) }
+func Task(id string) slog.Attr { return slog.String(FieldTaskID, id) }
+func Step(n int64) slog.Attr   { return slog.Int64(FieldStep, n) }
+func Rank(n int) slog.Attr     { return slog.Int(FieldRank, n) }
+
+// Job 返回 job 字段（docs/10.2 D26）。空串是合法取值：裸 Pod 或自定义 CR
+// 直接建出的 Pod 没有 owner Job，字段仍要出现。
+func Job(name string) slog.Attr    { return slog.String(FieldJob, name) }
 func Plugin(name string) slog.Attr { return slog.String(FieldPlugin, name) }
 func Bytes(n int64) slog.Attr      { return slog.Int64(FieldBytes, n) }
 func Retry(n int) slog.Attr        { return slog.Int(FieldRetry, n) }

@@ -33,6 +33,11 @@ const (
 	EnvLogLevel          = "CONTROLLER_LOG_LEVEL"
 	EnvDebugAddr         = "CONTROLLER_DEBUG_ADDR"
 
+	// EnvCheckpointImage 是本次发布里 checkpointd 镜像的取值。安装清单把它
+	// 放在 traincache-checkpoint-image ConfigMap 里，webhook Deployment 用
+	// 环境变量读它，作为注入 sidecar 镜像的发布默认值。
+	EnvCheckpointImage = "CHECKPOINT_IMAGE"
+
 	// K auto-default inputs. They live in the traincache-config ConfigMap so
 	// Agent and Controller read the same cacheCapacityBytes.
 	EnvCacheCapacityBytes = "TRAINCACHE_CACHE_CAPACITY_BYTES"
@@ -71,6 +76,9 @@ type Config struct {
 	CacheCapacityBytes int64
 	StartupWindowBytes int64
 	MaxFillFraction    float64
+	// CheckpointImage 是本次发布里 checkpointd 镜像的取值（空 = 没有发布
+	// 默认值，准入要求用户自己提供镜像）。
+	CheckpointImage string
 }
 
 // Load reads the process environment.
@@ -88,6 +96,7 @@ func load(lookup func(string) (string, bool)) (*Config, error) {
 		GateName:        env(lookup, EnvGateName, "traincache.io/warmup"),
 		LogLevel:        strings.ToLower(env(lookup, EnvLogLevel, "info")),
 		DebugAddr:       env(lookup, EnvDebugAddr, DefaultDebugAddr),
+		CheckpointImage: strings.TrimSpace(env(lookup, EnvCheckpointImage, "")),
 	}
 
 	var err error

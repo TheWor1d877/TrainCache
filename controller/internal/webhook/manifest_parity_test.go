@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -52,11 +53,16 @@ func TestManifestParity(t *testing.T) {
 		if s.ObjectSelector == nil || g.ObjectSelector == nil {
 			t.Fatalf("webhook %q objectSelector: manifest %v, generated %v", s.Name, s.ObjectSelector, g.ObjectSelector)
 		}
-		for key, value := range g.ObjectSelector.MatchLabels {
-			if s.ObjectSelector.MatchLabels[key] != value {
-				t.Fatalf("webhook %q objectSelector[%s]: manifest %q, generated %q",
-					s.Name, key, s.ObjectSelector.MatchLabels[key], value)
-			}
+		// matchLabels 与 matchExpressions 都要一致：checkpoint 那条只写
+		// matchExpressions Exists（D24），漏比它等于放着一份装不进集群的
+		// 清单不管。
+		if !reflect.DeepEqual(s.ObjectSelector.MatchLabels, g.ObjectSelector.MatchLabels) {
+			t.Fatalf("webhook %q objectSelector matchLabels: manifest %v, generated %v",
+				s.Name, s.ObjectSelector.MatchLabels, g.ObjectSelector.MatchLabels)
+		}
+		if !reflect.DeepEqual(s.ObjectSelector.MatchExpressions, g.ObjectSelector.MatchExpressions) {
+			t.Fatalf("webhook %q objectSelector matchExpressions: manifest %v, generated %v",
+				s.Name, s.ObjectSelector.MatchExpressions, g.ObjectSelector.MatchExpressions)
 		}
 	}
 }

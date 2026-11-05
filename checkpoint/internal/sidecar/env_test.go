@@ -7,12 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 var allEnvKeys = []string{
 	envTaskID, envRank, envWorldSize, envTaskDir, envNVMEDir, envStateDir,
 	envProbeFile, envPlugin, envPluginPath, envBackend, envRequire,
-	envRetention, envCheckpointStep,
+	envRetention, envCheckpointStep, envJob, envRestoreGiveUpAfter,
 }
 
 func clearSidecarEnv(t *testing.T) {
@@ -76,6 +77,13 @@ func TestFromEnvDefaults(t *testing.T) {
 	if opts.CheckpointStep != nil {
 		t.Fatalf("CheckpointStep = %v, want nil", *opts.CheckpointStep)
 	}
+	// 裸 Pod 没有 owner Job：JOB 未注入时 Job 是空串而不是缺省值，也不报错。
+	if opts.Job != "" {
+		t.Fatalf("Job = %q, want 空串", opts.Job)
+	}
+	if opts.RestoreGiveUpAfter != DefaultRestoreGiveUpAfter {
+		t.Fatalf("RestoreGiveUpAfter = %s, want %s", opts.RestoreGiveUpAfter, DefaultRestoreGiveUpAfter)
+	}
 }
 
 func TestFromEnvRequiredVariables(t *testing.T) {
@@ -115,6 +123,9 @@ func TestFromEnvInvalidValues(t *testing.T) {
 		{"step not int", func(t *testing.T) { t.Setenv(envCheckpointStep, "x") }, envCheckpointStep},
 		{"task traversal", func(t *testing.T) { t.Setenv(envTaskID, "../escape") }, envTaskID},
 		{"plugin traversal", func(t *testing.T) { t.Setenv(envPlugin, "../escape") }, envPlugin},
+		{"give up not duration", func(t *testing.T) { t.Setenv(envRestoreGiveUpAfter, "abc") }, envRestoreGiveUpAfter},
+		{"give up zero", func(t *testing.T) { t.Setenv(envRestoreGiveUpAfter, "0s") }, envRestoreGiveUpAfter},
+		{"give up negative", func(t *testing.T) { t.Setenv(envRestoreGiveUpAfter, "-5m") }, envRestoreGiveUpAfter},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -143,6 +154,8 @@ func TestFromEnvOptionalOverrides(t *testing.T) {
 	t.Setenv(envRequire, "true")
 	t.Setenv(envRetention, "3")
 	t.Setenv(envCheckpointStep, "42")
+	t.Setenv(envJob, "train-job-7f9c")
+	t.Setenv(envRestoreGiveUpAfter, "90m")
 
 	opts, err := FromEnv()
 	if err != nil {
@@ -162,6 +175,12 @@ func TestFromEnvOptionalOverrides(t *testing.T) {
 	}
 	if opts.CheckpointStep == nil || *opts.CheckpointStep != 42 {
 		t.Fatalf("CheckpointStep = %v", opts.CheckpointStep)
+	}
+	if opts.Job != "train-job-7f9c" {
+		t.Fatalf("Job = %q, want train-job-7f9c", opts.Job)
+	}
+	if opts.RestoreGiveUpAfter != 90*time.Minute {
+		t.Fatalf("RestoreGiveUpAfter = %s, want 90m", opts.RestoreGiveUpAfter)
 	}
 }
 

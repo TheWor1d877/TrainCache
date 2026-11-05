@@ -15,6 +15,12 @@ import (
 
 var errNoCheckpoint = errors.New("sidecar: 后端没有完整 checkpoint")
 
+// ErrRestoreGiveUp 标记「慢速重试到放弃期限仍未恢复成功」这一终态。Run 把它
+// 原样向上返回，cmd/checkpointd 按 errors.Is 识别并以退出码 3 结束（design
+// 10.1 §7.3、§8），与配置非法的退出码 2 分开：2 重拉一定没用，3 交给 Job 的
+// backoffLimit 记账，重启次数用完才判 Failed。
+var ErrRestoreGiveUp = errors.New("sidecar: 恢复放弃")
+
 type restoreState struct {
 	policy   plugin.Policy
 	latest   bool
@@ -23,8 +29,10 @@ type restoreState struct {
 	step     int64
 }
 
-// restore 按 design 10.1 §6.4、§6.5 恢复。失败时进程不退出，探针保持
-// 非 ready；超过 RestoreDeadline 后转为每 RestoreSlowInterval 一轮。
+// restore 按 design 10.1 §6.4、§6.5 与 10.2 D14 分三段恢复：
+// RestoreDeadline 内密集重试；到点后每 RestoreSlowInterval 一轮慢速重试，
+// 每轮写一条 ERROR；到 RestoreGiveUpAfter 记 reason=restore_give_up 的 ERROR
+// 并返回 ErrRestoreGiveUp，让进程退出，不再无限重试。
 func (s *Sidecar) restore(ctx context.Context) error {
 	st := &restoreState{policy: plugin.Policy{Mode: "latest"}, latest: true}
 	if s.opts.CheckpointStep != nil {
@@ -60,6 +68,14 @@ func (s *Sidecar) restore(ctx context.Context) error {
 		}
 		if slow || time.Since(start) >= s.opts.RestoreDeadline {
 			slow = true
+			// 放弃判定放在慢速段开头：恢复期限到点后才可能进入慢速段，
+			// 放在这里正好覆盖「慢速段跑满到放弃期限」的情形。
+			if time.Since(start) >= s.opts.RestoreGiveUpAfter {
+				s.log.Error("恢复放弃，进程以非零码退出",
+					append([]any{obs.Task(s.opts.TaskID), obs.Step(st.step), obs.Retry(attempt),
+						slog.String("reason", "restore_give_up")}, obs.Err(err)...)...)
+				return fmt.Errorf("%w (task_id=%s, 已重试 %d 次): %w", ErrRestoreGiveUp, s.opts.TaskID, attempt, err)
+			}
 			s.log.Error("恢复失败，等待下一轮慢速重试",
 				append([]any{obs.Task(s.opts.TaskID), obs.Step(st.step), obs.Retry(attempt)}, obs.Err(err)...)...)
 			if !sleepCtx(ctx, s.opts.RestoreSlowInterval) {
@@ -108,6 +124,15 @@ func (s *Sidecar) restoreOnce(ctx context.Context, st *restoreState) error {
 	})
 	if err != nil {
 		return err
+	}
+	// 插件进程的 stderr 不接进日志，协议里也没有日志帧，所以 D25 的
+	// reason=rank_beyond_world_size WARN 只能由这里基于两个插件同语义的
+	// MaxExtraRank 统一发出——两侧的行为与日志字段因此天然一致。
+	// 不带 step：latest 模式跨多个 step 枚举，多余份未必落在选中的 step 上。
+	if res.MaxExtraRank > 0 {
+		s.log.Warn("存在超出 world_size 的多余 rank",
+			obs.Task(s.opts.TaskID), slog.String("reason", "rank_beyond_world_size"),
+			slog.Int("max_rank", res.MaxExtraRank), slog.Int("world_size", s.opts.WorldSize))
 	}
 	if !res.Found || !res.Complete {
 		if s.opts.RequireCheckpoint || st.fallback {

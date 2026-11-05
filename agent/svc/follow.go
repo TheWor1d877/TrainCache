@@ -153,8 +153,8 @@ func (a *Agent) snapshotSources() []datasetSnapshot {
 }
 
 // StartBackground 启动 Agent 的后台循环:采集层(inotify/热度,D63 起无 ring 也启动)、
-// 快照跟随(R1)与读者心跳(R2);必须在 agentd 的 signal ctx 下调用。ctx 取消时停止
-// 后台循环,并对已知 dataset best-effort Withdraw。
+// 快照跟随(R1)、读者心跳(R2)与本地副本清扫(§11.5);必须在 agentd 的 signal ctx 下
+// 调用。ctx 取消时停止后台循环,并对已知 dataset best-effort Withdraw。
 func (a *Agent) StartBackground(ctx context.Context) {
 	if a.Collector != nil {
 		a.Collector.Start(ctx)
@@ -170,4 +170,5 @@ func (a *Agent) StartBackground(ctx context.Context) {
 		hb := newReaderHeartbeat(a.ReaderRegistry, a.Cfg.indexRefreshInterval(), a.snapshotSources)
 		go hb.run(ctx)
 	}
+	a.startLocalGC(ctx)
 }

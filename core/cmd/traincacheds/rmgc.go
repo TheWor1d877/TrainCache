@@ -91,6 +91,9 @@ func (c *cli) flagGiven(name string) bool {
 
 // executeGC 处理 gc <ds> [--orphan-blocks] [--orphan-grace d] [--dry-run] [--yes]，只触发一次 Collector.Sweep。
 //
+// gc 只回收对象存储里的快照对象与孤儿块对象，不碰任何节点的本地 CAS：本地副本归
+// 各节点 Agent 的 LocalGC（design 5.1 §11.5）。
+//
 // dry-run 用 dryRunStore 吞掉 Delete 并记录键：同一套回收规则走完，只是不落盘，
 // 计数照常返回，所以预览结果与真正执行一致。
 func (c *cli) executeGC(rest []string) int {
@@ -114,20 +117,15 @@ func (c *cli) executeGC(rest []string) int {
 	}
 	dataset := rest[0]
 	return c.withStore(func(store objectstore.Store) error {
-		cs, cleanup, err := tempCAS()
-		if err != nil {
-			return err
-		}
-		defer cleanup()
-
 		// 孤儿块先算后删，且用删除前的快照集合判定：dry-run 与真正执行看到同一批
 		// 候选，结果可复现。快照回收后新变成孤儿的块留给下一轮。
 		var orphans []objectstore.ObjectInfo
 		if c.orphanBlocks {
-			orphans, err = index.FindOrphanBlocks(c.ctx, store, dataset, c.orphanGrace)
+			o, err := index.FindOrphanBlocks(c.ctx, store, dataset, c.orphanGrace)
 			if err != nil {
 				return err
 			}
+			orphans = o
 		}
 
 		target := store
@@ -136,12 +134,12 @@ func (c *cli) executeGC(rest []string) int {
 			dry = &dryRunStore{Store: store}
 			target = dry
 		}
-		removedBlocks, removedObjects, err := index.NewCollector(target, cs, index.DefaultConfig()).Sweep(c.ctx, dataset)
-		if errors.Is(err, index.ErrNoCurrent) {
+		removedObjects, sweepErr := index.NewCollector(target, index.DefaultConfig()).Sweep(c.ctx, dataset)
+		if errors.Is(sweepErr, index.ErrNoCurrent) {
 			return noCurrentError(dataset)
 		}
-		if err != nil {
-			return err
+		if sweepErr != nil {
+			return sweepErr
 		}
 
 		orphanBytes := int64(0)
@@ -163,11 +161,11 @@ func (c *cli) executeGC(rest []string) int {
 			prefix = "removed"
 		}
 		if c.orphanBlocks {
-			fmt.Fprintf(c.stdout, "%s objects=%d local_blocks=%d orphan_blocks=%d orphan_bytes=%d\n",
-				prefix, removedObjects, removedBlocks, len(orphans), orphanBytes)
+			fmt.Fprintf(c.stdout, "%s objects=%d orphan_blocks=%d orphan_bytes=%d\n",
+				prefix, removedObjects, len(orphans), orphanBytes)
 			return nil
 		}
-		fmt.Fprintf(c.stdout, "%s objects=%d local_blocks=%d\n", prefix, removedObjects, removedBlocks)
+		fmt.Fprintf(c.stdout, "%s objects=%d\n", prefix, removedObjects)
 		return nil
 	})
 }
@@ -183,7 +181,7 @@ func (s *dryRunStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-// tempCAS 在系统临时目录建一个空 CAS，只为满足 Writer/Collector 的构造参数；
+// tempCAS 在系统临时目录建一个空 CAS，只为满足 Writer 的构造参数；
 // rm/gc 不读写本节点缓存，退出时整目录删除。
 func tempCAS() (*cas.Store, func(), error) {
 	dir, err := os.MkdirTemp("", "traincacheds-")

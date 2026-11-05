@@ -6,7 +6,9 @@ package index
 //  2. PreviousUntil 切换宽限窗:声明切到 S2 后 S1 只在宽限期内受保护;
 //  3. UpdatedAt/ReaderGrace 心跳有效期:读者停止心跳后 claim 整体忽略。
 // 另覆盖有效 claim 的 SnapID 保护(出窗也不得删除)与切换宽限期内的旧快照保护。
-// 另覆盖 protected manifest 缺失时的 fail-safe(OnSweepSkip、跳过块删除)。
+// 对象侧回收归 Collector.Sweep(出窗快照对象)，块侧回收归 LocalGC.Sweep
+// (活块 = CURRENT ∪ 有效 claim 保护的快照引用的块)，两侧分别断言。
+// 另覆盖 protected manifest 缺失时的 fail-safe(OnSweepSkip、整轮该数据集不删对象)。
 // 全程使用内存 objectstore.Mock + 临时 CAS,不依赖真实 sleep 推进时间窗。
 
 import (
@@ -64,7 +66,8 @@ func (f *rgcFixture) assertSnapshotKept(t *testing.T, dataset string, i int) {
 	}
 }
 
-// assertSnapshotGone 断言第 i 个快照的 manifest/分片与引用块均已删除。
+// assertSnapshotGone 断言第 i 个快照的 manifest/分片与引用块均已删除
+// (对象侧由 Collector 回收、块侧由 LocalGC 回收)。
 func (f *rgcFixture) assertSnapshotGone(t *testing.T, dataset string, i int) {
 	t.Helper()
 	if objectExists(t, f.env.store, ManifestKey(dataset, f.snaps[i])) {
@@ -81,8 +84,9 @@ func (f *rgcFixture) assertSnapshotGone(t *testing.T, dataset string, i int) {
 }
 
 // TestR2R3GCRetentionWindowAndActiveClaim:时间窗 1(固定保留窗口)+ 时间窗 2(SnapID)。
-// S1..S4 提交后 S1 出窗;无 claim 时 S1 可删,Declare(S1) 后 S1 的 manifest/分片/块
-// 全部受保护,而其他出窗快照(S2/S3)照常回收。
+// S1..S4 提交后 S1 出窗;无 claim 时 S1 的对象与块均可删,Declare(S1) 后 S1 的
+// manifest/分片受 Collector 保护、引用块受 LocalGC 活块集合保护,而其他出窗快照
+// (S2/S3)照常回收。
 func TestR2R3GCRetentionWindowAndActiveClaim(t *testing.T) {
 	ctx := context.Background()
 	const dataset = "r2r3-window"
@@ -90,11 +94,16 @@ func TestR2R3GCRetentionWindowAndActiveClaim(t *testing.T) {
 	f := newRGCFixture(t, dataset, cfg)
 	base := time.Unix(1_700_000_000, 0)
 
-	// 先证明 S1 确实不在固定保留窗口:无 claim 时会被回收。
-	col := NewCollector(f.env.store, f.env.cs, cfg)
+	// 先证明 S1 确实不在固定保留窗口:无 claim 时对象与块都会被回收。
+	col := NewCollector(f.env.store, cfg)
 	col.now = func() time.Time { return base }
-	if _, _, err := col.Sweep(ctx, dataset); err != nil {
+	if _, err := col.Sweep(ctx, dataset); err != nil {
 		t.Fatalf("无 claim Sweep: %v", err)
+	}
+	g := NewLocalGC(f.env.store, f.env.cs, cfg)
+	g.now = func() time.Time { return base }
+	if _, err := g.Sweep(ctx, []string{dataset}); err != nil {
+		t.Fatalf("无 claim LocalGC Sweep: %v", err)
 	}
 	if objectExists(t, f.env.store, ManifestKey(dataset, f.snaps[0])) {
 		t.Fatalf("固定保留窗口(snapID=%s)未把 S1 判为出窗", f.snaps[0])
@@ -110,14 +119,23 @@ func TestR2R3GCRetentionWindowAndActiveClaim(t *testing.T) {
 	if err := reg.Declare(ctx, dataset, f.snaps[0]); err != nil {
 		t.Fatalf("Declare(S1): %v", err)
 	}
-	col = NewCollector(f.env.store, f.env.cs, cfg)
+	col = NewCollector(f.env.store, cfg)
 	col.now = func() time.Time { return base }
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("有 claim Sweep: %v", err)
 	}
-	if removedBlocks != 2 || removedObjects != 4 {
-		t.Fatalf("删除 (blocks=%d, objects=%d),期望 (2,4):仅 S2/S3 可删", removedBlocks, removedObjects)
+	if removedObjects != 4 {
+		t.Fatalf("删除对象 %d 个,期望 4:仅 S2/S3 出窗", removedObjects)
+	}
+	g = NewLocalGC(f.env.store, f.env.cs, cfg)
+	g.now = func() time.Time { return base }
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("有 claim LocalGC Sweep: %v", err)
+	}
+	if removedBlocks != 2 {
+		t.Fatalf("删除块 %d 个,期望 2:活块 = CURRENT(S4) ∪ claim(S1)", removedBlocks)
 	}
 	f.assertSnapshotKept(t, dataset, 0)
 	if !objectExists(t, f.env.store, ManifestKey(dataset, f.snaps[3])) ||
@@ -157,12 +175,18 @@ func TestR2R3GCPreviousClaimGraceWindow(t *testing.T) {
 		t.Fatalf("心跳 Declare(S2): %v", err)
 	}
 
-	col := NewCollector(f.env.store, f.env.cs, cfg)
+	col := NewCollector(f.env.store, cfg)
 	col.now = func() time.Time { return now }
+	g := NewLocalGC(f.env.store, f.env.cs, cfg)
+	g.now = func() time.Time { return now }
 
-	// 宽限期内(t=base+2s < base+11s):S1/S2 均受保护。
-	if _, _, err := col.Sweep(ctx, dataset); err != nil {
-		t.Fatalf("宽限期内 Sweep: %v", err)
+	// 宽限期内(t=base+2s < base+11s):S1/S2 均受保护(S1 靠 PreviousSnapID、
+	// S2 靠 SnapID),仅 S3 出窗可删。
+	if _, err := col.Sweep(ctx, dataset); err != nil {
+		t.Fatalf("宽限期内对象 Sweep: %v", err)
+	}
+	if _, err := g.Sweep(ctx, []string{dataset}); err != nil {
+		t.Fatalf("宽限期内块 Sweep: %v", err)
 	}
 	f.assertSnapshotKept(t, dataset, 0)
 	f.assertSnapshotKept(t, dataset, 1)
@@ -171,12 +195,16 @@ func TestR2R3GCPreviousClaimGraceWindow(t *testing.T) {
 	// 距切换已 > ReaderGrace(t=base+12s),心跳在 t=base+2s 刷新后仍有效(10s ≤ grace);
 	// PreviousUntil(base+11s)已过,仅 SnapID=S2 受保护。
 	now = base.Add(12 * time.Second)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
-		t.Fatalf("宽限期后 Sweep: %v", err)
+		t.Fatalf("宽限期后对象 Sweep: %v", err)
+	}
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("宽限期后块 Sweep: %v", err)
 	}
 	if removedBlocks != 1 || removedObjects != 2 {
-		t.Fatalf("宽限期后删除 (blocks=%d, objects=%d),期望 (1,2):S1 可删(S3 已在上轮回收)", removedBlocks, removedObjects)
+		t.Fatalf("宽限期后删除 (blocks=%d, objects=%d),期望 (1,2):S1 失保(S3 已在上轮回收)", removedBlocks, removedObjects)
 	}
 	f.assertSnapshotGone(t, dataset, 0)
 	f.assertSnapshotKept(t, dataset, 1)
@@ -188,7 +216,7 @@ func TestR2R3GCPreviousClaimGraceWindow(t *testing.T) {
 
 // TestR2R3GCReaderHeartbeatGraceWindow:时间窗 3 的读者死亡分支。
 // 声明 S1 后不再心跳(模拟 Agent 崩溃);时钟前进超过 ReaderGrace 后 claim 整体忽略,
-// S1 重新成为出窗快照并被 Sweep 回收。
+// S1 重新成为出窗快照并被回收(对象与块)。
 func TestR2R3GCReaderHeartbeatGraceWindow(t *testing.T) {
 	ctx := context.Background()
 	const dataset = "r2r3-dead"
@@ -203,21 +231,30 @@ func TestR2R3GCReaderHeartbeatGraceWindow(t *testing.T) {
 		t.Fatalf("Declare(S1): %v", err)
 	}
 
-	col := NewCollector(f.env.store, f.env.cs, cfg)
+	col := NewCollector(f.env.store, cfg)
 	col.now = func() time.Time { return now }
+	g := NewLocalGC(f.env.store, f.env.cs, cfg)
+	g.now = func() time.Time { return now }
 
-	// 心跳仍有效:S1 受保护。
+	// 心跳仍有效:S1 受保护(对象与块)。
 	now = base.Add(5 * time.Second)
-	if _, _, err := col.Sweep(ctx, dataset); err != nil {
-		t.Fatalf("心跳有效时 Sweep: %v", err)
+	if _, err := col.Sweep(ctx, dataset); err != nil {
+		t.Fatalf("心跳有效时对象 Sweep: %v", err)
+	}
+	if _, err := g.Sweep(ctx, []string{dataset}); err != nil {
+		t.Fatalf("心跳有效时块 Sweep: %v", err)
 	}
 	f.assertSnapshotKept(t, dataset, 0)
 
 	// 停止心跳(不再 Declare),时钟前进超过 ReaderGrace:claim 视为读者已死。
 	now = base.Add(11 * time.Second)
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
-		t.Fatalf("心跳过期后 Sweep: %v", err)
+		t.Fatalf("心跳过期后对象 Sweep: %v", err)
+	}
+	removedBlocks, err := g.Sweep(ctx, []string{dataset})
+	if err != nil {
+		t.Fatalf("心跳过期后块 Sweep: %v", err)
 	}
 	if removedBlocks != 1 || removedObjects != 2 {
 		t.Fatalf("心跳过期后删除 (blocks=%d, objects=%d),期望 (1,2):S1 可删(S2/S3 已在上轮回收)", removedBlocks, removedObjects)
@@ -230,8 +267,9 @@ func TestR2R3GCReaderHeartbeatGraceWindow(t *testing.T) {
 }
 
 // TestR2R3GCProtectedManifestMissing:protected 快照 manifest 缺失时调用
-// OnSweepSkip(dataset,"manifest_unavailable"),本轮跳过块删除(包括孤儿块),
-// 但继续删除其他可删快照对象(S2/S3);S1 的分片与 CURRENT 均保留。
+// OnSweepSkip(dataset,"manifest_unavailable"),本轮该数据集一个对象都不删——
+// 无法知道它复用了哪些分片对象,继续删可能误删;S2/S3 的可删对象留给下一轮。
+// Collector 不碰本地块,全部块保留(块侧口径见 local_gc_test.go)。
 func TestR2R3GCProtectedManifestMissing(t *testing.T) {
 	ctx := context.Background()
 	const dataset = "r2r3-missing"
@@ -262,36 +300,33 @@ func TestR2R3GCProtectedManifestMissing(t *testing.T) {
 		t.Fatalf("Delete manifest: %v", err)
 	}
 
-	col := NewCollector(f.env.store, f.env.cs, cfg)
+	col := NewCollector(f.env.store, cfg)
 	col.now = func() time.Time { return base }
-	removedBlocks, removedObjects, err := col.Sweep(ctx, dataset)
+	removedObjects, err := col.Sweep(ctx, dataset)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if skipCalls != 1 || skipReason != "manifest_unavailable" {
 		t.Fatalf("OnSweepSkip 调用 %d 次、reason=%q,期望 1 次 manifest_unavailable", skipCalls, skipReason)
 	}
-	if removedBlocks != 0 {
-		t.Fatalf("manifest 缺失时删除块 %d 个,期望 0", removedBlocks)
-	}
-	// 其它可删快照对象仍回收:S2/S3 各 manifest + 分片 = 4。
-	if removedObjects != 4 {
-		t.Fatalf("删除快照对象 %d 个,期望 4(S2/S3)", removedObjects)
+	if removedObjects != 0 {
+		t.Fatalf("manifest 缺失时删除对象 %d 个,期望 0(整轮跳过)", removedObjects)
 	}
 	for i, fp := range f.blocks {
 		if !blockExists(t, f.env.cs, fp) {
-			t.Fatalf("跳过块删除时 S%d 的块 %s 被删除", i+1, fp)
+			t.Fatalf("第 %d 个块被 Collector 删除(块回收不归它)", i+1)
 		}
 	}
-	// S1 虽 manifest 缺失,分片仍因 protected 保留。
+	// S1 的分片仍在(本轮什么都不删)。
 	for _, key := range f.snapshotKeys(t, dataset, 0) {
 		if !objectExists(t, f.env.store, key) {
-			t.Fatalf("protected 快照 S1 的分片 %q 被删除", key)
+			t.Fatalf("整轮跳过时 protected 快照 S1 的分片 %q 被删除", key)
 		}
 	}
+	// S2/S3 本可回收,也因整轮跳过而保留;CURRENT 与 S4 manifest 同样在。
 	for _, i := range []int{1, 2} {
-		if objectExists(t, f.env.store, ManifestKey(dataset, f.snaps[i])) {
-			t.Fatalf("可删快照 S%d 的 manifest 未回收", i+1)
+		if !objectExists(t, f.env.store, ManifestKey(dataset, f.snaps[i])) {
+			t.Fatalf("整轮跳过时窗口外快照 S%d 的 manifest 被删除", i+1)
 		}
 	}
 	if !objectExists(t, f.env.store, ManifestKey(dataset, f.snaps[3])) ||

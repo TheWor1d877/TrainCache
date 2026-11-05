@@ -15,9 +15,9 @@
 |---|---|---|---|
 | 1 | 是凭证吗 | Secret + `secretKeyRef` | `accessKey`、`secretKey` |
 | 2 | 是每个 Pod 各不相同的身份信息吗 | Downward API `fieldRef` | `NODE_NAME`（`spec.nodeName`） |
-| 3 | 换集群或换实验轮次要改吗 | 该工作负载自己 namespace 里的 ConfigMap + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入在 `traincache-config`；`controllerPollInterval`、`controllerScoreTTL` 同在 `traincache-config`；两个 Scheduler 项在 kube-system 的 `traincache-scheduler-config` |
+| 3 | 换集群或换实验轮次要改吗 | 该工作负载自己 namespace 里的 ConfigMap + `configMapKeyRef` | 端点、桶、TLS 开关、缓存容量、预取提前量、淘汰策略、白名单、自动 K 输入、网关到桶并发额度与缓存配额在 `traincache-config`；`controllerPollInterval`、`controllerScoreTTL` 同在 `traincache-config`；两个 Scheduler 项在 kube-system 的 `traincache-scheduler-config` |
 | 4 | 值与代码默认不同，但基本不动吗 | 同上，写进 ConfigMap | 同上后四项 |
-| 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go` 与 `controller/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
+| 5 | 值等于代码默认 | 哪里都不写，默认只活在 `agent/svc/config.go`、`controller/internal/config/config.go`、`gateway/internal/config/config.go` | 监听端口、`TRAINCACHE_VERIFY`、`TRAINCACHE_CACHE_ROOT`、网关缓存根目录、11 个 `TRAINCACHE_HEAT_*`、`CONTROLLER_*` 的默认档 |
 
 五份工作负载清单（Agent DaemonSet、manager、webhook、scheduler、gateway）因此没有任何一条 `value:` 字面量 env，取值全部走引用或走代码默认。引用还有一个方向要守：`configMapKeyRef` 只在本 Pod 的 namespace 里找对象，跨不过去，所以 kube-system 的 scheduler 用不了 `traincache-config`。这两条由 `hack/verify-config-placement.sh` 逐条校验，写错即失败。往 ConfigMap 加一项而同 namespace 的清单里没有对应引用时，进程读不到那一项。
 
@@ -27,7 +27,7 @@
 
 ### 2.1 ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，15 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`，见本节末尾。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，现 15 个配置项，网关缓存层增三项到 18。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`、`gatewayCache`、`gatewayCacheDatasetBytes`、`gatewayCacheTotalBytes`。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`，见本节末尾。
 
 | 配置项 | 默认 | 读取方 | 说明 |
 |---|---|---|---|
@@ -44,10 +44,13 @@
 | `gatewaySecure` | `"false"` | Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真，取值独立于 `objstoreSecure`，源站与网关的 TLS 各设一次 |
 | `gatewayBucketConcurrency` | `"32"` | 网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动。改它会重启网关 Deployment |
 | `gatewayBlockBufferBytes` | `"10485760"` | 网关 | 每个在途块环形缓冲的字节数（默认 10MiB），正整数；非法值使网关拒绝启动。改它会重启网关 Deployment |
+| `gatewayCache` | `"true"` | 网关 | 磁盘缓存开关，默认打开。`1`/`true`/`yes` 开，其余取值关；env 未设置也开。关掉后网关只做在途合并，不落盘。该关的四种场合见 9.2 D29：数据集小于节点盘、工作集大于配额、命中侧只有 HDD 或邻居写盘活跃、源站不计费且出口快于集群取速率。改它会重启网关 Deployment |
+| `gatewayCacheDatasetBytes` | `"34359738368"` | 网关 | 单个 dataset 在网关盘上的驻写上限，默认 32GiB，正整数；非法值使网关拒绝启动。超过它先删这个 dataset 里 mtime 最老的块。改它会重启网关 Deployment |
+| `gatewayCacheTotalBytes` | `"68719476736"` | 网关 | 全局驻写上限，默认 64GiB，正整数且不小于 `gatewayCacheDatasetBytes`，否则网关拒绝启动。单 dataset 淘汰后仍超总上限，删最久没出现的 dataset 整个目录。改它会重启网关 Deployment |
 | `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；清单写 1s，让门控放行延迟落在 bench 的测量窗口内 |
 | `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
 
-`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` 只被网关读取，改这两个键重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。改仓库文件后 apply，再重启读取方：
+`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` / `gatewayCache` / `gatewayCacheDatasetBytes` / `gatewayCacheTotalBytes` 只被网关读取，改这五项重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。缓存根目录 `/var/lib/traincache-gateway/cache` 是代码常量，不进 ConfigMap，清单只负责把卷挂到这条路径；两个配额与 Agent 的 `cacheCapacityBytes` 落在同一块宿主盘上，两处之和要给节点盘留余量，判据见 9.1 K10。改仓库文件后 apply，再重启读取方：
 
 ```bash
 kubectl apply -f controller/deploy/agent/configmap.yaml
@@ -74,6 +77,22 @@ kubectl -n traincache rollout status deploy/traincache-controller-manager
 kubectl apply -f controller/deploy/scheduler/kube-scheduler-config.yaml
 kubectl -n kube-system rollout restart deploy/traincache-scheduler
 kubectl -n kube-system rollout status deploy/traincache-scheduler
+```
+
+#### ConfigMap traincache-checkpoint-image
+
+位置 `controller/deploy/webhook/checkpoint-image.yaml`，namespace `traincache`，一项。
+
+| 配置项 | 默认 | 读取方 | 说明 |
+|---|---|---|---|
+| `checkpointImage` | `ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev` | webhook | 注入到训练 Pod 的 checkpointd 镜像。开发清单写 `:dev`；发布清单由渲染脚本把它改成本次发布的 digest。接入方可用 Pod 注解 `traincache.io/checkpoint-image` 或自己的 ConfigMap 键覆盖它 |
+
+改这个值后重启 webhook：
+
+```bash
+kubectl apply -f controller/deploy/webhook/checkpoint-image.yaml
+kubectl -n traincache rollout restart deploy/traincache-webhook
+kubectl -n traincache rollout status deploy/traincache-webhook
 ```
 
 ### 2.2 对象存储
@@ -123,6 +142,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 | `TRAINCACHE_METRICS_ADDR` | `:9411` | 指标监听地址，DaemonSet 的 `hostPort` 同值 |
 | `TRAINCACHE_ORDERS_DIR` | `/run/traincache/orders` | OrderSource ring 目录 |
 | `TRAINCACHE_INDEX_REFRESH_INTERVAL` | `5s` | 快照跟随刷新周期 |
+| `TRAINCACHE_LOCAL_GC_INTERVAL` | `10m` | Agent 清扫本节点本地孤儿块副本的周期（机制见 6.1 §7.6、5.1 §11.5）。Agent 按节点一进程一份，粒度为进程级即节点级；调大则已删除条目/数据集的本地副本更晚被回收，调小则每轮索引读取流量增加 |
 | `TRAINCACHE_READ_STALL_MIN_WAIT_MS` | `100` | `read_stall` 入直方图的最小等待毫秒 |
 | `TRAINCACHE_READ_STALL_WINDOW_MS` | `5000` | `read_stall` 归因关联窗口，单位毫秒，以帧 `ts` 为中心前后各该值 |
 
@@ -144,7 +164,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 
 ### 2.5 控制面参数
 
-manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。manager 与 webhook 的项在 `traincache-config`，scheduler 的项在自己 namespace 的 `traincache-scheduler-config`。webhook 的六条取值全部等于默认，清单里没有 env 块。
+manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。manager 与 webhook 的项在 `traincache-config`，scheduler 的项在自己 namespace 的 `traincache-scheduler-config`。webhook 的六条取值全部等于默认；它另有一条 `CHECKPOINT_IMAGE`，值来自 `traincache-checkpoint-image` ConfigMap，装配值是镜像引用而不是运行参数。
 
 | 变量 | 生效值 | 写在哪里 | 说明 |
 |---|---|---|---|
@@ -161,6 +181,7 @@ manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等�
 | `CONTROLLER_HEALTH_ADDR` | `:8081` | 代码默认 | `healthz` / `readyz` 监听，探针按同名端口引用 |
 | `CONTROLLER_WEBHOOK_ADDR` | `:9443` | 代码默认 | webhook server 监听，Service 443 转发到这里 |
 | `CONTROLLER_NAMESPACE` | 空 | 代码默认 | 只校验格式并记进启动日志，不改变任何监听范围：manager 始终 watch 全部 namespace，webhook 的准入范围由 `objectSelector` 的 `traincache.io/warmup: enabled` 决定；留空即可 |
+| `CHECKPOINT_IMAGE` | 装配方给的值 | ConfigMap `traincache-checkpoint-image`（namespace `traincache`） | 注入到训练 Pod 的 checkpointd 镜像。发布清单里这个值是本次发布的 digest；接入方可用 Pod 注解或自己的 ConfigMap 键覆盖它 |
 
 `CONTROLLER_GATE_NAME` 与 `CONTROLLER_SCORE_ANNOTATION` 是 webhook、scheduler、训练 Pod 三端共用的约定键，改动要三端同步。
 

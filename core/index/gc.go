@@ -9,52 +9,59 @@ import (
 	"strings"
 	"time"
 
-	"traincache/core/cas"
 	"traincache/core/objectstore"
 )
 
-// Collector 回收旧快照/分片/块（docs/5.0-cache-core-design-method.md 步骤 7、docs/5.1-design.md §7.3）。
-// 内部持有 objectstore.Store（快照对象枚举与删除）与 *cas.Store（块枚举与删除）。
+// Collector 回收旧快照与分片对象（docs/5.0-cache-core-design-method.md 步骤 7、docs/5.1-design.md §7.3）。
+// 内部持有 objectstore.Store（快照对象枚举与删除）。
+//
+// 回收面按数据集划分：快照清单与分片对象挂在 dataset/<name>/ 下，逐 dataset 回收即可。
+// 本地块不归它——本地 CAS 是节点级全局、内容寻址，块不按数据集分区，删除面只能按
+// 节点算（见 LocalGC）。
 type Collector struct {
 	store objectstore.Store
-	cs    *cas.Store
 	cfg   Config
 	now   func() time.Time // 可注入时钟（测试用），默认 time.Now
 }
 
 // NewCollector 构造 Collector；cfg 的零值字段回退 DefaultConfig 默认值
 // （RetainSnapshots 经 withDefaults 保证 ≥1，即至少保留 CURRENT）。
-func NewCollector(store objectstore.Store, cs *cas.Store, cfg Config) *Collector {
-	return &Collector{store: store, cs: cs, cfg: cfg.withDefaults(), now: time.Now}
+func NewCollector(store objectstore.Store, cfg Config) *Collector {
+	return &Collector{store: store, cfg: cfg.withDefaults(), now: time.Now}
 }
 
-// Sweep ① 计算活块集合 = 保留快照（CURRENT + 按 snapID 字典序最大的最近
-// RetainSnapshots-1 个已提交快照）引用的指纹；② 扫描 cas 目录，删除不在活块集合
-// 且 refcount=0、pin=0 的块；③ 删除不在保留窗口内、且不被保留快照复用的旧快照
-// 清单与分片对象（CURRENT 对象绝不删）。
+// Sweep 删除不在保留窗口内、且不被保留快照复用的旧快照清单与分片对象
+// （CURRENT 对象绝不删）。返回删除的对象数。
 //
-// 安全性：ErrNoCurrent（尚无任何快照）时不删任何东西；任一活快照的 manifest 或
-// 分片下载/解析失败、分片指纹不符（ErrInvalidShard）时同样不删任何东西（先完成
-// 全部读取与校验，再执行删除）。Sweep 不承诺与并发 Commit 安全：调用方应串行调用
-// （Agent 层调度职责；并发下最坏为 Commit 冲突重试）。
-func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks int, removedObjects int, err error) {
+// 保留窗口 = CURRENT ∪ 按 snapID 字典序最大的最近 RetainSnapshots-1 个已提交快照
+// ∪ 有效读者 claim 保护的快照（§5.11）。
+//
+// 安全性：ErrNoCurrent（尚无任何快照）时不删任何东西；任一保留快照的分片下载/解析
+// 失败、分片指纹不符（ErrInvalidShard）时同样不删任何东西（先完成全部读取与校验，
+// 再执行删除）。保留快照的 manifest 缺失或损坏时无法知道它引用了哪些分片对象
+// （未变更分片跨快照复用同一个对象键），本 dataset 的对象删除整轮跳过并回调
+// OnSweepSkip("manifest_unavailable")，不牵连其它 dataset。
+//
+// Sweep 不承诺与并发 Commit 安全：调用方应串行调用（Agent 层调度职责；并发下最坏
+// 为 Commit 冲突重试）。
+func (c *Collector) Sweep(ctx context.Context, dataset string) (removedObjects int, err error) {
 	prefix := snapshotsPrefix(dataset)
 	keys, err := c.store.List(ctx, prefix)
 	if err != nil {
-		return 0, 0, fmt.Errorf("index: sweep list %s: %w", prefix, err)
+		return 0, fmt.Errorf("index: sweep list %s: %w", prefix, err)
 	}
 
 	// CURRENT：尚无快照时绝不删任何东西（所有块可能正被写入）。
 	raw, err := getObject(ctx, c.store, CurrentKey(dataset))
 	if err != nil {
 		if errors.Is(err, objectstore.ErrNotFound) {
-			return 0, 0, ErrNoCurrent
+			return 0, ErrNoCurrent
 		}
-		return 0, 0, err
+		return 0, err
 	}
 	curSnapID, curManifestFP8, err := parseCurrent(string(raw))
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 
 	// 保留窗口：{CURRENT} ∪ snapID 字典序最大的 RetainSnapshots-1 个
@@ -85,7 +92,7 @@ func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks in
 	// claims 读取失败或 JSON 损坏属于 fail-safe：本轮不做任何删除。
 	claims, err := ReadReaderClaims(ctx, c.store, dataset)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	now := c.now()
 	for _, claim := range claims {
@@ -100,47 +107,33 @@ func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks in
 		}
 	}
 
-	// 读取全部 protected 快照的 manifest 与分片（一次下载两用）：得到活对象键集合
-	// （D18 完整键，未变更分片跨快照复用）与活块集合；分片内容必须重算指纹校验
-	// （ErrInvalidShard 时不删任何东西），否则损坏的分片会让其引用的块被误判为孤儿。
-	// 任一 protected manifest 缺失/损坏：跳过本轮块删除（OnSweepSkip），但继续删除
-	// 其他可删快照对象，不得整体停摆。
+	// 读取全部 protected 快照的 manifest 与分片：得到活对象键集合（D18 完整键，
+	// 未变更分片跨快照复用）。分片内容必须重算指纹校验（ErrInvalidShard 时不删
+	// 任何东西），否则损坏的分片会让它引用的对象被误判为可删。
 	liveKeys := map[string]struct{}{CurrentKey(dataset): {}}
-	liveBlocks := make(map[cas.Fingerprint]struct{})
-	skipBlocks := false
 	for id := range protected {
 		manifestFP8 := ""
 		if id == curSnapID {
 			manifestFP8 = curManifestFP8
 		}
-		m, err := c.loadManifest(ctx, dataset, id, manifestFP8)
+		m, err := loadManifest(ctx, c.store, dataset, id, manifestFP8)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return 0, 0, ctxErr
+				return 0, ctxErr
 			}
-			if !skipBlocks {
-				skipBlocks = true
-				if c.cfg.OnSweepSkip != nil {
-					c.cfg.OnSweepSkip(dataset, "manifest_unavailable")
-				}
+			if c.cfg.OnSweepSkip != nil {
+				c.cfg.OnSweepSkip(dataset, "manifest_unavailable")
 			}
-			continue
+			return 0, nil
 		}
 		liveKeys[ManifestKey(dataset, id)] = struct{}{}
 		for _, ref := range m.Shards {
 			data, err := getObject(ctx, c.store, ref.Key)
 			if err != nil {
-				return 0, 0, err
+				return 0, err
 			}
 			if contentFingerprint(data) != ref.Fingerprint {
-				return 0, 0, fmt.Errorf("%w: %s", ErrInvalidShard, ref.Key)
-			}
-			entries, err := unmarshalEntries(data)
-			if err != nil {
-				return 0, 0, err
-			}
-			for _, e := range entries {
-				liveBlocks[e.Fingerprint] = struct{}{}
+				return 0, fmt.Errorf("%w: %s", ErrInvalidShard, ref.Key)
 			}
 			liveKeys[ref.Key] = struct{}{}
 		}
@@ -157,42 +150,18 @@ func (c *Collector) Sweep(ctx context.Context, dataset string) (removedBlocks in
 			continue
 		}
 		if err := c.store.Delete(ctx, key); err != nil {
-			return removedBlocks, removedObjects, fmt.Errorf("index: sweep delete %s: %w", key, err)
+			return removedObjects, fmt.Errorf("index: sweep delete %s: %w", key, err)
 		}
 		removedObjects++
 	}
-
-	// protected manifest 不可用时无法重建完整 liveBlocks，本轮跳过块删除。
-	if skipBlocks {
-		return removedBlocks, removedObjects, nil
-	}
-
-	// 块侧：枚举磁盘全量指纹，删除不在活块集合的孤儿块；仍被引用或正在被读
-	// （ErrInUse）与已被并发删除（ErrNotFound）的跳过，留待下次。
-	fps, err := c.cs.List()
-	if err != nil {
-		return removedBlocks, removedObjects, err
-	}
-	for _, fp := range fps {
-		if _, ok := liveBlocks[fp]; ok {
-			continue
-		}
-		switch err := c.cs.Remove(fp); {
-		case err == nil:
-			removedBlocks++
-		case errors.Is(err, cas.ErrInUse), errors.Is(err, cas.ErrNotFound):
-		default:
-			return removedBlocks, removedObjects, fmt.Errorf("index: sweep remove block %s: %w", fp, err)
-		}
-	}
-	return removedBlocks, removedObjects, nil
+	return removedObjects, nil
 }
 
 // loadManifest 下载并解析一个快照的 manifest；manifestFP8 非空时比对内容指纹
 // （CURRENT → manifest 校验链），并校验 snapshot_id 与快照 ID 一致。
-func (c *Collector) loadManifest(ctx context.Context, dataset, snapID, manifestFP8 string) (*Manifest, error) {
+func loadManifest(ctx context.Context, store objectstore.Store, dataset, snapID, manifestFP8 string) (*Manifest, error) {
 	key := ManifestKey(dataset, snapID)
-	data, err := getObject(ctx, c.store, key)
+	data, err := getObject(ctx, store, key)
 	if err != nil {
 		return nil, err
 	}

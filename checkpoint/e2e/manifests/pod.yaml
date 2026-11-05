@@ -15,9 +15,8 @@ metadata:
   namespace: traincache
   labels:
     app: traincache-checkpoint-e2e
-    traincache.io/checkpoint: enabled
-  annotations:
     traincache.io/checkpoint: ckpt-config
+  annotations:
     traincache.io/task-id: t1
     traincache.io/rank: "0"
     traincache.io/world-size: "1"
