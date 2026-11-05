@@ -307,7 +307,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 // NVMe 不可写时关闭缓存并记 WARN，不阻断启动（design 10.1 §6.1）。
 func (s *Sidecar) prepare() error {
 	// 训练容器在恢复完成后才启动，<task_id> 目录必须由 sidecar 先建出来。
-	if err := os.MkdirAll(s.opts.TaskDir, 0o755); err != nil {
+	// 目录按组可写建：训练程序可能不是 65532，只有 fsGroup 组能写进去。
+	if err := os.MkdirAll(s.opts.TaskDir, 0o775); err != nil {
 		return fmt.Errorf("sidecar: 创建工作目录 %s: %w", s.opts.TaskDir, err)
 	}
 	info, err := os.Stat(s.opts.TaskDir)
@@ -316,6 +317,10 @@ func (s *Sidecar) prepare() error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("sidecar: 工作目录 %s 不是目录", s.opts.TaskDir)
+	}
+	// 目录已存在时按 umask 建出来的模式不带组写权限，这里补上。
+	if err := os.Chmod(s.opts.TaskDir, 0o775); err != nil {
+		return fmt.Errorf("sidecar: 工作目录 %s 不能设为组可写: %w", s.opts.TaskDir, err)
 	}
 	if err := ensureWritable(s.opts.TaskDir); err != nil {
 		return fmt.Errorf("sidecar: 工作目录 %s 不可写: %w", s.opts.TaskDir, err)

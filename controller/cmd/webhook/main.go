@@ -81,7 +81,7 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger) erro
 	mgr.GetWebhookServer().Register(tcwebhook.MutatePodPath, &admission.Webhook{Handler: mutator})
 
 	checkpointMutator := &tcwebhook.CheckpointMutator{
-		Client: mgr.GetClient(),
+		Client: mgr.GetAPIReader(),
 		Log:    log.With("webhook", "checkpoint"),
 	}
 	mgr.GetWebhookServer().Register(tcwebhook.MutateCheckpointPath, &admission.Webhook{Handler: checkpointMutator})

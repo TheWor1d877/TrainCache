@@ -74,8 +74,8 @@ kubectl -n "$NS" create secret tls traincache-webhook-tls \
   --cert="$TLS/tls.crt" --key="$TLS/tls.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
   && ok "TLS secret" || fail "TLS secret"
 ca_b64="$(base64 -w0 "$TLS/ca.crt")"
-kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
-  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$ca_b64\"}]" >/dev/null \
+kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategic \
+  -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$ca_b64\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$ca_b64\"}}]}" >/dev/null \
   && ok "caBundle patched" || fail "patch caBundle"
 
 printf '\n== CRDs\n'

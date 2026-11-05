@@ -8,7 +8,7 @@
     (meta 行 = 上限/采样间隔;采样行 = memory.current + memory.stat file;
      final 行 = OOM 状态与限制恢复)
 
-判据(主对话裁决后的口径):
+判据(裁决后的口径):
   前置门(欠配真实生效;不满足 → 判"无效"而非红灯):
     file 采样曾 ≥ 0.9×1GiB 且 memory.current 全程 ≤ 上限、无 OOM kill
     (OOMKilled=false,oom_kill 事件=0,final 行齐全)。
@@ -19,7 +19,7 @@
     ② epoch 2..9 逐 epoch 中位 stall 的 CV ≤ 0.30(重复形态幅度稳定)。
   报告项③(计算并输出数值,不参与绿/红):
     epoch 0 中位 stall 与 epoch 1..9 中位 stall 中位数的比值(旧阈值 >1.2)。
-    主对话裁决:恒定 tc 限速装置下该比值被链路瓶颈掩盖(实测 0.99),与探针 B
+    设计裁决:恒定 tc 限速装置下该比值被链路瓶颈掩盖(实测 0.99),与探针 B
     已确立机制一致(w4 冷态签名只在 wait 尾部),故降级为报告项;另报告
     "epoch1 首窗切换峰值"作为切换瞬间冷读集中的证据。
 
@@ -49,7 +49,7 @@ COLD_RATIO = 1.2                        # 报告项③的旧阈值(比值现不�
 GATE_FILE_RATIO = 0.9                   # 前置门:file 峰值 ≥ 0.9×上限
 SWITCH_PEAK_EPOCH = 1                   # 报告项:切换瞬间冷读集中考察的首窗 epoch
 DOWNGRADE_REASON_3 = (
-    "主对话裁决:恒定 tc 限速(100mbit+20ms)装置下,链路瓶颈掩盖 epoch0 冷态"
+    "设计裁决:恒定 tc 限速(100mbit+20ms)装置下,链路瓶颈掩盖 epoch0 冷态"
     "信号(实测比值 0.99,低于旧阈值 1.2),与探针 B 已确立机制一致(w4 冷态"
     "签名只在 wait 尾部,中位 stall 对冷态不敏感);据此判据③降级为报告项,"
     "不参与绿/红判定,verdict 以判据①②为准记\"重复形态确认\",并补充"
@@ -202,7 +202,7 @@ def main():
             peak_val is not None and fw_vals and peak_val >= max(fw_vals)),
         "all_epochs_first_window_mean_stall": first_windows,
         "note": "切换瞬间冷读集中的证据:epoch1 首窗(切换后前 20 步)的窗口均值 "
-                "stall 为各 epoch 首窗最高;主对话裁决补充报告项。",
+                "stall 为各 epoch 首窗最高;裁决后补充报告项。",
     }
 
     # ---------------- 切换窗 tail 占比表(前 20 步,w4 口径 wait≥0.5s)----
@@ -347,7 +347,7 @@ def main():
     out = {
         "verdict": verdict,
         "verdict_label": verdict_label,
-        "verdict_note": "绿/红仅由前置门 + 判据①②决定;判据③为报告项(主对话裁决)。",
+        "verdict_note": "绿/红仅由前置门 + 判据①②决定;判据③为报告项(设计裁决)。",
         "gate": gate,
         "criteria": {"window_repeat_r": crit1, "epoch_cv": crit2,
                      "epoch0_cold": crit3},

@@ -1,15 +1,15 @@
 name: release
 
 # 发版入口：push vX.Y.Z tag。不重建镜像，只把候选 digest 晋升成 :vX.Y.Z，
-# 再把候选的 install.yaml、两个 CLI 与镜像 tar 组成 draft Release。
-# 不自动转正，转正由人工点 Publish；发布物验证由 release-smoke 在候选阶段完成。
-# CI 不创建 tag，版本号只来自 tag。
+# 再把候选的 install.yaml、两个 CLI 与镜像 tar 组成 Release。
+# 附件以 draft 建齐后由本 workflow 翻成正式版；上传中断时 draft 留在原地供排查。
+# 发布物验证由 release-smoke 在候选阶段完成。CI 不创建 tag，版本号只来自 tag。
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write    # 建 draft Release、传附件
+  contents: write    # 建 Release、传附件、转正
   packages: write    # 推送晋升后的 tag
   actions: read      # 查候选 run、下候选 artifact
 
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   promote:
-    name: promote candidate, draft release
+    name: promote candidate, publish release
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -143,3 +143,6 @@ jobs:
             traincache-linux-amd64 \
             trainpublish-linux-amd64 \
             SHA256SUMS
+
+      - name: publish release
+        run: gh release edit "$TAG" --draft=false

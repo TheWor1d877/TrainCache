@@ -6,6 +6,7 @@
 #   ./hack/build-images.sh manager agent    # 只构建指定组件
 #   TAG=v0.1.0 ./hack/build-images.sh
 #   ./hack/build-images.sh --prepare-only   # 只准备基础镜像，不构建（供 e2e 预检）
+#   ./hack/build-images.sh --list-bases webhook  # 打印该组件需要的基础镜像
 #   ./hack/build-images.sh --print-fp       # 只打印当前源码指纹（不构建，供镜像新鲜度门禁）
 #
 # 每个镜像都打上 io.traincache.src-fp 标签，值是构建时源码指纹。热集群里
@@ -41,11 +42,15 @@ declare -A IMG=(
 
 prepare_only=0
 print_fp=0
+list_bases=0
 components=()
 for arg in "$@"; do
   case "$arg" in
     --prepare-only) prepare_only=1 ;;
     --print-fp) print_fp=1 ;;
+    --list-bases)
+      list_bases=1
+      ;;
     -*)
       echo "未知参数: $arg" >&2
       exit 2
@@ -84,6 +89,15 @@ base_refs() {
       if ($3 == "AS" || $3 == "as") alias[$4] = 1
     }' "$@"
 }
+
+# 列出所选组件需要的基础镜像。e2e 预拉清单从这里取，避免手抄 FROM 与
+# Dockerfile 脱节（曾因清单停在 alpine 而 webhook 已换成 bookworm 导致 CI 失败）。
+if [[ "$list_bases" == 1 ]]; then
+  for comp in "${components[@]}"; do
+    base_refs "${DF[$comp]}"
+  done | awk '!seen[$0]++'
+  exit 0
+fi
 
 # 本机镜像里找同一基础镜像的副本：官方镜像在镜像站下多一层 library/。
 find_local_alias() {

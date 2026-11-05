@@ -20,6 +20,42 @@ make e2e    # create a kind cluster, load images, run six assertions
 
 Fluid 1.1.0-alpha.9 runs DataLoad apart from scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md) §2.2). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid. §0). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and trigger no rescheduling, so the blocks written at startup stop matching what later epochs read, and no component fetches ahead of the reader.
 
+## Where it applies
+
+TrainCache targets training workloads where data has to be fetched from remote storage, the consumption order can be computed ahead of time, and fetch bandwidth is the bottleneck. It pulls blocks onto the node's local disk before the Pod is scheduled, uses block-level readiness to decide which node the Pod lands on, and keeps prefetching later blocks in the order training consumes them.
+
+### Workload classes
+
+| Workload | Dataset size | Consumption pattern | Where TrainCache sits |
+|---|---|---|---|
+| Large-scale pretraining | TB to PB | Mostly single-pass | Weak area: the working set does not fit the node cache, reuse ratio is low |
+| Intermediate training, large-scale fine-tuning | Hundreds of GB to a few TB | Repeated across runs and epochs | Strong area |
+| Task-specific fine-tuning, domain training | A few GB to hundreds of GB | Repeated iterations | Edge of the strong area: reuse from iterations offsets part of the fixed system cost |
+| Streaming, online data | No fixed total | Consumption order cannot be derived ahead of time | Not applicable: neither order-based prefetch nor the gate has a premise |
+
+### Conditions for the strong area
+
+Four conditions hold at once:
+
+1. Data has to be fetched from remote storage. The local disk cannot hold the whole working set, or the cold start has no local copy.
+2. The consumption order can be derived ahead of time. Epoch, shuffle seed and batch size are known from the Job spec.
+3. Fetch bandwidth is the bottleneck. Going straight to the data source stalls the trainer when it reads a block.
+4. The same data is consumed repeatedly: across epochs, across runs, and across cold starts on different nodes.
+
+Two benefit paths cover different dataset sizes:
+
+- **Reuse**: the dataset size (basis: total bytes of the whole dataset) falls between a fraction and a few multiples of the cache space available per node (basis: per node, taken as 8 to 12 TB), that is hundreds of GB to a few TB. The node cache holds most of the working set, so repeated consumption no longer goes back to remote storage.
+- **Overlap**: when the working set exceeds the node cache, order-based prefetch overlaps the download with the compute. The gain comes from pipelining, and the cache reuse ratio is low there. The current experiments cover this path; see "Known limitations" for their scale.
+
+One order of magnitude more data pushes the reuse ratio down and leaves only plain order-based prefetch; one order of magnitude less data leaves the fixed cost of the controller, the gate, agentd, the order sidecar and the hook instrumentation above the gain.
+
+### Conditions for the weak area
+
+- Large-scale pretraining with mostly single-pass consumption: the working set does not fit the node cache, the data is not consumed twice, and the cache reuse ratio stays low.
+- Streaming and online data: the consumption order cannot be derived ahead of time, so neither order-based prefetch nor the gate has a premise.
+- The node already has a copy: the image ships the data, or another job on the same node left a usable cache, which makes warmup a redundant action.
+- The dataset is far larger than the cache space of the whole cluster: the cache degrades into a streaming buffer and the reuse ratio approaches zero.
+
 ## Features
 
 - After a `WarmupTask` is submitted, the webhook injects the `traincache.io/warmup` SchedulingGate into matching training Pods, which stay Pending. The controller requests blocks from candidate nodes per Pod shard and removes the gate once block readiness reaches the threshold `M`.
@@ -49,11 +85,11 @@ openssl req -newkey rsa:2048 -nodes -keyout "$TLS/tls.key" -out "$TLS/tls.csr" -
 printf 'subjectAltName=DNS:%s,DNS:%s.%s.svc.cluster.local\n' "$SVC" "$SVC" "$NS" >"$TLS/san.ext"
 openssl x509 -req -in "$TLS/tls.csr" -CA "$TLS/ca.crt" -CAkey "$TLS/ca.key" -CAcreateserial -out "$TLS/tls.crt" -days 365 -extfile "$TLS/san.ext"
 kubectl -n "$NS" create secret tls traincache-webhook-tls --cert="$TLS/tls.crt" --key="$TLS/tls.key"
-kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
-  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$(base64 -w0 "$TLS/ca.crt")\"}]"
+kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategic \
+  -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}}]}"
 ```
 
-The certificate is valid for 365 days. The SAN covers the Service name and the DNS name inside the namespace.
+The certificate is valid for 365 days. The SAN covers the Service name and the DNS name inside the namespace. The CA goes into both webhook entries: the checkpoint entry has `failurePolicy: Fail`, so a Pod with the `traincache.io/checkpoint: enabled` label is rejected when its `caBundle` is empty.
 
 **3. Bucket and credentials.** `DataSet.spec` takes `endpoint` (no scheme), `bucket` and `secretRef`. The Secret holds `accessKey` and `secretKey` and lives in the same namespace as the DataSet. For bucket setup see [cloud object storage deployment](docs/0-cloud-object-storage-deployment.md).
 
@@ -157,7 +193,7 @@ Documents under `docs/` are written in Chinese.
 | [2 Three-layer architecture](docs/2-three-layer-architecture.md) | Control plane, node plane, data sources and data-plane conventions |
 | [3 Field survey](docs/3-field-survey.md) | How Fluid and JuiceFS work, and the gaps found |
 | [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.6 and standing commands |
-| [4.1 Bench setup and rules](docs/4.1-bench-setup-and-rules.md) | Rig, parameters, data locations and prohibitions |
+| [4.1 Bench setup and rules](docs/4.1-bench-setup-and-rules.md) | Rig, parameters and data locations |
 | [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md) | Images, startup, warmup, runs and teardown for the control groups |
 | [4.3 Startup and experiments](docs/4.3-startup-and-experiments.md) | Image builds, control plane startup, experiment families |
 | [4.4 Experiment protocol](docs/4.4-experiment-protocol.md) | Pre-registered hypotheses, metric definitions, condition matrix and criteria |

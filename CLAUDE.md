@@ -31,7 +31,7 @@
 3. 任何清理命令不得指向 `~/tcd`。
 
 ## 镜像拉取
-docker 拉取加速用 `/etc/docker/daemon.json` 的 `registry-mirrors`；镜像站域名不写进 Dockerfile、清单、脚本或文档。
+docker 拉取加速用 `/etc/docker/daemon.json` 的 `registry-mirrors`；我私人镜像站的域名不写进 Dockerfile、清单、脚本或文档。公共代理不在禁止范围（Go module 用 `goproxy.cn`）。
 k8s/containerd 不读 daemon.json。镜像拉不到时先在宿主机 `docker pull`，再 `kind load`，不要给清单里的镜像名加域名前缀。
 送镜像进集群用 `./hack/kind-load.sh <cluster> <image>`，不要用 `kind load docker-image`：Docker 29 全新安装默认启用 containerd 镜像库，`docker save` 会带上本机没有 blob 的其他平台引用，节点侧 `ctr images import --all-platforms` 随即报 content digest not found（升级安装的 overlay2 后端撞不到，所以开发机上看不出来）。
 拉取问题长时间无法解决就保留进度并中断，交给用户处理。
@@ -39,7 +39,7 @@ k8s/containerd 不读 daemon.json。镜像拉不到时先在宿主机 `docker pu
 ## 版本、镜像与发布物
 - 版本号唯一来源是 git tag `vX.Y.Z`；镜像 tag、二进制注入版本、CHANGELOG 标题逐字一致，统一带 `v`。
 - 镜像名固定 `ghcr.io/thewor1d877/traincache/<组件>`：开发打 `:dev`，候选打 `sha-<7 位短 sha>`，发布清单用 `@sha256`。仓库内任何文件不得出现私有镜像站域名。
-- Dockerfile 不设镜像站参数，基础镜像写官方短名，拉取加速交给 docker daemon 的 `registry-mirrors`。
+- Dockerfile 不写私人镜像站前缀，基础镜像写官方短名，拉取加速交给 docker daemon 的 `registry-mirrors`；Go module 走 `ARG GOPROXY`，默认值用公共代理。
 - 仓库内清单的镜像 tag 写 `dev`；发布清单由 kustomize `images:` 渲染，全部 Traincache 镜像用 `@sha256` 固定，不手改 YAML。
 - `controller/deploy/observability/` 是 dev-only 装置，不进发布包，也不得引用到发布清单。
 - 文档正文只写当前状态，不标“v几新增”；版本历史只记 `CHANGELOG.md`；只有对外契约表（CRD 字段、env、CLI flag）标“起始版本”。
@@ -91,6 +91,7 @@ k8s/containerd 不读 daemon.json。镜像拉不到时先在宿主机 `docker pu
 24. 不修改事实，规则只约束表述、结构、篇幅；数字、路径、命令、签名、口径、决策内容照原样保留；拿不准就留着问，绝不为文字好看改数据。可以有判断（识别真冗余、真矛盾），但不越界。
 25. 交互式推进：一次一小节，多提问，禁止长时间埋头不反馈；并行时主对话做最终把关，子代理产出必须实地核验后落地；编号锚点策略：外部引用的 D 号保留、不重排，新增从现有最大号顺排（见 `docs/4.5-metric-decisions.md`）。
 26. 改动文档的小节号或文件名后，全链扫一遍引用：文档正文、代码注释、脚本注释、清单注释都算。`hack/verify-doc-refs.sh` 只覆盖一部分，注释里的 `X.Y §Z` 要另查（扫 `docs/N.M*.md` 的 `^#{2,4}` 标题，再对照代码里的引用文本）。
+27. 读者文档（`docs/`、README、代码与脚本注释）只写读者用得上的事实。四类内容不进文档：开发期的自我约束（不删数据、产物只追加、密钥文件不外泄）、协作流程语（子代理／主对话／回传 BLOCKED／派活）、只对本机成立的状态快照（集群在线、负载 Ready、本机工具链版本）、一次性动作与产物对账（补戳、已清理、待重跑）。这类规矩只留在本文件与提交信息里。
 
 
 ## 文档与代码的同步

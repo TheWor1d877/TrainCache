@@ -202,7 +202,7 @@ func TestSevenLineFamiliesRegisteredAtStartup(t *testing.T) {
 			}
 		}
 	}
-	// 构造预置:agent_up=1(主对话冻结)、agent_degraded=0,node 标签取 Config.Node。
+	// 构造预置:agent_up=1(设计冻结)、agent_degraded=0,node 标签取 Config.Node。
 	if m := metric(t, snap, agentUpName, labels("node", "node-1")); m.value != 1 {
 		t.Errorf("构造预置 agent_up{node=node-1} = %v, want 1", m.value)
 	}

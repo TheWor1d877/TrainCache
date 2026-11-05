@@ -33,9 +33,11 @@ const (
 	AnnotationCheckpointImg  = "traincache.io/checkpoint-image"
 )
 
-// DefaultCheckpointImage is used when CheckpointMutator.Image is empty. e2e
-// overrides it with AnnotationCheckpointImg.
-const DefaultCheckpointImage = "traincache-checkpointd:dev"
+// The sidecar image comes from the ConfigMap key checkpointImage or the Pod
+// annotation traincache.io/checkpoint-image. The sidecar is a release
+// artifact whose digest changes with every version, so there is no default
+// image to fall back to: a Pod without one is rejected, the same way a Pod
+// whose ConfigMap cannot be read is rejected.
 
 const (
 	checkpointContainerName = "checkpointd"
@@ -67,6 +69,7 @@ const (
 	keyRequireCheckpoint = "requireCheckpoint"
 	keyWorldSize         = "worldSize"
 	keySecure            = "secure"
+	keyCheckpointImage   = "checkpointImage"
 
 	defaultPlugin        = "s3"
 	defaultPartSizeBytes = 8 * 1024 * 1024
@@ -80,7 +83,10 @@ const (
 // that look enabled but cannot be resolved, because a half-configured sidecar
 // would silently lose checkpoints.
 type CheckpointMutator struct {
-	Client client.Client
+	// Client 直连 API server，不走 manager 的缓存 client：webhook 的 RBAC
+	// 只给 configmaps/jobs 的 get，没有 list/watch，缓存 informer 起不来，
+	// 读操作会一直阻塞到准入超时。
+	Client client.Reader
 	Log    *slog.Logger
 	Image  string
 }
@@ -97,6 +103,7 @@ type checkpointConfig struct {
 	RequireCheckpoint bool
 	WorldSize         int
 	Secure            bool
+	Image             string
 }
 
 type backendJSON struct {
@@ -155,6 +162,18 @@ func (m *CheckpointMutator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Denied(err.Error())
 	}
 
+	image := m.Image
+	if image == "" {
+		image = cfg.Image
+	}
+	if override := strings.TrimSpace(pod.Annotations[AnnotationCheckpointImg]); override != "" {
+		image = override
+	}
+	if image == "" {
+		return deniedf("checkpoint image is not configured: set ConfigMap %q key %s or Pod annotation %s",
+			cmName, keyCheckpointImage, AnnotationCheckpointImg)
+	}
+
 	if hasContainer(pod.Spec.Containers, checkpointContainerName) ||
 		hasContainer(pod.Spec.InitContainers, checkpointContainerName) {
 		return admission.Allowed("already injected")
@@ -188,14 +207,6 @@ func (m *CheckpointMutator) Handle(ctx context.Context, req admission.Request) a
 	}
 	if !rankResolved {
 		log.Warn("checkpoint rank unresolved; assuming 0", "world_size", worldSize)
-	}
-
-	image := m.Image
-	if image == "" {
-		image = DefaultCheckpointImage
-	}
-	if override := strings.TrimSpace(pod.Annotations[AnnotationCheckpointImg]); override != "" {
-		image = override
 	}
 
 	if err := applyCheckpointInjection(pod, cmName, cfg, taskID, rank, worldSize, image); err != nil {
@@ -308,6 +319,7 @@ func parseCheckpointConfig(cm *corev1.ConfigMap) (checkpointConfig, error) {
 	cfg := checkpointConfig{
 		Plugin:        getString(data, keyPlugin, defaultPlugin),
 		Prefix:        getString(data, keyBackendPrefix, ""),
+		Image:         strings.TrimSpace(getString(data, keyCheckpointImage, "")),
 		NVMEEnabled:   true,
 		PartSizeBytes: defaultPartSizeBytes,
 		Concurrency:   defaultConcurrency,

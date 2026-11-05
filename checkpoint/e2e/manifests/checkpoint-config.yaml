@@ -26,3 +26,4 @@ data:
   secure: "false"
   nvmeEnabled: "false"
   worldSize: "1"
+  checkpointImage: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev

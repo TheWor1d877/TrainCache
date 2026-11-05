@@ -1,0 +1,141 @@
+# Volume-full scenario: the state volume (STATE_DIR) is a tmpfs the trainer
+# fills after checkpointd is up, so the resume-state write of the S3 plugin
+# hits a real ENOSPC. The admitted Pod cannot express this: the webhook
+# creates the work volume as a plain emptyDir without a size limit, so the
+# sidecar container is written by hand here.
+#
+# The socket and the probe marker live on a separate volume: a tmpfs without
+# free space cannot hold a socket file, and the sidecar has to start before
+# the trainer fills the state volume.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traincache-checkpoint-enospc
+  namespace: traincache
+  labels:
+    app: traincache-checkpoint-enospc
+spec:
+  securityContext:
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  volumes:
+    - name: checkpoint-work
+      emptyDir: {}
+    - name: checkpoint-plugins
+      emptyDir: {}
+    - name: checkpoint-run
+      emptyDir: {}
+    - name: checkpoint-state
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
+  initContainers:
+    - name: checkpoint-plugins
+      image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+      imagePullPolicy: IfNotPresent
+      command: ["cp", "-a", "/opt/traincache/plugins/.", "/mnt/plugins/"]
+      volumeMounts:
+        - name: checkpoint-plugins
+          mountPath: /mnt/plugins
+    - name: checkpointd
+      image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+      imagePullPolicy: IfNotPresent
+      command: ["checkpointd"]
+      restartPolicy: Always
+      startupProbe:
+        exec:
+          command: ["checkpointd", "probe"]
+        periodSeconds: 10
+        failureThreshold: 360
+        timeoutSeconds: 3
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 512Mi
+      volumeMounts:
+        - name: checkpoint-work
+          mountPath: /checkpoints-work
+        - name: checkpoint-run
+          mountPath: /run/checkpoint
+        - name: checkpoint-state
+          mountPath: /run/checkpoint-state
+        - name: checkpoint-plugins
+          mountPath: /opt/traincache/plugins
+          readOnly: true
+      env:
+        - name: TASK_ID
+          value: t1
+        - name: RANK
+          value: "0"
+        - name: WORLD_SIZE
+          value: "1"
+        - name: TRAINCACHE_CHECKPOINT_DIR
+          value: /checkpoints-work/t1
+        - name: STATE_DIR
+          value: /run/checkpoint-state
+        - name: PROBE_FILE
+          value: /run/checkpoint/ready
+        - name: SOCKET_PATH
+          value: /run/checkpoint/plugin.sock
+        - name: PLUGIN
+          value: s3
+        - name: BACKEND
+          value: '{"endpoint":"minio:9000","bucket":"traincache","prefix":"e2e-enospc","part_size":8388608,"concurrency":2,"secure":false}'
+        - name: REQUIRE_CHECKPOINT
+          value: "false"
+        - name: NVME_RETENTION
+          value: "1"
+        - name: TRAINCACHE_CHECKPOINT_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: traincache-checkpoint
+              key: accessKey
+        - name: TRAINCACHE_CHECKPOINT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: traincache-checkpoint
+              key: secretKey
+  containers:
+    - name: trainer
+      image: busybox:1.36.1
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # 等 checkpointd 启动完成再写满状态卷：启动时要往状态目录写探针文件。
+          i=0
+          while [ ! -f /run/checkpoint/ready ]; do
+            i=$((i + 1))
+            [ "$i" -gt 300 ] && echo "trainer: probe file missing" && exit 1
+            sleep 1
+          done
+          # 写满状态卷：tmpfs 的 sizeLimit 是 1 MiB，这里写 4 MiB。
+          dd if=/dev/zero of=/run/checkpoint-state/fill bs=1048576 count=4 2>/dev/null || true
+          mkdir -p /checkpoints-work/t1/step-1
+          dd if=/dev/urandom of=/checkpoints-work/t1/step-1/data.bin bs=1048576 count=1 2>/dev/null
+          sync
+          touch /checkpoints-work/t1/step-1/.done
+          echo "trainer: wrote step-1 into a full state volume"
+          # step 1 保存失败后 sidecar 停止接收新 step，这一步不会被上传。
+          sleep 120
+          mkdir -p /checkpoints-work/t1/step-2
+          dd if=/dev/urandom of=/checkpoints-work/t1/step-2/data.bin bs=1048576 count=1 2>/dev/null
+          sync
+          touch /checkpoints-work/t1/step-2/.done
+          echo "trainer: wrote step-2"
+          sleep 3600
+      volumeMounts:
+        - name: checkpoint-work
+          mountPath: /checkpoints-work
+        - name: checkpoint-run
+          mountPath: /run/checkpoint
+        - name: checkpoint-state
+          mountPath: /run/checkpoint-state

@@ -29,6 +29,7 @@ func checkpointConfigMap(name string, overrides map[string]string) *corev1.Confi
 	data := map[string]string{
 		keyBackendEndpoint: "http://minio:9000",
 		keyBackendBucket:   "checkpoints",
+		keyCheckpointImage: "checkpointd:dev",
 	}
 	for k, v := range overrides {
 		data[k] = v
@@ -142,6 +143,18 @@ func TestCheckpointHandleSelection(t *testing.T) {
 			}},
 			msg: "backendBucket",
 		},
+		{
+			name:   "missing checkpointImage",
+			mutate: func(p *corev1.Pod) {},
+			objects: []runtime.Object{&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "ckpt-config", Namespace: "train"},
+				Data: map[string]string{
+					keyBackendEndpoint: "http://minio:9000",
+					keyBackendBucket:   "checkpoints",
+				},
+			}},
+			msg: keyCheckpointImage,
+		},
 	}
 
 	for _, tc := range cases {
@@ -173,7 +186,7 @@ func TestCheckpointHandleInjectsSidecar(t *testing.T) {
 	mutated := applyPatches(t, pod, m.Handle(context.Background(), admissionRequest(t, pod)))
 
 	sidecar := sidecarOf(t, mutated)
-	if sidecar.Image != DefaultCheckpointImage {
+	if sidecar.Image != "checkpointd:dev" {
 		t.Fatalf("image = %q", sidecar.Image)
 	}
 	if sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
@@ -274,6 +287,30 @@ func TestCheckpointHandleInjectsSidecar(t *testing.T) {
 	}
 	if _, ok := mountOf(train, checkpointWorkVolume); !ok {
 		t.Fatalf("training container missing work volume mount: %#v", train.VolumeMounts)
+	}
+}
+
+// The sidecar image comes from the ConfigMap key checkpointImage; the Pod
+// annotation overrides it, so a single ConfigMap can serve Pods that pin a
+// different digest.
+func TestCheckpointHandleImageResolution(t *testing.T) {
+	cm := checkpointConfigMap("ckpt-config", map[string]string{
+		keyCheckpointImage: "checkpointd:from-configmap",
+		keyWorldSize:       "1",
+	})
+	m := newCheckpointMutator(t, cm)
+
+	pod := checkpointPod()
+	mutated := applyPatches(t, pod, m.Handle(context.Background(), admissionRequest(t, pod)))
+	if got := sidecarOf(t, mutated).Image; got != "checkpointd:from-configmap" {
+		t.Fatalf("image = %q", got)
+	}
+
+	pod = checkpointPod()
+	pod.Annotations[AnnotationCheckpointImg] = "checkpointd:from-annotation"
+	mutated = applyPatches(t, pod, m.Handle(context.Background(), admissionRequest(t, pod)))
+	if got := sidecarOf(t, mutated).Image; got != "checkpointd:from-annotation" {
+		t.Fatalf("image = %q", got)
 	}
 }
 

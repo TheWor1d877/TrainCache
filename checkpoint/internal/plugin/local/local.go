@@ -28,12 +28,9 @@ import (
 	"traincache/checkpoint/internal/plugin"
 )
 
-const (
-	// Name 是握手时声明的插件名，与安装目录 cmd/plugin-local 对应。
-	Name = "local"
-	// Version 是构建版本；本地构建统一为 dev。
-	Version = "dev"
-)
+// Name 是握手时声明的插件名，与安装目录 cmd/plugin-local 对应。
+// 版本由命令入口的变量提供，构建脚本用 -X 注入。
+const Name = "local"
 
 const (
 	methodResolve = "resolve"

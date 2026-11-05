@@ -22,7 +22,7 @@ const (
 	reasonVersion = "version"
 )
 
-// M3 预取线 family 名(design §5.8 节点状态线与延迟线;主对话冻结的三个打点方法)。
+// M3 预取线 family 名(design §5.8 节点状态线与延迟线;设计冻结的三个打点方法)。
 const (
 	prefetchQueueDepthName = "traincache_prefetch_queue_depth"
 	prefetchCursorName     = "traincache_prefetch_cursor"

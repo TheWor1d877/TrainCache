@@ -1,10 +1,12 @@
-# Single-rank training Pod with the same checkpoint injection shape the
-# CheckpointMutator produces (design 10.1 §4.2). Keeping the shape identical
-# means the e2e fails if the injected contract and this manifest drift apart;
-# the only additions are the Pod name and the control-plane toleration.
+# Training Pod that opts into checkpointing. The checkpointd sidecar is not
+# written here: the Pod is admitted through the MutatingWebhookConfiguration
+# and the webhook injects the sidecar, the volumes and the environment
+# (design 10.1 §4.2). The e2e asserts that the injection happened by reading
+# the admitted Pod back from the API server.
 #
-# The busybox trainer writes step-1/data.bin (1 MiB) and .done, then sleeps.
-# On the first Pod checkpointd uploads step 1; after the Pod is recreated the
+# The busybox trainer writes step-1/data.bin (1 MiB) and .done into the
+# directory the webhook points TRAINCACHE_CHECKPOINT_DIR at, then sleeps. On
+# the first Pod checkpointd uploads step 1; after the Pod is recreated the
 # emptyDir is fresh, so the restored file proves the S3 round trip.
 apiVersion: v1
 kind: Pod
@@ -13,88 +15,17 @@ metadata:
   namespace: traincache
   labels:
     app: traincache-checkpoint-e2e
+    traincache.io/checkpoint: enabled
+  annotations:
+    traincache.io/checkpoint: ckpt-config
+    traincache.io/task-id: t1
+    traincache.io/rank: "0"
+    traincache.io/world-size: "1"
 spec:
-  securityContext:
-    fsGroup: 65532
-    fsGroupChangePolicy: OnRootMismatch
   tolerations:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
-  volumes:
-    - name: checkpoint-work
-      emptyDir: {}
-    - name: checkpoint-plugins
-      emptyDir: {}
-    - name: checkpoint-run
-      emptyDir: {}
-  initContainers:
-    - name: checkpoint-plugins
-      image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
-      imagePullPolicy: IfNotPresent
-      command: ["cp", "-a", "/opt/traincache/plugins/.", "/mnt/plugins/"]
-      volumeMounts:
-        - name: checkpoint-plugins
-          mountPath: /mnt/plugins
-    - name: checkpointd
-      image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
-      imagePullPolicy: IfNotPresent
-      command: ["checkpointd"]
-      restartPolicy: Always
-      startupProbe:
-        exec:
-          command: ["checkpointd", "probe"]
-        periodSeconds: 10
-        failureThreshold: 360
-        timeoutSeconds: 3
-      resources:
-        requests:
-          cpu: 50m
-          memory: 64Mi
-        limits:
-          memory: 512Mi
-      volumeMounts:
-        # 保存成功后 checkpointd 要删除工作卷上的副本，必须可写。
-        - name: checkpoint-work
-          mountPath: /checkpoints-work
-        - name: checkpoint-run
-          mountPath: /run/checkpoint
-        - name: checkpoint-plugins
-          mountPath: /opt/traincache/plugins
-          readOnly: true
-      env:
-        - name: TASK_ID
-          value: t1
-        - name: RANK
-          value: "0"
-        - name: WORLD_SIZE
-          value: "1"
-        - name: TRAINCACHE_CHECKPOINT_DIR
-          value: /checkpoints-work/t1
-        - name: STATE_DIR
-          value: /run/checkpoint/state
-        - name: PROBE_FILE
-          value: /run/checkpoint/ready
-        - name: SOCKET_PATH
-          value: /run/checkpoint/plugin.sock
-        - name: PLUGIN
-          value: s3
-        - name: BACKEND
-          value: '{"endpoint":"minio:9000","bucket":"traincache","prefix":"e2e","part_size":8388608,"concurrency":2,"secure":false}'
-        - name: REQUIRE_CHECKPOINT
-          value: "false"
-        - name: NVME_RETENTION
-          value: "1"
-        - name: TRAINCACHE_CHECKPOINT_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: traincache-checkpoint
-              key: accessKey
-        - name: TRAINCACHE_CHECKPOINT_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: traincache-checkpoint
-              key: secretKey
   containers:
     - name: trainer
       image: busybox:1.36.1
@@ -104,15 +35,14 @@ spec:
         - -c
         - |
           set -eu
-          mkdir -p /checkpoints-work/t1/step-1
-          dd if=/dev/urandom of=/checkpoints-work/t1/step-1/data.bin bs=1048576 count=1 2>/dev/null
+          # 组可写：checkpointd 以 65532 运行，删工作卷副本要能写 step 目录
+          # （design 10.1 §4.3 权限）。
+          umask 0002
+          # 内容固定为 1 MiB 全零：恢复后的文件要和上传前逐字节一致，
+          # 断言用 sha256 比对，不能用随机数据。
+          mkdir -p "$TRAINCACHE_CHECKPOINT_DIR/step-1"
+          dd if=/dev/zero of="$TRAINCACHE_CHECKPOINT_DIR/step-1/data.bin" bs=1048576 count=1 2>/dev/null
           sync
-          touch /checkpoints-work/t1/step-1/.done
+          touch "$TRAINCACHE_CHECKPOINT_DIR/step-1/.done"
           echo "trainer: wrote 1 MiB step-1/data.bin"
           sleep 3600
-      env:
-        - name: TRAINCACHE_CHECKPOINT_DIR
-          value: /checkpoints-work/t1
-      volumeMounts:
-        - name: checkpoint-work
-          mountPath: /checkpoints-work

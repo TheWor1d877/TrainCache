@@ -36,7 +36,7 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time=6h
+            - --storage.tsdb.retention.time=24h
             - --web.listen-address=:9090
           ports:
             - name: http

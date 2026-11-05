@@ -1,6 +1,6 @@
 // Package metrics： families.go 落 M6 指标底座:design §5.8 七线指标全量注册(23 个 family 中新增 20 个;
 // prefetch_queue_depth / prefetch_cursor / stage_switch_eta_seconds 三个由 M3 注册,复用不动)
-// 与主对话冻结的专用打点 API(M4 rescan / M5 collector / M6 淘汰循环按这里冻结的方法名打点)。
+// 与设计冻结的专用打点 API(M4 rescan / M5 collector / M6 淘汰循环按这里冻结的方法名打点)。
 //
 // 标签纪律(§5.8 基数纪律;decisions D17):
 //   - dataset 一律先经 DatasetLabel 归并(白名单外 "other");
@@ -376,7 +376,7 @@ func (r *Registry) initSevenLine() {
 		r.requestDuration.WithLabelValues(ep, ResultSuccess)
 		r.requestDuration.WithLabelValues(ep, ResultError)
 	}
-	// 节点状态线:agent_up 构造时预置 1(主对话冻结),agent_degraded 预置 0。
+	// 节点状态线:agent_up 构造时预置 1(设计冻结),agent_degraded 预置 0。
 	r.agentUp.WithLabelValues(r.node).Set(1)
 	r.agentDegraded.WithLabelValues(r.node).Set(0)
 }
