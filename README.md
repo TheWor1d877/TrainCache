@@ -20,6 +20,42 @@ make e2e    # create a kind cluster, load images, run six assertions
 
 Fluid 1.1.0-alpha.9 runs DataLoad apart from scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md) §2.2). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid. §0). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and trigger no rescheduling, so the blocks written at startup stop matching what later epochs read, and no component fetches ahead of the reader.
 
+## Where it applies
+
+TrainCache targets training workloads where data has to be fetched from remote storage, the consumption order can be computed ahead of time, and fetch bandwidth is the bottleneck. It pulls blocks onto the node's local disk before the Pod is scheduled, uses block-level readiness to decide which node the Pod lands on, and keeps prefetching later blocks in the order training consumes them.
+
+### Workload classes
+
+| Workload | Dataset size | Consumption pattern | Where TrainCache sits |
+|---|---|---|---|
+| Large-scale pretraining | TB to PB | Mostly single-pass | Weak area: the working set does not fit the node cache, reuse ratio is low |
+| Intermediate training, large-scale fine-tuning | Hundreds of GB to a few TB | Repeated across runs and epochs | Strong area |
+| Task-specific fine-tuning, domain training | A few GB to hundreds of GB | Repeated iterations | Edge of the strong area: reuse from iterations offsets part of the fixed system cost |
+| Streaming, online data | No fixed total | Consumption order cannot be derived ahead of time | Not applicable: neither order-based prefetch nor the gate has a premise |
+
+### Conditions for the strong area
+
+Four conditions hold at once:
+
+1. Data has to be fetched from remote storage. The local disk cannot hold the whole working set, or the cold start has no local copy.
+2. The consumption order can be derived ahead of time. Epoch, shuffle seed and batch size are known from the Job spec.
+3. Fetch bandwidth is the bottleneck. Going straight to the data source stalls the trainer when it reads a block.
+4. The same data is consumed repeatedly: across epochs, across runs, and across cold starts on different nodes.
+
+Two benefit paths cover different dataset sizes:
+
+- **Reuse**: the dataset size (basis: total bytes of the whole dataset) falls between a fraction and a few multiples of the cache space available per node (basis: per node, taken as 8 to 12 TB), that is hundreds of GB to a few TB. The node cache holds most of the working set, so repeated consumption no longer goes back to remote storage.
+- **Overlap**: when the working set exceeds the node cache, order-based prefetch overlaps the download with the compute. The gain comes from pipelining, and the cache reuse ratio is low there. The current experiments cover this path; see "Known limitations" for their scale.
+
+One order of magnitude more data pushes the reuse ratio down and leaves only plain order-based prefetch; one order of magnitude less data leaves the fixed cost of the controller, the gate, agentd, the order sidecar and the hook instrumentation above the gain.
+
+### Conditions for the weak area
+
+- Large-scale pretraining with mostly single-pass consumption: the working set does not fit the node cache, the data is not consumed twice, and the cache reuse ratio stays low.
+- Streaming and online data: the consumption order cannot be derived ahead of time, so neither order-based prefetch nor the gate has a premise.
+- The node already has a copy: the image ships the data, or another job on the same node left a usable cache, which makes warmup a redundant action.
+- The dataset is far larger than the cache space of the whole cluster: the cache degrades into a streaming buffer and the reuse ratio approaches zero.
+
 ## Features
 
 - After a `WarmupTask` is submitted, the webhook injects the `traincache.io/warmup` SchedulingGate into matching training Pods, which stay Pending. The controller requests blocks from candidate nodes per Pod shard and removes the gate once block readiness reaches the threshold `M`.
