@@ -256,6 +256,7 @@ deploy_workload() {
   # Pod 的 spec 不可变，上一轮的 Pod 要先删掉，否则 apply 改不动它。
   kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null \
     || { fail "delete pod $POD"; return 1; }
+  wait_webhook_answers 120 || { fail "webhook 未应答准入请求"; return 1; }
   kubectl apply -f "$E2E/manifests/pod.yaml" >/dev/null \
     || { fail "apply pod.yaml"; return 1; }
   ok "workload applied"
@@ -269,6 +270,45 @@ wait_pod_ready() {
     [[ "$ready" == "True" ]] && return 0
     sleep 2
   done
+  return 1
+}
+
+# rollout status 只说明 Deployment 可用：Pod Ready 与 Service 有就绪后端之间
+# 还差一段传播。准入请求打到没有后端的 ClusterIP 时连接被丢在中间，apiserver
+# 一直等到超时才报 context deadline exceeded，看不出是"webhook 还没接上"。
+# 用一次 server 端 dry-run 创建探测：它会真的走一遍准入链路，又不落 Pod。
+wait_webhook_answers() {
+  local timeout="$1" deadline out=""
+  deadline=$((SECONDS + timeout))
+  local probe="$LOG_DIR/webhook-probe.yaml"
+  cat >"$probe" <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traincache-webhook-probe
+  namespace: traincache
+  labels:
+    traincache.io/checkpoint: enabled
+  annotations:
+    traincache.io/checkpoint: ckpt-config
+    traincache.io/task-id: probe
+spec:
+  containers:
+    - name: probe
+      image: busybox:1.36.1
+      command: ["sh", "-c", "sleep 1"]
+EOF
+  while (( SECONDS < deadline )); do
+    out="$(kubectl -n "$NS" create --dry-run=server -f "$probe" 2>&1)"
+    # 两种应答算 webhook 已经在服务：放行时 kubectl 打印 created (server dry run)，
+    # 拒绝时错误里带 admission webhook 字样。其余都是"没接上"，
+    # 错误措辞随 apiserver 版本变，这里不按措辞判断。
+    if grep -q "dry run" <<<"$out" || grep -q "admission webhook" <<<"$out"; then
+      return 0
+    fi
+    sleep 2
+  done
+  info "webhook 未应答: ${out//$'\n'/ }"
   return 1
 }
 
@@ -378,6 +418,8 @@ dump_state() {
   say ""
   say "---- diagnostics (cluster kept) ----"
   kubectl -n "$NS" get pod -o wide 2>&1 || true
+  kubectl -n "$NS" get endpoints traincache-webhook -o wide 2>&1 || true
+  kubectl -n "$NS" logs deploy/traincache-webhook --tail=120 2>&1 || true
   kubectl -n "$NS" describe pod "$POD" 2>&1 | tail -40 || true
   kubectl -n "$NS" logs "$POD" -c checkpointd --tail=120 2>&1 || true
   kubectl -n "$NS" logs "$POD" -c trainer --tail=40 2>&1 || true
