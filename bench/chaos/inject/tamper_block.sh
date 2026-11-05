@@ -318,6 +318,34 @@ else
   fail "观察 ${OBSERVE}s 内没看到校验层反应(quarantined=${QUAR_AFTER:-0} repair_queue_depth=${RQ_AFTER:-0} repair_requests=${RREQ_AFTER:-0})"
 fi
 
+# ---- 修复队列回落:坏块重拉完后队列要回到 0,repair 回源计数要涨 ----
+MAX_RQ="$RQ_AFTER"
+FINAL_RQ="$RQ_AFTER"
+FINAL_RREQ="$RREQ_AFTER"
+END_TS=$(( $(date +%s) + OBSERVE ))
+while [ "$(date +%s)" -lt "$END_TS" ]; do
+  FINAL_RQ="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_repair_queue_depth)"
+  FINAL_RREQ="$(chaos_metric_label_sum "$NS" "$AGENTD_POD" traincache_fetch_requests_total reason repair)"
+  FINAL_RQ="${FINAL_RQ:-0}"; FINAL_RREQ="${FINAL_RREQ:-0}"
+  MAX_RQ="$(awk -v a="$FINAL_RQ" -v m="$MAX_RQ" 'BEGIN{print (a+0>m+0)?a:m}')"
+  if [ "$FINAL_RQ" = "0" ] && [ "$(awk -v a="$FINAL_RREQ" -v b="$RREQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
+    break
+  fi
+  sleep 3
+done
+if [ "$(awk -v a="$FINAL_RREQ" -v b="$RREQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
+  pass "repair 回源计数上升(${RREQ_BEFORE:-0} → ${FINAL_RREQ}),坏块走了修复队列"
+else
+  fail "repair 回源计数没涨(${RREQ_BEFORE:-0} → ${FINAL_RREQ})"
+fi
+if [ "${FINAL_RQ:-0}" -eq 0 ] 2>/dev/null; then
+  pass "修复队列已回落(峰值 ${MAX_RQ},终值 ${FINAL_RQ})"
+elif [ "$(awk -v a="$MAX_RQ" -v b="$RQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
+  pass "修复队列上升过(峰值 ${MAX_RQ}),观察窗口内还没回落"
+else
+  fail "修复队列没上升(峰值 ${MAX_RQ},终值 ${FINAL_RQ})"
+fi
+
 printf 'quarantined_before=%s\nquarantined_after=%s\nrepair_queue_depth_before=%s\nrepair_queue_depth_after=%s\nrepair_requests_before=%s\nrepair_requests_after=%s\nobserve_s=%s\n' \
   "${QUAR_BEFORE:-}" "${QUAR_AFTER:-}" "${RQ_BEFORE:-}" "${RQ_AFTER:-}" "${RREQ_BEFORE:-}" "${RREQ_AFTER:-}" "$OBSERVE" \
   >>"$OUT_DIR/tampered_block.txt"

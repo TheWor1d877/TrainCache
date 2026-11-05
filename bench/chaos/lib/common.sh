@@ -36,6 +36,10 @@ CHAOS_MINIO_DEPLOY_DEFAULT="minio"
 CHAOS_MINIO_LABEL_DEFAULT="app=minio"
 # agent 本地缓存根:agent/svc/config.go:29、controller/deploy/agent/daemonset.yaml:146
 CHAOS_CACHE_ROOT_DEFAULT="/var/cache/traincache"
+# 控制面指标端口与路径:controller/cmd/controller-manager/main.go 的 metricsPath、
+# controller/cmd/scheduler/main.go 的 metricsPath
+CHAOS_CTRL_METRICS_PORT_DEFAULT="9412"
+CHAOS_CTRL_METRICS_PATH_DEFAULT="/metrics/traincache"
 
 CHAOS_KUBECONFIG=""
 CHAOS_KC_MODE="none"     # flag | env | none
@@ -152,6 +156,43 @@ chaos_metric_label_sum() {
           'index($0, f"{")==1 && index($0, k "=\"" v "\"")>0 {s+=$2} END{printf "%s", (s==""?"":s)}' \
       2>/dev/null || true)"
   printf '%s' "${out}"
+}
+
+# ---- 控制面对象与指标 ----
+# 控制面 Pod 名:controller-manager 与 scheduler 各一个,按名字前缀取
+chaos_ctrl_pod() {   # $1 = controller-manager|scheduler,$2 = namespace
+  chaos_kubectl -n "${2:-$CHAOS_NS_DEFAULT}" get pods \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep -E "^traincache-$1" | head -1 || true
+}
+
+# 控制面指标原文:走 apiserver 的 pods/proxy 通道,不需要容器里有 wget/curl
+chaos_ctrl_metrics_text() {   # $1 = controller-manager|scheduler,$2 = namespace
+  local kind="$1" ns="${2:-$CHAOS_NS_DEFAULT}" pod
+  pod="$(chaos_ctrl_pod "$kind" "$ns")"
+  [ -n "$pod" ] || return 0
+  chaos_kubectl get --raw \
+    "/api/v1/namespaces/$ns/pods/$pod:${CHAOS_CTRL_METRICS_PORT_DEFAULT}/proxy${CHAOS_CTRL_METRICS_PATH_DEFAULT}" 2>/dev/null || true
+}
+
+# 控制面指标的某个 family 值(无标签族)
+chaos_ctrl_metric() {   # $1 = family,$2 = controller-manager|scheduler,$3 = namespace
+  chaos_ctrl_metrics_text "$2" "$3" \
+    | awk -v f="$1" '$0 ~ "^"f"(\\{| )" {print $2; exit}' 2>/dev/null || true
+}
+
+# CRD 的 jsonpath 取值(如 warmuptask 的 status.phase)
+chaos_cr_jsonpath() {   # $1 = kind,$2 = jsonpath,$3 = namespace
+  chaos_kubectl -n "${3:-$CHAOS_NS_DEFAULT}" get "$1" -o "jsonpath=$2" 2>/dev/null || true
+}
+
+# 数据集的单块字节数:取 spec.shards 里最大的 chunkSize
+chaos_dataset_chunk_bytes() {   # $1 = namespace
+  local sizes
+  sizes="$(chaos_kubectl -n "${1:-$CHAOS_NS_DEFAULT}" get datasets \
+    -o jsonpath='{range .items[*].spec.shards[*].chunkSize}{.}{"\n"}{end}' 2>/dev/null || true)"
+  [ -n "$sizes" ] || return 0
+  printf '%s' "$sizes" | sort -n | tail -1
 }
 
 # ---- 证据目录 ----

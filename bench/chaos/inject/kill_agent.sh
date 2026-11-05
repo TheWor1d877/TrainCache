@@ -30,6 +30,7 @@ KUBECONFIG_ARG=""
 POD=""
 NODE=""
 TIMEOUT=180
+FETCH_WINDOW_S=20   # 回源字节增量的观察窗口秒数
 DRY_RUN=0
 OUT_DIR=""
 
@@ -206,10 +207,33 @@ fi
 FETCH_BYTES="$(chaos_metric_sum "$NS" "$NEW_POD" traincache_fetch_bytes_total)"
 QUARANTINED="$(chaos_metric_sum "$NS" "$NEW_POD" traincache_quarantined_blocks)"
 
+# 已落盘的块不重下:替代 Pod 上没有隔离块,回源字节增量不超过一个块
+if [ -n "$NEW_POD" ]; then
+  if [ "${QUARANTINED:-0}" = "0" ]; then
+    pass "替代 Pod 上 traincache_quarantined_blocks=0(已落盘的块没被判为损坏)"
+  else
+    fail "替代 Pod 上 traincache_quarantined_blocks=${QUARANTINED}(重启后有块被判损坏)"
+  fi
+  CHUNK_BYTES="$(chaos_dataset_chunk_bytes "$NS")"
+  sleep "$FETCH_WINDOW_S"
+  FETCH_BYTES2="$(chaos_metric_sum "$NS" "$NEW_POD" traincache_fetch_bytes_total)"
+  DELTA="$(awk -v a="${FETCH_BYTES2:-0}" -v b="${FETCH_BYTES:-0}" 'BEGIN{printf "%d", (a+0)-(b+0)}')"
+  if [ -n "$CHUNK_BYTES" ] && [ "$CHUNK_BYTES" != "0" ]; then
+    if [ "$DELTA" -le "$CHUNK_BYTES" ]; then
+      pass "观察窗口内回源字节增量 ${DELTA}B 不超过一个块(${CHUNK_BYTES}B)"
+    else
+      fail "观察窗口内回源字节增量 ${DELTA}B 超过一个块(${CHUNK_BYTES}B),已落盘的块被重下了"
+    fi
+  else
+    chaos_note "取不到数据集 chunkSize,回源字节增量只记录不判定:${DELTA}B"
+  fi
+  FETCH_BYTES_DELTA="$DELTA"
+fi
+
 [ -n "$OUT_DIR" ] && {
-  printf 'agent_up=%s\nreplacement_ready_s=%s\nrescan_phase=%s\nnode=%s\nfetch_bytes_total=%s\nquarantined_blocks=%s\n' \
+  printf 'agent_up=%s\nreplacement_ready_s=%s\nrescan_phase=%s\nnode=%s\nfetch_bytes_total=%s\nfetch_bytes_delta=%s\nchunk_bytes=%s\nquarantined_blocks=%s\n' \
     "${AGENT_UP:-}" "$REPLACEMENT_READY_S" "${RESCAN_PHASE:-}" "${NEW_NODE:-}" \
-    "${FETCH_BYTES:-}" "${QUARANTINED:-}" >"$OUT_DIR/metrics.txt"
+    "${FETCH_BYTES:-}" "${FETCH_BYTES_DELTA:-}" "${CHUNK_BYTES:-}" "${QUARANTINED:-}" >"$OUT_DIR/metrics.txt"
   printf 'agent_up=%s\nreplacement_ready_s=%s\n' "${AGENT_UP:-}" "$REPLACEMENT_READY_S" >>"$OUT_DIR/timings.txt"
 }
 chaos_note "替代 Pod=$NEW_POD 重建耗时=${REPLACEMENT_READY_S}s agent_up=${AGENT_UP:-<取不到>} rescan_phase=${RESCAN_PHASE:-<取不到>}"

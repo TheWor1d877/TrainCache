@@ -27,6 +27,7 @@ NS="$CHAOS_MINIO_NS_DEFAULT"
 DEPLOY="$CHAOS_MINIO_DEPLOY_DEFAULT"
 TIMEOUT=120
 OBSERVE=30
+TRAIN_POD="$CHAOS_TRAIN_POD_DEFAULT"
 AGENT_NS="$CHAOS_NS_DEFAULT"
 RESTORE=0
 REPLICAS_OVERRIDE=""
@@ -214,4 +215,21 @@ if [ -n "$AGENTD_POD" ]; then
     "${SRC_MODE_BEFORE:-}" "${SRC_MODE_AFTER:-}" "${FB_BEFORE:-}" "${FB_AFTER:-}" "$AGENTD_POD" "$OBSERVE" \
     >>"$OUT_DIR/replicas.txt"
 fi
+
+# ---- 门控与训练终态:源站不可用时 WarmupTask 落 Degraded,训练终止是预期终态 ----
+WARMUP_PHASES="$(chaos_cr_jsonpath warmuptask '{range .items[*].status.phase}{.}{" "}{end}' "$AGENT_NS")"
+TRAIN_PHASE="$(chaos_kubectl -n "$AGENT_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+if printf '%s' "$WARMUP_PHASES" | grep -q "Degraded"; then
+  pass "WarmupTask status.phase 出现 Degraded:${WARMUP_PHASES}"
+else
+  fail "WarmupTask status.phase 里没有 Degraded(当前:${WARMUP_PHASES:-<取不到>})"
+fi
+case "$TRAIN_PHASE" in
+  Failed|Succeeded) pass "训练 Pod $TRAIN_POD 终止(phase=$TRAIN_PHASE),源站不可用下训练终止是预期终态" ;;
+  "")              fail "取不到训练 Pod $TRAIN_POD 的 phase" ;;
+  *)              chaos_note "训练 Pod $TRAIN_POD 仍在 phase=$TRAIN_PHASE(源站不可用期间不要求立刻终止)" ;;
+esac
+printf 'warmup_phases=%s\ntrain_pod=%s\ntrain_pod_phase=%s\n' \
+  "${WARMUP_PHASES:-}" "$TRAIN_POD" "${TRAIN_PHASE:-}" >>"$OUT_DIR/replicas.txt"
+
 [ "$OK" = 1 ]
