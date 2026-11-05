@@ -124,12 +124,14 @@ build_images() {
       info "SKIP_BUILD=1: reusing $comp image without a freshness check"
       continue
     fi
-    # build-images 只做本地基础镜像检查，不联网；CI runner 上没有这两个名字。
-    for base in golang:1.26-alpine alpine:3.24; do
+    # build-images 只做本地基础镜像检查，不联网；CI runner 上没有这些名字，
+    # 基础镜像清单按 Dockerfile 的 FROM 取，不手抄。
+    while IFS= read -r base; do
+      [[ -n "$base" ]] || continue
       if ! docker image inspect "$base" >/dev/null 2>&1; then
         docker pull "$base" >/dev/null 2>&1 || { fail "pull $base"; return 1; }
       fi
-    done
+    done < <("$REPO_ROOT/hack/build-images.sh" --list-bases "$comp")
     TAG="$TAG" "$REPO_ROOT/hack/build-images.sh" "$comp" >"$LOG_DIR/build-$comp.log" 2>&1 \
       || { fail "build $comp image"; tail -30 "$LOG_DIR/build-$comp.log"; return 1; }
   done
