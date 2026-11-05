@@ -317,7 +317,6 @@ func (s *Sidecar) processSave(ctx context.Context, step int64, path string) erro
 	var lastErr error
 	tried := 0
 	for attempt := 1; attempt <= attempts; attempt++ {
-		tried = attempt
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -325,6 +324,9 @@ func (s *Sidecar) processSave(ctx context.Context, step int64, path string) erro
 			lastErr = deadlineErr
 			break
 		}
+		// retry 记的是真正打到插件上的次数：时限在循环开头就掐断本轮时，
+		// 这次尝试没有发生，不能计进终态日志。
+		tried = attempt
 		res, err := s.saveAttempt(saveCtx, step, path)
 		if err == nil {
 			s.saveSucceeded(step, path, res, start)

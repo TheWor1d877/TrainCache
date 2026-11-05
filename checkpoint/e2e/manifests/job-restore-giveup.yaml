@@ -1,0 +1,149 @@
+# Restore give-up scenario (design 10.1 §6.4/§8, 10.2 D14): the local backend
+# holds a committed step whose data file does not match the sha256 recorded in
+# manifest.json, so every restore attempt fails with CORRUPT. The manifest is
+# seeded after the mismatched data, and the manifest is the commit marker, so
+# there is never a window in which a restore could legitimately succeed.
+# checkpointd retries until TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER, writes
+# one ERROR (reason=restore_give_up) and exits with code 3.
+#
+# The workload is a Job (restartPolicy: OnFailure, backoffLimit: 2) instead of
+# the bare Pods of the other modes: this run proves that each give-up exit is
+# accounted in status.failed and that the Job turns Failed once backoffLimit is
+# exceeded, rather than restarting forever. The sidecar is written by hand like
+# pod-enospc.yaml: the webhook-injected Pod cannot pin the restore deadlines,
+# the local plugin or the fake backend.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: traincache-checkpoint-giveup
+  namespace: traincache
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: traincache-checkpoint-giveup
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        - name: checkpoint-work
+          emptyDir: {}
+        - name: checkpoint-plugins
+          emptyDir: {}
+        - name: checkpoint-run
+          emptyDir: {}
+        - name: checkpoint-backend
+          emptyDir: {}
+      initContainers:
+        - name: checkpoint-plugins
+          image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "-a", "/opt/traincache/plugins/.", "/mnt/plugins/"]
+          volumeMounts:
+            - name: checkpoint-plugins
+              mountPath: /mnt/plugins
+        - name: checkpointd
+          image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+          imagePullPolicy: IfNotPresent
+          command: ["checkpointd"]
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command: ["checkpointd", "probe"]
+            periodSeconds: 10
+            failureThreshold: 360
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: checkpoint-work
+              mountPath: /checkpoints-work
+            - name: checkpoint-run
+              mountPath: /run/checkpoint
+            - name: checkpoint-plugins
+              mountPath: /opt/traincache/plugins
+              readOnly: true
+            - name: checkpoint-backend
+              mountPath: /backend
+              readOnly: true
+          env:
+            - name: TASK_ID
+              value: t1
+            - name: RANK
+              value: "0"
+            - name: WORLD_SIZE
+              value: "1"
+            - name: TRAINCACHE_CHECKPOINT_DIR
+              value: /checkpoints-work/t1
+            - name: STATE_DIR
+              value: /run/checkpoint/state
+            - name: PROBE_FILE
+              value: /run/checkpoint/ready
+            - name: SOCKET_PATH
+              value: /run/checkpoint/plugin.sock
+            - name: PLUGIN
+              value: local
+            - name: BACKEND
+              value: '{"root":"/backend"}'
+            - name: REQUIRE_CHECKPOINT
+              value: "true"
+            - name: TRAINCACHE_CHECKPOINT_RESTORE_DEADLINE
+              value: 30s
+            - name: TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER
+              value: 90s
+        - name: seed-backend
+          image: busybox:1.36.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              # want 是 1 MiB 全零的 sha256；files/data.bin 里放随机字节，
+              # 大小一致、内容不符，manifest 校验每次恢复都判 CORRUPT。
+              want=30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58
+              rank=/backend/t1/step-0/rank-0
+              mkdir -p "$rank/files"
+              dd if=/dev/urandom of="$rank/files/data.bin" bs=1048576 count=1 2>/dev/null
+              chmod 644 "$rank/files/data.bin"
+              # manifest 最后写：它是提交标记，写完之前 resolve 只会看到空后端。
+              printf '{"version":1,"task_id":"t1","step":0,"rank":0,"world_size":1,"epoch":0,"created_at":"2026-11-05T00:00:00Z","files":[{"path":"data.bin","size":1048576,"sha256":"%s"}]}' "$want" > "$rank/manifest.json"
+              chmod 644 "$rank/manifest.json"
+              echo "seed-backend: committed step-0 whose data does not match manifest.json"
+          volumeMounts:
+            - name: checkpoint-backend
+              mountPath: /backend
+      containers:
+        - name: trainer
+          image: busybox:1.36.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              # 恢复永远不会成功：训练容器只是等探针就绪，直到 sidecar 放弃退出。
+              i=0
+              while [ "$(cat /run/checkpoint/ready 2>/dev/null || true)" != "ready" ]; do
+                i=$((i + 1))
+                [ "$((i % 60))" -eq 0 ] && echo "trainer: still waiting for restore ($i)"
+                sleep 5
+              done
+              echo "trainer: restore unexpectedly ready"
+              sleep 3600
+          volumeMounts:
+            - name: checkpoint-work
+              mountPath: /checkpoints-work
+            - name: checkpoint-run
+              mountPath: /run/checkpoint

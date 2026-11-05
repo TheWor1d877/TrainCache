@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
+	"traincache/checkpoint/internal/obs"
 	corelog "traincache/core/logging"
 )
 
@@ -17,10 +19,13 @@ import (
 // 与 agentd、gatewayd 保持一致。
 var output io.Writer = os.Stderr
 
+// envJob 由准入注入（docs/10.2 D26），取值是 owner Job 名；裸 Pod 时为空串。
+const envJob = "JOB"
+
 // logSchemaVersion 是公开日志字段的 schema 版本（docs/8.1 §3.1）；只增不改。
 const logSchemaVersion = 1
 
-// New 构造绑定 component 与 version 的 JSON logger，并设为 slog.Default。
+// New 构造绑定 component、job 与 version 的 JSON logger，并设为 slog.Default。
 // level 取 debug/info/warn/error（大小写不敏感），未知值退化为 info；
 // 启动阶段的级别合法性由 config 负责，这里不阻断启动。
 func New(component, version, level string) *slog.Logger {
@@ -35,8 +40,12 @@ func New(component, version, level string) *slog.Logger {
 		),
 		sampler,
 	)
+	// job 按 logger 属性一次性挂上，全部日志行才能带上它（D26）；
+	// 空串也要挂，字段存在性是日志侧按 Job 名对账的前提。
+	// 去空白与 sidecar 的 envString 同口径，两处读到的 Job 才是同一个值。
 	logger := slog.New(handler).With(
 		slog.String("component", component),
+		obs.Job(strings.TrimSpace(os.Getenv(envJob))),
 		slog.String("version", version),
 		slog.Int("log_schema_version", logSchemaVersion),
 	)

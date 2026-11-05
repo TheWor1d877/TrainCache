@@ -3,6 +3,8 @@ package local
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"traincache/checkpoint/internal/manifest"
 	"traincache/checkpoint/internal/plugin"
@@ -425,5 +428,161 @@ func TestMoveReplacesExistingFile(t *testing.T) {
 	}
 	if !bytes.Equal(body, []byte("new")) {
 		t.Fatalf("目标内容 %q，期望覆盖为 new", body)
+	}
+}
+
+// putRankManifest 按后端布局直接写出某个 rank 的 manifest。D25 用例要造的
+// 是「编号 ≥ 声明 world_size 的已提交份」，走 save 会被 rank < world_size 的
+// 参数校验拦住，只能按布局落对象。
+func putRankManifest(t *testing.T, root, task string, step int64, rank, world, epoch int) {
+	t.Helper()
+	// manifest 自身要求 rank < world_size：多余份来自副本数更大的上一轮，
+	// 编号越界时按它的实际编号取最小可用值。
+	manifestWorld := world
+	if manifestWorld <= rank {
+		manifestWorld = rank + 1
+	}
+	m := &manifest.Manifest{
+		Version:   manifest.Version,
+		TaskID:    task,
+		Step:      step,
+		Rank:      rank,
+		WorldSize: manifestWorld,
+		Epoch:     epoch,
+		CreatedAt: time.Now().UTC(),
+		Files:     []manifest.File{{Path: "model.bin", Size: 4, SHA256: sha256Hex("data")}},
+	}
+	data, err := m.Marshal()
+	if err != nil {
+		t.Fatalf("编码 manifest: %v", err)
+	}
+	key := filepath.FromSlash(plugin.ManifestKey(root, task, step, rank))
+	if err := os.MkdirAll(filepath.Dir(key), 0o755); err != nil {
+		t.Fatalf("建 rank 目录: %v", err)
+	}
+	if err := os.WriteFile(key, data, 0o644); err != nil {
+		t.Fatalf("写 manifest: %v", err)
+	}
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestStepCompleteRequiresExactRankSet 锁住 D25：完整性按 rank 集合恰好
+// 等于 {0 … world_size-1} 判定，缺份与多出份都判不完整。
+func TestStepCompleteRequiresExactRankSet(t *testing.T) {
+	const world = 3
+	cases := []struct {
+		name         string
+		ranks        []int
+		wantComplete bool
+		wantMaxExtra int
+	}{
+		{"集合 {0,1,2} 完整", []int{0, 1, 2}, true, 0},
+		{"集合 {0,1,3} 缺 2 且多出 3", []int{0, 1, 3}, false, 3},
+		{"集合 {0,1,2,3} 多出 3", []int{0, 1, 2, 3}, false, 3},
+		{"多份取最大编号", []int{0, 1, 2, 3, 5}, false, 5},
+		{"只缺份没有多余", []int{0, 1}, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, rank := range tc.ranks {
+				putRankManifest(t, root, testTask, 7, rank, world, 2)
+			}
+			epoch, maxExtra, complete, err := stepComplete(root, testTask, 7, world)
+			if err != nil {
+				t.Fatalf("stepComplete: %v", err)
+			}
+			if complete != tc.wantComplete {
+				t.Fatalf("complete = %v, want %v", complete, tc.wantComplete)
+			}
+			if maxExtra != tc.wantMaxExtra {
+				t.Fatalf("maxExtra = %d, want %d", maxExtra, tc.wantMaxExtra)
+			}
+			if tc.wantComplete && epoch != 2 {
+				t.Fatalf("epoch = %d, want 2", epoch)
+			}
+		})
+	}
+}
+
+// TestStepCompleteIgnoresInFlightAndOddNames 锁住 D25 的边界：多余份只在
+// manifest 已写出时才算提交；编号越界与不认识的名字都不参与集合比对。
+func TestStepCompleteIgnoresInFlightAndOddNames(t *testing.T) {
+	const world = 3
+	root := t.TempDir()
+	for _, rank := range []int{0, 1, 2} {
+		putRankManifest(t, root, testTask, 7, rank, world, 1)
+	}
+	// rank-9 只有文件没有 manifest：保存中断留下的半成品，不算多余份。
+	inflight := filepath.FromSlash(plugin.RankPrefix(root, testTask, 7, 9))
+	if err := os.MkdirAll(filepath.Join(inflight, "files"), 0o755); err != nil {
+		t.Fatalf("建在途目录: %v", err)
+	}
+	// step 目录顶层的标记文件、临时名与非数字 rank 目录都不该被当成 rank 份。
+	for _, name := range []string{".done", ".complete", "manifest.json.tmp-1", "rank-x", "rank-", "rank-99999999999999999999"} {
+		if err := os.MkdirAll(filepath.Join(filepath.FromSlash(plugin.StepPrefix(root, testTask, 7)), name), 0o755); err != nil {
+			t.Fatalf("建杂项目录 %s: %v", name, err)
+		}
+	}
+	epoch, maxExtra, complete, err := stepComplete(root, testTask, 7, world)
+	if err != nil {
+		t.Fatalf("stepComplete: %v", err)
+	}
+	if !complete || maxExtra != 0 || epoch != 1 {
+		t.Fatalf("complete=%v maxExtra=%d epoch=%d, want true/0/1", complete, maxExtra, epoch)
+	}
+}
+
+// TestResolveCarriesMaxExtraRank 验证多余份能经 resolve 回到 checkpointd：
+// step 模式判不完整时带上编号，latest 落到更旧的完整 step 时也不能丢。
+func TestResolveCarriesMaxExtraRank(t *testing.T) {
+	const world = 3
+	root := t.TempDir()
+	stepParams := func(mode string, step int64) plugin.ResolveParams {
+		return plugin.ResolveParams{
+			TaskID: testTask, Rank: 0, WorldSize: world,
+			Policy:  plugin.Policy{Mode: mode, Step: step},
+			Backend: rawBackend(t, root),
+		}
+	}
+	for _, rank := range []int{0, 1, 2} {
+		putRankManifest(t, root, testTask, 9, rank, world, 1)
+	}
+	putRankManifest(t, root, testTask, 10, 3, world, 1)
+
+	out, err := call(t, "resolve", stepParams("step", 10))
+	if err != nil {
+		t.Fatalf("resolve step 10: %v", err)
+	}
+	if got := out.(plugin.ResolveResult); got.Found || got.MaxExtraRank != 3 {
+		t.Fatalf("step 模式结果 %+v, want found=false max_extra=3", got)
+	}
+
+	out, err = call(t, "resolve", stepParams("latest", 0))
+	if err != nil {
+		t.Fatalf("resolve latest: %v", err)
+	}
+	if got := out.(plugin.ResolveResult); !got.Found || got.Step != 9 || got.MaxExtraRank != 3 {
+		t.Fatalf("latest 结果 %+v, want found step=9 max_extra=3", got)
+	}
+
+	// 干净目录上多余份为 0：字段缺省即「没有」，不能凭空报警。
+	clean := t.TempDir()
+	for _, rank := range []int{0, 1, 2} {
+		putRankManifest(t, clean, testTask, 1, rank, world, 1)
+	}
+	out, err = call(t, "resolve", plugin.ResolveParams{
+		TaskID: testTask, Rank: 0, WorldSize: world,
+		Policy: plugin.Policy{Mode: "latest"}, Backend: rawBackend(t, clean),
+	})
+	if err != nil {
+		t.Fatalf("resolve 干净目录: %v", err)
+	}
+	if got := out.(plugin.ResolveResult); !got.Found || got.MaxExtraRank != 0 {
+		t.Fatalf("干净目录结果 %+v, want found 且无多余份", got)
 	}
 }

@@ -7,24 +7,27 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // 环境变量名（design 10.1 §4.2、§5.4 与任务约定冻结）。
 const (
-	envTaskID         = "TASK_ID"
-	envRank           = "RANK"
-	envWorldSize      = "WORLD_SIZE"
-	envTaskDir        = "TRAINCACHE_CHECKPOINT_DIR"
-	envNVMEDir        = "NVME_DIR"
-	envStateDir       = "STATE_DIR"
-	envProbeFile      = "PROBE_FILE"
-	envPlugin         = "PLUGIN"
-	envPluginPath     = "PLUGIN_PATH"
-	envSocketPath     = "SOCKET_PATH"
-	envBackend        = "BACKEND"
-	envRequire        = "REQUIRE_CHECKPOINT"
-	envRetention      = "NVME_RETENTION"
-	envCheckpointStep = "CHECKPOINT_STEP"
+	envTaskID             = "TASK_ID"
+	envRank               = "RANK"
+	envWorldSize          = "WORLD_SIZE"
+	envTaskDir            = "TRAINCACHE_CHECKPOINT_DIR"
+	envNVMEDir            = "NVME_DIR"
+	envStateDir           = "STATE_DIR"
+	envProbeFile          = "PROBE_FILE"
+	envPlugin             = "PLUGIN"
+	envPluginPath         = "PLUGIN_PATH"
+	envSocketPath         = "SOCKET_PATH"
+	envBackend            = "BACKEND"
+	envRequire            = "REQUIRE_CHECKPOINT"
+	envRetention          = "NVME_RETENTION"
+	envCheckpointStep     = "CHECKPOINT_STEP"
+	envJob                = "JOB"
+	envRestoreGiveUpAfter = "TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER"
 )
 
 // FromEnv 从环境变量组装 Options。错误信息带变量名，供启动日志直接定位。
@@ -56,6 +59,9 @@ func FromEnv() (Options, error) {
 		TaskID:    taskID,
 		Rank:      rank,
 		WorldSize: worldSize,
+		// 准入按 D26 注入 JOB（owner Job 名）；裸 Pod 时为空串。
+		// 空串是合法取值，不设默认值也不报错，日志字段仍要出现。
+		Job:       envString(envJob, ""),
 		TaskDir:   taskDir,
 		StateDir:  envString(envStateDir, DefaultStateDir),
 		ProbeFile: envString(envProbeFile, DefaultProbeFile),
@@ -86,6 +92,12 @@ func FromEnv() (Options, error) {
 			return Options{}, fmt.Errorf("sidecar: %s=%d 非法(需 ≥ 0)", envCheckpointStep, step)
 		}
 		opts.CheckpointStep = &step
+	}
+	// 恢复放弃期限（D14）。cmd 的装配序不合并这个键，值由这里直接读；
+	// 「必须大于 RESTORE_DEADLINE」由 New 判定——恢复期限在 New 之前才
+	// 合并进 Options，这里看不到它。
+	if opts.RestoreGiveUpAfter, err = envPositiveDuration(envRestoreGiveUpAfter, DefaultRestoreGiveUpAfter); err != nil {
+		return Options{}, err
 	}
 	return opts, nil
 }
@@ -134,6 +146,22 @@ func envBool(name string, def bool) (bool, error) {
 		return false, fmt.Errorf("sidecar: %s=%q 非法(需 true/false): %w", name, raw, err)
 	}
 	return v, nil
+}
+
+// envPositiveDuration 按 config.go 的时长校验风格解析：空取默认，非法报变量名。
+func envPositiveDuration(name string, def time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("sidecar: %s=%q 非法(需时长): %w", name, raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("sidecar: %s=%q 非法(需 > 0)", name, raw)
+	}
+	return d, nil
 }
 
 func envBackendJSON() (json.RawMessage, error) {

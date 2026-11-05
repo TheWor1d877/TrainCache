@@ -50,8 +50,12 @@ webhooks:
         resources: ["pods"]
         scope: "*"
     objectSelector:
-      matchLabels:
-        traincache.io/checkpoint: enabled
+      # 只匹配键是否存在（D24）：traincache.io/checkpoint 的值是每个任务的
+      # ConfigMap 名，不可枚举，限定取值会让写错值的 Pod 静默绕过 webhook。
+      # 键存在即进准入，值的合法性与 ConfigMap 是否存在由准入判、写错即拒绝。
+      matchExpressions:
+        - key: traincache.io/checkpoint
+          operator: Exists
     clientConfig:
       service:
         namespace: traincache

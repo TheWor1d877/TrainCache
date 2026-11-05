@@ -48,12 +48,10 @@ func checkpointPod() *corev1.Pod {
 			Namespace: "train",
 			UID:       types.UID("1234567890abcdef"),
 			Labels: map[string]string{
-				CheckpointEnabledLabel:         CheckpointEnabledValue,
+				CheckpointEnabledLabel:         "ckpt-config",
 				"batch.kubernetes.io/job-name": "trainer",
 			},
-			Annotations: map[string]string{
-				AnnotationCheckpoint: "ckpt-config",
-			},
+			Annotations: map[string]string{},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "trainer", Image: "trainer:dev"}},
@@ -109,6 +107,8 @@ func TestCheckpointHandleSelection(t *testing.T) {
 		msg        string
 	}{
 		{
+			// 集群里 objectSelector 按 Exists 匹配，没 label 的 Pod 根本不会
+			// 触发这条 webhook；单测按 mutator 入口的同一判据断言放行不改。
 			name:       "missing label",
 			mutate:     func(p *corev1.Pod) { delete(p.Labels, CheckpointEnabledLabel) },
 			objects:    []runtime.Object{checkpointConfigMap("ckpt-config", nil)},
@@ -116,17 +116,40 @@ func TestCheckpointHandleSelection(t *testing.T) {
 			patchEmpty: true,
 		},
 		{
-			name:       "label not enabled",
-			mutate:     func(p *corev1.Pod) { p.Labels[CheckpointEnabledLabel] = "false" },
+			name: "old annotation without label",
+			mutate: func(p *corev1.Pod) {
+				delete(p.Labels, CheckpointEnabledLabel)
+				p.Annotations["traincache.io/checkpoint"] = "ckpt-config"
+			},
 			objects:    []runtime.Object{checkpointConfigMap("ckpt-config", nil)},
 			allowed:    true,
 			patchEmpty: true,
 		},
 		{
-			name:    "missing checkpoint annotation",
-			mutate:  func(p *corev1.Pod) { delete(p.Annotations, AnnotationCheckpoint) },
+			// 老写法 label=enabled 没有特判：按「找名为 enabled 的 ConfigMap」
+			// 处理，读不到即拒绝，这正是 D24 要的效果。
+			name:    "legacy label value enabled",
+			mutate:  func(p *corev1.Pod) { p.Labels[CheckpointEnabledLabel] = "enabled" },
 			objects: []runtime.Object{checkpointConfigMap("ckpt-config", nil)},
-			msg:     AnnotationCheckpoint,
+			msg:     "enabled",
+		},
+		{
+			name:    "empty label value",
+			mutate:  func(p *corev1.Pod) { p.Labels[CheckpointEnabledLabel] = "" },
+			objects: []runtime.Object{checkpointConfigMap("ckpt-config", nil)},
+			msg:     CheckpointEnabledLabel,
+		},
+		{
+			name:    "uppercase label value",
+			mutate:  func(p *corev1.Pod) { p.Labels[CheckpointEnabledLabel] = "Ckpt-Config" },
+			objects: []runtime.Object{checkpointConfigMap("ckpt-config", nil)},
+			msg:     "Ckpt-Config",
+		},
+		{
+			name:    "label value with slash",
+			mutate:  func(p *corev1.Pod) { p.Labels[CheckpointEnabledLabel] = "train/ckpt-config" },
+			objects: []runtime.Object{checkpointConfigMap("ckpt-config", nil)},
+			msg:     "train/ckpt-config",
 		},
 		{
 			name:    "configmap missing",
@@ -264,7 +287,7 @@ func TestCheckpointHandleInjectsSidecar(t *testing.T) {
 		t.Fatalf("backend = %#v", backend)
 	}
 
-	for _, name := range []string{"TASK_ID", "RANK", "WORLD_SIZE", "TRAINCACHE_CHECKPOINT_DIR", "STATE_DIR", "PROBE_FILE", "SOCKET_PATH", "PLUGIN", "REQUIRE_CHECKPOINT", "NVME_RETENTION", "NVME_DIR"} {
+	for _, name := range []string{"TASK_ID", "RANK", "WORLD_SIZE", "JOB", "TRAINCACHE_CHECKPOINT_DIR", "STATE_DIR", "PROBE_FILE", "SOCKET_PATH", "PLUGIN", "REQUIRE_CHECKPOINT", "NVME_RETENTION", "NVME_DIR"} {
 		if _, ok := envOf(sidecar, name); !ok {
 			t.Fatalf("missing env %s", name)
 		}
@@ -310,6 +333,36 @@ func TestCheckpointHandleImageResolution(t *testing.T) {
 	pod.Annotations[AnnotationCheckpointImg] = "checkpointd:from-annotation"
 	mutated = applyPatches(t, pod, m.Handle(context.Background(), admissionRequest(t, pod)))
 	if got := sidecarOf(t, mutated).Image; got != "checkpointd:from-annotation" {
+		t.Fatalf("image = %q", got)
+	}
+}
+
+// The release default (the image the install manifest pinned) is the last
+// resort: the user's ConfigMap key and the Pod annotation both override it.
+func TestCheckpointHandleImageReleaseDefault(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "ckpt-config", Namespace: "train"},
+		Data: map[string]string{
+			keyBackendEndpoint: "http://minio:9000",
+			keyBackendBucket:   "checkpoints",
+			keyWorldSize:       "1",
+		},
+	}
+	m := newCheckpointMutator(t, cm)
+	m.DefaultImage = "checkpointd:from-release"
+
+	pod := checkpointPod()
+	mutated := applyPatches(t, pod, m.Handle(context.Background(), admissionRequest(t, pod)))
+	if got := sidecarOf(t, mutated).Image; got != "checkpointd:from-release" {
+		t.Fatalf("image = %q", got)
+	}
+
+	cm.Data[keyCheckpointImage] = "checkpointd:from-configmap"
+	m2 := newCheckpointMutator(t, cm)
+	m2.DefaultImage = "checkpointd:from-release"
+	pod = checkpointPod()
+	mutated = applyPatches(t, pod, m2.Handle(context.Background(), admissionRequest(t, pod)))
+	if got := sidecarOf(t, mutated).Image; got != "checkpointd:from-configmap" {
 		t.Fatalf("image = %q", got)
 	}
 }
@@ -404,5 +457,53 @@ func TestCheckpointHandleKeepsWarmupAnnotations(t *testing.T) {
 	}
 	if mutated.Annotations[warmup.AnnotationPodIndex] != "0" {
 		t.Fatalf("pod-index annotation = %q", mutated.Annotations[warmup.AnnotationPodIndex])
+	}
+}
+
+// D26：JOB 由准入写成字面量供 checkpointd 日志按训练作业对账；裸 Pod 两个
+// label 都没有时写空串而不是省略变量。
+func TestCheckpointHandleInjectsJobEnv(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*corev1.Pod)
+		want   string
+	}{
+		{
+			name:   "batch job-name label",
+			mutate: func(p *corev1.Pod) {},
+			want:   "trainer",
+		},
+		{
+			name: "legacy job-name label",
+			mutate: func(p *corev1.Pod) {
+				delete(p.Labels, "batch.kubernetes.io/job-name")
+				p.Labels["job-name"] = "legacy-trainer"
+			},
+			want: "legacy-trainer",
+		},
+		{
+			name:   "bare pod",
+			mutate: func(p *corev1.Pod) { delete(p.Labels, "batch.kubernetes.io/job-name") },
+			want:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newCheckpointMutator(t, checkpointConfigMap("ckpt-config", map[string]string{keyWorldSize: "1"}))
+			pod := checkpointPod()
+			tc.mutate(pod)
+
+			mutated := applyPatches(t, pod, m.Handle(context.Background(), admissionRequest(t, pod)))
+			job, ok := envOf(sidecarOf(t, mutated), "JOB")
+			if !ok {
+				t.Fatal("JOB env must be present even when the Pod has no job label")
+			}
+			if job.ValueFrom != nil {
+				t.Fatalf("JOB must be written as a literal by admission: %#v", job)
+			}
+			if job.Value != tc.want {
+				t.Fatalf("JOB = %q, want %q", job.Value, tc.want)
+			}
+		})
 	}
 }

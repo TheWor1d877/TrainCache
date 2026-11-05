@@ -8,8 +8,14 @@
 # tmpfs the trainer fills, so the resume-state write of the S3 plugin fails
 # with ENOSPC and the sidecar keeps its working directory.
 #
+# A third mode covers the restore give-up exit: the local backend holds a
+# committed step whose data does not match its manifest, every restore is
+# CORRUPT, and checkpointd exits with code 3 once RESTORE_GIVE_UP_AFTER is
+# reached. The workload is a Job: the run proves status.failed accumulates to
+# backoffLimit and the Job turns Failed (10.2 D14).
+#
 # Usage:
-#   ./checkpoint/e2e/run.sh [clean|setup|run|assert|enospc]   (default: run)
+#   ./checkpoint/e2e/run.sh [clean|setup|run|assert|enospc|loop|restore-giveup]   (default: run)
 #
 #   clean   delete the kind cluster and runtime logs
 #   setup   create/refresh the cluster, build and load images, start MinIO,
@@ -19,11 +25,15 @@
 #   assert  re-run the assertions against the current cluster (no mutation)
 #   enospc  setup + the volume-full failure assertions
 #   loop    setup + the 100-step steady-state assertions
+#   restore-giveup  cluster + build/load images only (no MinIO, no webhook),
+#           then the restore give-up and Job-Failed assertions
 #
 # Environment overrides:
 #   CLUSTER=kind-traincheckpoint-e2e
 #   NODE_IMAGE=<kind node image, default kindest/node:v1.37.0>
 #   SKIP_BUILD=1   reuse an existing image without a freshness check
+#   LOG_DIR=<dir>  run logs (default /tmp/traincheckpoint-e2e; a parallel run
+#                  must redirect it so the two runs do not clobber each other)
 #
 # Exit codes: 0 all assertions passed; 1 a step/assertion failed; 2 usage or
 # missing tool. On failure the kind cluster is kept for inspection and the
@@ -42,6 +52,7 @@ NS=traincache
 POD=traincache-checkpoint-e2e
 POD_ENOSPC=traincache-checkpoint-enospc
 POD_LOOP=traincache-checkpoint-loop
+JOB_GIVEUP=traincache-checkpoint-giveup
 TASK=t1
 STEP=1
 # 前缀每次运行唯一：上一轮留下的 step 会被 sidecar 先恢复，同一个 step 不再
@@ -57,7 +68,7 @@ IMG_MINIO="pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
 IMG_BUSYBOX="busybox:1.36.1"
 WEBHOOK_MWC=traincache-pod-warmup
 
-LOG_DIR="${TMPDIR:-/tmp}/traincheckpoint-e2e"
+LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/traincheckpoint-e2e}"
 MODE="${1:-run}"
 FAILS=0
 PF_PID=""
@@ -288,9 +299,8 @@ metadata:
   name: traincache-webhook-probe
   namespace: traincache
   labels:
-    traincache.io/checkpoint: enabled
-  annotations:
     traincache.io/checkpoint: ckpt-config
+  annotations:
     traincache.io/task-id: probe
 spec:
   containers:
@@ -424,6 +434,8 @@ dump_state() {
   kubectl -n "$NS" logs "$POD" -c checkpointd --tail=120 2>&1 || true
   kubectl -n "$NS" logs "$POD" -c trainer --tail=40 2>&1 || true
   kubectl -n "$NS" logs "$POD_ENOSPC" -c checkpointd --tail=120 2>&1 || true
+  kubectl -n "$NS" get job "$JOB_GIVEUP" -o jsonpath='{.status}{"\n"}' 2>&1 || true
+  kubectl -n "$NS" describe job "$JOB_GIVEUP" 2>&1 | tail -20 || true
   kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
   say "logs: $LOG_DIR/run.log"
 }
@@ -437,6 +449,18 @@ setup() {
   ensure_bucket || return 1
   deploy_webhook || return 1
   deploy_workload || return 1
+}
+
+# setup_giveup 只准备镜像：放弃场景不经过准入、不碰对象存储，MinIO 与
+# webhook 都不需要，但 namespace 必须自己建（平时它是 minio.yaml 建的）。
+setup_giveup() {
+  require_tools
+  cluster_up || return 1
+  build_images || return 1
+  load_images || return 1
+  kubectl get ns "$NS" >/dev/null 2>&1 \
+    || kubectl create ns "$NS" >/dev/null \
+    || { fail "create namespace $NS"; return 1; }
 }
 
 run_flow() {
@@ -611,6 +635,104 @@ sidecar_fds() {
     sh -c 'ls /proc/1/fd | wc -l' 2>/dev/null | tr -d '[:space:]'
 }
 
+# run_giveup_scenario 覆盖恢复放弃的出口（10.2 D14）：本地后端的 step-0 有
+# 合法 manifest 但数据与 sha256 不符，恢复每次都 CORRUPT；checkpointd 到
+# RESTORE_GIVE_UP_AFTER 写一条 reason=restore_give_up 的 ERROR 并以退出码 3
+# 退出。断言 restartPolicy: OnFailure 的 Job 把每次放弃计入 status.failed，
+# 累加超过 backoffLimit 后 Job 判 Failed、Pod 被删，而不是无限重启。
+# 每个放弃周期约 6 分钟（放弃期限 90s + 慢速重试 5 分钟一轮），backoffLimit=2
+# 即三次失败，整体预算约 40 分钟。
+run_giveup_scenario() {
+  step "restore give-up scenario: apply job-restore-giveup.yaml"
+  # 上一轮的 Job 与 Pod 都要先删掉：Job 的 spec 不可变，重跑从干净计数开始。
+  kubectl -n "$NS" delete job "$JOB_GIVEUP" --ignore-not-found --wait=true >/dev/null \
+    || { fail "delete job $JOB_GIVEUP"; return 1; }
+  kubectl apply -f "$E2E/manifests/job-restore-giveup.yaml" >/dev/null \
+    || { fail "apply job-restore-giveup.yaml"; return 1; }
+
+  step "wait for the Job Pod"
+  local gpod="" i
+  for i in $(seq 1 90); do
+    gpod="$(giveup_pod)"
+    [[ -n "$gpod" ]] && break
+    sleep 2
+  done
+  [[ -n "$gpod" ]] || { fail "no Pod for job $JOB_GIVEUP within 180s"; return 1; }
+  ok "Job Pod $gpod"
+
+  step "wait for the give-up ERROR"
+  # 首个放弃在容器启动后约 6 分钟：期限 30s 后转慢速，每轮睡 5 分钟再判。
+  wait_log_pattern "$gpod" checkpointd "恢复放弃，进程以非零码退出" 900 \
+    || { fail "no \"恢复放弃，进程以非零码退出\" in checkpointd logs within 900s"; return 1; }
+  ok "checkpointd wrote the give-up ERROR"
+
+  log_has "$gpod" checkpointd '"reason":"restore_give_up"' \
+    && ok "the give-up ERROR carries reason=restore_give_up" \
+    || fail "the give-up ERROR lacks reason=restore_give_up"
+  log_has "$gpod" checkpointd 'sha256' \
+    && ok "the give-up ERROR carries the CORRUPT checksum detail" \
+    || fail "no sha256 detail in the checkpointd logs"
+  log_has "$gpod" checkpointd "恢复完成 step" \
+    && fail "restore reported success on a corrupt backend" \
+    || ok "restore never succeeded"
+
+  step "read the give-up exit code"
+  local code=""
+  for i in $(seq 1 60); do
+    code="$(giveup_exit_code "$gpod")"
+    [[ -n "$code" && "$code" != "0" ]] && break
+    sleep 2
+  done
+  [[ "$code" == "3" ]] \
+    && ok "checkpointd exited with code 3" \
+    || fail "checkpointd exit code = ${code:-missing}, want 3"
+
+  step "wait for the Job to turn Failed at backoffLimit"
+  local limit failed="" cond="" reason=""
+  limit="$(kubectl -n "$NS" get job "$JOB_GIVEUP" -o jsonpath='{.spec.backoffLimit}')"
+  for i in $(seq 1 150); do
+    failed="$(kubectl -n "$NS" get job "$JOB_GIVEUP" -o jsonpath='{.status.failed}' 2>/dev/null)"
+    cond="$(kubectl -n "$NS" get job "$JOB_GIVEUP" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)"
+    reason="$(kubectl -n "$NS" get job "$JOB_GIVEUP" -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}' 2>/dev/null)"
+    [[ "$cond" == "True" ]] && break
+    [[ $((i % 6)) -eq 0 ]] && info "status.failed=${failed:-0} (backoffLimit=$limit), waiting for Failed"
+    sleep 20
+  done
+  [[ "$cond" == "True" ]] \
+    && ok "the Job reports Failed" \
+    || fail "the Job never reached Failed within 3000s (status.failed=${failed:-0})"
+  [[ "$reason" == "BackoffLimitExceeded" ]] \
+    && ok "the Failed reason is BackoffLimitExceeded" \
+    || fail "the Failed reason is ${reason:-none}"
+  [[ "$failed" == "$((limit + 1))" ]] \
+    && ok "status.failed accumulated to ${failed} (backoffLimit $limit): each give-up exit counted" \
+    || fail "status.failed=${failed:-0}, expected $((limit + 1))"
+
+  step "assert the Job stopped restarting"
+  for i in $(seq 1 30); do
+    [[ -z "$(giveup_pod)" ]] && break
+    sleep 10
+  done
+  [[ -z "$(giveup_pod)" ]] \
+    && ok "the failed Pod is gone; the Job released the quota" \
+    || fail "the Job Pod still exists after the backoffLimit"
+}
+
+# giveup_pod 返回 Job 当前的 Pod 名；Job 还没有 Pod 时返回空串。
+giveup_pod() {
+  kubectl -n "$NS" get pods -l "job-name=$JOB_GIVEUP" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+# giveup_exit_code 读 checkpointd 的终止码：刚退出在 state.terminated，
+# kubelet 重启后挪到 lastState.terminated，两处都看。
+giveup_exit_code() {
+  local pod="$1" code
+  code="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.initContainerStatuses[?(@.name=="checkpointd")].state.terminated.exitCode}' 2>/dev/null)"
+  [[ -n "$code" ]] || code="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.initContainerStatuses[?(@.name=="checkpointd")].lastState.terminated.exitCode}' 2>/dev/null)"
+  printf '%s' "$code"
+}
+
 clean() {
   step "clean"
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -634,8 +756,9 @@ main() {
     assert) assert_all || rc=1 ;;
     enospc) { setup && run_enospc_scenario; } || rc=1 ;;
     loop)   { setup && run_loop_scenario; } || rc=1 ;;
+    restore-giveup) { setup_giveup && run_giveup_scenario; } || rc=1 ;;
     *)
-      say "usage: $0 [clean|setup|run|assert|enospc|loop]"
+      say "usage: $0 [clean|setup|run|assert|enospc|loop|restore-giveup]"
       exit 2
       ;;
   esac

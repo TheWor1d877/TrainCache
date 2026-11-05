@@ -163,13 +163,14 @@ func resolve(p plugin.ResolveParams) (plugin.ResolveResult, error) {
 	}
 
 	if p.Policy.Mode == policyStep {
-		epoch, complete, err := stepComplete(b.Root, p.TaskID, p.Policy.Step, p.WorldSize)
+		epoch, maxExtra, complete, err := stepComplete(b.Root, p.TaskID, p.Policy.Step, p.WorldSize)
 		if err != nil {
 			return plugin.ResolveResult{}, errInternal(err)
 		}
 		if !complete {
-			// 指定的 step 不完整时按契约返回未找到，不把半成品交给调用方。
-			return plugin.ResolveResult{}, nil
+			// 指定的 step 不完整时按契约返回未找到，不把半成品交给调用方；
+			// 多余 rank 仍要带回去，那是 D25 的 WARN 唯一的素材来源。
+			return plugin.ResolveResult{MaxExtraRank: maxExtra}, nil
 		}
 		return plugin.ResolveResult{Found: true, Step: p.Policy.Step, Complete: true, Epoch: epoch}, nil
 	}
@@ -181,16 +182,22 @@ func resolve(p plugin.ResolveParams) (plugin.ResolveResult, error) {
 	}
 	// 从大到小找第一个完整 step；不完整的 step 直接跳过，因为契约只认
 	// manifest 齐全的 step。
+	var maxExtra int
 	for i := len(steps) - 1; i >= 0; i-- {
-		epoch, complete, err := stepComplete(b.Root, p.TaskID, steps[i], p.WorldSize)
+		epoch, extra, complete, err := stepComplete(b.Root, p.TaskID, steps[i], p.WorldSize)
 		if err != nil {
 			return plugin.ResolveResult{}, errInternal(err)
 		}
 		if complete {
-			return plugin.ResolveResult{Found: true, Step: steps[i], Complete: true, Epoch: epoch}, nil
+			// 选中 step 自身没有多余份（有的话上面就判不完整了），带回去的
+			// 是更靠新 step 上的编号：异常拓扑只要在本次枚举里出现过就要报。
+			return plugin.ResolveResult{Found: true, Step: steps[i], Complete: true, Epoch: epoch, MaxExtraRank: maxExtra}, nil
+		}
+		if extra > maxExtra {
+			maxExtra = extra
 		}
 	}
-	return plugin.ResolveResult{}, nil
+	return plugin.ResolveResult{MaxExtraRank: maxExtra}, nil
 }
 
 // listSteps 只读 <root>/<task_id>，按数值升序返回 step-N 目录的 N。
@@ -222,36 +229,109 @@ func listSteps(taskDir string) ([]int64, error) {
 	return steps, nil
 }
 
-// stepComplete 判断一个 step 是否完整：world_size 份 manifest 全部存在
-// 且能通过 manifest.Unmarshal 才算。epoch 取第一个可解析的 manifest；
-// rank 从 0 开始扫描，因此 rank 0 存在时它优先。
-func stepComplete(root, taskID string, step int64, worldSize int) (epoch int, complete bool, err error) {
+// stepComplete 按 design 10.2 D25 判完整性：实际存在的 rank 集合必须恰好
+// 等于 {0 … worldSize-1}。缺任一份判不完整；出现编号 ≥ worldSize 的已提交
+// 份同样判不完整，并把看到过的最大编号经 maxExtra 带回（0 表示没有多余份）。
+// epoch 取第一个可解析的 manifest；rank 从 0 开始扫描，因此 rank 0 存在时它优先。
+func stepComplete(root, taskID string, step int64, worldSize int) (epoch int, maxExtra int, complete bool, err error) {
+	// 先扫多余份：它让 step 注定不完整，省掉后面 worldSize 次读。
+	maxExtra, err = extraMaxRank(root, taskID, step, worldSize)
+	if err != nil || maxExtra > 0 {
+		return 0, maxExtra, false, err
+	}
 	gotEpoch := false
 	for rank := 0; rank < worldSize; rank++ {
 		path := filepath.FromSlash(plugin.ManifestKey(root, taskID, step, rank))
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				return 0, false, nil
+				return 0, 0, false, nil
 			}
-			return 0, false, err
+			return 0, 0, false, err
 		}
 		m, err := manifest.Unmarshal(data)
 		if err != nil {
 			// 存在但不可解析的 manifest 不算完整。resolve 只挑完整 step，
 			// 不必区分“缺失”与“损坏”。
-			return 0, false, nil
+			return 0, 0, false, nil
 		}
 		if m.TaskID != taskID || m.Step != step || m.Rank != rank || m.WorldSize != worldSize {
 			// 目录被换过或 manifest 放错位置，不能算完整。
-			return 0, false, nil
+			return 0, 0, false, nil
 		}
 		if !gotEpoch {
 			epoch = m.Epoch
 			gotEpoch = true
 		}
 	}
-	return epoch, true, nil
+	return epoch, 0, true, nil
+}
+
+// extraMaxRank 枚举 step 目录下编号 ≥ worldSize 的 rank 子目录，只把
+// 「manifest 存在、能解析且 task_id/step/rank 与目录相符」的份算作已提交：
+// manifest 是提交标记，没有它的目录是在途半成品，不该判不完整。
+// 有意不比较它的 world_size——副本数变小正是这里要发现的异常本身，
+// 按请求值比对只会把 anomaly 藏起来。
+func extraMaxRank(root, taskID string, step int64, worldSize int) (int, error) {
+	ents, err := os.ReadDir(filepath.FromSlash(plugin.StepPrefix(root, taskID, step)))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	maxRank := 0
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		rank, ok := parseRankDirName(e.Name())
+		if !ok || rank < worldSize {
+			continue
+		}
+		data, err := os.ReadFile(filepath.FromSlash(plugin.ManifestKey(root, taskID, step, rank)))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return 0, err
+		}
+		m, err := manifest.Unmarshal(data)
+		if err != nil {
+			continue
+		}
+		if m.TaskID != taskID || m.Step != step || m.Rank != rank {
+			continue
+		}
+		if rank > maxRank {
+			maxRank = rank
+		}
+	}
+	return maxRank, nil
+}
+
+// parseRankDirName 严格解析 rank 目录名：前缀之后必须全是数字，编号上限与
+// S3 侧 parseRankPrefix 同值，保证两个插件对同一个目录名的取舍一致。
+// step 目录下的其它名字（临时目录、标记文件、来路不明的目录）都不算 rank 目录。
+func parseRankDirName(name string) (int, bool) {
+	const rankDirPrefix = "rank-"
+	if !strings.HasPrefix(name, rankDirPrefix) {
+		return 0, false
+	}
+	digits := name[len(rankDirPrefix):]
+	if digits == "" {
+		return 0, false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 0 || n > 1<<30 {
+		return 0, false
+	}
+	return n, true
 }
 
 func save(ctx context.Context, p plugin.SaveParams, sess *plugin.Session) (plugin.TransferResult, error) {

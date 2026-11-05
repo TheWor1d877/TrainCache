@@ -235,6 +235,8 @@ func TestRestoreRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+// 放弃期限之前，慢速重试段保持不退出：现场还在，探针保持非 ready，
+// 排障的人还能进去看状态与网络（design 10.2 D14）。
 func TestRestoreSlowModeKeepsRunningUntilCancel(t *testing.T) {
 	opts := testOptions(t)
 	log, buf := newTestLogger()
@@ -242,6 +244,7 @@ func TestRestoreSlowModeKeepsRunningUntilCancel(t *testing.T) {
 	opts.RestoreDeadline = 10 * time.Millisecond
 	opts.RestoreRetryIntervals = []time.Duration{time.Millisecond}
 	opts.RestoreSlowInterval = 10 * time.Millisecond
+	opts.RestoreGiveUpAfter = 30 * time.Second
 	f := &fakeFactory{build: func() *fakePlugin {
 		return &fakePlugin{
 			resolve: func(context.Context, plugin.ResolveParams) (plugin.ResolveResult, error) {
@@ -257,10 +260,10 @@ func TestRestoreSlowModeKeepsRunningUntilCancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.restore(ctx) }()
 
-	time.Sleep(40 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
 	select {
 	case err := <-done:
-		t.Fatalf("恢复慢速重试不应退出, err=%v", err)
+		t.Fatalf("未到放弃期限时慢速重试不应退出, err=%v", err)
 	default:
 	}
 	cancel()
@@ -272,8 +275,147 @@ func TestRestoreSlowModeKeepsRunningUntilCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cancel 后 restore 未退出")
 	}
-	if strings.Count(buf.String(), "恢复失败") < 2 {
+	if strings.Count(buf.String(), "等待下一轮慢速重试") < 2 {
 		t.Fatalf("慢速重试应每轮记 Error:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "restore_give_up") {
+		t.Fatalf("未到放弃期限不应记放弃日志:\n%s", buf.String())
+	}
+}
+
+// 到放弃期限仍未成功时放弃并带错误返回：cmd 据此以非零码退出，把失败
+// 交给 Job 记账，而不是让 Pod 停在 Init 占着 GPU（design 10.2 D14）。
+func TestRestoreGivesUpAndExits(t *testing.T) {
+	opts := testOptions(t)
+	log, buf := newTestLogger()
+	opts.Logger = log
+	opts.RestoreDeadline = 10 * time.Millisecond
+	opts.RestoreRetryIntervals = []time.Duration{time.Millisecond}
+	opts.RestoreSlowInterval = 5 * time.Millisecond
+	opts.RestoreGiveUpAfter = 60 * time.Millisecond
+	f := &fakeFactory{build: func() *fakePlugin {
+		return &fakePlugin{
+			resolve: func(context.Context, plugin.ResolveParams) (plugin.ResolveResult, error) {
+				return plugin.ResolveResult{Found: true, Step: 1, Complete: true}, nil
+			},
+			restore: func(context.Context, plugin.RestoreParams) (plugin.TransferResult, error) {
+				return plugin.TransferResult{}, &plugin.Error{Code: plugin.CodeUnavailable, Message: "down"}
+			},
+		}
+	}}
+	s := newTestSidecar(t, opts, f)
+	err := s.restore(context.Background())
+	if !errors.Is(err, ErrRestoreGiveUp) {
+		t.Fatalf("restore = %v, want ErrRestoreGiveUp", err)
+	}
+	text := buf.String()
+	if !strings.Contains(text, "reason=restore_give_up") {
+		t.Fatalf("放弃日志缺 reason=restore_give_up:\n%s", text)
+	}
+	if !strings.Contains(text, "task_id=task") || !strings.Contains(text, "retry=") || !strings.Contains(text, "err=") {
+		t.Fatalf("放弃日志缺 task_id/retry/err 字段:\n%s", text)
+	}
+	// 放弃前先走过慢速重试段：每轮一条 ERROR 是可观测出口的前提。
+	if strings.Count(text, "等待下一轮慢速重试") < 1 {
+		t.Fatalf("放弃前应至少有一轮慢速重试 ERROR:\n%s", text)
+	}
+	if f.count() < 2 {
+		t.Fatalf("插件启动次数 = %d, want ≥2", f.count())
+	}
+}
+
+// Run 把放弃错误原样交给进程入口，同时收尾把探针置 failed：
+// 这是 D14 唯一的失败出口，不能被 shutdown 的收尾逻辑吞掉。
+func TestRunReturnsGiveUpError(t *testing.T) {
+	opts := testOptions(t)
+	opts.RestoreDeadline = 10 * time.Millisecond
+	opts.RestoreRetryIntervals = []time.Duration{time.Millisecond}
+	opts.RestoreSlowInterval = 5 * time.Millisecond
+	opts.RestoreGiveUpAfter = 60 * time.Millisecond
+	f := &fakeFactory{build: func() *fakePlugin {
+		return &fakePlugin{
+			resolve: func(context.Context, plugin.ResolveParams) (plugin.ResolveResult, error) {
+				return plugin.ResolveResult{Found: true, Step: 1, Complete: true}, nil
+			},
+			restore: func(context.Context, plugin.RestoreParams) (plugin.TransferResult, error) {
+				return plugin.TransferResult{}, &plugin.Error{Code: plugin.CodeUnavailable, Message: "down"}
+			},
+		}
+	}}
+	s := newTestSidecar(t, opts, f)
+	if err := s.Run(context.Background()); !errors.Is(err, ErrRestoreGiveUp) {
+		t.Fatalf("Run = %v, want ErrRestoreGiveUp", err)
+	}
+	if v, err := ReadProbe(opts.ProbeFile); err != nil || v != "failed" {
+		t.Fatalf("放弃后探针 = %q (%v), want failed", v, err)
+	}
+}
+
+// 放弃期限不大于恢复期限时慢速段长度为零，恢复一失败就退出，等于绕过
+// D14 的「保留现场」，所以判配置非法而不是静默取大。
+func TestNewRejectsGiveUpNotAfterRestoreDeadline(t *testing.T) {
+	for _, give := range []time.Duration{500 * time.Millisecond, time.Second} {
+		give := give
+		t.Run(give.String(), func(t *testing.T) {
+			opts := testOptions(t)
+			opts.RestoreDeadline = time.Second
+			opts.RestoreGiveUpAfter = give
+			if _, err := New(opts, &fakeFactory{}); err == nil {
+				t.Fatalf("RestoreGiveUpAfter=%s 应判非法", give)
+			} else if !strings.Contains(err.Error(), "需大于") {
+				t.Fatalf("err = %v, want 包含「需大于」", err)
+			}
+		})
+	}
+}
+
+// 多余 rank 由插件枚举带回，WARN 在 checkpointd 侧记：两个插件的 stderr
+// 都不进日志，只有这里能保证行为与日志字段一致（design 10.2 D25）。
+func TestRestoreWarnsOnRankBeyondWorldSize(t *testing.T) {
+	opts := testOptions(t)
+	log, buf := newTestLogger()
+	opts.Logger = log
+	f := &fakeFactory{build: func() *fakePlugin {
+		return &fakePlugin{
+			resolve: func(context.Context, plugin.ResolveParams) (plugin.ResolveResult, error) {
+				return plugin.ResolveResult{Found: false, MaxExtraRank: 3}, nil
+			},
+		}
+	}}
+	s := newTestSidecar(t, opts, f)
+	st := &restoreState{policy: plugin.Policy{Mode: "latest"}, latest: true}
+	if err := s.restoreOnce(context.Background(), st); err != nil {
+		t.Fatalf("require=false 时应跳过恢复: %v", err)
+	}
+	text := buf.String()
+	if !strings.Contains(text, "reason=rank_beyond_world_size") {
+		t.Fatalf("缺 rank_beyond_world_size 的 WARN:\n%s", text)
+	}
+	if !strings.Contains(text, "max_rank=3") || !strings.Contains(text, "world_size=1") {
+		t.Fatalf("WARN 缺最大 rank 或 world_size:\n%s", text)
+	}
+}
+
+// 完整 step 上没有多余份时不记 WARN：多余份编号 0 是「没有」，不能因为
+// 字段存在就报警。
+func TestRestoreNoWarnWithoutExtraRank(t *testing.T) {
+	opts := testOptions(t)
+	log, buf := newTestLogger()
+	opts.Logger = log
+	f := &fakeFactory{build: func() *fakePlugin {
+		return &fakePlugin{
+			resolve: func(context.Context, plugin.ResolveParams) (plugin.ResolveResult, error) {
+				return plugin.ResolveResult{Found: false}, nil
+			},
+		}
+	}}
+	s := newTestSidecar(t, opts, f)
+	st := &restoreState{policy: plugin.Policy{Mode: "latest"}, latest: true}
+	if err := s.restoreOnce(context.Background(), st); err != nil {
+		t.Fatalf("restoreOnce: %v", err)
+	}
+	if strings.Contains(buf.String(), "rank_beyond_world_size") {
+		t.Fatalf("没有多余份却记了 WARN:\n%s", buf.String())
 	}
 }
 

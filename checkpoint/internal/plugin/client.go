@@ -82,6 +82,12 @@ type ResolveResult struct {
 	Step     int64 `json:"step"`
 	Complete bool  `json:"complete"`
 	Epoch    int   `json:"epoch"`
+	// MaxExtraRank 是本次枚举里确认已提交的、编号 ≥ world_size 的最大
+	// rank，0 表示没有多余份（world_size ≥ 1，多余份编号必 ≥ 1）。
+	// 完整性按 rank 集合恰好等于 {0 … world_size-1} 判定，多余份同样判
+	// 不完整；checkpointd 据此记 reason=rank_beyond_world_size 的 WARN
+	// （design 10.2 D25）。旧插件不回填该字段，按 0 处理即可。
+	MaxExtraRank int `json:"max_extra_rank,omitempty"`
 }
 
 // TransferResult 是 save 与 restore 的返回。

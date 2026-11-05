@@ -22,39 +22,39 @@ Fluid 1.1.0-alpha.9 的 DataLoad 与调度互不影响：Pod 创建后立刻进�
 
 ## 适用场景
 
-TrainCache 面向"数据要从远端拉、消费顺序能提前算出来、拉取带宽是瓶颈"的训练负载。它在 Pod 调度前把数据块拉到节点本地盘，用块级就绪度决定 Pod 落在哪个节点，训练中按消费顺序续拉后续块。
+TrainCache 面向「数据要从远端拉、消费顺序能提前算出来、拉取带宽是瓶颈」的训练负载。它在 Pod 调度前把数据块拉到节点本地盘，用块级就绪度决定 Pod 落在哪个节点，训练中按消费顺序续拉后续块。
 
 ### 负载分类
 
 | 负载类型 | 数据集总量 | 消费特征 | TrainCache 的位置 |
 |---|---|---|---|
-| 大规模预训练 | TB ~ PB 级 | 单遍消费为主 | 劣势区：工作集装不进节点缓存，缓存复用比例低 |
-| 中间训练、大规模微调 | 几百 GB ~ 几 TB | 多实验、多 epoch 反复消费 | 优势区 |
+| 大规模预训练 | TB ~ PB 级 | 多数只消费一遍 | 劣势区：工作集装不进节点缓存，缓存复用比例低 |
+| 中间训练、大规模微调 | 几百 GB ~ 几 TB | 多个实验、多个 epoch 反复消费 | 优势区 |
 | 业务微调、领域训练 | 几 GB ~ 几百 GB | 反复迭代 | 优势区边缘：迭代带来的复用抵掉一部分系统固定开销 |
-| 流式、在线数据 | 无固定总量 | 消费顺序不可提前推导 | 不适用：顺序预排与门控都失去前提 |
+| 流式、在线数据 | 没有固定总量 | 消费顺序算不出来 | 不适用：顺序预排与门控都没有依据 |
 
 ### 优势区间的判据
 
 四条同时成立时收益最大：
 
-1. 数据要从远端拉。本地盘装不下整个工作集，或冷启动时没有本地副本。
-2. 消费顺序可提前推导。epoch、shuffle seed、batch 大小在 Job 配置里已知。
+1. 数据要从远端拉。本地盘装不下整个工作集，或者冷启动时本地没有副本。
+2. 消费顺序能提前算出来。epoch、shuffle seed、batch 大小在 Job 配置里已知。
 3. 拉取带宽是瓶颈。直连数据源会让训练在读块时停顿。
-4. 同一份数据被重复消费。多 epoch、多实验、多节点各自的冷启动都读它。
+4. 同一份数据被重复消费。多个 epoch、多个实验、各节点的冷启动都读它。
 
-两条收益路径随数据集总量落在不同区间：
+收益有两条路径：
 
-- **复用**：数据集总量（口径：整个数据集的总字节数）落在每节点可用缓存空间（口径：每节点，按 8~12 TB 计）的几分之一到几倍区间，即几百 GB 到几 TB。节点缓存装得下大部分工作集，重复消费不必再回远端取。
-- **重叠**：工作集超过节点缓存时，顺序预取让下载与计算重叠，收益来自流水线化，此时缓存复用比例低。现有实验覆盖的是这条路径，实验规模见「已知限制」。
+- **复用**：数据集总量（口径：整个数据集的总字节数）落在每节点可用缓存空间（口径：每节点，按 8~12 TB 计）的几分之一到几倍区间，也就是几百 GB 到几 TB。节点缓存装得下大部分工作集，重复消费不必再回远端取。
+- **重叠**：工作集超过节点缓存时，按消费顺序预取让下载与计算同时进行，收益在这里，缓存复用比例低。现有实验覆盖的是这条路径，实验规模见「已知限制」。
 
-数据集总量再大一个数量级，复用比例下降，收益退化成纯顺序预取；再小一个数量级，Controller、门控、Agent、订单 sidecar 与钩子插桩的固定开销压倒收益。
+数据集总量再大一个数量级，重复消费比例下降，收益只剩顺序预取带来的重叠；再小一个数量级，Controller、门控、Agent、订单 sidecar 与钩子插桩的固定开销超过收益。
 
 ### 劣势区间的判据
 
 - 单遍消费为主的大规模预训练：工作集装不进节点缓存，数据不重复消费，缓存复用比例低。
-- 流式、在线数据：消费顺序无法提前推导，顺序预排与门控都失去前提。
-- 本机已有数据副本：镜像里带了数据，或同节点的其它任务留下了可用缓存，预热变成多余动作。
-- 数据集总量远大于集群可用缓存空间：缓存退化成流式缓冲，复用比例趋近于零。
+- 流式、在线数据：消费顺序算不出来，顺序预排与门控都没有依据。
+- 本机已有数据副本：镜像里带了数据，或者同节点其它任务留下了可用缓存，预热是多余动作。
+- 数据集总量远大于集群可用缓存空间：缓存只起流式缓冲的作用，复用比例趋近于零。
 
 ## 功能
 
@@ -89,7 +89,7 @@ kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategi
   -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}}]}"
 ```
 
-证书有效期为 365 天，SAN 覆盖 Service 名与 namespace 内的 DNS。CA 要写进两条 webhook 条目：checkpoint 条目的 `failurePolicy` 是 `Fail`，`caBundle` 为空时带 `traincache.io/checkpoint: enabled` 标签的 Pod 会被准入拒绝。
+证书有效期为 365 天，SAN 覆盖 Service 名与 namespace 内的 DNS。CA 要写进两条 webhook 条目：checkpoint 条目的 `failurePolicy` 是 `Fail`，`caBundle` 为空时带 `traincache.io/checkpoint` 标签（值为同 namespace 的 ConfigMap 名）的 Pod 会被准入拒绝。
 
 **3. 桶与凭据。** `DataSet.spec` 写 `endpoint`（不带 scheme）、`bucket`、`secretRef`；Secret 的字段是 `accessKey` 与 `secretKey`，与 DataSet 同 namespace。桶的接入方式见[云对象存储部署指南](docs/0-cloud-object-storage-deployment.md)。
 
@@ -163,14 +163,6 @@ kubectl delete -f install.yaml
 
 Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里部署并测得基准数据，作为七种组态中的对照组（[现勘报告](docs/3-field-survey.md)、[4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md)）。`DataSet` 与 `Runtime` 的命名、nodeAffinity 注入方式参考 Fluid。块级就绪度在 `controller/cmd/controller-manager`，SchedulingGate 注入在 `controller/cmd/webhook`，节点打分在 `controller/cmd/scheduler`，预取在 `agent/cmd/agentd`。上游代码未内嵌，两个项目均为 Apache-2.0：[fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid)、[juicedata/juicefs](https://github.com/juicedata/juicefs)。
 
-## 已知限制
-
-- 实验只覆盖 kind 五节点集群、2/8/32 GiB 三档数据集与 1 GiB 缓存；跨集群、多租户与 GPU 训练未测。
-- 1000 mbit 下门控预热增加总时长：M-1000 慢 28.1%，S-1000 慢 5.6%。门控只在带宽受限且工作集超过缓存时有效。
-- 读路径要求节点有本地盘。agentd 不在读 I/O 路径上，读侧信号靠旁路采集，精度受钩子覆盖率影响。
-- 持续预取 lookahead 16 与 32 相对 8 的全程收益为 −7.4% 与 −17.3%（n=2），各 lookahead 档位都没有正收益。
-- 网关单副本，多副本扩容未实现。
-- 不调度 epoch。epoch、shuffle 与 curriculum 切换只改节点内预取顺序，不进入调度路径。
 
 ## 构建与测试
 
