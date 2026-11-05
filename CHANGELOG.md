@@ -19,6 +19,29 @@
 
 # Changelog正文
 
+## 未发布
+
+### Added
+
+- Agent 每 10 分钟清扫一次本节点的本地孤儿块副本，环境变量 `TRAINCACHE_LOCAL_GC_INTERVAL` 调周期，循环启动即跑首轮。数据集删除或条目移除后，节点上那份不再被任何快照引用的副本由它回收，代价是一次回源重拉。机制见 `docs/5.1-design.md` §11.5、`docs/6.1-design.md` §7.6。
+- 发布产物新增第 6 个 digest：`traincache-checkpointd`。它的镜像引用写进新的 ConfigMap `traincache-checkpoint-image`（键 `checkpointImage`，namespace `traincache`），webhook 以 `CHECKPOINT_IMAGE` 读作注入 sidecar 的默认值，发布清单里渲染成本次发布的 digest。Pod 注解 `traincache.io/checkpoint-image` 与接入方自己的 ConfigMap 键仍优先。
+- checkpoint 恢复新增放弃出口：`TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER`（默认 60m）到点后写一条 `reason=restore_give_up` 的 ERROR，checkpointd 以退出码 3 结束，`restartPolicy: OnFailure` 下计入 Job 的 `status.failed` 与 `backoffLimit`，不再无限占着 Pod。决策见 `docs/10.2-decisions.md` D14。
+- checkpointd 每条日志带 `job` 字段，值来自准入从 owner Job 注入的 `JOB` 环境变量；裸 Pod 为空串。它是 checkpoint 链路与 Job 的对账键，决策见 `docs/10.2-decisions.md` D26。
+- 插件 `resolve` 返回新增可选字段 `max_extra_rank`，带回已提交的最大 rank。第三方插件不返回该字段照常可用。
+- `checkpoint/e2e` 新增 `restore-giveup` 模式：本地后端留一份数据与 manifest 的 sha256 不符的已提交 step，每次恢复都判 CORRUPT，断言 checkpointd 到点以退出码 3 结束、`restartPolicy: OnFailure` 的 Job 把每次放弃计进 `status.failed`、超过 `backoffLimit: 2` 后转 Failed。整体预算约 40 分钟。
+
+### Changed
+
+- checkpoint 的启用标记合一：label `traincache.io/checkpoint` 的值从固定 `enabled` 改成该 Pod 用的 ConfigMap 名，`objectSelector` 按键是否存在匹配。Pod 注解 `traincache.io/checkpoint` 删除。接入方需要把标签值改成 ConfigMap 名；写错值的 Pod 会被准入拒绝并给出原因。契约见 `docs/10.1-design.md` §4.2、决策见 D24。
+- 一个 step 判完整的条件改成「已提交的 rank 集合恰好等于 `{0 … world_size-1}`」：缺份和多出 `rank ≥ world_size` 都判不完整，多出的那份另记一条 `reason=rank_beyond_world_size` 的 WARN。弹性训练下副本数与 rank 数不等时不再误判可恢复，决策见 D25。
+- `traincacheds gc` 只回收对象存储里的快照对象与孤儿块对象，不再删除任何节点的本地副本，输出去掉 `local_blocks=`。本地副本归各节点 Agent。
+- `TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER` 必须大于 `TRAINCACHE_CHECKPOINT_RESTORE_DEADLINE`（默认 10m），否则 `checkpointd` 启动即判配置非法、以退出码 2 结束。
+- `traincache_gc_blocks_removed_total` 改由 Agent 的节点级清扫打点，`dataset` 标签为 `other`。
+
+### Fixed
+
+- 保存终态 ERROR 的 `retry` 把没真正打到插件上的那轮也计了进去，比实际尝试次数多 1。
+
 ## [v0.5.1] - 2026-11-05
 
 ### Added
