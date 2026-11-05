@@ -76,6 +76,22 @@ kubectl -n kube-system rollout restart deploy/traincache-scheduler
 kubectl -n kube-system rollout status deploy/traincache-scheduler
 ```
 
+#### ConfigMap traincache-checkpoint-image
+
+位置 `controller/deploy/webhook/checkpoint-image.yaml`，namespace `traincache`，一项。
+
+| 配置项 | 默认 | 读取方 | 说明 |
+|---|---|---|---|
+| `checkpointImage` | `ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev` | webhook | 注入到训练 Pod 的 checkpointd 镜像。开发清单写 `:dev`；发布清单由渲染脚本把它改成本次发布的 digest。接入方可用 Pod 注解 `traincache.io/checkpoint-image` 或自己的 ConfigMap 键覆盖它 |
+
+改这个值后重启 webhook：
+
+```bash
+kubectl apply -f controller/deploy/webhook/checkpoint-image.yaml
+kubectl -n traincache rollout restart deploy/traincache-webhook
+kubectl -n traincache rollout status deploy/traincache-webhook
+```
+
 ### 2.2 对象存储
 
 Agent 的端点、桶、TLS 开关写在 ConfigMap `traincache-config`，AK/SK 由 DaemonSet 从 Secret `traincache-objstore` 注入成 env；控制面在 DataSet CRD 里配置。两边必须指向同一个桶。
@@ -123,6 +139,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 | `TRAINCACHE_METRICS_ADDR` | `:9411` | 指标监听地址，DaemonSet 的 `hostPort` 同值 |
 | `TRAINCACHE_ORDERS_DIR` | `/run/traincache/orders` | OrderSource ring 目录 |
 | `TRAINCACHE_INDEX_REFRESH_INTERVAL` | `5s` | 快照跟随刷新周期 |
+| `TRAINCACHE_LOCAL_GC_INTERVAL` | `10m` | Agent 清扫本节点本地孤儿块副本的周期（机制见 6.1 §7.6、5.1 §11.5）。Agent 按节点一进程一份，粒度为进程级即节点级；调大则已删除条目/数据集的本地副本更晚被回收，调小则每轮索引读取流量增加 |
 | `TRAINCACHE_READ_STALL_MIN_WAIT_MS` | `100` | `read_stall` 入直方图的最小等待毫秒 |
 | `TRAINCACHE_READ_STALL_WINDOW_MS` | `5000` | `read_stall` 归因关联窗口，单位毫秒，以帧 `ts` 为中心前后各该值 |
 
@@ -144,7 +161,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 
 ### 2.5 控制面参数
 
-manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。manager 与 webhook 的项在 `traincache-config`，scheduler 的项在自己 namespace 的 `traincache-scheduler-config`。webhook 的六条取值全部等于默认，清单里没有 env 块。
+manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等于 `controller/internal/config/config.go` 默认值的不写进清单，需要偏离默认的进 ConfigMap。manager 与 webhook 的项在 `traincache-config`，scheduler 的项在自己 namespace 的 `traincache-scheduler-config`。webhook 的六条取值全部等于默认；它另有一条 `CHECKPOINT_IMAGE`，值来自 `traincache-checkpoint-image` ConfigMap，装配值是镜像引用而不是运行参数。
 
 | 变量 | 生效值 | 写在哪里 | 说明 |
 |---|---|---|---|
@@ -161,6 +178,7 @@ manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等�
 | `CONTROLLER_HEALTH_ADDR` | `:8081` | 代码默认 | `healthz` / `readyz` 监听，探针按同名端口引用 |
 | `CONTROLLER_WEBHOOK_ADDR` | `:9443` | 代码默认 | webhook server 监听，Service 443 转发到这里 |
 | `CONTROLLER_NAMESPACE` | 空 | 代码默认 | 只校验格式并记进启动日志，不改变任何监听范围：manager 始终 watch 全部 namespace，webhook 的准入范围由 `objectSelector` 的 `traincache.io/warmup: enabled` 决定；留空即可 |
+| `CHECKPOINT_IMAGE` | 装配方给的值 | ConfigMap `traincache-checkpoint-image`（namespace `traincache`） | 注入到训练 Pod 的 checkpointd 镜像。发布清单里这个值是本次发布的 digest；接入方可用 Pod 注解或自己的 ConfigMap 键覆盖它 |
 
 `CONTROLLER_GATE_NAME` 与 `CONTROLLER_SCORE_ANNOTATION` 是 webhook、scheduler、训练 Pod 三端共用的约定键，改动要三端同步。
 

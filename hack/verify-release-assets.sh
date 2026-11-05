@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # verify-release-assets.sh — 校验一个候选产物目录的完整性。
 #
-# 查四件事：install.yaml 里恰好五个 digest 引用、SHA256SUMS 逐项对得上、
+# 查四件事：install.yaml 里恰好六个 digest 引用、SHA256SUMS 逐项对得上、
 # 目录内每个文件都被 SHA256SUMS 覆盖、install.yaml 的每个 GHCR digest 匿名可解析。
-# candidate.json 比 install.yaml 多一个 checkpointd（由准入注入，不进清单）。
+# 六个 digest 是五个部署组件加 checkpointd：checkpointd 由准入注入，不进任何
+# Deployment，install.yaml 把它的取值放在 traincache-checkpoint-image
+# ConfigMap 里，webhook 读它作为注入镜像的默认值。
 # （docker manifest inspect，只看 manifest 不下载层；包不是 Public 这里就报
 # not pullable，层数据的真拉由 release-smoke 的装机段负责）。
 #
@@ -29,22 +31,24 @@ done
 
 printf '\n== image digests in install.yaml\n'
 mapfile -t refs < <(grep -oE "${REG}/[a-z0-9._-]+@sha256:[0-9a-f]{64}" "$DIR/install.yaml" | sort -u)
-if [[ "${#refs[@]}" -eq 5 ]]; then
-  ok "5 digest references"
+if [[ "${#refs[@]}" -eq 6 ]]; then
+  ok "6 digest references"
 else
-  fail "expected 5 digest references, got ${#refs[@]}"
+  fail "expected 6 digest references, got ${#refs[@]}"
 fi
 
-if [[ -f "$DIR/candidate.json" && "${#refs[@]}" -eq 5 ]]; then
+if [[ -f "$DIR/candidate.json" && "${#refs[@]}" -eq 6 ]]; then
   printf '\n== candidate digests match install.yaml\n'
   mapfile -t cand < <(jq -r '.images[]' "$DIR/candidate.json" | sed 's/^sha256://' | sort)
   mapfile -t have < <(printf '%s\n' "${refs[@]}" | sed 's/.*@//; s/^sha256://' | sort)
   missing="$(comm -23 <(printf '%s\n' "${have[@]}") <(printf '%s\n' "${cand[@]}"))"
-  if [[ "${#cand[@]}" -ge 5 && -z "$missing" ]]; then
-    ok "install.yaml 的五个 digest 都出现在 candidate.json 中"
+  extra="$(comm -13 <(printf '%s\n' "${have[@]}") <(printf '%s\n' "${cand[@]}"))"
+  if [[ "${#cand[@]}" -eq 6 && -z "$missing" && -z "$extra" ]]; then
+    ok "install.yaml 的六个 digest 与 candidate.json 一致"
   else
-    fail "install.yaml 的 digest 未全部出现在 candidate.json 中"
+    fail "install.yaml 的 digest 与 candidate.json 不一致"
     printf 'missing:\n%s\n' "$missing"
+    printf 'extra:\n%s\n' "$extra"
   fi
 fi
 

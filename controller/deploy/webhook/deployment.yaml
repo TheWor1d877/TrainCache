@@ -28,10 +28,17 @@ spec:
         - name: webhook
           image: ghcr.io/thewor1d877/traincache/webhook:dev
           imagePullPolicy: IfNotPresent
-          # No env entries: every setting this process reads uses the default in
+          # No env entries except CHECKPOINT_IMAGE: every other setting this
+          # process reads uses the default in
           # controller/internal/config/config.go (webhook :9443, health :8081,
           # metrics :9412, all namespaces, gate traincache.io/warmup, log level
           # info).
+          env:
+            - name: CHECKPOINT_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-checkpoint-image
+                  key: checkpointImage
           ports:
             - name: https
               containerPort: 9443

@@ -17,6 +17,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGMAPS=(
   controller/deploy/agent/configmap.yaml
   controller/deploy/scheduler/kube-scheduler-config.yaml
+  controller/deploy/webhook/checkpoint-image.yaml
 )
 WORKLOADS=(
   controller/deploy/agent/daemonset.yaml

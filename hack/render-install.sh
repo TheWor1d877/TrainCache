@@ -2,24 +2,26 @@
 # render-install.sh — 把发布清单里的镜像后缀换成 digest 后渲染成单文件。
 #
 # 用法:
-#   ./hack/render-install.sh <vX.Y.Z> <d_manager> <d_webhook> <d_scheduler> <d_agent> <d_gateway> [output]
+#   ./hack/render-install.sh <vX.Y.Z> <d_manager> <d_webhook> <d_scheduler> <d_agent> <d_gateway> <d_checkpoint> [output]
 #
 # digest 形如 sha256:<64 hex>。不改组件 YAML，也不写死 tag。
+# checkpointd 不进任何 Deployment，它由准入注入；它的 digest 写进
+# traincache-checkpoint-image ConfigMap，webhook 读它作为注入镜像的默认值。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REG="ghcr.io/thewor1d877/traincache"
 
-if [[ $# -lt 6 ]]; then
-  echo "usage: $0 <vX.Y.Z> <d_manager> <d_webhook> <d_scheduler> <d_agent> <d_gateway> [output]" >&2
+if [[ $# -lt 7 ]]; then
+  echo "usage: $0 <vX.Y.Z> <d_manager> <d_webhook> <d_scheduler> <d_agent> <d_gateway> <d_checkpoint> [output]" >&2
   exit 2
 fi
 
-VER="$1" D_MANAGER="$2" D_WEBHOOK="$3" D_SCHEDULER="$4" D_AGENT="$5" D_GATEWAY="$6"
-OUT="${7:-install.yaml}"
+VER="$1" D_MANAGER="$2" D_WEBHOOK="$3" D_SCHEDULER="$4" D_AGENT="$5" D_GATEWAY="$6" D_CHECKPOINT="$7"
+OUT="${8:-install.yaml}"
 
 [[ "$VER" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "版本不是 vX.Y.Z: $VER" >&2; exit 2; }
-for pair in "manager:$D_MANAGER" "webhook:$D_WEBHOOK" "scheduler:$D_SCHEDULER" "agent:$D_AGENT" "gateway:$D_GATEWAY"; do
+for pair in "manager:$D_MANAGER" "webhook:$D_WEBHOOK" "scheduler:$D_SCHEDULER" "agent:$D_AGENT" "gateway:$D_GATEWAY" "checkpoint:$D_CHECKPOINT"; do
   name="${pair%%:*}" dg="${pair#*:}"
   [[ "$dg" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$name 的 digest 非法: $dg" >&2; exit 2; }
 done
@@ -49,6 +51,14 @@ images:
   - name: $REG/traincache-gateway
     newName: $REG/traincache-gateway
     digest: $D_GATEWAY
+patches:
+  - target:
+      kind: ConfigMap
+      name: traincache-checkpoint-image
+    patch: |-
+      - op: replace
+        path: /data/checkpointImage
+        value: $REG/traincache-checkpointd@$D_CHECKPOINT
 EOF
 
 kubectl kustomize "$tmp" >"$OUT"
@@ -58,7 +68,7 @@ if grep -q ':dev' "$OUT"; then
   echo "渲染结果仍含 :dev 标签" >&2
   bad=1
 fi
-for pair in "controller-manager:$D_MANAGER" "webhook:$D_WEBHOOK" "kube-scheduler:$D_SCHEDULER" "traincache-agentd:$D_AGENT" "traincache-gateway:$D_GATEWAY"; do
+for pair in "controller-manager:$D_MANAGER" "webhook:$D_WEBHOOK" "kube-scheduler:$D_SCHEDULER" "traincache-agentd:$D_AGENT" "traincache-gateway:$D_GATEWAY" "traincache-checkpointd:$D_CHECKPOINT"; do
   comp="${pair%%:*}" dg="${pair#*:}"
   grep -q "$REG/$comp@$dg" "$OUT" || { echo "缺少 $comp@$dg" >&2; bad=1; }
 done

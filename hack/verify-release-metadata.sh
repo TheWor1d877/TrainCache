@@ -24,13 +24,28 @@ done <<<"$images"
 
 # 2. kustomization 的 images 必须覆盖全部部署组件，且发布前都指向 dev。
 #    checkpointd 由准入按 Pod 注入，不进 kustomization，因此这五个组件的
-#    循环保持五行；它的 Dockerfile/main 在第 3、4 节单独校验。
+#    循环保持五行；它的取值放在 traincache-checkpoint-image ConfigMap 里，
+#    单独在下面校验，它的 Dockerfile/main 在第 3、4 节校验。
 for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
   if ! grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
       | grep -q 'newTag: dev'; then
     fail "kustomization images 缺少 $comp 或未指向 dev"
   fi
 done
+
+# 2b. checkpointd 的镜像取值必须由 ConfigMap 承载，且只能是 dev 标签或 digest。
+ckpt_image="$(awk '/^[[:space:]]*checkpointImage:/ {print $2; exit}' \
+  controller/deploy/webhook/checkpoint-image.yaml)"
+[[ -n "$ckpt_image" ]] || fail "checkpoint-image.yaml 缺少 checkpointImage 键"
+case "$ckpt_image" in
+  *@sha256:*) ;;
+  *:dev) ;;
+  *) fail "checkpointd 镜像未使用 dev 标签或 digest: $ckpt_image" ;;
+esac
+grep -q 'name: CHECKPOINT_IMAGE' controller/deploy/webhook/deployment.yaml \
+  || fail "webhook Deployment 没有读 CHECKPOINT_IMAGE"
+grep -q 'name: traincache-checkpoint-image' controller/deploy/webhook/deployment.yaml \
+  || fail "webhook Deployment 的 CHECKPOINT_IMAGE 没引用 traincache-checkpoint-image"
 
 # 3. 组件清单从五变六：五个部署组件加 checkpointd（由准入注入的 sidecar）。
 #    Dockerfile 不设镜像站参数,VERSION 默认 dev 并由 ldflags 注入。
