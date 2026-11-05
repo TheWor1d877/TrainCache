@@ -203,6 +203,15 @@ spec:
           type: DirectoryOrCreate
 ```
 
+## 4.1 webhook 服务证书与 caBundle
+
+webhook 的服务证书由安装方提供：`controller/deploy/webhook/deployment.yaml` 把 Secret `traincache-webhook-tls` 挂到 `/tmp/k8s-webhook-server/serving-certs`，webhook 进程从该目录读证书与私钥。仓库清单 `controller/deploy/webhook/mutatingwebhook.yaml` 的两条规则都写 `caBundle: ""`，注释写明安装方建好 Secret 后填入签发 CA；`controller/e2e/run.sh` 与 `hack/release-smoke.sh` 用 openssl 自签证书并回填两条规则的 caBundle，属测试装置。
+
+caBundle 为空或与服务证书不匹配，API server 无法验证 webhook 的 HTTPS 调用，两条规则各按自己的 failurePolicy 处置：
+
+- `pods.traincache.io`（预热注入）`failurePolicy: Ignore`：Pod 照常创建且不带 schedulingGate，Controller 在 WarmupTask 上记 `Condition GateInjectionDegraded`（见 7.1 §7.9）。
+- `pods-checkpoint.traincache.io`（checkpoint 注入）`failurePolicy: Fail`：API server 拒绝创建该 Pod。
+
 ## 5. 验证
 
 第一步看日志。endpoint 不通或凭证错，Agent 启动就报错退出。正常输出：
