@@ -597,7 +597,7 @@ func TestGcDryRunKeepsObjects(t *testing.T) {
 	before := storeContents(t, env.store)
 
 	code, stdout, stderr := runWith(env.store, "gc", dataset)
-	assertResult(t, code, stdout, stderr, exitOK, "would remove objects=2 local_blocks=0\n")
+	assertResult(t, code, stdout, stderr, exitOK, "would remove objects=2\n")
 
 	if after := storeContents(t, env.store); after != before {
 		t.Fatalf("gc dry-run 删除了对象")
@@ -613,7 +613,7 @@ func TestGcWithYesRemovesOldSnapshots(t *testing.T) {
 	_ = seedGcDataset(t, env, dataset)
 
 	code, stdout, stderr := runWith(env.store, "gc", dataset, "--yes")
-	assertResult(t, code, stdout, stderr, exitOK, "removed objects=2 local_blocks=0\n")
+	assertResult(t, code, stdout, stderr, exitOK, "removed objects=2\n")
 
 	keys, err := env.store.List(context.Background(), snapshotsPrefix(dataset))
 	if err != nil {
@@ -927,13 +927,13 @@ func TestGcOrphanBlocks(t *testing.T) {
 	env.store.SetModTime(orphanKey, time.Now().Add(-48*time.Hour))
 
 	code, stdout, stderr := runWith(env.store, "gc", dataset, "--orphan-blocks")
-	assertResult(t, code, stdout, stderr, exitOK, "would remove objects=0 local_blocks=0 orphan_blocks=1 orphan_bytes=1\n")
+	assertResult(t, code, stdout, stderr, exitOK, "would remove objects=0 orphan_blocks=1 orphan_bytes=1\n")
 	if !objectExists(t, env.store, orphanKey) {
 		t.Fatalf("dry-run 删掉了孤儿块")
 	}
 
 	code, stdout, stderr = runWith(env.store, "gc", dataset, "--orphan-blocks", "--yes")
-	assertResult(t, code, stdout, stderr, exitOK, "removed objects=0 local_blocks=0 orphan_blocks=1 orphan_bytes=1\n")
+	assertResult(t, code, stdout, stderr, exitOK, "removed objects=0 orphan_blocks=1 orphan_bytes=1\n")
 	if objectExists(t, env.store, orphanKey) {
 		t.Fatalf("--yes 后孤儿块仍在")
 	}

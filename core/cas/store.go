@@ -258,7 +258,7 @@ func (s *Store) Remove(fp Fingerprint) error {
 
 // Evict 只删除块的本地副本，供 Agent 层磁盘淘汰用（D28）：refcount 不拦
 // （引用是快照级逻辑簿记，与副本是否在本地无关），pin>0 返回 ErrInUse；
-// 已不存在返回 ErrNotFound（与 Remove/Sweep 并发安全）。索引条目不受影响，
+// 已不存在返回 ErrNotFound（与 Remove、Put 同在 Store.mu 内串行）。索引条目不受影响，
 // 后续读取经 Catalog.Lookup 命中 + Open 得 ErrNotFound 后由 fetch 重下。
 // 簿记契约：Evict 不动 refs；只删 blocks/ 下的正常块路径，不涉及 quarantine/。
 func (s *Store) Evict(fp Fingerprint) error {

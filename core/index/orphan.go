@@ -23,9 +23,8 @@ func FindOrphanBlocks(ctx context.Context, store objectstore.Store, dataset stri
 	if err != nil {
 		return nil, fmt.Errorf("index: orphan sweep list %s: %w", prefix, err)
 	}
-	// Collector 的 loadManifest 允许传空 manifestFP8（只做存在性与 snapshot_id 校验），
-	// Catalog 的同名方法要求校验指纹；这里只需要前者。cs 传 nil：不触发本地块回收。
-	col := NewCollector(store, nil, DefaultConfig())
+	// loadManifest 允许传空 manifestFP8（只做存在性与 snapshot_id 校验），
+	// Catalog 的同名方法要求校验指纹；这里只需要前者。
 	cat := NewCatalog(store, dataset, DefaultConfig())
 	live := make(map[string]struct{})
 	seen := make(map[string]bool, len(keys))
@@ -35,7 +34,7 @@ func FindOrphanBlocks(ctx context.Context, store objectstore.Store, dataset stri
 			continue
 		}
 		seen[snapID] = true
-		manifest, err := col.loadManifest(ctx, dataset, snapID, "")
+		manifest, err := loadManifest(ctx, store, dataset, snapID, "")
 		if err != nil {
 			return nil, fmt.Errorf("index: orphan sweep manifest %s: %w", snapID, err)
 		}

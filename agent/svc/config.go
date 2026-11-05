@@ -48,6 +48,11 @@ const (
 	defaultIndexRefreshInterval = 5 * time.Second
 	// envIndexRefreshInterval 覆盖快照跟随刷新周期(time.ParseDuration)。
 	envIndexRefreshInterval = "TRAINCACHE_INDEX_REFRESH_INTERVAL"
+	// defaultLocalGCInterval 是节点级本地孤儿副本清扫的默认周期(design §11.5)。
+	// 周期取 10m:回收只损失一次回源、无需紧实时,但数据集删除后的残留窗口要有界。
+	defaultLocalGCInterval = 10 * time.Minute
+	// envLocalGCInterval 覆盖本地副本清扫周期(time.ParseDuration)。
+	envLocalGCInterval = "TRAINCACHE_LOCAL_GC_INTERVAL"
 	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;6.1 §5.12)。
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
 
@@ -117,6 +122,9 @@ type Config struct {
 	// IndexRefreshInterval 是快照跟随刷新周期(6.1 §5.9;默认 5s,
 	// TRAINCACHE_INDEX_REFRESH_INTERVAL 覆盖)。
 	IndexRefreshInterval time.Duration
+	// LocalGCInterval 是节点级本地孤儿副本清扫周期(design §11.5;默认 10m,
+	// TRAINCACHE_LOCAL_GC_INTERVAL 覆盖)。
+	LocalGCInterval time.Duration
 	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(6.1 §5.12;默认 false,
 	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
 	ObjstoreProbeConditionalWrite bool
@@ -140,6 +148,15 @@ func (c Config) indexRefreshInterval() time.Duration {
 		return c.IndexRefreshInterval
 	}
 	return defaultIndexRefreshInterval
+}
+
+// localGCInterval 返回生效的本地副本清扫周期(未配置/非正 → 默认 10m;
+// Config 直接构造的测试与零值场景同样适用)。
+func (c Config) localGCInterval() time.Duration {
+	if c.LocalGCInterval > 0 {
+		return c.LocalGCInterval
+	}
+	return defaultLocalGCInterval
 }
 
 // Load 从环境变量加载配置并校验(design §8):
@@ -172,6 +189,11 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 清扫周期与刷新周期同口径:配错即拒绝启动,不静默回退默认值。
+	localGCInterval, err := envDuration(envLocalGCInterval, defaultLocalGCInterval)
+	if err != nil {
+		return nil, err
+	}
 	cacheCapacityBytes, err := envNonNegInt64(envCacheCapacityBytes, 0)
 	if err != nil {
 		return nil, err
@@ -198,6 +220,7 @@ func Load() (*Config, error) {
 		ReadStallMinWaitMS:            readStallMinWaitMS,
 		ReadStallWindowMS:             readStallWindowMS,
 		IndexRefreshInterval:          indexRefreshInterval,
+		LocalGCInterval:               localGCInterval,
 		ObjstoreProbeConditionalWrite: envBool(envObjstoreProbeConditionalWrite),
 		GatewayEndpoint:               envOr("TRAINCACHE_GATEWAY_ENDPOINT", ""),
 		GatewaySecure:                 envBool("TRAINCACHE_GATEWAY_SECURE"),

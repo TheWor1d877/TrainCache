@@ -311,18 +311,20 @@ func (h evictHeatSource) ListForEviction() []evictor.EvictionEntry {
 	return out
 }
 
-// sweepDatasets 驱动一轮 core GC(evictor.Config.Sweep 接线;D32:失败仅日志不阻塞淘汰):
-// 遍历已知 dataset 逐个 index.Collector.Sweep 并累加;ErrNoCurrent(该 dataset 尚无快照,
-// Sweep 口径"绝不删")视为空操作跳过,其余错误记日志并返回首个(evictor 按 result=error 打点)。
-// 打点 dataset 标签由 evictor.Config.Dataset 提供("" 经白名单归 other)。
+// sweepDatasets 驱动一轮 core 对象 GC(evictor.Config.Sweep 接线;D32:失败仅日志不阻塞淘汰):
+// 遍历已知 dataset 逐个 index.Collector.Sweep 并累加回收对象数;ErrNoCurrent(该 dataset
+// 尚无快照,Sweep 口径"绝不删")视为空操作跳过,其余错误记日志并返回首个(evictor 按
+// result=error 打点)。打点 dataset 标签由 evictor.Config.Dataset 提供("" 经白名单归 other)。
+// blocks 恒为 0:Collector 只回收快照对象,不删本地块——本地 CAS 节点级全局、按单数据集
+// 算活块会误删其它数据集的副本,本地副本回收改走节点级清扫(见 localgc.go)。
 func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err error) {
 	// D48:借用淘汰周期刷新修复队列深度(数据源 = Rescan.Status)。
 	a.reportRepairQueueDepth()
-	if a.ObjectStore == nil || a.CS == nil {
+	if a.ObjectStore == nil {
 		return 0, 0, nil
 	}
 	var firstErr error
-	col := index.NewCollector(a.ObjectStore, a.CS, index.Config{
+	col := index.NewCollector(a.ObjectStore, index.Config{
 		RefreshInterval: a.Cfg.indexRefreshInterval(),
 		OnSweepSkip:     a.onSweepSkip,
 	})
@@ -330,8 +332,7 @@ func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err e
 		if ctx.Err() != nil {
 			break
 		}
-		b, o, serr := col.Sweep(ctx, ds)
-		blocks += int64(b)
+		o, serr := col.Sweep(ctx, ds)
 		objects += int64(o)
 		switch {
 		case serr == nil:
@@ -357,10 +358,22 @@ func (a *Agent) onSweepSkip(dataset, reason string) {
 	slog.Warn("sweep: protected 快照不可用,跳过本轮块删除", "dataset", dataset, "reason", reason)
 }
 
-// knownDatasets 返回已知 dataset 名(升序去重):已装配 bundle 集合 ∪ 对象存储枚举
-// (与 rescan.buildMapping 同款粗筛规则)。枚举失败降级为仅 bundle 集合(只记日志,
-// GC 覆盖不全不影响淘汰)。
+// knownDatasets 返回已知 dataset 名(升序去重),对象存储枚举失败时降级为仅 bundle
+// 集合(只记日志)。该降级口径仅对对象 GC 成立:GC 覆盖不全会少清一点对象,下轮补上。
+// 本地副本清扫不得使用本方法,必须走 knownDatasetsStrict(见 localgc.go 的整轮放弃)。
 func (a *Agent) knownDatasets(ctx context.Context) []string {
+	out, err := a.knownDatasetsStrict(ctx)
+	if err == nil {
+		return out
+	}
+	slog.Warn("sweep: 枚举对象存储失败,本轮仅覆盖已装配 dataset", "err", err)
+	return a.bundleDatasetNames()
+}
+
+// knownDatasetsStrict 是完整枚举版:bundle 集合 ∪ 对象存储枚举,枚举失败返回错误且
+// 不给出子集。LocalGC.Sweep 的调用方义务(漏一个数据集 = 它的本地副本被当孤儿删掉)
+// 要求要么拿到全集、要么拿到错误,不存在"带着子集继续"的中间态。
+func (a *Agent) knownDatasetsStrict(ctx context.Context) ([]string, error) {
 	seen := make(map[string]struct{})
 	out := make([]string, 0)
 	add := func(name string) {
@@ -373,22 +386,28 @@ func (a *Agent) knownDatasets(ctx context.Context) []string {
 		seen[name] = struct{}{}
 		out = append(out, name)
 	}
-	if a.Prefetch != nil {
-		for _, name := range a.Prefetch.bundleNames() {
+	for _, name := range a.bundleDatasetNames() {
+		add(name)
+	}
+	if a.ObjectStore != nil {
+		keys, err := a.ObjectStore.List(ctx, "")
+		if err != nil {
+			return nil, fmt.Errorf("svc: 枚举对象存储: %w", err)
+		}
+		for _, name := range datasetsOfKeys(keys) {
 			add(name)
 		}
 	}
-	if a.ObjectStore != nil {
-		if keys, err := a.ObjectStore.List(ctx, ""); err != nil {
-			slog.Warn("sweep: 枚举对象存储失败,本轮仅覆盖已装配 dataset", "err", err)
-		} else {
-			for _, name := range datasetsOfKeys(keys) {
-				add(name)
-			}
-		}
-	}
 	sort.Strings(out)
-	return out
+	return out, nil
+}
+
+// bundleDatasetNames 返回已装配 bundle 的 dataset 名(升序;未装配预取器 → nil)。
+func (a *Agent) bundleDatasetNames() []string {
+	if a.Prefetch == nil {
+		return nil
+	}
+	return a.Prefetch.bundleNames()
 }
 
 // datasetsOfKeys 从对象键列表提取数据集名(去重;与 rescan.datasetsOf 同规则,子模块

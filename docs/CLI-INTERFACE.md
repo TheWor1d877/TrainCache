@@ -222,3 +222,16 @@ trainpublish --dataset coco --bucket traincache \
 trainpublish --dataset coco --bucket traincache --check-dataset /data/coco-dataset.yaml
 # ok dataset=coco chunk_size=67108864 dataset_file=/data/coco-dataset.yaml
 ```
+
+## 11. traincacheds
+
+数据集管理 CLI（`rm`/`ls`/`stat`/`gc`），源码 `core/cmd/traincacheds`，命令面、参数与删除语义见 `5.1-design.md` §11。本节只记 `gc` 的输出口径。
+
+`gc <ds>` 回收对象存储里不再被引用的快照对象，`--orphan-blocks` 再清远端孤儿块对象；不删除任何节点的本地块副本，输出没有 `local_blocks=` 字段。结果一行：
+
+```
+removed objects=2                                          # 不带 --orphan-blocks
+removed objects=2 orphan_blocks=1 orphan_bytes=67108864    # 带 --orphan-blocks
+```
+
+dry-run 同一行、行首为 `would remove`。本地副本由各节点 Agent 的周期清扫负责（默认 10 分钟，`TRAINCACHE_LOCAL_GC_INTERVAL`，见 5.1 §11.5、6.1 §7.6），CLI 不提供该入口。
