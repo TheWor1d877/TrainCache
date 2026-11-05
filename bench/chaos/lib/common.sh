@@ -186,13 +186,21 @@ chaos_cr_jsonpath() {   # $1 = kind,$2 = jsonpath,$3 = namespace
   chaos_kubectl -n "${3:-$CHAOS_NS_DEFAULT}" get "$1" -o "jsonpath=$2" 2>/dev/null || true
 }
 
-# 数据集的单块字节数:取 spec.shards 里最大的 chunkSize
+# 数据集的单块字节数:取 spec.chunkSize(controller/api/v1alpha1/dataset_types.go 的 DataSetSpec.ChunkSize)
 chaos_dataset_chunk_bytes() {   # $1 = namespace
-  local sizes
-  sizes="$(chaos_kubectl -n "${1:-$CHAOS_NS_DEFAULT}" get datasets \
-    -o jsonpath='{range .items[*].spec.shards[*].chunkSize}{.}{"\n"}{end}' 2>/dev/null || true)"
-  [ -n "$sizes" ] || return 0
-  printf '%s' "$sizes" | sort -n | tail -1
+  local v
+  v="$(chaos_kubectl -n "${1:-$CHAOS_NS_DEFAULT}" get datasets \
+    -o jsonpath='{range .items[*]}{.spec.chunkSize}{"\n"}{end}' 2>/dev/null || true)"
+  v="$(printf '%s\n' "$v" | grep -E '^[0-9]+$' | sort -n | tail -1)"
+  printf '%s' "${v:-}"
+}
+
+# 挂了 hook socket 的训练 Pod:挂载点 /run/tc-hook 的 Pod 才会往 agent 上报 read_miss
+# (bench/compare/run_bench.py 的 vol_mounts 里挂 hook-dir 到 /run/tc-hook)
+chaos_hook_client_pod() {   # $1 = namespace
+  chaos_kubectl -n "${1:-$CHAOS_NS_DEFAULT}" get pods \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[*].volumeMounts[*].mountPath}{.}{"\t"}{end}{"\n"}{end}' 2>/dev/null \
+    | awk -F'\t' '$0 ~ /\/run\/tc-hook/ {print $1; exit}' || true
 }
 
 # ---- 证据目录 ----

@@ -31,6 +31,9 @@ TRAIN_POD="$CHAOS_TRAIN_POD_DEFAULT"
 AGENT_NS="$CHAOS_NS_DEFAULT"
 RESTORE=0
 REPLICAS_OVERRIDE=""
+RECOVER=1
+RECOVER_OBSERVE=60
+TRAIN_MANIFEST=""
 DRY_RUN=0
 KUBECONFIG_ARG=""
 OUT_DIR=""
@@ -39,7 +42,9 @@ usage() {
   cat <<'EOF'
 用法: minio_down.sh [--ns NAMESPACE] [--deploy DEPLOY] [--timeout SECONDS]
                     [--observe SECONDS] [--agent-ns NAMESPACE]
-                    [--restore] [--replicas N] [--out DIR] [--kubeconfig PATH]
+                    [--restore] [--replicas N] [--no-recover]
+                    [--recover-observe SECONDS] [--train-manifest PATH]
+                    [--out DIR] [--kubeconfig PATH]
                     [--dry-run] [--help]
   --ns           MinIO 所在 namespace(默认 minio)
   --deploy       MinIO Deployment 名(默认 minio;bench/k8s/minio.yaml:25)
@@ -48,6 +53,9 @@ usage() {
   --agent-ns     agentd 所在 namespace(默认 traincache),用于取 source_mode 等指标
   --restore      恢复模式:按记录的原始副本数 scale 回去
   --replicas     恢复时指定副本数(不给则用状态文件里记录的原始值)
+  --no-recover   下线后不自动恢复源站与训练 Pod
+  --recover-observe 恢复源站后的观察窗口秒数(默认 60),期间取回源错误计数增量
+  --train-manifest  训练 Pod 清单路径(默认取仓库内 agent/deploy/train-pod.yaml)
   --out          证据目录(写 replicas.txt / assertions.txt)
   --kubeconfig   本轮 kubeconfig 副本;不给则要求环境变量 KUBECONFIG
   --dry-run      只打印将执行的命令,不碰集群
@@ -74,6 +82,11 @@ while [ "$#" -gt 0 ]; do
     --restore) RESTORE=1; shift ;;
     --replicas) [ "$#" -ge 2 ] || { echo "错误:--replicas 缺值" >&2; exit 2; }; REPLICAS_OVERRIDE="$2"; shift 2 ;;
     --replicas=*) REPLICAS_OVERRIDE="${1#--replicas=}"; shift ;;
+    --no-recover) RECOVER=0; shift ;;
+    --recover-observe) [ "$#" -ge 2 ] || { echo "错误:--recover-observe 缺值" >&2; exit 2; }; RECOVER_OBSERVE="$2"; shift 2 ;;
+    --recover-observe=*) RECOVER_OBSERVE="${1#--recover-observe=}"; shift ;;
+    --train-manifest) [ "$#" -ge 2 ] || { echo "错误:--train-manifest 缺值" >&2; exit 2; }; TRAIN_MANIFEST="$2"; shift 2 ;;
+    --train-manifest=*) TRAIN_MANIFEST="${1#--train-manifest=}"; shift ;;
     --out) [ "$#" -ge 2 ] || { echo "错误:--out 缺值" >&2; exit 2; }; OUT_DIR="$2"; shift 2 ;;
     --out=*) OUT_DIR="${1#--out=}"; shift ;;
     --kubeconfig) [ "$#" -ge 2 ] || { echo "错误:--kubeconfig 缺值" >&2; exit 2; }; KUBECONFIG_ARG="$2"; shift 2 ;;
@@ -106,6 +119,18 @@ if [ "$DRY_RUN" = 1 ]; then
     chaos_show_cmd -n "$AGENT_NS" exec "\$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
       wget -qO- "http://127.0.0.1:${CHAOS_METRICS_PORT_DEFAULT}/metrics"
     chaos_note "[dry-run]   ↑ 观察窗口 ${OBSERVE}s 内取 traincache_source_mode / traincache_gateway_fallback_total(源站不可用时不应变化)"
+    chaos_show_cmd -n "$AGENT_NS" get warmuptasks.eta.traincache.io -o jsonpath='{.items[*].status.phase}'
+    chaos_note "[dry-run]   ↑ 取 WarmupTask status.phase(CRD 直读,门控降级判据)"
+    if [ "$RECOVER" = 1 ]; then
+      chaos_show_cmd -n "$NS" scale "deploy/$DEPLOY" --replicas="\$ORIGINAL"
+      chaos_note "[dry-run]   ↑ 恢复源站副本数"
+      chaos_show_cmd -n "$AGENT_NS" delete pod "\$TRAIN_POD" --grace-period=0 --wait=false
+      chaos_show_cmd -n "$AGENT_NS" apply -f "\$TRAIN_MANIFEST"
+      chaos_note "[dry-run]   ↑ 重新起训:删掉训练 Pod 再按清单重建"
+      chaos_show_cmd -n "$AGENT_NS" exec "\$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
+        wget -qO- "http://127.0.0.1:${CHAOS_METRICS_PORT_DEFAULT}/metrics"
+      chaos_note "[dry-run]   ↑ 恢复窗口 ${RECOVER_OBSERVE}s 内取 traincache_fetch_requests_total{result=\"error\"} 增量"
+    fi
   fi
   exit 0
 fi
@@ -147,7 +172,58 @@ if [ "$RESTORE" = 1 ]; then
   else
     fail "MinIO 恢复超时(${TIMEOUT}s 内 readyReplicas 未到 $TARGET)"
   fi
-  printf 'restored_replicas=%s\ncurrent_replicas=%s\n' "$TARGET" "${READY:-0}" >"$OUT_DIR/replicas.txt"
+
+  # ---- 恢复后补块:训练侧读到取不到的块,hook 记 read_miss,Agent 回源补块 ----
+  # read_miss 由训练侧经 hook socket 上报,集群里没有挂 hook 的训练 Pod 时该判据不适用。
+  AGENTD_POD="$(chaos_agentd_pod_rows "$AGENT_NS" | awk '$3=="True"{print $1; exit}')"
+  HOOK_POD="$(chaos_hook_client_pod "$AGENT_NS")"
+  MISS_BEFORE=""
+  MISS_AFTER=""
+  FETCH_BEFORE=""
+  FETCH_AFTER=""
+  ERR_BEFORE=""
+  ERR_AFTER=""
+  TRAIN_PHASE_AFTER=""
+  if [ -n "$AGENTD_POD" ]; then
+    MISS_BEFORE="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_hook_read_miss_total reason absent)"
+    FETCH_BEFORE="$(chaos_metric_sum "$AGENT_NS" "$AGENTD_POD" traincache_fetch_bytes_total)"
+    ERR_BEFORE="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_fetch_requests_total result error)"
+    END_TS=$(( $(date +%s) + OBSERVE ))
+    while [ "$(date +%s)" -lt "$END_TS" ]; do
+      MISS_AFTER="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_hook_read_miss_total reason absent)"
+      FETCH_AFTER="$(chaos_metric_sum "$AGENT_NS" "$AGENTD_POD" traincache_fetch_bytes_total)"
+      ERR_AFTER="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_fetch_requests_total result error)"
+      sleep 3
+    done
+    if [ -n "$HOOK_POD" ]; then
+      MISS_DELTA="$(awk -v a="${MISS_AFTER:-0}" -v b="${MISS_BEFORE:-0}" 'BEGIN{printf "%d",(a+0)-(b+0)}')"
+      if [ "$MISS_DELTA" -gt 0 ]; then
+        pass "源站恢复后 hook read_miss(reason=absent)上升 ${MISS_DELTA}(${MISS_BEFORE:-0} → ${MISS_AFTER:-0}),训练侧取不到的块被补回"
+      else
+        fail "源站恢复后 hook read_miss(reason=absent)没涨(${MISS_BEFORE:-0} → ${MISS_AFTER:-0}),补块没发生"
+      fi
+    else
+      chaos_note "命名空间 $AGENT_NS 里没有挂 hook 的训练 Pod,read_miss 判据不适用;回源字节 ${FETCH_BEFORE:-0} → ${FETCH_AFTER:-0} 只作证据"
+    fi
+    ERR_DELTA="$(awk -v a="${ERR_AFTER:-0}" -v b="${ERR_BEFORE:-0}" 'BEGIN{printf "%d",(a+0)-(b+0)}')"
+    if [ "$ERR_DELTA" -eq 0 ]; then
+      pass "源站恢复窗口内回源错误计数没涨(${ERR_BEFORE:-0} → ${ERR_AFTER:-0}),回源路径恢复"
+    else
+      fail "源站恢复窗口内回源错误计数涨了 ${ERR_DELTA}(${ERR_BEFORE:-0} → ${ERR_AFTER:-0})"
+    fi
+    TRAIN_PHASE_AFTER="$(chaos_kubectl -n "$AGENT_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [ "$TRAIN_PHASE_AFTER" = "Running" ]; then
+      pass "训练 Pod $TRAIN_POD 在源站恢复后是 Running"
+    else
+      fail "训练 Pod $TRAIN_POD 在源站恢复后的 phase=${TRAIN_PHASE_AFTER:-<取不到>}(期望 Running)"
+    fi
+  else
+    chaos_note "命名空间 $AGENT_NS 里没有 Ready 的 agentd Pod,补块判据跳过"
+  fi
+  printf 'restored_replicas=%s\ncurrent_replicas=%s\nhook_client_pod=%s\nread_miss_absent_before=%s\nread_miss_absent_after=%s\nfetch_bytes_before=%s\nfetch_bytes_after=%s\nfetch_errors_before=%s\nfetch_errors_after=%s\ntrain_pod_phase_after=%s\n' \
+    "$TARGET" "${READY:-0}" "${HOOK_POD:-}" "${MISS_BEFORE:-}" "${MISS_AFTER:-}" \
+    "${FETCH_BEFORE:-}" "${FETCH_AFTER:-}" "${ERR_BEFORE:-}" "${ERR_AFTER:-}" "${TRAIN_PHASE_AFTER:-}" \
+    >"$OUT_DIR/replicas.txt"
   [ "$OK" = 1 ]
   exit $?
 fi
@@ -217,19 +293,131 @@ if [ -n "$AGENTD_POD" ]; then
 fi
 
 # ---- 门控与训练终态:源站不可用时 WarmupTask 落 Degraded,训练终止是预期终态 ----
+# 门控与训练终态由 bench/compare 的装置产生(WarmupTask + 带 hook 的训练 Job)。
+# 集群里没有 WarmupTask 时这两项判据不适用,只记录不判定。
+WARMUP_NAMES="$(chaos_cr_jsonpath warmuptask '{range .items[*]}{.metadata.name}{"\n"}{end}' "$AGENT_NS")"
 WARMUP_PHASES="$(chaos_cr_jsonpath warmuptask '{range .items[*].status.phase}{.}{" "}{end}' "$AGENT_NS")"
 TRAIN_PHASE="$(chaos_kubectl -n "$AGENT_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-if printf '%s' "$WARMUP_PHASES" | grep -q "Degraded"; then
-  pass "WarmupTask status.phase 出现 Degraded:${WARMUP_PHASES}"
+JOB_FAILED="$(chaos_cr_jsonpath job '{range .items[*]}{.status.failed}{" "}{end}' "$AGENT_NS")"
+if [ -z "$(printf '%s' "$WARMUP_NAMES" | tr -d '[:space:]')" ]; then
+  chaos_note "集群里没有 WarmupTask,门控判据与训练终态判据不适用(门控装置在 bench/compare 的 WarmupTask 里)"
 else
-  fail "WarmupTask status.phase 里没有 Degraded(当前:${WARMUP_PHASES:-<取不到>})"
+  if printf '%s' "$WARMUP_PHASES" | grep -q "Degraded"; then
+    pass "WarmupTask status.phase 出现 Degraded:${WARMUP_PHASES}"
+  else
+    fail "WarmupTask status.phase 里没有 Degraded(当前:${WARMUP_PHASES:-<取不到>})"
+  fi
+  TERMINAL=0
+  case "$TRAIN_PHASE" in
+    Failed|Succeeded) TERMINAL=1 ;;
+  esac
+  if [ "$(awk -v a="${JOB_FAILED:-0}" 'BEGIN{print (a+0>0)?1:0}')" = "1" ]; then
+    TERMINAL=1
+  fi
+  if [ "$TERMINAL" = "1" ]; then
+    pass "训练终态到达(训练 Pod $TRAIN_POD phase=${TRAIN_PHASE:-<无>},Job failed=${JOB_FAILED:-0}),源站不可用下训练终止是预期终态"
+  else
+    fail "训练终态没到(训练 Pod $TRAIN_POD phase=${TRAIN_PHASE:-<取不到>},Job failed=${JOB_FAILED:-0}),源站不可用时训练应终止"
+  fi
 fi
-case "$TRAIN_PHASE" in
-  Failed|Succeeded) pass "训练 Pod $TRAIN_POD 终止(phase=$TRAIN_PHASE),源站不可用下训练终止是预期终态" ;;
-  "")              fail "取不到训练 Pod $TRAIN_POD 的 phase" ;;
-  *)              chaos_note "训练 Pod $TRAIN_POD 仍在 phase=$TRAIN_PHASE(源站不可用期间不要求立刻终止)" ;;
-esac
-printf 'warmup_phases=%s\ntrain_pod=%s\ntrain_pod_phase=%s\n' \
-  "${WARMUP_PHASES:-}" "$TRAIN_POD" "${TRAIN_PHASE:-}" >>"$OUT_DIR/replicas.txt"
+printf 'warmup_names=%s\nwarmup_phases=%s\ntrain_pod=%s\ntrain_pod_phase=%s\njob_failed=%s\n' \
+  "$(printf '%s' "${WARMUP_NAMES:-}" | tr '\n' ' ')" "${WARMUP_PHASES:-}" "$TRAIN_POD" "${TRAIN_PHASE:-}" "${JOB_FAILED:-}" \
+  >>"$OUT_DIR/replicas.txt"
+
+# ---- 恢复:源站回到原副本数,训练 Pod 重新起训,回源错误不再增长 ----
+if [ "$RECOVER" = 1 ]; then
+  if [ -z "$TRAIN_MANIFEST" ]; then
+    TRAIN_MANIFEST="$CHAOS_REPO/agent/deploy/train-pod.yaml"
+  fi
+  chaos_note "恢复源站:scale deploy/$DEPLOY --replicas=$ORIGINAL"
+  chaos_kubectl -n "$NS" scale "deploy/$DEPLOY" --replicas="$ORIGINAL" >/dev/null
+  ROK=0
+  for _ in $(seq 1 $((TIMEOUT / 5 + 1))); do
+    RREADY="$(chaos_kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
+    [ "${RREADY:-0}" = "$ORIGINAL" ] && { ROK=1; break; }
+    sleep 5
+  done
+  if [ "$ROK" = 1 ]; then
+    pass "源站已恢复到 $ORIGINAL 副本且 Ready"
+  else
+    fail "源站恢复超时(${TIMEOUT}s 内 readyReplicas 未到 $ORIGINAL)"
+  fi
+
+  ERR_BEFORE=0
+  if [ -n "$AGENTD_POD" ]; then
+    ERR_BEFORE="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_fetch_requests_total result error)"
+    ERR_BEFORE="${ERR_BEFORE:-0}"
+  fi
+
+  chaos_note "重新起训:删除训练 Pod $TRAIN_POD 后按清单重建"
+  HOOK_POD="$(chaos_hook_client_pod "$AGENT_NS")"
+  if [ "$HOOK_POD" = "$TRAIN_POD" ]; then
+    chaos_note "训练 Pod $TRAIN_POD 挂了 hook socket,不删不重建,避免丢掉 hook 挂载"
+  else
+  chaos_kubectl -n "$AGENT_NS" delete pod "$TRAIN_POD" --grace-period=0 --wait=false >/dev/null 2>&1 || true
+  sleep 3
+  if [ -r "$TRAIN_MANIFEST" ]; then
+    chaos_kubectl -n "$AGENT_NS" apply -f "$TRAIN_MANIFEST" >/dev/null 2>&1 \
+      || fail "训练 Pod 重建失败:apply -f $TRAIN_MANIFEST"
+  else
+    chaos_note "警告:训练 Pod 清单不可读($TRAIN_MANIFEST),跳过重建"
+  fi
+  TOK=0
+  TPHASE=""
+  for _ in $(seq 1 $((TIMEOUT / 5 + 1))); do
+    TPHASE="$(chaos_kubectl -n "$AGENT_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    [ "$TPHASE" = "Running" ] && { TOK=1; break; }
+    sleep 5
+  done
+  if [ "$TOK" = 1 ]; then
+    pass "训练 Pod $TRAIN_POD 重建后 Running"
+  else
+    fail "训练 Pod $TRAIN_POD 重建后未 Running(phase=${TPHASE:-<取不到>})"
+  fi
+  fi
+
+  ERR_AFTER="$ERR_BEFORE"
+  if [ -n "$AGENTD_POD" ]; then
+    END_TS=$(( $(date +%s) + RECOVER_OBSERVE ))
+    while [ "$(date +%s)" -lt "$END_TS" ]; do
+      ERR_AFTER="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_fetch_requests_total result error)"
+      ERR_AFTER="${ERR_AFTER:-0}"
+      sleep 5
+    done
+    ERR_DELTA="$(awk -v a="${ERR_AFTER:-0}" -v b="${ERR_BEFORE:-0}" 'BEGIN{print (a+0)-(b+0)}')"
+    if [ "$(awk -v a="$ERR_DELTA" 'BEGIN{print (a+0==0)?1:0}')" = "1" ]; then
+      pass "恢复窗口 ${RECOVER_OBSERVE}s 内 traincache_fetch_requests_total{result=\"error\"} 增量为 0(${ERR_BEFORE} → ${ERR_AFTER}),回源路径不再报错"
+    else
+      fail "恢复窗口 ${RECOVER_OBSERVE}s 内回源错误仍增长 ${ERR_DELTA}(源站恢复后不应再有错误回源)"
+    fi
+    printf 'recover_error_before=%s\nrecover_error_after=%s\nrecover_observe_s=%s\ntrain_manifest=%s\n' \
+      "$ERR_BEFORE" "$ERR_AFTER" "$RECOVER_OBSERVE" "$TRAIN_MANIFEST" >>"$OUT_DIR/replicas.txt"
+  fi
+
+  # 补块续上:挂 hook 的训练 Pod 在位时,读不到块会报 read_miss,Agent 走 demand 补块
+  if [ -z "$HOOK_POD" ]; then
+    chaos_note "命名空间 $AGENT_NS 里没有挂 hook socket 的训练 Pod,read_miss 补块判据不适用"
+  elif [ -z "$AGENTD_POD" ]; then
+    chaos_note "没有 Ready 的 agentd Pod,read_miss 补块判据跳过"
+  else
+    MISS_BEFORE="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_hook_read_miss_total reason absent)"
+    MISS_BEFORE="${MISS_BEFORE:-0}"
+    MISS_AFTER="$MISS_BEFORE"
+    END_TS=$(( $(date +%s) + RECOVER_OBSERVE ))
+    while [ "$(date +%s)" -lt "$END_TS" ]; do
+      MISS_AFTER="$(chaos_metric_label_sum "$AGENT_NS" "$AGENTD_POD" traincache_hook_read_miss_total reason absent)"
+      MISS_AFTER="${MISS_AFTER:-0}"
+      sleep 5
+    done
+    MISS_DELTA="$(awk -v a="${MISS_AFTER:-0}" -v b="${MISS_BEFORE:-0}" 'BEGIN{print (a+0)-(b+0)}')"
+    if [ "$(awk -v a="$MISS_DELTA" 'BEGIN{print (a+0>0)?1:0}')" = "1" ]; then
+      pass "恢复后 traincache_hook_read_miss_total{reason=\"absent\"} 上升 ${MISS_DELTA}(hook 训练 Pod=$HOOK_POD),读不到块的走 demand 补块"
+    else
+      fail "恢复后 read_miss 没有上升(${MISS_BEFORE} → ${MISS_AFTER}),补块路径没被触发"
+    fi
+    printf 'hook_pod=%s\nread_miss_absent_before=%s\nread_miss_absent_after=%s\n' \
+      "$HOOK_POD" "$MISS_BEFORE" "$MISS_AFTER" >>"$OUT_DIR/replicas.txt"
+  fi
+fi
 
 [ "$OK" = 1 ]

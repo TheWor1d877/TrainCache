@@ -287,6 +287,13 @@ if printf '%s\n' "$QDISCS" | grep -q "netem"; then
 else
   fail "qdisc show 里没有 netem(见 $OUT_DIR/qdisc.txt)"
 fi
+if [ -n "$RATE" ]; then
+  if printf '%s\n' "$QDISCS" | grep -q "tbf"; then
+    pass "tbf 限速已挂在 root 子队列:$RATE burst=$BURST"
+  else
+    fail "qdisc show 里没有 tbf(限速档没挂上限,见 $OUT_DIR/qdisc.txt)"
+  fi
+fi
 if printf '%s\n' "$QDISCS" | grep -q "netns="; then
   pass "sandbox netns 定位成功:$(printf '%s\n' "$QDISCS" | grep -m1 'netns=')"
 else
