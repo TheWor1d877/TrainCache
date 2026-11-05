@@ -126,7 +126,10 @@ if [ -z "$TARGET" ]; then
 fi
 [ -n "$TARGET" ] || chaos_die "选不出要杀的 agentd Pod(全部不 Ready?):$ROWS"
 OLD_UID="$(chaos_kubectl -n "$NS" get pod "$TARGET" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
-chaos_note "目标 agentd Pod=$TARGET uid=$OLD_UID"
+TARGET_NODE="$(printf '%s\n' "$ROWS" | awk -v p="$TARGET" '$1==p {print $2; exit}')"
+# 删除前的 Pod 名单:替代 Pod 必须是名单里没有的新 Pod,不能是早就存在的另一个节点上的 Pod
+BEFORE_NAMES="$(printf '%s\n' "$ROWS" | awk '{print $1}' | tr '\n' ' ')"
+chaos_note "目标 agentd Pod=$TARGET uid=$OLD_UID node=${TARGET_NODE:-<取不到>}"
 
 # ---- 注入 ----
 T0="$(date +%s)"
@@ -144,7 +147,9 @@ while :; do
     break
   fi
   ROWS2="$(chaos_agentd_pod_rows "$NS")"
-  CAND="$(printf '%s\n' "$ROWS2" | awk -v old="$TARGET" '$1!=old && $3=="True" {print $1; exit}')"
+  # 替代 Pod:删除前名单里没有的名字 + Ready + 与旧 Pod 同节点(DaemonSet 按节点铺)
+  CAND="$(printf '%s\n' "$ROWS2" | awk -v before=" $BEFORE_NAMES " -v node="$TARGET_NODE" \
+    '$3=="True" && index(before, " " $1 " ")==0 && (node=="" || $2==node) {print $1; exit}')"
   if [ -n "$CAND" ]; then
     NEW_POD="$CAND"
     NEW_READY="True"
@@ -154,16 +159,22 @@ while :; do
 done
 T1="$(date +%s)"
 REPLACEMENT_READY_S=$((T1 - T0))
+NEW_UID=""
+[ -n "$NEW_POD" ] && NEW_UID="$(chaos_kubectl -n "$NS" get pod "$NEW_POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 
 [ -n "$OUT_DIR" ] && {
   printf '%s\n' "$NEW_POD" >"$OUT_DIR/replacement_pod.txt"
-  printf 'old_pod=%s\nold_uid=%s\nreplacement_pod=%s\nreplacement_ready_s=%s\n' \
-    "$TARGET" "$OLD_UID" "$NEW_POD" "$REPLACEMENT_READY_S" >"$OUT_DIR/timings.txt"
+  printf 'old_pod=%s\nold_uid=%s\nold_node=%s\nreplacement_pod=%s\nreplacement_uid=%s\nreplacement_ready_s=%s\n' \
+    "$TARGET" "$OLD_UID" "${TARGET_NODE:-}" "$NEW_POD" "${NEW_UID:-}" "$REPLACEMENT_READY_S" >"$OUT_DIR/timings.txt"
 }
 
 if [ -n "$NEW_POD" ]; then
   pass "替代 Pod 已 Ready: $NEW_POD(耗时 ${REPLACEMENT_READY_S}s)"
-  pass "替代 Pod 名不同于旧 Pod($TARGET != $NEW_POD)"
+  if [ -n "$NEW_UID" ] && [ "$NEW_UID" != "$OLD_UID" ]; then
+    pass "替代 Pod 的 UID 与旧 Pod 不同(旧 $OLD_UID → 新 $NEW_UID)"
+  else
+    fail "替代 Pod 的 UID 没变(旧=${OLD_UID:-<取不到>} 新=${NEW_UID:-<取不到>}),旧 Pod 没被真删"
+  fi
 else
   fail "${TIMEOUT}s 内没有出现 Ready 的替代 agentd Pod(旧 Pod=$TARGET)"
 fi
@@ -188,11 +199,11 @@ RESCAN_PHASE=""
 NEW_NODE="$(chaos_agentd_pod_rows "$NS" | awk -v p="$NEW_POD" '$1==p {print $2; exit}')"
 if [ -n "$NEW_POD" ]; then
   chaos_metrics_text "$NS" "$NEW_POD" >"$OUT_DIR/metrics_after.txt" 2>/dev/null || true
-  # rescan 阶段:命令输出是 "RESCAN_PHASE<TAB>SAMPLING" 形式(agent/cmd/traincache/main.go:415-424)
+  # rescan 阶段:命令输出是 "RESCAN_PHASE  DONE" 形式(agent/cmd/traincache/main.go:415-424 的 row 输出)
   for _ in $(seq 1 24); do
     RESCAN_PHASE="$(chaos_kubectl -n "$NS" exec "$NEW_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
       traincache node status --node "${NEW_NODE:-}" --item rescan 2>/dev/null \
-      | awk -F'\t' '/^RESCAN_PHASE/{print $2; exit}' || true)"
+      | awk '/^RESCAN_PHASE/{print $2; exit}' || true)"
     case "$RESCAN_PHASE" in
       ""|SAMPLING) sleep 5 ;;
       *) break ;;

@@ -35,6 +35,7 @@ TRIGGER="rescan"   # rescan = 改完后重启 agentd 触发全量校验; none = 
 RESTORE=0
 OBSERVE=60
 AGENTD_READY_TIMEOUT=120
+RESCAN_TIMEOUT=600
 DRY_RUN=0
 KUBECONFIG_ARG=""
 OUT_DIR=""
@@ -44,6 +45,7 @@ usage() {
 用法: tamper_block.sh [--ns NAMESPACE] [--ds AGENTD_DS] [--cache-root DIR]
                       [--block REL_PATH] [--offset N] [--bytes N] [--observe SECONDS]
                       [--trigger rescan|none] [--ready-timeout SECONDS]
+                      [--rescan-timeout SECONDS]
                       [--restore]
                       [--out DIR] [--kubeconfig PATH] [--dry-run] [--help]
   --ns           agentd 所在 namespace(默认 traincache)
@@ -56,6 +58,7 @@ usage() {
   --trigger      改坏之后怎么让校验层发现:rescan(默认,重启 agentd 触发全量校验)
                  或 none(只等训练侧重读该块)
   --ready-timeout  等 agentd 替代 Pod 就绪的上限秒数(默认 120,只在 --trigger rescan 时用)
+  --rescan-timeout 等替代 Pod 的 rescan 走完全量校验的上限秒数(默认 600,块多时全量校验耗时长)
   --restore      用证据目录里的备份把字节写回去
   --out          证据目录(写 tampered_block.txt / tamper_backup/ / assertions.txt)
   --kubeconfig   本轮 kubeconfig 副本;不给则要求环境变量 KUBECONFIG
@@ -88,6 +91,8 @@ while [ "$#" -gt 0 ]; do
     --trigger=*) TRIGGER="${1#--trigger=}"; shift ;;
     --ready-timeout) [ "$#" -ge 2 ] || { echo "错误:--ready-timeout 缺值" >&2; exit 2; }; AGENTD_READY_TIMEOUT="$2"; shift 2 ;;
     --ready-timeout=*) AGENTD_READY_TIMEOUT="${1#--ready-timeout=}"; shift ;;
+    --rescan-timeout) [ "$#" -ge 2 ] || { echo "错误:--rescan-timeout 缺值" >&2; exit 2; }; RESCAN_TIMEOUT="$2"; shift 2 ;;
+    --rescan-timeout=*) RESCAN_TIMEOUT="${1#--rescan-timeout=}"; shift ;;
     --restore) RESTORE=1; shift ;;
     --out) [ "$#" -ge 2 ] || { echo "错误:--out 缺值" >&2; exit 2; }; OUT_DIR="$2"; shift 2 ;;
     --out=*) OUT_DIR="${1#--out=}"; shift ;;
@@ -113,8 +118,8 @@ if [ "$DRY_RUN" = 1 ]; then
     sh -c "cp $CACHE_ROOT/\$BLOCK $CACHE_ROOT/\$BLOCK.chaos-orig"
   chaos_note "[dry-run]   ↑ 先在缓存里留一份原字节旁文件(.chaos-orig),同轮重跑不叠加损坏"
   chaos_show_cmd -n "$NS" exec "\$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
-    sh -c "dd if=\$BLOCK.chaos-orig bs=1 count=\$NBYTES skip=\$OFFSET of=\$BLOCK conv=notrunc"
-  chaos_note "[dry-run]   ↑ 用备份里的原字节写回改写区间(逐字节取反后写回)"
+    sh -c "dd if=\$BLOCK bs=1 skip=\$OFFSET count=\$NBYTES of=\$BLOCK.chaos-tmp"
+  chaos_note "[dry-run]   ↑ 读出改写区间的原字节,逐字节取反(255 - b)后按同一偏移写回"
   chaos_show_cmd -n "$NS" exec "\$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
     sh -c "sha256sum \$BLOCK"
   chaos_note "[dry-run]   ↑ 回读校验和,与改前对比"
@@ -156,7 +161,27 @@ if [ -n "$TRAIN_NODE" ]; then
 fi
 [ -n "$AGENTD_POD" ] || AGENTD_POD="$(printf '%s\n' "$ROWS" | awk '$3=="True" {print $1; exit}')"
 [ -n "$AGENTD_POD" ] || chaos_die "选不出 Ready 的 agentd Pod:$ROWS"
-chaos_note "agentd Pod=$AGENTD_POD(训练 Pod 节点=${TRAIN_NODE:-<无>})"
+AGENTD_NODE="$(printf '%s\n' "$ROWS" | awk -v p="$AGENTD_POD" '$1==p {print $2; exit}')"
+# 块目录是节点级的 hostPath:选到没有缓存块的节点上注入不了,换个有块的 Pod
+has_blocks() {   # $1 = pod
+  [ -n "$(chaos_kubectl -n "$NS" exec "$1" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
+      sh -c "ls -1 $CACHE_ROOT/blocks/*/*.blk 2>/dev/null | head -1" 2>/dev/null)" ]
+}
+if ! has_blocks "$AGENTD_POD"; then
+  ALT_POD=""
+  for p in $(printf '%s\n' "$ROWS" | awk '$3=="True"{print $1}'); do
+    if has_blocks "$p"; then ALT_POD="$p"; break; fi
+  done
+  if [ -z "$ALT_POD" ]; then
+    chaos_die "所有 Ready 的 agentd Pod 上都没有已缓存的块(blocks/*/*.blk);先跑有数据的训练臂再注入"
+  fi
+  chaos_note "agentd Pod $AGENTD_POD 所在节点没有缓存块,改用 $ALT_POD"
+  AGENTD_POD="$ALT_POD"
+  AGENTD_NODE="$(printf '%s\n' "$ROWS" | awk -v p="$AGENTD_POD" '$1==p {print $2; exit}')"
+fi
+# 删除前的 Pod 名单:替代 Pod 必须是名单里没有的新 Pod,且与旧 Pod 同节点
+BEFORE_NAMES="$(printf '%s\n' "$ROWS" | awk '{print $1}' | tr '\n' ' ')"
+chaos_note "agentd Pod=$AGENTD_POD 节点=$AGENTD_NODE(训练 Pod 节点=${TRAIN_NODE:-<无>})"
 
 # 在容器里跑一段 sh(参数用位置参数传,避免多层引号转义)
 agentd_sh() {
@@ -164,12 +189,21 @@ agentd_sh() {
 }
 
 # ---- 挑块文件 ----
+if [ "$RESTORE" = 1 ] && [ -z "$BLOCK_REL" ] && [ -r "$OUT_DIR/tampered_block.txt" ]; then
+  # 恢复模式:从原证据目录的 tampered_block.txt 取回当时改坏的块
+  BLOCK_REL="$(awk -F= '/^block=/{print $2; exit}' "$OUT_DIR/tampered_block.txt")"
+  [ -n "$BLOCK_REL" ] && chaos_note "恢复目标取自 $OUT_DIR/tampered_block.txt:$BLOCK_REL"
+fi
 if [ -z "$BLOCK_REL" ]; then
   BLOCK_REL="$(chaos_kubectl -n "$NS" exec "$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
     sh -c "ls -1 $CACHE_ROOT/blocks/*/*.blk 2>/dev/null | head -1")"
 fi
 [ -n "$BLOCK_REL" ] || chaos_die "$CACHE_ROOT 下没有已缓存的块文件(blocks/*/*.blk);先跑有数据的训练臂再注入"
-BLOCK_PATH="$CACHE_ROOT/$BLOCK_REL"
+# ls 给的是绝对路径,--block 给的可能是相对 cache-root 的路径,两种都归一到绝对路径
+case "$BLOCK_REL" in
+  /*) BLOCK_PATH="$BLOCK_REL" ;;
+  *)  BLOCK_PATH="$CACHE_ROOT/$BLOCK_REL" ;;
+esac
 chaos_note "目标块文件=$BLOCK_PATH"
 
 BACKUP_DIR="$OUT_DIR/tamper_backup"
@@ -205,15 +239,41 @@ RQ_BEFORE="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_repair_queue_depth)
 RREQ_BEFORE="$(chaos_metric_label_sum "$NS" "$AGENTD_POD" traincache_fetch_requests_total reason repair)"
 chaos_note "基线:quarantined=${QUAR_BEFORE:-0} repair_queue_depth=${RQ_BEFORE:-0} repair_requests=${RREQ_BEFORE:-0}"
 
+RESCAN_TRIGGERED=0
+QUAR_PEAK="$QUAR_BEFORE"
+RQ_PEAK="$RQ_BEFORE"
+RREQ_AFTER="$RREQ_BEFORE"
+sample_metrics() {
+  local q r t
+  q="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_quarantined_blocks)"
+  r="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_repair_queue_depth)"
+  t="$(chaos_metric_label_sum "$NS" "$AGENTD_POD" traincache_fetch_requests_total reason repair)"
+  q="${q:-0}"; r="${r:-0}"; t="${t:-0}"
+  QUAR_PEAK="$(awk -v a="$q" -v m="$QUAR_PEAK" 'BEGIN{print (a+0>m+0)?a:m}')"
+  RQ_PEAK="$(awk -v a="$r" -v m="$RQ_PEAK" 'BEGIN{print (a+0>m+0)?a:m}')"
+  RREQ_AFTER="$t"
+}
+
 # ---- 先留原字节旁文件(同轮可重复) ----
-agentd_sh "$BLOCK_PATH" <<'EOS'
+# 已有 .chaos-orig 时不再覆盖:那个文件是最初的原字节,覆盖会把已改坏的内容当成原件
+ORIG_STATE="$(agentd_sh "$BLOCK_PATH" <<'EOS'
 f="$1"
-cp "$f" "$f.chaos-orig"
+if [ -f "$f.chaos-orig" ]; then
+  echo kept
+else
+  cp "$f" "$f.chaos-orig"
+  echo created
+fi
 EOS
+)"
 # 同时把原字节拷到证据目录(供 --restore 跨进程用)
 chaos_kubectl -n "$NS" exec "$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
   sh -c "cat '$BLOCK_PATH'" >"$BACKUP_LOCAL"
-pass "原字节已留底:$BLOCK_PATH.chaos-orig(同轮重跑不叠加)+ $BACKUP_LOCAL"
+if [ "$ORIG_STATE" = "kept" ]; then
+  pass "缓存里已有 .chaos-orig(最初的原字节),沿用它不覆盖;本轮证据另存 $BACKUP_LOCAL"
+else
+  pass "原字节已留底:$BLOCK_PATH.chaos-orig(同轮重跑不叠加)+ $BACKUP_LOCAL"
+fi
 
 # ---- 决定改写区间 ----
 if [ -z "$OFFSET" ]; then
@@ -227,7 +287,7 @@ chaos_note "改写区间:offset=$OFFSET bytes=$NBYTES(数据区,不动块头)"
 TOGGLE_OUT="$(agentd_sh "$BLOCK_PATH" "$OFFSET" "$NBYTES" <<'EOS'
 set -eu
 f="$1"; off="$2"; n="$3"
-tmp=/tmp/.chaos-byte.$$
+tmp="${f}.chaos-tmp"   # agentd 容器的 /tmp 只读,临时文件放在块文件同目录
 trap 'rm -f "$tmp"' EXIT
 i=0
 while [ "$i" -lt "$n" ]; do
@@ -275,7 +335,8 @@ if [ "$TRIGGER" = "rescan" ]; then
   READY_END=$(( $(date +%s) + AGENTD_READY_TIMEOUT ))
   NEW_POD=""
   while [ "$(date +%s)" -lt "$READY_END" ]; do
-    NEW_POD="$(chaos_agentd_pod_rows "$NS" | awk -v old="$OLD_POD" '$1!=old && $3=="True" {print $1; exit}')"
+    NEW_POD="$(chaos_agentd_pod_rows "$NS" | awk -v before=" $BEFORE_NAMES " -v node="$AGENTD_NODE" \
+      '$3=="True" && index(before, " " $1 " ")==0 && (node=="" || $2==node) {print $1; exit}')"
     [ -n "$NEW_POD" ] && break
     sleep 3
   done
@@ -283,7 +344,30 @@ if [ "$TRIGGER" = "rescan" ]; then
     fail "agentd 替代 Pod 在 ${AGENTD_READY_TIMEOUT}s 内没就绪,rescan 触发没生效"
   else
     AGENTD_POD="$NEW_POD"
-    chaos_note "agentd 替代 Pod=$AGENTD_POD,开始轮询隔离与修复指标"
+    chaos_note "agentd 替代 Pod=$AGENTD_POD,等它的 rescan 走完全量校验"
+    # 替代 Pod 是新进程,计数器从 0 重新计数:它的 repair 回源计数从 0 涨到 1,
+    # 就是这一轮把坏块检出并重拉的证据(基线在旧 Pod 上,拿旧计数比新计数会串轮次)
+    RESCAN_TRIGGERED=1
+    QUAR_PEAK=0
+    RQ_PEAK=0
+    RREQ_AFTER=0
+    RESCAN_END=$(( $(date +%s) + RESCAN_TIMEOUT ))
+    RESCAN_PHASE=""
+    while [ "$(date +%s)" -lt "$RESCAN_END" ]; do
+      sample_metrics
+      RESCAN_PHASE="$(chaos_kubectl -n "$NS" exec "$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
+        traincache node status --node "${AGENTD_NODE:-}" --item rescan 2>/dev/null \
+        | awk '/^RESCAN_PHASE/{print $2; exit}' || true)"
+      case "$RESCAN_PHASE" in
+        ""|SAMPLING) sleep 2 ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$RESCAN_PHASE" ] && [ "$RESCAN_PHASE" != "SAMPLING" ]; then
+      pass "替代 Pod 的 rescan 走完全量校验:$RESCAN_PHASE"
+    else
+      fail "替代 Pod 的 rescan 在 ${RESCAN_TIMEOUT}s 内没离开 SAMPLING(当前:${RESCAN_PHASE:-<取不到>})"
+    fi
   fi
 fi
 
@@ -292,61 +376,69 @@ printf 'block=%s\noffset=%s\nbytes=%s\nsha256_before=%s\nsha256_after=%s\nbackup
   >"$OUT_DIR/tampered_block.txt"
 
 # ---- 观测:校验层是否抓住了这次损坏(隔离 / 修复队列 / repair 回源)----
-QUAR_AFTER="$QUAR_BEFORE"
-RQ_AFTER="$RQ_BEFORE"
-RREQ_AFTER="$RREQ_BEFORE"
+# 坏块被检出后立刻进隔离区并排修复队列,修复成功隔离计数回落,只看终值会漏掉这个过程,
+# 所以隔离数与队列深度取采样峰值,repair 回源计数取终值(单调递增)。
 END_TS=$(( $(date +%s) + OBSERVE ))
 while [ "$(date +%s)" -lt "$END_TS" ]; do
-  QUAR_AFTER="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_quarantined_blocks)"
-  RQ_AFTER="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_repair_queue_depth)"
-  RREQ_AFTER="$(chaos_metric_label_sum "$NS" "$AGENTD_POD" traincache_fetch_requests_total reason repair)"
-  QUAR_AFTER="${QUAR_AFTER:-0}"; RQ_AFTER="${RQ_AFTER:-0}"; RREQ_AFTER="${RREQ_AFTER:-0}"
-  HIT="$(awk -v a="$QUAR_AFTER" -v q="$QUAR_BEFORE" -v r="$RQ_AFTER" -v s="$RREQ_BEFORE" -v t="$RREQ_AFTER" \
+  sample_metrics
+  HIT="$(awk -v a="$QUAR_PEAK" -v q="$QUAR_BEFORE" -v r="$RQ_PEAK" -v s="$RREQ_BEFORE" -v t="$RREQ_AFTER" \
         'BEGIN{print ((a+0>q+0)||(r+0>0)||(t+0>s+0))?1:0}')"
   if [ "$HIT" = "1" ]; then
     break
   fi
   sleep 3
 done
+sample_metrics
 chaos_metrics_text "$NS" "$AGENTD_POD" >"$OUT_DIR/metrics_after.txt" 2>/dev/null || true
 
-if [ "$(awk -v a="$QUAR_AFTER" -v q="$QUAR_BEFORE" 'BEGIN{print (a+0>q+0)?1:0}')" = "1" ]; then
-  pass "traincache_quarantined_blocks 上升(${QUAR_BEFORE:-0} → ${QUAR_AFTER:-0}),坏块进了隔离区"
-elif [ "$(awk -v r="$RQ_AFTER" -v s="$RREQ_AFTER" -v sb="$RREQ_BEFORE" 'BEGIN{print ((r+0>0)||(s+0>sb+0))?1:0}')" = "1" ]; then
-  pass "修复队列/修复回源有反应(repair_queue_depth=${RQ_AFTER:-0} repair_requests=${RREQ_BEFORE:-0}→${RREQ_AFTER:-0})"
+if [ "${RESCAN_TRIGGERED:-0}" = "1" ]; then
+  # 替代 Pod 上 repair 回源计数从 0 起步,涨到 1 就说明坏块被检出并重拉了
+  if [ "$(awk -v a="$RREQ_AFTER" 'BEGIN{print (a+0>0)?1:0}')" = "1" ]; then
+    pass "替代 Pod 上 repair 回源计数为 ${RREQ_AFTER}(新进程从 0 起),坏块被检出并重拉"
+  else
+    fail "替代 Pod 上 repair 回源计数没涨(${RREQ_AFTER:-0}),坏块没被检出重拉"
+  fi
+elif [ "$(awk -v a="$QUAR_PEAK" -v q="$QUAR_BEFORE" 'BEGIN{print (a+0>q+0)?1:0}')" = "1" ]; then
+  pass "traincache_quarantined_blocks 峰值 ${QUAR_BEFORE:-0} -> ${QUAR_PEAK},坏块进了隔离区"
+elif [ "$(awk -v r="$RQ_PEAK" -v s="$RREQ_AFTER" -v sb="$RREQ_BEFORE" 'BEGIN{print ((r+0>0)||(s+0>sb+0))?1:0}')" = "1" ]; then
+  pass "修复队列/修复回源有反应(repair_queue_depth 峰值=${RQ_PEAK} repair_requests=${RREQ_BEFORE:-0}->${RREQ_AFTER:-0})"
 else
-  fail "观察 ${OBSERVE}s 内没看到校验层反应(quarantined=${QUAR_AFTER:-0} repair_queue_depth=${RQ_AFTER:-0} repair_requests=${RREQ_AFTER:-0})"
+  fail "观察 ${OBSERVE}s 内没看到校验层反应(quarantined 峰值=${QUAR_PEAK} repair_queue_depth 峰值=${RQ_PEAK} repair_requests=${RREQ_BEFORE:-0}->${RREQ_AFTER:-0})"
 fi
 
 # ---- 修复队列回落:坏块重拉完后队列要回到 0,repair 回源计数要涨 ----
-MAX_RQ="$RQ_AFTER"
-FINAL_RQ="$RQ_AFTER"
-FINAL_RREQ="$RREQ_AFTER"
+FINAL_RQ="$RQ_PEAK"
 END_TS=$(( $(date +%s) + OBSERVE ))
 while [ "$(date +%s)" -lt "$END_TS" ]; do
+  sample_metrics
   FINAL_RQ="$(chaos_metric_sum "$NS" "$AGENTD_POD" traincache_repair_queue_depth)"
-  FINAL_RREQ="$(chaos_metric_label_sum "$NS" "$AGENTD_POD" traincache_fetch_requests_total reason repair)"
-  FINAL_RQ="${FINAL_RQ:-0}"; FINAL_RREQ="${FINAL_RREQ:-0}"
-  MAX_RQ="$(awk -v a="$FINAL_RQ" -v m="$MAX_RQ" 'BEGIN{print (a+0>m+0)?a:m}')"
-  if [ "$FINAL_RQ" = "0" ] && [ "$(awk -v a="$FINAL_RREQ" -v b="$RREQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
+  FINAL_RQ="${FINAL_RQ:-0}"
+  if [ "$FINAL_RQ" = "0" ] && [ "$(awk -v a="$RREQ_AFTER" -v b="$RREQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
     break
   fi
   sleep 3
 done
-if [ "$(awk -v a="$FINAL_RREQ" -v b="$RREQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
-  pass "repair 回源计数上升(${RREQ_BEFORE:-0} → ${FINAL_RREQ}),坏块走了修复队列"
+if [ "${RESCAN_TRIGGERED:-0}" = "1" ]; then
+  if [ "$(awk -v a="$RREQ_AFTER" 'BEGIN{print (a+0>0)?1:0}')" = "1" ]; then
+    pass "repair 回源计数为 ${RREQ_AFTER}(替代 Pod 新进程从 0 起),坏块走了修复队列"
+  else
+    fail "repair 回源计数为 ${RREQ_AFTER:-0}(替代 Pod 新进程从 0 起,应为 1)"
+  fi
+elif [ "$(awk -v a="$RREQ_AFTER" -v b="$RREQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
+  pass "repair 回源计数上升(${RREQ_BEFORE:-0} -> ${RREQ_AFTER}),坏块走了修复队列"
 else
-  fail "repair 回源计数没涨(${RREQ_BEFORE:-0} → ${FINAL_RREQ})"
+  fail "repair 回源计数没涨(${RREQ_BEFORE:-0} -> ${RREQ_AFTER})"
 fi
 if [ "${FINAL_RQ:-0}" -eq 0 ] 2>/dev/null; then
-  pass "修复队列已回落(峰值 ${MAX_RQ},终值 ${FINAL_RQ})"
-elif [ "$(awk -v a="$MAX_RQ" -v b="$RQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
-  pass "修复队列上升过(峰值 ${MAX_RQ}),观察窗口内还没回落"
+  pass "修复队列已回落(峰值 ${RQ_PEAK},终值 ${FINAL_RQ})"
+elif [ "$(awk -v a="$RQ_PEAK" -v b="$RQ_BEFORE" 'BEGIN{print (a+0>b+0)?1:0}')" = "1" ]; then
+  pass "修复队列上升过(峰值 ${RQ_PEAK}),观察窗口内还没回落"
 else
-  fail "修复队列没上升(峰值 ${MAX_RQ},终值 ${FINAL_RQ})"
+  fail "修复队列没上升(峰值 ${RQ_PEAK},终值 ${FINAL_RQ})"
 fi
 
-printf 'quarantined_before=%s\nquarantined_after=%s\nrepair_queue_depth_before=%s\nrepair_queue_depth_after=%s\nrepair_requests_before=%s\nrepair_requests_after=%s\nobserve_s=%s\n' \
-  "${QUAR_BEFORE:-}" "${QUAR_AFTER:-}" "${RQ_BEFORE:-}" "${RQ_AFTER:-}" "${RREQ_BEFORE:-}" "${RREQ_AFTER:-}" "$OBSERVE" \
+printf 'quarantined_before=%s\nquarantined_peak=%s\nrepair_queue_depth_before=%s\nrepair_queue_depth_peak=%s\nrepair_requests_before=%s\nrepair_requests_after=%s\nrescan_phase=%s\nobserve_s=%s\n' \
+  "${QUAR_BEFORE:-}" "${QUAR_PEAK}" "${RQ_BEFORE:-}" "${RQ_PEAK}" "${RREQ_BEFORE:-}" "${RREQ_AFTER:-}" \
+  "${RESCAN_PHASE:-}" "$OBSERVE" \
   >>"$OUT_DIR/tampered_block.txt"
 chaos_note "证据:$OUT_DIR/tampered_block.txt(基线/终值见 metrics_before.txt / metrics_after.txt)"

@@ -14,7 +14,7 @@
 #   run-id = UTC 时间戳 + 四位随机后缀(同一秒并发跑也不撞目录)
 #
 # 强制集(mandatory set)的口径:
-#   五个必跑故障 —— kill_agent(agentd 被 SIGKILL)、netem_degrade(源站网络降级:
+#   六个必跑故障 —— kill_agent(agentd 被 SIGKILL)、netem_degrade(源站网络降级:
 #   档 2A,只挂 netem)、netem_degrade_rate(档 2B,netem 加 tbf 限速)、
 #   minio_down(源站整体下线)、tamper_block(改坏本地块)、stop_ordersrc(订单写端停摆)。
 #   tamper_block 在默认 xxh3 档位就能检出改字节(core/cas/store.go 的 Open 重算

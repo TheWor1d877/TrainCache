@@ -320,8 +320,10 @@ fi
 TRAIN_PHASE="$(chaos_kubectl -n "$TRAIN_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 if [ "$TRAIN_PHASE" = "Running" ]; then
   pass "训练 Pod $TRAIN_NS/$TRAIN_POD 存活(phase=Running)"
+elif [ -z "$TRAIN_PHASE" ]; then
+  fail "训练 Pod $TRAIN_NS/$TRAIN_POD 不存在:先 kubectl apply -f agent/deploy/train-pod.yaml(网络降级的读等待判据要有训练 Pod 才能成立)"
 else
-  fail "训练 Pod $TRAIN_NS/$TRAIN_POD phase=${TRAIN_PHASE:-<取不到>}(期望 Running)"
+  fail "训练 Pod $TRAIN_NS/$TRAIN_POD phase=$TRAIN_PHASE(期望 Running)"
 fi
 
 # 有界性:全部读等待落在 60s 桶内(bucket le=60 的计数等于 _count)
