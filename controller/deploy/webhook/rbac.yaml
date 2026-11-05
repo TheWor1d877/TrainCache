@@ -1,6 +1,9 @@
 # The mutating webhook reads WarmupTasks, ConfigMaps and Jobs, and patches
 # WarmupTask status when it records GateInjectionDegraded. It never reads
 # Secrets: checkpoint credentials are injected as secretKeyRef references.
+# The reads go straight to the API server (no informer), so list/watch are not
+# needed: a cached client would wait for an informer that can never sync and
+# the admission request would time out.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

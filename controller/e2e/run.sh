@@ -315,8 +315,8 @@ deploy_control_plane() {
 
   local ca_b64
   ca_b64="$(base64 -w0 "$TLS/ca.crt")"
-  kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
-    -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$ca_b64\"}]" >/dev/null \
+  kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategic \
+    -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$ca_b64\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$ca_b64\"}}]}" >/dev/null \
     || { fail "patch webhook caBundle"; return 1; }
   ok "manifests applied and webhook CA injected"
 

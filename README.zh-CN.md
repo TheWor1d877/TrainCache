@@ -49,11 +49,11 @@ openssl req -newkey rsa:2048 -nodes -keyout "$TLS/tls.key" -out "$TLS/tls.csr" -
 printf 'subjectAltName=DNS:%s,DNS:%s.%s.svc.cluster.local\n' "$SVC" "$SVC" "$NS" >"$TLS/san.ext"
 openssl x509 -req -in "$TLS/tls.csr" -CA "$TLS/ca.crt" -CAkey "$TLS/ca.key" -CAcreateserial -out "$TLS/tls.crt" -days 365 -extfile "$TLS/san.ext"
 kubectl -n "$NS" create secret tls traincache-webhook-tls --cert="$TLS/tls.crt" --key="$TLS/tls.key"
-kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
-  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$(base64 -w0 "$TLS/ca.crt")\"}]"
+kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategic \
+  -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$(base64 -w0 "$TLS/ca.crt")\"}}]}"
 ```
 
-证书有效期为 365 天，SAN 覆盖 Service 名与 namespace 内的 DNS。
+证书有效期为 365 天，SAN 覆盖 Service 名与 namespace 内的 DNS。CA 要写进两条 webhook 条目：checkpoint 条目的 `failurePolicy` 是 `Fail`，`caBundle` 为空时带 `traincache.io/checkpoint: enabled` 标签的 Pod 会被准入拒绝。
 
 **3. 桶与凭据。** `DataSet.spec` 写 `endpoint`（不带 scheme）、`bucket`、`secretRef`；Secret 的字段是 `accessKey` 与 `secretKey`，与 DataSet 同 namespace。桶的接入方式见[云对象存储部署指南](docs/0-cloud-object-storage-deployment.md)。
 

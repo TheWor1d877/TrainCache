@@ -1,0 +1,154 @@
+# Steady-state loop: the trainer writes 100 steps in a row and waits for each
+# one to be uploaded and its working copy deleted. The sidecar is written by
+# hand here for the same reason as pod-enospc.yaml: the scan interval and the
+# NVMe cache settings are not part of the admission contract, and a 20s scan
+# interval would turn 100 steps into an hour-long run.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traincache-checkpoint-loop
+  namespace: traincache
+  labels:
+    app: traincache-checkpoint-loop
+spec:
+  securityContext:
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  volumes:
+    - name: checkpoint-work
+      emptyDir: {}
+    - name: checkpoint-nvme
+      emptyDir: {}
+    - name: checkpoint-plugins
+      emptyDir: {}
+    - name: checkpoint-run
+      emptyDir: {}
+  initContainers:
+    - name: checkpoint-plugins
+      image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+      imagePullPolicy: IfNotPresent
+      command: ["cp", "-a", "/opt/traincache/plugins/.", "/mnt/plugins/"]
+      volumeMounts:
+        - name: checkpoint-plugins
+          mountPath: /mnt/plugins
+    - name: checkpointd
+      image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+      imagePullPolicy: IfNotPresent
+      command: ["checkpointd"]
+      restartPolicy: Always
+      startupProbe:
+        exec:
+          command: ["checkpointd", "probe"]
+        periodSeconds: 10
+        failureThreshold: 360
+        timeoutSeconds: 3
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 512Mi
+      volumeMounts:
+        - name: checkpoint-work
+          mountPath: /checkpoints-work
+        - name: checkpoint-nvme
+          mountPath: /checkpoints-nvme
+        - name: checkpoint-run
+          mountPath: /run/checkpoint
+        - name: checkpoint-plugins
+          mountPath: /opt/traincache/plugins
+          readOnly: true
+      env:
+        - name: TASK_ID
+          value: t1
+        - name: RANK
+          value: "0"
+        - name: WORLD_SIZE
+          value: "1"
+        - name: TRAINCACHE_CHECKPOINT_DIR
+          value: /checkpoints-work/t1
+        - name: STATE_DIR
+          value: /run/checkpoint/state
+        - name: PROBE_FILE
+          value: /run/checkpoint/ready
+        - name: SOCKET_PATH
+          value: /run/checkpoint/plugin.sock
+        - name: PLUGIN
+          value: s3
+        - name: BACKEND
+          value: '{"endpoint":"minio:9000","bucket":"traincache","prefix":"e2e-loop","part_size":8388608,"concurrency":2,"secure":false}'
+        - name: REQUIRE_CHECKPOINT
+          value: "false"
+        - name: NVME_RETENTION
+          value: "1"
+        - name: NVME_DIR
+          value: /checkpoints-nvme
+        - name: TRAINCACHE_CHECKPOINT_SCAN_INTERVAL
+          value: 1s
+        - name: TRAINCACHE_CHECKPOINT_SCAN_STABLE
+          value: "2"
+        - name: TRAINCACHE_CHECKPOINT_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: traincache-checkpoint
+              key: accessKey
+        - name: TRAINCACHE_CHECKPOINT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: traincache-checkpoint
+              key: secretKey
+  containers:
+    - name: trainer
+      image: busybox:1.36.1
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # 组可写：checkpointd 以 65532 运行，删工作卷副本要能写 step 目录
+          # （design 10.1 §4.3 权限）。
+          umask 0002
+          i=0
+          while [ ! -f /run/checkpoint/ready ]; do
+            i=$((i + 1))
+            [ "$i" -gt 300 ] && echo "trainer: probe file missing" && exit 1
+            sleep 1
+          done
+          mkdir -p /checkpoints-work/t1
+          n=1
+          while [ "$n" -le 100 ]; do
+            dir="/checkpoints-work/t1/step-$n"
+            mkdir -p "$dir"
+            dd if=/dev/zero of="$dir/data.bin" bs=1048576 count=1 2>/dev/null
+            sync
+            touch "$dir/.done"
+            # checkpointd 删掉工作卷上的副本后目录才消失，目录消失即这一步上传完成。
+            w=0
+            while [ -d "$dir" ]; do
+              w=$((w + 1))
+              if [ "$w" -gt 120 ]; then
+                echo "trainer: step $n was not uploaded within 120s"
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "trainer: step $n done"
+            n=$((n + 1))
+          done
+          echo "trainer: work dirs left: $(ls -1 /checkpoints-work/t1 | wc -l)"
+          echo "trainer: cache entries: $(ls -1 /checkpoints-nvme/t1 2>/dev/null | wc -l)"
+          echo "trainer: loop done: 100 steps"
+          sleep 3600
+      volumeMounts:
+        - name: checkpoint-work
+          mountPath: /checkpoints-work
+        - name: checkpoint-nvme
+          mountPath: /checkpoints-nvme
+          readOnly: true
+        - name: checkpoint-run
+          mountPath: /run/checkpoint

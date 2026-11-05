@@ -242,8 +242,10 @@ ensure_webhook_tls() {
       return 0
     fi
     cur_ca="$(kubectl get mutatingwebhookconfiguration traincache-pod-warmup \
-      -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
-    if [ -n "$cur_ca" ]; then
+      -o jsonpath='{range .webhooks[*]}{.clientConfig.caBundle}{"\n"}{end}' 2>/dev/null \
+      | grep -v '^$' | sort -u || true)"
+    # 两条条目的 CA 相同才可直接沿用，不同说明是半旧状态，重建证书。
+    if [ "$(printf '%s\n' "$cur_ca" | grep -c .)" = "1" ]; then
       WEBHOOK_CA_B64="$cur_ca"
       log_group "$GROUP" "secret/traincache-webhook-tls 已存在(无 ca.crt),沿用现有 caBundle"
       return 0
@@ -277,14 +279,16 @@ ensure_ca_bundle() {
     log_group "$GROUP" "WARNING: 未取得 webhook CA,跳过 caBundle 注入" >&2
     return 0
   fi
+  # 两条 webhook 条目都要是同一个 CA：checkpoint 条目的 failurePolicy 是 Fail，
+  # caBundle 为空时带 traincache.io/checkpoint 标签的 Pod 会被准入拒绝。
   cur="$(kubectl get mutatingwebhookconfiguration traincache-pod-warmup \
-    -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
+    -o jsonpath='{range .webhooks[*]}{.clientConfig.caBundle}{"\n"}{end}' 2>/dev/null | sort -u || true)"
   if [ "$cur" = "$WEBHOOK_CA_B64" ]; then
     log_group "$GROUP" "webhook caBundle 已是最新,跳过"
     return 0
   fi
-  kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=json \
-    -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"$WEBHOOK_CA_B64\"}]" \
+  kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategic \
+    -p "{\"webhooks\":[{\"name\":\"pods.traincache.io\",\"clientConfig\":{\"caBundle\":\"$WEBHOOK_CA_B64\"}},{\"name\":\"pods-checkpoint.traincache.io\",\"clientConfig\":{\"caBundle\":\"$WEBHOOK_CA_B64\"}}]}" \
     >/dev/null
   log_group "$GROUP" "webhook caBundle 已注入"
 }
