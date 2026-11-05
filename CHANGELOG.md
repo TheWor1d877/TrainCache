@@ -19,6 +19,12 @@
 
 # Changelog正文
 
+## 未发布
+
+### Fixed
+
+- checkpoint 的 `s3`、`local` 插件把版本号声明成常量，`-ldflags -X` 对常量静默无效，镜像里握手始终报 `dev`；改为变量后与 checkpointd 一样携带 tag 版本。
+
 ## [v0.5.0] - 2026-11-05
 
 ### Added
