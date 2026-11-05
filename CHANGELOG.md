@@ -19,18 +19,21 @@
 
 # Changelog正文
 
-## 未发布
+## [v0.5.1] - 2026-11-05
 
 ### Added
 
+- `checkpoint/e2e` 增加两个集群模式：`enospc` 用 1 MiB tmpfs 状态卷触发真实容量写满，断言最终保存失败、工作目录保留、该 step 未上传；`loop` 连跑 100 步，断言上传 100 次、工作目录清空、NVMe 缓存按保留份数收敛、sidecar 打开的文件数不随步数增长。
+
+### Changed
+
 - checkpoint 的 sidecar 镜像改由 ConfigMap 键 `checkpointImage` 或 Pod 注解 `traincache.io/checkpoint-image` 指定，两处都为空时准入拒绝该 Pod；原先写死的镜像 tag 从未发布，拉不到。契约见 `docs/10.1-design.md` §4.2。
-- `checkpoint/e2e` 增加 `enospc` 模式：状态卷用 1 MiB tmpfs，训练程序写满后 sidecar 落状态失败，断言最终保存失败、工作目录保留、该 step 未上传、sidecar 存活。
-- `checkpoint/e2e` 增加 `loop` 模式：连续 100 步保存，断言上传 100 次、工作目录清空、NVMe 缓存按保留份数收敛、sidecar 打开的文件数不随步数增长。
+- 日志组件枚举补 `checkpointd`，采集侧按该标签查询 checkpoint 日志。决策见 `docs/8.2-decisions.md` ADR-016。
 
 ### Fixed
 
 - 安装期给 `MutatingWebhookConfiguration` 注入 `caBundle` 时只写了第一条 webhook，checkpoint 那条（`failurePolicy: Fail`）一直是空 `caBundle`，带 `traincache.io/checkpoint=enabled` 标签的 Pod 会被准入拒绝。README、`hack/release-smoke.sh`、`controller/e2e/run.sh`、`bench/scripts/ctrl_up.sh` 五处注入点改为按 webhook 名逐条注入。
-- checkpoint 准入读 ConfigMap 与 Job 改走直连 API 的 reader：webhook 的 RBAC 只有 `get`，缓存 client 会等一个同步不起来的 informer，准入请求必然超时。决策见 `docs/10.2-decisions.md` D22。
+- checkpoint 准入读 ConfigMap 与 Job 走缓存 client，而 webhook 的 RBAC 只有 `get`，informer 起不来，准入请求必然超时；改走直连 API 的 reader。决策见 `docs/10.2-decisions.md` D22。
 - checkpointd 删不掉工作卷上的副本：`<task_id>` 目录按 0755 建出，训练程序建的 step 目录默认也是 0755，非 root 的 checkpointd 没有目录写权限，删除总是失败，工作卷会一直涨。目录改为按 0775 建出，训练程序要用组可写方式建 step 目录（`umask 0002`）。契约见 `docs/10.1-design.md` §4.3，决策见 `docs/10.2-decisions.md` D23。
 - checkpoint 的 `s3`、`local` 插件把版本号声明成常量，`-ldflags -X` 对常量静默无效，镜像里握手始终报 `dev`；改为变量后与 checkpointd 一样携带 tag 版本。
 
