@@ -204,7 +204,9 @@ deploy_webhook() {
   kubectl apply -k "$REPO_ROOT/controller/config/crd/bases" >/dev/null \
     || { fail "apply CRDs"; return 1; }
   local f
-  for f in rbac service deployment mutatingwebhook; do
+  # checkpoint-image 要排在 deployment 前面：webhook Deployment 用
+  # configMapKeyRef 读它，ConfigMap 缺失时 Pod 停在 CreateContainerConfigError。
+  for f in rbac service checkpoint-image deployment mutatingwebhook; do
     kubectl apply -f "$REPO_ROOT/controller/deploy/webhook/$f.yaml" >/dev/null \
       || { fail "apply webhook/$f.yaml"; return 1; }
   done
