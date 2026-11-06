@@ -49,6 +49,17 @@
 #   gatewayBlockBufferBytes  — Gateway-only size in bytes of the ring buffer
 #                              held per in-flight block; positive integer.
 #                              Changing it restarts the gateway Deployment.
+#   gatewayCache             — Gateway-only disk cache switch; "true" enables
+#                              the on-disk cache layer, anything else turns it
+#                              off and leaves the gateway doing in-flight
+#                              merging only. Read by the gateway only.
+#   gatewayCacheDatasetBytes — Gateway-only per-dataset residency cap in bytes
+#                              (32GiB by default); positive integer. Changing it
+#                              restarts the gateway Deployment.
+#   gatewayCacheTotalBytes   — Gateway-only global residency cap in bytes
+#                              (64GiB by default); positive integer and not
+#                              below gatewayCacheDatasetBytes. Changing it
+#                              restarts the gateway Deployment.
 #   controllerPollInterval   — WarmupTask progress poll interval. The code
 #                              default is 2s; 1s keeps gate release latency
 #                              inside the bench measurement window.
@@ -79,5 +90,8 @@ data:
   gatewaySecure: "false"
   gatewayBucketConcurrency: "32"
   gatewayBlockBufferBytes: "10485760"
+  gatewayCache: "true"
+  gatewayCacheDatasetBytes: "34359738368"
+  gatewayCacheTotalBytes: "68719476736"
   controllerPollInterval: "1s"
   controllerScoreTTL: "10m"

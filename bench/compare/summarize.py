@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """五格对照汇总：按 (格子, 组态) 报平均数与 bootstrap 95% CI，并给组间判定。
 
+格子名带臂后缀（D23）：`gateway=1` 记 `+gw`，`gateway_cache=1` 再叠 `+cache`，
+两列各自成组，带网关与带缓存的产物不混进同一格。
+
 口径来源 docs/4.4：§1.6 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
 §1.7 作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
 
@@ -74,6 +77,23 @@ def _nums(rows: list[dict], metric: str) -> list[float]:
     return out
 
 
+def _is_on(value) -> bool:
+    """summary.csv 的开关列取值口径：1/true 视为开，其余（含空）视为关。"""
+    return str(value or "").strip().lower() in ("1", "true")
+
+
+def _arm_suffix(row: dict) -> str:
+    """D23：按 gateway 与 gateway_cache 两列给格子名加后缀。
+
+    gateway=1 → `+gw`；gateway_cache=1 → 再叠 `+cache`。两列各自成组，
+    带缓存与不带缓存的产物不混进同一格。老产物没有 gateway_cache 列时按关处理。
+    """
+    suffix = "+gw" if _is_on(row.get("gateway")) else ""
+    if _is_on(row.get("gateway_cache")):
+        suffix += "+cache"
+    return suffix
+
+
 def _read_root(root: Path, version: str | None = None,
                rejected: list[dict] | None = None
                ) -> dict[tuple[str, str], list[dict]]:
@@ -114,11 +134,10 @@ def _read_root(root: Path, version: str | None = None,
                     continue
                 if row.get("group") not in GROUP_ORDER:
                     continue
-                # D23：gateway=1 的行走 +gw 格子，与无网关的同名格子分开统计
-                if (row.get("gateway") or "").strip().lower() in ("1", "true"):
-                    cell_key = f"{cell}+gw"
-                else:
-                    cell_key = cell
+                # D23：gateway=1 的行走 +gw 格子，与无网关的同名格子分开统计；
+                # gateway_cache=1（网关落盘缓存开）再叠一层 +cache 后缀，
+                # 两列各自成组，均值不混。
+                cell_key = f"{cell}{_arm_suffix(row)}"
                 cells.setdefault((cell_key, row["group"]), []).append(row)
     return cells
 
@@ -276,6 +295,10 @@ def render_markdown(rows: list[dict], verdict: list[dict]) -> str:
     if any(str(r.get("cell", "")).endswith("+gw") for r in rows):
         lines += ["注：格子名带 `+gw` 表示该格有网关（`summary.csv` 的 `gateway=1`），"
                   "与同名基础格子分别统计、不混在一起。", ""]
+    if any("+cache" in str(r.get("cell", "")) for r in rows):
+        lines += ["注：格子名带 `+cache` 表示该格开了网关磁盘缓存"
+                  "（`summary.csv` 的 `gateway_cache=1`），与同名的 `+gw` 格子"
+                  "分别统计、不混在一起。", ""]
     lines += _render(rows, TABLE_A, "makespan 与 stall")
     lines += [""]
     lines += _render(rows, TABLE_B, "命中率与字节成本")
@@ -388,6 +411,40 @@ def selftest() -> None:
                    - 5.0) < 1e-9
         gw_md = render_markdown(list(gw_tbl.values()), [])
         assert "S-100+gw" in gw_md and "`+gw`" in gw_md, gw_md
+
+        # D23：按 gateway 与 gateway_cache 两列分组——带缓存与不带缓存各成一格
+        cache_root = Path(td) / "cache"
+        cp = cache_root / "S-100" / "tag1" / "traincache-cold" / "summary.csv"
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        with open(cp, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["group", "rep", "void", "gateway",
+                                              "gateway_cache", "startup_makespan"])
+            w.writeheader()
+            for gw, gc, vals in (("0", "0", ["10", "10"]),
+                                 ("1", "0", ["4", "6"]),
+                                 ("1", "1", ["2", "2"]),
+                                 ("0", "1", ["7", "7"])):
+                for i, v in enumerate(vals):
+                    w.writerow({"group": "traincache-cold", "rep": i, "void": "false",
+                                "gateway": gw, "gateway_cache": gc,
+                                "startup_makespan": v})
+        cache_cells = _read_root(cache_root)
+        assert set(cache_cells) == {("S-100", "traincache-cold"),
+                                    ("S-100+gw", "traincache-cold"),
+                                    ("S-100+gw+cache", "traincache-cold"),
+                                    ("S-100+cache", "traincache-cold")}, cache_cells
+        cache_tbl = {(r["cell"], r["group"]): r for r in build_table(cache_cells)}
+        assert len(cache_tbl) == 4, cache_tbl
+        assert abs(cache_tbl[("S-100", "traincache-cold")]["startup_makespan_mean"]
+                   - 10.0) < 1e-9
+        assert abs(cache_tbl[("S-100+gw", "traincache-cold")]["startup_makespan_mean"]
+                   - 5.0) < 1e-9
+        assert abs(cache_tbl[("S-100+gw+cache", "traincache-cold")]
+                   ["startup_makespan_mean"] - 2.0) < 1e-9
+        assert abs(cache_tbl[("S-100+cache", "traincache-cold")]["startup_makespan_mean"]
+                   - 7.0) < 1e-9
+        cache_md = render_markdown(list(cache_tbl.values()), [])
+        assert "+cache" in cache_md and "`+cache`" in cache_md, cache_md
     print("summarize selftest PASS")
 
 

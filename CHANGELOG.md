@@ -24,6 +24,13 @@
 ### Added
 
 - 新增混沌套件 `bench/chaos/`：`run.sh` 逐档注入六种单点故障并断言降级行为，注入脚本在 `bench/chaos/inject/`（Agent 崩溃、网络劣化两档、块数据损坏、源站宕机、订单通道停写、节点丢失）。网络劣化分抖动丢包与加限速两档。产物写到数据层 `~/tcd/chaos/<run-id>/`，规格见 `docs/4.7-chaos-suite.md`。
+- 网关新增磁盘缓存层，默认开启。网关回源取到的块留在盘上，同一个块的后续请求从盘上读出，不再回源。缓存只覆盖 `<dataset>/blocks/` 前缀的块。契约见 `docs/9.1-design.md` §5.5。
+- 网关新增三个配置项，取值来自 ConfigMap `traincache-config`：`gatewayCache`（默认 `"true"`，磁盘缓存开关）、`gatewayCacheDatasetBytes`（默认 `34359738368`，单个 dataset 的盘上驻写上限，单位字节）、`gatewayCacheTotalBytes`（默认 `68719476736`，全部 dataset 合计的盘上驻写上限，单位字节）；对应环境变量 `TRAINCACHE_GATEWAY_CACHE`、`TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES`、`TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES`。后两项取值须为正整数，非法值让网关拒绝启动。契约见 `docs/9.1-design.md` §5.3。
+- 网关 Deployment 新增一个 `emptyDir` 卷，挂在 `/var/lib/traincache-gateway/cache`；网关容器保持只读根文件系统。网关 Pod 删除后盘上内容随之清空，Pod 重建后第一次取数回源并回填。契约见 `docs/9.1-design.md` §5.5。
+- 网关 60s 汇总日志新增 `cache_hit` 字段，记本窗口字节从盘上取走的请求数；磁盘缓存关闭时该值恒为 0。契约见 `docs/9.1-design.md` §7.3。
+- 网关条目结束日志行新增 `from` 字段，取值 `origin` 或 `cache`，标明这次扇出的字节来自源站还是盘上缓存。契约见 `docs/9.1-design.md` §5.4。
+- bench 侧：`summary.csv` 新增 `gateway_cache` 列，取值 1 表示网关磁盘缓存开启，0 表示只做在途合并。实验 COND 的 `environment` 新增 `gateway_cache` 键；`gateway` 为 false 时该键必须为 false。
+- bench 侧：新增 6 条带网关磁盘缓存的实验 COND（`gw-100-r1-on-cache`、`gw-100-r4repl-on-cache`、`gw-100-r4shard-on-cache`、`gw-1000-r1-on-cache`、`gw-1000-r4repl-on-cache`、`gw-1000-r4shard-on-cache`），与同档不带缓存的臂对照。COND 由 `bench/experiments/gen_gw_conds.py` 生成。
 
 ### Fixed
 

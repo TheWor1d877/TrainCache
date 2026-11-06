@@ -15,6 +15,9 @@
 #   6. kubectl apply -k controller/deploy(仅清单哈希变化或工作负载缺失时)
 #   7. 网关开关(TRAINCACHE_GATEWAY=1):traincache-gateway 副本 1 并等 rollout;
 #      不带或为 0:副本 0(对象保留,不删 Deployment)。见 ensure_gateway
+#   7b. 网关磁盘缓存开关(TRAINCACHE_GATEWAY_CACHE=1/0):patch traincache-config
+#      的 gatewayCache(1→true、0→false);configMapKeyRef 不热生效,改完必须
+#      重启 deployment/traincache-gateway。未设置则保持清单默认。见 ensure_gateway_cache
 #   8. traincache-config 的 WHITELIST/CACHE_CAPACITY_BYTES/STARTUP_WINDOW_BYTES/MAX_FILL_FRACTION/BUCKET、
 #      gatewayEndpoint(开网关指向 traincache-gateway.<NS>.svc:9413,关网关置空)
 #      与本轮的 PREFETCH_LOOKAHEAD/EVICT_POLICY(apply 会盖回清单默认,所以在 apply 之后对齐);
@@ -57,6 +60,21 @@ if [ "$GATEWAY_ON" = "1" ]; then
 else
   WANT_GATEWAY_ENDPOINT=""
 fi
+
+# ---- 网关磁盘缓存开关(D23):TRAINCACHE_GATEWAY_CACHE=1 → gatewayCache=true,
+#      =0 → gatewayCache=false。未设置则不动 ConfigMap(保持清单默认 true)。
+#      configMapKeyRef 改值不热生效,改完必须重启网关 Deployment。
+GATEWAY_CACHE_RAW="${TRAINCACHE_GATEWAY_CACHE:-}"
+WANT_GATEWAY_CACHE=""
+case "$GATEWAY_CACHE_RAW" in
+  "") ;;
+  1) WANT_GATEWAY_CACHE=true ;;
+  0) WANT_GATEWAY_CACHE=false ;;
+  *)
+    WANT_GATEWAY_CACHE=false
+    log_group "$GROUP" "WARNING: TRAINCACHE_GATEWAY_CACHE 取值 '$GATEWAY_CACHE_RAW' 非法(只认 0/1),按 0(false)处理" >&2
+    ;;
+esac
 
 # ---- 0. context 断言:装置只跑在自己的 kind 集群上 ----
 # 同一台机器上并行的会话会共用 ~/.kube/config,而 kind create cluster 会把
@@ -344,6 +362,41 @@ ensure_gateway() {
   fi
 }
 
+# ---- 网关磁盘缓存开关:patch traincache-config 的 gatewayCache ----
+# configMapKeyRef 不热生效:改完必须重启网关 Deployment 才吃到新值。
+# 值没变就不 patch 也不重启(与 agentd 配置同一口径,重复调用不滚 Pod)。
+ensure_gateway_cache() {
+  local cur replicas
+  if [ -z "$WANT_GATEWAY_CACHE" ]; then
+    log_group "$GROUP" "TRAINCACHE_GATEWAY_CACHE 未设置:保持 traincache-config 的 gatewayCache 现状"
+    return 0
+  fi
+  if ! kubectl -n "$NS" get deployment traincache-gateway >/dev/null 2>&1; then
+    log_group "$GROUP" "WARNING: deployment/traincache-gateway 不存在,跳过磁盘缓存开关" >&2
+    return 0
+  fi
+  cur="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gatewayCache}' 2>/dev/null || true)"
+  if [ "$cur" = "$WANT_GATEWAY_CACHE" ]; then
+    log_group "$GROUP" "网关磁盘缓存开关已是 gatewayCache=$WANT_GATEWAY_CACHE,不改值不重启"
+    return 0
+  fi
+  kubectl -n "$NS" patch configmap traincache-config --type merge \
+    -p "{\"data\":{\"gatewayCache\":\"$WANT_GATEWAY_CACHE\"}}" >/dev/null
+  log_group "$GROUP" "网关磁盘缓存开关已 patch: gatewayCache=$WANT_GATEWAY_CACHE"
+  replicas="$(kubectl -n "$NS" get deployment traincache-gateway -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+  kubectl -n "$NS" rollout restart deployment/traincache-gateway >/dev/null
+  if [ "${replicas:-0}" -gt 0 ] && [ "$GATEWAY_ON" = "1" ]; then
+    if ! kubectl -n "$NS" rollout status deployment/traincache-gateway --timeout=240s >/dev/null 2>&1; then
+      log_group "$GROUP" "错误: 网关滚动更新未在 240s 内就绪(gatewayCache=$WANT_GATEWAY_CACHE)" >&2
+      kubectl -n "$NS" get pods -l app.kubernetes.io/name=traincache-gateway -o wide >&2 || true
+      return 1
+    fi
+    log_group "$GROUP" "网关已重启,磁盘缓存开关生效(gatewayCache=$WANT_GATEWAY_CACHE)"
+  else
+    log_group "$GROUP" "网关本轮无在跑副本:新 Pod 起来时直接读 gatewayCache=$WANT_GATEWAY_CACHE"
+  fi
+}
+
 # ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数/网关端点/预取提前量/淘汰策略)----
 # 这六处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
 # 引用,改值不再动工作负载清单。桶以前由 `kubectl set env` 直接覆盖 DaemonSet 的
@@ -447,9 +500,10 @@ check_image_freshness
 ensure_objstore_secret
 ensure_webhook_tls
 ensure_control_plane
+ensure_gateway_cache
 ensure_gateway
 ensure_ca_bundle
 ensure_agent_config
 wait_ready
 print_status
-log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON)"
+log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON gatewayCache=${WANT_GATEWAY_CACHE:-<未设置,保持现状>})"

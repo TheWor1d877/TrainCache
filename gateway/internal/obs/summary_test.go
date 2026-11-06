@@ -35,7 +35,7 @@ func newTestLogger(interval time.Duration) (*Logger, *recHandler) {
 	return New(interval, slog.New(h)), h
 }
 
-// TestSummaryFields 覆盖九个字段与 datasets 计数。
+// TestSummaryFields 覆盖十个字段与 datasets 计数。
 func TestSummaryFields(t *testing.T) {
 	l, h := newTestLogger(300 * time.Millisecond)
 	defer l.Stop()
@@ -47,6 +47,7 @@ func TestSummaryFields(t *testing.T) {
 	l.Passthrough()
 	l.Kicked()
 	l.Rejected()
+	l.CacheHit()
 	l.Bytes(123)
 
 	select {
@@ -61,6 +62,7 @@ func TestSummaryFields(t *testing.T) {
 			"passthrough": 1,
 			"kicked":      1,
 			"rejected":    1,
+			"cache_hit":   1,
 			"bytes":       123,
 			"datasets":    2,
 		}
@@ -76,8 +78,49 @@ func TestSummaryFields(t *testing.T) {
 		if _, ok := m["window_s"]; !ok {
 			t.Fatal("缺少 window_s 字段")
 		}
+		// 汇总行共十个字段（msg 之外），不多不少。
+		if got, want := len(m)-1, 10; got != want {
+			t.Fatalf("汇总行字段数 = %d, want %d（字段: %v）", got, want, m)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("未输出 60s 汇总行")
+	}
+}
+
+// TestCacheHitSnapshot 覆盖 CacheHit() 后 Snapshot().CacheHit 递增。
+func TestCacheHitSnapshot(t *testing.T) {
+	l, _ := newTestLogger(time.Hour)
+	defer l.Stop()
+
+	if got := l.Snapshot().CacheHit; got != 0 {
+		t.Fatalf("空窗口 CacheHit = %d, want 0", got)
+	}
+	l.CacheHit()
+	if got := l.Snapshot().CacheHit; got != 1 {
+		t.Fatalf("CacheHit = %d, want 1", got)
+	}
+	l.CacheHit()
+	l.CacheHit()
+	if got := l.Snapshot().CacheHit; got != 3 {
+		t.Fatalf("CacheHit = %d, want 3", got)
+	}
+}
+
+// TestSummaryCacheHitZeroOnEmptyWindow 覆盖空窗口汇总行的 cache_hit 恒为 0。
+func TestSummaryCacheHitZeroOnEmptyWindow(t *testing.T) {
+	l, h := newTestLogger(30 * time.Millisecond)
+	defer l.Stop()
+
+	m := waitRecord(t, h)
+	got, ok := m["cache_hit"].(int64)
+	if !ok {
+		t.Fatalf("字段 cache_hit 类型 = %T, want int64", m["cache_hit"])
+	}
+	if got != 0 {
+		t.Fatalf("空窗口 cache_hit = %d, want 0", got)
+	}
+	if n := len(m) - 1; n != 10 {
+		t.Fatalf("汇总行字段数 = %d, want 10（字段: %v）", n, m)
 	}
 }
 

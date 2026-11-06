@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corelog "traincache/core/logging"
+	"traincache/gateway/internal/cache"
 	"traincache/gateway/internal/config"
 	"traincache/gateway/internal/logging"
 	"traincache/gateway/internal/merge"
@@ -59,14 +60,31 @@ func main() {
 	summary := obs.New(60*time.Second, slog.Default())
 	defer summary.Stop()
 
+	// 缓存开关关闭时不构造 Store、不扫描盘：关闭态走改动前的代码路径
+	// （design 9.1 §6.6；9.2 D29）。
+	var store *cache.Store
+	if cfg.Cache {
+		store = cache.New(cache.RootDir, cfg.CacheDatasetBytes, cfg.CacheTotalBytes)
+	}
+
 	srv := server.New(org, server.Options{
-		Bucket:      cfg.Bucket,
-		Concurrency: cfg.BucketConcurrency,
-		BufferBytes: cfg.BlockBufferBytes,
-		Registry:    registry,
-		Scheduler:   scheduler,
-		Obs:         summary,
+		Bucket:       cfg.Bucket,
+		Concurrency:  cfg.BucketConcurrency,
+		BufferBytes:  cfg.BlockBufferBytes,
+		Registry:     registry,
+		Scheduler:    scheduler,
+		Obs:          summary,
+		Cache:        store,
+		CacheEnabled: cfg.Cache,
 	}, slog.Default())
+
+	// 扫描填 last-touch 表并重建驻写字节账；扫描失败只记 Warn，不阻塞启动
+	// （design 9.1 §6.6）。
+	if store != nil {
+		if err := store.Scan(context.Background()); err != nil {
+			slog.Warn("扫描缓存目录失败", "dir", cache.RootDir, "err", err)
+		}
+	}
 
 	lis, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -93,6 +111,9 @@ func main() {
 		"bucket", cfg.Bucket,
 		"concurrency", cfg.BucketConcurrency,
 		"buffer_bytes", cfg.BlockBufferBytes,
+		"cache", cfg.Cache,
+		"cache_dataset_bytes", cfg.CacheDatasetBytes,
+		"cache_total_bytes", cfg.CacheTotalBytes,
 	)
 
 	serveErr := make(chan error, 1)

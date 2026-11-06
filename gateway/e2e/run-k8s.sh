@@ -18,6 +18,7 @@
 #   bash gateway/e2e/run-k8s.sh
 #   E2E_KEY='compare-data-8m/blocks/shard-00000.tar#0' bash gateway/e2e/run-k8s.sh
 #   TC_E2E_AGENT=1 bash gateway/e2e/run-k8s.sh    # 追加步骤 5（Agent 降级联动）
+#   TC_E2E_CACHE=1 bash gateway/e2e/run-k8s.sh    # 追加磁盘缓存往返步骤（标号 [cache]）
 #
 # 步骤：
 #   1. apply controller/deploy/gateway（Deployment + Service）、替换镜像、等 ready
@@ -29,8 +30,14 @@
 #      scale 0 → 触发块读取 → fallback_total 增加、source_mode=0；随后恢复
 #   6. 清理临时 Pod（不删除 Deployment / Service）
 #
+# 可选步骤（不改动上面 6 步的语义与顺序）：
+#   [cache] TC_E2E_CACHE=1：gatewayCache=true → 同键两轮 GET（第一轮 from=origin、
+#      第二轮 from=cache，两轮 sha256 一致）→ 删网关 Pod → 重建后第一轮 cache_hit=0
+#      （emptyDir 随 Pod 清空）、第二轮起命中；结束时恢复 gatewayCache 原值。
+#
 # 退出码：0 = 没有 FAIL（允许 SKIP）；1 = 至少一步 FAIL。
-# 可重复执行；步骤 5 的所有改动由 trap 兜底恢复（ConfigMap 与副本数）。
+# 可重复执行；步骤 5 与缓存步骤的所有改动由 trap 兜底恢复（ConfigMap、副本数、
+# agentd 与临时注入的日志级别）。
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +54,7 @@ AGENT_LABEL="app.kubernetes.io/name=traincache-agentd"
 PROBE_IMAGE="${TC_PROBE_IMAGE:-busybox:latest}"
 E2E_KEY="${E2E_KEY:-}"
 TC_E2E_AGENT="${TC_E2E_AGENT:-0}"
+TC_E2E_CACHE="${TC_E2E_CACHE:-0}"
 
 command -v kubectl >/dev/null 2>&1 || { echo "FATAL: 找不到 kubectl"; exit 1; }
 
@@ -73,6 +81,11 @@ GW_ENDPOINT_ORIG=""
 GW_ENDPOINT_PATCHED=0
 GW_REPLICAS_ORIG=""
 AGENT_RESTART_NEEDED=0
+# 缓存步骤（TC_E2E_CACHE=1）改动过的集群状态，trap 兜底恢复。
+GW_CACHE_ORIG=""
+GW_CACHE_KEY_PRESENT=0
+GW_CACHE_PATCHED=0
+GW_DEBUG_ENV_ADDED=0
 
 # restore_agent_step 幂等恢复步骤 5 的三处改动：ConfigMap、网关副本数、agentd。
 # 任一项失败返回 1，调用方（显式恢复或 trap）至少打印 NOTE，不掩盖原始退出码。
@@ -111,6 +124,60 @@ restore_agent_step() {
   return "$rc"
 }
 
+# restore_cache_step 幂等恢复缓存步骤改动过的两处集群状态：ConfigMap 的
+# gatewayCache 与临时注入的 TRAINCACHE_LOG_LEVEL。改完 ConfigMap 必须重启
+# 网关才生效，所以恢复的最后一件事是 rollout restart 并等 ready。
+# 任一项失败返回 1，调用方（显式恢复或 trap）至少打印 NOTE，不掩盖原始退出码。
+restore_cache_step() {
+  local rc=0 changed=0
+  if [[ "$GW_CACHE_PATCHED" == "1" ]]; then
+    if [[ "$GW_CACHE_KEY_PRESENT" == "1" ]]; then
+      if kubectl -n "$NS" patch configmap traincache-config --type merge \
+        -p "{\"data\":{\"gatewayCache\":\"${GW_CACHE_ORIG}\"}}" >>"$RAW_LOG" 2>&1; then
+        GW_CACHE_PATCHED=0
+        changed=1
+        note "已恢复 gatewayCache='${GW_CACHE_ORIG}'"
+      else
+        note "恢复 gatewayCache 失败，请手动检查 ConfigMap"
+        rc=1
+      fi
+    else
+      if kubectl -n "$NS" patch configmap traincache-config --type json \
+        -p '[{"op":"remove","path":"/data/gatewayCache"}]' >>"$RAW_LOG" 2>&1; then
+        GW_CACHE_PATCHED=0
+        changed=1
+        note "已删除 gatewayCache 键（恢复为未设置）"
+      else
+        note "删除 gatewayCache 键失败，请手动检查 ConfigMap"
+        rc=1
+      fi
+    fi
+  fi
+  if [[ "$GW_DEBUG_ENV_ADDED" == "1" ]]; then
+    # 两个变量都要摘掉：级别与 debug 采样率。采样率只在启动时读一次，
+    # 漏掉它会让 Pod 回到 1% 采样的默认行为（debug 行几乎看不见）。
+    if kubectl -n "$NS" set env deploy/"$GW_DEPLOY" \
+      TRAINCACHE_LOG_LEVEL- TRAINCACHE_LOG_DEBUG_SAMPLE_RATE- >>"$RAW_LOG" 2>&1; then
+      GW_DEBUG_ENV_ADDED=0
+      changed=1
+      note "已移除临时注入的 TRAINCACHE_LOG_LEVEL=debug 与 TRAINCACHE_LOG_DEBUG_SAMPLE_RATE=1"
+    else
+      note "移除 TRAINCACHE_LOG_LEVEL/TRAINCACHE_LOG_DEBUG_SAMPLE_RATE 失败，请手动检查 Deployment"
+      rc=1
+    fi
+  fi
+  if [[ "$changed" == "1" ]]; then
+    if kubectl -n "$NS" rollout restart deploy/"$GW_DEPLOY" >>"$RAW_LOG" 2>&1 \
+      && kubectl -n "$NS" rollout status deploy/"$GW_DEPLOY" --timeout=120s >>"$RAW_LOG" 2>&1; then
+      note "网关已按恢复后的配置重启"
+    else
+      note "网关重启失败，请手动检查 Deployment"
+      rc=1
+    fi
+  fi
+  return "$rc"
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT
@@ -118,6 +185,11 @@ cleanup() {
   if [[ "$GW_ENDPOINT_PATCHED" == "1" || "$AGENT_RESTART_NEEDED" == "1" || -n "$GW_REPLICAS_ORIG" ]]; then
     say "-- trap: 恢复步骤 5 的集群改动"
     restore_agent_step || note "trap 恢复未全部成功，请按 NOTE 手动收尾"
+  fi
+
+  if [[ "$GW_CACHE_PATCHED" == "1" || "$GW_DEBUG_ENV_ADDED" == "1" ]]; then
+    say "-- trap: 恢复缓存步骤的集群改动"
+    restore_cache_step || note "trap 恢复未全部成功，请按 NOTE 手动收尾"
   fi
 
   if ((${#TEMP_PODS[@]} > 0)); then
@@ -208,6 +280,177 @@ mc_cat_sha() { # key
   kubectl -n "$MINIO_NS" exec "$MINIO_POD" -- sh -c \
     'mc alias set tc "$1" "$2" "$3" >/dev/null 2>&1 || exit 3; mc cat "tc/$4/$5"' \
     _ "$EP_URL" "$AK" "$SK" "$BUCKET" "$1" 2>/dev/null | sha256sum | awk '{print $1}'
+}
+
+# ---- 网关 Pod 与日志读取（缓存步骤用） ----
+
+# gw_pod_names 列出当前运行中的网关 Pod 名（每行一个）；没有则输出空。
+gw_pod_names() {
+  kubectl -n "$NS" get pods -l "app.kubernetes.io/name=$GW_SVC" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null
+}
+
+# gw_pod_name 输出当前运行中的网关 Pod 名；没有则输出空串。
+gw_pod_name() {
+  kubectl -n "$NS" get pods -l "app.kubernetes.io/name=$GW_SVC" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+# gw_wait_ready 等网关 Pod 就绪并输出 Pod 名；exclude 非空时跳过该 Pod，
+# 用于等删 Pod 之后重建出来的新 Pod（正在终止的旧 Pod 也要跳过）。
+gw_wait_ready() { # [exclude]
+  local ex="${1:-}" p i
+  for ((i = 0; i < 30; i++)); do
+    while IFS= read -r p; do
+      [[ -n "$p" && "$p" != "$ex" ]] || continue
+      if kubectl -n "$NS" wait --for=condition=Ready "pod/$p" --timeout=10s >/dev/null 2>&1; then
+        printf '%s' "$p"
+        return 0
+      fi
+    done < <(gw_pod_names)
+    sleep 1
+  done
+  return 1
+}
+
+# gw_log_lines 取网关 Pod 当前日志行数，用来划出某一轮的日志区间。
+gw_log_lines() { # pod
+  kubectl -n "$NS" logs "$1" 2>>"$RAW_LOG" | wc -l | tr -d ' '
+}
+
+# gw_logs_since 取网关 Pod 里行号大于 since 的日志；since=0 表示全部日志。
+gw_logs_since() { # pod since
+  kubectl -n "$NS" logs "$1" 2>>"$RAW_LOG" | tail -n "+$(( $2 + 1 ))"
+}
+
+# gw_enable_debug_log 打开网关 debug 级日志：「条目结束」「读盘命中」都是 Debug 级。
+#
+# 只调级别不够：core/logging 对 Debug 级默认只按 1% 采样
+# （TRAINCACHE_LOG_DEBUG_SAMPLE_RATE，默认 0.01），打开级别后绝大多数
+# debug 行仍然不会出现，脚本会误判「没有等到条目结束日志行」。采样率只在
+# 进程启动时读一次，所以必须走 env + rollout restart；/debug/loglevel 端点
+# 只改级别，改不了采样率，这里不再依赖它。
+#
+# 幂等：env 已经注入过就直接返回（删 Pod 重建后新 Pod 从 Deployment 继承
+# 同一份 env，不需要再重启一次）。
+gw_enable_debug_log() {
+  if [[ "$GW_DEBUG_ENV_ADDED" == "1" ]]; then
+    return 0
+  fi
+  kubectl -n "$NS" set env deploy/"$GW_DEPLOY" \
+    TRAINCACHE_LOG_LEVEL=debug TRAINCACHE_LOG_DEBUG_SAMPLE_RATE=1 >>"$RAW_LOG" 2>&1 || return 1
+  GW_DEBUG_ENV_ADDED=1
+  kubectl -n "$NS" rollout status deploy/"$GW_DEPLOY" --timeout=120s >>"$RAW_LOG" 2>&1 || return 1
+  return 0
+}
+
+# cache_get_once 在探针 Pod 内对同一个块键做一次 GET，输出
+# "get rc=<退出码> size=<字节> sha=<sha256>"；失败重试 5 次。
+cache_get_once() { # pod
+  local out i
+  out=""
+  for ((i = 0; i < 5; i++)); do
+    out="$(kubectl -n "$NS" exec "$1" -- sh -c '
+set -u
+url="$1"
+wget -q -O /tmp/cache.bin "$url"
+rc=$?
+size="$(wc -c < /tmp/cache.bin 2>/dev/null || echo 0)"
+sha="$(sha256sum /tmp/cache.bin 2>/dev/null | cut -d" " -f1)"
+echo "get rc=$rc size=$size sha=$sha"
+' _ "$(gw_url)" 2>>"$RAW_LOG")"
+    if printf '%s\n' "$out" | grep -q '^get rc=0 '; then
+      break
+    fi
+    sleep 2
+  done
+  printf '%s\n' "$out" | grep '^get ' || true
+}
+
+# cache_field 从 cache_get_once 的输出里取 rc / size / sha 字段。
+cache_field() { # 结果行 字段名
+  case "$2" in
+    rc)   sed -n 's/^get rc=\([0-9]*\) .*/\1/p' <<<"$1" ;;
+    size) sed -n 's/^get rc=[0-9]* size=\([0-9]*\) .*/\1/p' <<<"$1" ;;
+    sha)  sed -n 's/^get .*sha=\([0-9a-f]*\)$/\1/p' <<<"$1" ;;
+  esac
+}
+
+# cache_round 做一轮 GET，输出 "rc size sha"。
+cache_round() { # pod
+  local res
+  res="$(cache_get_once "$1")"
+  printf '%s %s %s' "$(cache_field "$res" rc)" "$(cache_field "$res" size)" "$(cache_field "$res" sha)"
+}
+
+# cache_wait_entry_end 等某一轮的「条目结束」日志行并打印它；等不到返回 1。
+cache_wait_entry_end() { # pod since
+  local pod="$1" since="$2" i out
+  for ((i = 0; i < 30; i++)); do
+    out="$(gw_logs_since "$pod" "$since")"
+    if printf '%s\n' "$out" | grep -q '条目结束'; then
+      printf '%s\n' "$out" | grep '条目结束'
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# cache_wait_hit_log 等一条「读盘命中」日志行并打印它；等不到返回 1。
+# 「读盘命中」是读盘路径的独立证据：它与「条目结束」是两条不同的日志消息，
+# 而 core/logging 的 60s 去重键里含消息文本，所以两者不会互相压制。
+cache_wait_hit_log() { # pod since
+  local pod="$1" since="$2" i out
+  for ((i = 0; i < 30; i++)); do
+    out="$(gw_logs_since "$pod" "$since")"
+    if printf '%s\n' "$out" | grep -q '读盘命中'; then
+      printf '%s\n' "$out" | grep '读盘命中' | head -n1
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# cache_dedup_gap 等待 core/logging 的 60s 去重窗口过去（last_epoch 是上一次
+# 观察到「条目结束」行的 unix 秒）。
+#
+# 去重键是 (component, 消息文本, node, task_id, reason)，不含 dataset/key：
+# 同一进程里 60s 内的第二条「条目结束」会被整条丢弃，连 from=cache 也看不到。
+# 所以两轮之间必须等过窗口，下一条「条目结束」才会再次出现（并带 suppressed 计数）。
+cache_dedup_gap() { # last_epoch
+  local last="$1" now wait
+  now="$(date +%s)"
+  wait=$(( 61 - (now - last) ))
+  if ((wait > 0)); then
+    note "等待 ${wait}s 越过 core/logging 的 60s 去重窗口（否则第二轮的「条目结束」行会被丢弃）"
+    sleep "$wait"
+  fi
+}
+
+# cache_wait_summary 等一条 60s 汇总行（gets>=min_gets 且 cache_hit>=min_hit）
+# 并打印它；等不到返回 1。网关每 60s 出一条汇总，窗口内计数会被原子清零。
+cache_wait_summary() { # pod since min_gets min_hit 超时秒
+  local pod="$1" since="$2" min_gets="$3" min_hit="$4" limit="${5:-90}" i out line gets hit
+  for ((i = 0; i < limit; i++)); do
+    out="$(gw_logs_since "$pod" "$since")"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      gets="$(sed -n 's/.*"gets":[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$line")"
+      [[ "$gets" =~ ^[0-9]+$ ]] || continue
+      [[ "$gets" -ge "$min_gets" ]] || continue
+      hit="$(sed -n 's/.*"cache_hit":[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$line")"
+      [[ "$hit" =~ ^[0-9]+$ ]] || continue
+      [[ "$hit" -ge "$min_hit" ]] || continue
+      printf '%s\n' "$line"
+      return 0
+    done <<<"$out"
+    sleep 1
+  done
+  return 1
 }
 
 say "== TrainCache S3 网关 k8s e2e（kind / ns=$NS）=="
@@ -564,6 +807,219 @@ else
   fi
 fi
 
+# ---- 可选：磁盘缓存往返（TC_E2E_CACHE=1） ----
+# 规格来源：docs/9.3-test.md 4.3 节、docs/9.2-decisions.md D29 / D35。
+# 断言链：gatewayCache=true → 同键两轮 GET（第一轮 from=origin、第二轮 from=cache，
+# 两轮 sha256 一致）→ 删网关 Pod → 重建后第一轮 cache_hit=0、第二轮起命中。
+cache_step() {
+  local pod old_pod since since2 entry sum hit hit_line entry_end_at
+  local rc1 size1 sha1 rc2 size2 sha2 rc3 size3 sha3 rc4 size4 sha4
+
+  # 0) 记下原值并打开缓存开关；改完 ConfigMap 必须重启网关才生效（D29）。
+  GW_CACHE_ORIG="$(kubectl -n "$NS" get configmap traincache-config \
+    -o jsonpath='{.data.gatewayCache}' 2>/dev/null)"
+  if kubectl -n "$NS" get configmap traincache-config -o json 2>/dev/null | grep -q '"gatewayCache"'; then
+    GW_CACHE_KEY_PRESENT=1
+  fi
+  GW_CACHE_PATCHED=1
+  if kubectl -n "$NS" patch configmap traincache-config --type merge \
+      -p '{"data":{"gatewayCache":"true"}}' >>"$RAW_LOG" 2>&1; then
+    ok "gatewayCache=true（原值 '${GW_CACHE_ORIG:-<未设置>}'）"
+  else
+    fail "patch gatewayCache 失败"
+    restore_cache_step
+    return 1
+  fi
+  if kubectl -n "$NS" rollout restart deploy/"$GW_DEPLOY" >>"$RAW_LOG" 2>&1 \
+    && kubectl -n "$NS" rollout status deploy/"$GW_DEPLOY" --timeout=120s >>"$RAW_LOG" 2>&1; then
+    ok "网关已重启并 ready"
+  else
+    fail "网关重启未完成"
+    restore_cache_step
+    return 1
+  fi
+
+  # 「条目结束」行是 Debug 级：Info 级日志里看不到 from 字段。
+  if ! gw_enable_debug_log; then
+    fail "无法打开网关 debug 日志（/debug/loglevel 与 TRAINCACHE_LOG_LEVEL 均失败）"
+    restore_cache_step
+    return 1
+  fi
+  ok "网关 debug 日志已打开"
+
+  pod="$(gw_wait_ready)" || { fail "网关 Pod 未就绪"; restore_cache_step; return 1; }
+
+  # ---- 1) 同一个 Pod 两轮 GET：第一轮回源，第二轮读盘命中 ----
+  since="$(gw_log_lines "$pod")"
+  read -r rc1 size1 sha1 <<<"$(cache_round "$POD_CACHE")"
+  if [[ "$rc1" == "0" && -n "$sha1" && "$size1" != "0" ]]; then
+    ok "第一轮 GET 成功: size=$size1 sha=$sha1"
+  else
+    fail "第一轮 GET 失败（rc=${rc1:-<empty>} size=${size1:-0}）"
+  fi
+  if entry="$(cache_wait_entry_end "$pod" "$since")"; then
+    if printf '%s\n' "$entry" | grep -q '"from"[[:space:]]*:[[:space:]]*"origin"'; then
+      ok "第一轮条目结束行 from=origin"
+    else
+      fail "第一轮条目结束行没有 from=origin"
+      printf '%s\n' "$entry" | sed 's/^/    /'
+    fi
+  else
+    fail "第一轮没有等到「条目结束」日志行"
+  fi
+  entry_end_at="$(date +%s)"
+
+  # 去重窗口：core/logging 的去重键是 (component, 消息文本, node, task_id, reason)，
+  # 不含 dataset/key。同一进程里 60s 内的第二条「条目结束」会被整条丢弃，
+  # 所以第二轮之前必须等过窗口，否则 from=cache 那行根本不会出现。
+  cache_dedup_gap "$entry_end_at"
+  sleep 2   # 等盘上写入落定再做第二轮
+  since="$(gw_log_lines "$pod")"
+  read -r rc2 size2 sha2 <<<"$(cache_round "$POD_CACHE")"
+  if [[ "$rc2" == "0" && -n "$sha2" ]]; then
+    ok "第二轮 GET 成功: size=$size2 sha=$sha2"
+  else
+    fail "第二轮 GET 失败（rc=${rc2:-<empty>} size=${size2:-0}）"
+  fi
+  if entry="$(cache_wait_entry_end "$pod" "$since")"; then
+    if printf '%s\n' "$entry" | grep -q '"from"[[:space:]]*:[[:space:]]*"cache"'; then
+      ok "第二轮条目结束行 from=cache"
+    else
+      fail "第二轮条目结束行不是 from=cache"
+      printf '%s\n' "$entry" | sed 's/^/    /'
+    fi
+    if printf '%s\n' "$entry" | grep -q '"from"[[:space:]]*:[[:space:]]*"origin"'; then
+      fail "第二轮仍出现 from=origin（本轮没有命中盘上缓存）"
+    fi
+  else
+    fail "第二轮没有等到「条目结束」日志行"
+  fi
+  if hit_line="$(cache_wait_hit_log "$pod" "$since")"; then
+    ok "第二轮出现「读盘命中」日志行"
+  else
+    fail "第二轮没有等到「读盘命中」日志行"
+  fi
+  if [[ -n "$sha1" && -n "$sha2" && "$sha1" == "$sha2" ]]; then
+    ok "两轮响应字节 sha256 一致: $sha1"
+  else
+    fail "两轮响应字节 sha256 不一致: ${sha1:-<empty>} vs ${sha2:-<empty>}"
+  fi
+
+  # ---- 2) 删掉网关 Pod：emptyDir 随 Pod 清空，重建后第一轮必然回源（D35） ----
+  old_pod="$pod"
+  if kubectl -n "$NS" delete pod "$old_pod" --ignore-not-found --wait=true >>"$RAW_LOG" 2>&1; then
+    ok "已删除网关 Pod $old_pod"
+  else
+    fail "删除网关 Pod $old_pod 失败"
+  fi
+  pod="$(gw_wait_ready "$old_pod")" || { fail "网关 Pod 重建后未就绪"; restore_cache_step; return 1; }
+  # debug 级别与采样率是写在 Deployment 的 env 上的，新 Pod 会继承，
+  # 所以这里不需要再操作（gw_enable_debug_log 幂等）。
+  gw_enable_debug_log || note "重建后打开 debug 日志失败，条目结束行可能不可见"
+  pod="$(gw_wait_ready)" || { fail "网关 Pod 未就绪"; restore_cache_step; return 1; }
+  ok "网关新 Pod $pod 已就绪"
+
+  since="$(gw_log_lines "$pod")"
+  read -r rc3 size3 sha3 <<<"$(cache_round "$POD_CACHE")"
+  if [[ "$rc3" == "0" && -n "$sha3" && "$size3" != "0" ]]; then
+    ok "重建后第一轮 GET 成功: size=$size3 sha=$sha3"
+  else
+    fail "重建后第一轮 GET 失败（rc=${rc3:-<empty>} size=${size3:-0}）"
+  fi
+  if entry="$(cache_wait_entry_end "$pod" "$since")"; then
+    if printf '%s\n' "$entry" | grep -q '"from"[[:space:]]*:[[:space:]]*"origin"'; then
+      ok "重建后第一轮条目结束行 from=origin（盘是空的）"
+    else
+      fail "重建后第一轮条目结束行不是 from=origin"
+      printf '%s\n' "$entry" | sed 's/^/    /'
+    fi
+  else
+    fail "重建后第一轮没有等到「条目结束」日志行"
+  fi
+  # 空盘的直接证据：新 Pod 的日志里不能出现任何「读盘命中」。
+  if gw_logs_since "$pod" 0 | grep -q '读盘命中'; then
+    fail "重建后出现了「读盘命中」日志行（emptyDir 没有随 Pod 删除而清空）"
+  else
+    ok "重建后没有「读盘命中」日志行（emptyDir 随 Pod 删除而清空）"
+  fi
+  # 60s 汇总里的 cache_hit：第一轮覆盖本轮的窗口里必须是 0。
+  # 汇总行本身可能被 core/logging 的 60s 去重窗口丢弃（消息文本固定，
+  # 相邻两条汇总行间隔刚好等于去重窗口），所以这里只当佐证，找不到不算失败。
+  if sum="$(cache_wait_summary "$pod" 0 1 0 90)"; then
+    hit="$(sed -n 's/.*"cache_hit":[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$sum")"
+    if [[ "$hit" == "0" ]]; then
+      ok "重建后第一轮 cache_hit=0（emptyDir 随 Pod 删除而清空）"
+    else
+      fail "重建后第一轮 cache_hit=${hit:-<empty>}，期望 0"
+    fi
+  else
+    note "未等到覆盖本轮的 60s 汇总行（汇总行可能被 60s 去重窗口丢弃），跳过 cache_hit=0 断言"
+  fi
+
+  # 同一进程内 60s 的第二条「条目结束」会被去重丢弃，第三轮之后必须等过窗口。
+  cache_dedup_gap "$(date +%s)"
+  sleep 2
+  since2="$(gw_log_lines "$pod")"
+  read -r rc4 size4 sha4 <<<"$(cache_round "$POD_CACHE")"
+  if [[ "$rc4" == "0" && -n "$sha4" ]]; then
+    ok "重建后第二轮 GET 成功: size=$size4 sha=$sha4"
+  else
+    fail "重建后第二轮 GET 失败（rc=${rc4:-<empty>} size=${size4:-0}）"
+  fi
+  if entry="$(cache_wait_entry_end "$pod" "$since2")"; then
+    if printf '%s\n' "$entry" | grep -q '"from"[[:space:]]*:[[:space:]]*"cache"'; then
+      ok "重建后第二轮条目结束行 from=cache"
+    else
+      fail "重建后第二轮条目结束行不是 from=cache"
+      printf '%s\n' "$entry" | sed 's/^/    /'
+    fi
+  else
+    fail "重建后第二轮没有等到「条目结束」日志行"
+  fi
+  hit_line=""
+  if hit_line="$(cache_wait_hit_log "$pod" "$since2")"; then
+    ok "重建后第二轮出现「读盘命中」日志行"
+  else
+    fail "重建后第二轮没有等到「读盘命中」日志行"
+  fi
+  # 汇总计数佐证：命中已由上面的「读盘命中」行确认，汇总行可能被去重丢弃，
+  # 所以这里找不到只记 NOTE，不判 FAIL。
+  if sum="$(cache_wait_summary "$pod" 0 1 1 90)"; then
+    hit="$(sed -n 's/.*"cache_hit":[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$sum")"
+    ok "重建后第二轮起 cache_hit=${hit:-<empty>}（期望 ≥1）"
+  else
+    note "未等到 cache_hit≥1 的 60s 汇总行（汇总行可能被 60s 去重窗口丢弃）；命中已由「读盘命中」日志行确认"
+  fi
+  if [[ -n "$sha3" && -n "$sha4" && "$sha3" == "$sha4" ]]; then
+    ok "重建后两轮响应字节 sha256 一致: $sha3"
+  else
+    fail "重建后两轮响应字节 sha256 不一致: ${sha3:-<empty>} vs ${sha4:-<empty>}"
+  fi
+
+  # 显式恢复；失败时 trap 会在退出前再试一次。
+  if restore_cache_step; then
+    ok "缓存步骤的 gatewayCache 与日志级别已恢复"
+  else
+    fail "缓存步骤恢复未全部成功（trap 将重试）"
+  fi
+}
+
+say "-- [cache] 磁盘缓存往返（TC_E2E_CACHE=1 时启用）"
+if [[ "$TC_E2E_CACHE" != "1" ]]; then
+  skip "未启用（TC_E2E_CACHE != 1）"
+elif [[ $HAVE_KEY -ne 1 ]]; then
+  skip "没有可用对象键，无法验证缓存往返"
+elif [[ "$KEY" != *"/blocks/"* ]]; then
+  skip "对象键不是块键（<dataset>/blocks/...），缓存路径不适用"
+else
+  POD_CACHE="tc-gw-cache-$$-$RANDOM"
+  if ! run_probe_pod "$POD_CACHE" sleep 3600; then
+    fail "临时探针 Pod $POD_CACHE 未 ready（$PROBE_IMAGE 是否已载入集群？）"
+  else
+    cache_step
+  fi
+fi
+
 # ---- 6. 清理与汇总 ----
 say "-- [6/6] 清理临时 Pod 并汇总"
 if ((${#TEMP_PODS[@]} > 0)); then
@@ -583,6 +1039,6 @@ else
 fi
 say "原始证据: $RAW_LOG"
 say "排水观测: $DRAIN_LOG"
-say "注：不删除 Deployment/Service；步骤 5 的集群改动已由 trap 兜底恢复。"
+say "注：不删除 Deployment/Service；步骤 5 与缓存步骤的集群改动已由 trap 兜底恢复。"
 
 [[ $FAILS -eq 0 ]]

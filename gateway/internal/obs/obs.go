@@ -15,7 +15,7 @@ import (
 // SummaryMsg 是汇总行的固定消息（design 9.1 §7.3 冻结）。
 const SummaryMsg = "gateway: 60s 汇总"
 
-// Summary 是一个窗口的九个计数。Snapshot 返回当前窗口的实时值，不清零。
+// Summary 是一个窗口的十个计数。Snapshot 返回当前窗口的实时值，不清零。
 type Summary struct {
 	WindowS     int64
 	Gets        int64
@@ -24,6 +24,7 @@ type Summary struct {
 	Passthrough int64
 	Kicked      int64
 	Rejected    int64
+	CacheHit    int64 `json:"cache_hit"`
 	Bytes       int64
 	Datasets    int64
 }
@@ -43,6 +44,7 @@ type Logger struct {
 	passthrough atomic.Int64
 	kicked      atomic.Int64
 	rejected    atomic.Int64
+	cacheHit    atomic.Int64
 	bytes       atomic.Int64
 
 	dsMu     sync.Mutex
@@ -111,6 +113,9 @@ func (l *Logger) Kicked() { l.kicked.Add(1) }
 // Rejected 记一次准入拒绝。
 func (l *Logger) Rejected() { l.rejected.Add(1) }
 
+// CacheHit 记一次读盘命中：字节从盘上取走的请求数。
+func (l *Logger) CacheHit() { l.cacheHit.Add(1) }
+
 // Bytes 记从源站读入的字节数。
 func (l *Logger) Bytes(n int64) {
 	if n > 0 {
@@ -131,6 +136,7 @@ func (l *Logger) Snapshot() Summary {
 		Passthrough: l.passthrough.Load(),
 		Kicked:      l.kicked.Load(),
 		Rejected:    l.rejected.Load(),
+		CacheHit:    l.cacheHit.Load(),
 		Bytes:       l.bytes.Load(),
 		Datasets:    datasets,
 	}
@@ -144,6 +150,7 @@ func (l *Logger) emit() {
 	passthrough := l.passthrough.Swap(0)
 	kicked := l.kicked.Swap(0)
 	rejected := l.rejected.Swap(0)
+	cacheHit := l.cacheHit.Swap(0)
 	nbytes := l.bytes.Swap(0)
 
 	l.dsMu.Lock()
@@ -159,6 +166,7 @@ func (l *Logger) emit() {
 		"passthrough", passthrough,
 		"kicked", kicked,
 		"rejected", rejected,
+		"cache_hit", cacheHit,
 		"bytes", nbytes,
 		"datasets", datasets,
 	)

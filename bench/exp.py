@@ -246,6 +246,11 @@ def _cond_env(cond: dict, tilt: bool) -> dict[str, str]:
     env["TRAINCACHE_READERS"] = str(wl.get("readers", 1))
     env["TRAINCACHE_ACCESS_PATTERN"] = wl.get("access_pattern", "single")
     env["TRAINCACHE_GATEWAY"] = "1" if cond["environment"].get("gateway") else "0"
+    # D23：网关磁盘缓存开关。直接下发到起跑链路，取本 COND 的
+    # environment.gateway_cache；缺省按 false（0=只做在途合并），与
+    # run_bench.py 的回落口径一致（它自己再读一遍 COND 兜底）。
+    env["TRAINCACHE_GATEWAY_CACHE"] = (
+        "1" if cond["environment"].get("gateway_cache") else "0")
     mode = (pf.get("gate") or {}).get("mode")
     if mode:
         env["TRAINCACHE_GATE_MODE"] = mode
@@ -528,7 +533,9 @@ def _print_plan(family: str, points: list[str] | None = None) -> None:
             wl = cond["workload"]
             print(f"       readers={wl['readers']} "
                   f"access_pattern={wl['access_pattern']} "
-                  f"gateway={int(cond['environment']['gateway'])}")
+                  f"gateway={int(cond['environment']['gateway'])} "
+                  f"gateway_cache="
+                  f"{int(bool(cond['environment'].get('gateway_cache')))}")
         print("       " + " ".join(cmd))
 
 
