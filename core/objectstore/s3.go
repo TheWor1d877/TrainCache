@@ -25,10 +25,17 @@ var _ Store = (*S3Store)(nil)
 // "127.0.0.1:9000" 或 "cos.ap-guangzhou.myqcloud.com"，secure 为 true 时使用 HTTPS。
 // bucket 为对象存储桶名（v1 约定单桶，见 decisions.md Q5）。
 //
-// 本函数不安装网关响应头探针，错误语义与既有调用方保持一致。需要走网关时用
+// 本函数不安装网关响应头探针，错误语义与既有调用方保持一致。需要覆盖传输层
+// 行为（如压缩开关）时用 NewSourceS3Store；需要走网关时用
 // NewS3StoreWithOptions（9.1 §4.4）。
 func NewS3Store(endpoint, accessKey, secretKey, bucket string, secure bool) (*S3Store, error) {
-	return newS3Store(endpoint, accessKey, secretKey, bucket, secure, Options{}, false)
+	return NewSourceS3Store(endpoint, accessKey, secretKey, bucket, secure, Options{})
+}
+
+// NewSourceS3Store 与 NewS3Store 相同，并用 opts 覆盖传输层行为（目前用
+// Compression）；opts 为零值时与 NewS3Store 等价。不安装网关响应头探针。
+func NewSourceS3Store(endpoint, accessKey, secretKey, bucket string, secure bool, opts Options) (*S3Store, error) {
+	return newS3Store(endpoint, accessKey, secretKey, bucket, secure, opts, false)
 }
 
 // Get 实现 Store.Get（GET 前先 Stat 确认存在性，不存在返回 ErrNotFound）。

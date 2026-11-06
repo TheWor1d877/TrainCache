@@ -12,6 +12,7 @@ var envKeys = []string{
 	envObjstoreSecretKey,
 	envObjstoreBucket,
 	envObjstoreSecure,
+	envObjstoreCompression,
 	envListen,
 	envBucketConcurrency,
 	envBlockBufferBytes,
@@ -61,6 +62,7 @@ func TestLoad(t *testing.T) {
 	override.ObjstoreSecretKey = "sk"
 	override.Bucket = "bench"
 	override.ObjstoreSecure = true
+	override.ObjstoreCompression = true
 	override.Listen = "127.0.0.1:19413"
 	override.BucketConcurrency = 64
 	override.BlockBufferBytes = 20971520
@@ -111,18 +113,19 @@ func TestLoad(t *testing.T) {
 		{
 			name: "完整覆盖",
 			env: map[string]string{
-				envObjstoreEndpoint:  "minio.example:9443",
-				envObjstoreAccessKey: "ak",
-				envObjstoreSecretKey: "sk",
-				envObjstoreBucket:    "bench",
-				envObjstoreSecure:    "1",
-				envListen:            "127.0.0.1:19413",
-				envBucketConcurrency: "64",
-				envBlockBufferBytes:  "20971520",
-				envLogLevel:          "debug",
-				envCache:             "1",
-				envCacheDatasetBytes: "1073741824",
-				envCacheTotalBytes:   "2147483648",
+				envObjstoreEndpoint:    "minio.example:9443",
+				envObjstoreAccessKey:   "ak",
+				envObjstoreSecretKey:   "sk",
+				envObjstoreBucket:      "bench",
+				envObjstoreSecure:      "1",
+				envObjstoreCompression: "yes",
+				envListen:              "127.0.0.1:19413",
+				envBucketConcurrency:   "64",
+				envBlockBufferBytes:    "20971520",
+				envLogLevel:            "debug",
+				envCache:               "1",
+				envCacheDatasetBytes:   "1073741824",
+				envCacheTotalBytes:     "2147483648",
 			},
 			want: override,
 		},

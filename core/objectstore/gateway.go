@@ -73,7 +73,7 @@ func IsGatewayTimeout(err error) bool {
 
 // Options 是 S3Store 的可选构造参数。
 type Options struct {
-	// Transport 是底层 HTTP 传输层；nil 时使用 http.DefaultTransport。
+	// Transport 是底层 HTTP 传输层；nil 时使用 minio-go 的默认传输层。
 	Transport http.RoundTripper
 	// Region 固定 SigV4 签名区域（9.2 D17）。非空时 minio-go 不再请求
 	// GET /<bucket>?location=，网关只需处理 GET 与 HEAD 对象请求。
@@ -84,6 +84,31 @@ type Options struct {
 	// 0 表示沿用全局默认 minio.MaxRetry；本仓库的 v7.3.0 中该值语义为
 	// 「总尝试次数」（1 = 不重试）。
 	MaxRetries int
+	// Compression 允许请求声明 gzip。默认 false：传输层设置
+	// DisableCompression，不发 Accept-Encoding，响应按原始字节读取。
+	// 开启后 Go 传输层自动解压，指纹仍对解压后的原始字节计算。
+	// 带 Range 头的请求不参与协商（Go 传输层的行为），区间字节不会错位。
+	Compression bool
+}
+
+// baseTransport 按 Compression 选择传输层的压缩行为。调用方传入
+// *http.Transport 时先 Clone 再改标志，不影响其它使用者；传入其它
+// RoundTripper 时原样返回，压缩口径由该实现自己决定。
+func baseTransport(opts Options, secure bool) (http.RoundTripper, error) {
+	if opts.Transport != nil {
+		if t, ok := opts.Transport.(*http.Transport); ok {
+			clone := t.Clone()
+			clone.DisableCompression = !opts.Compression
+			return clone, nil
+		}
+		return opts.Transport, nil
+	}
+	t, err := minio.DefaultTransport(secure)
+	if err != nil {
+		return nil, err
+	}
+	t.DisableCompression = !opts.Compression
+	return t, nil
 }
 
 // gatewayProbeKey 是每请求探针在 ctx 中的键（仅本包内部使用，不跨包）。
@@ -145,14 +170,14 @@ func newS3Store(endpoint, accessKey, secretKey, bucket string, secure bool, opts
 	if opts.MaxRetries > 0 {
 		minioOpts.MaxRetries = opts.MaxRetries
 	}
+	base, err := baseTransport(opts, secure)
+	if err != nil {
+		return nil, err
+	}
 	if probe {
-		base := opts.Transport
-		if base == nil {
-			base = http.DefaultTransport
-		}
 		minioOpts.Transport = &gatewayTransport{base: base}
-	} else if opts.Transport != nil {
-		minioOpts.Transport = opts.Transport
+	} else {
+		minioOpts.Transport = base
 	}
 	client, err := minio.New(endpoint, minioOpts)
 	if err != nil {

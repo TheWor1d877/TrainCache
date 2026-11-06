@@ -19,12 +19,10 @@ var ErrTooManyRetries = errors.New("fetch: verification failed after max retries
 // backoffBase 是重试退避基数（decisions.md Q6：指数退避 100ms 起、无抖动）。
 const backoffBase = 100 * time.Millisecond
 
-// 大块 Range 并行下载：对象不小于 rangeThreshold 时拆成 rangeParts 个连续区间
-// 并行取，聚合到临时文件后再顺序喂给 CAS。小于该阈值仍走整对象 Get。
-const (
-	rangeThreshold int64 = 64 << 20 // 64 MiB
-	rangeParts           = 4
-)
+// 大块 Range 并行下载：对象不小于 Options.RangeThreshold（默认 64 MiB）时拆成
+// rangeParts 个连续区间并行取，聚合到临时文件后再顺序喂给 CAS。小于该阈值仍走
+// 整对象 Get。
+const rangeParts = 4
 
 // rangeTempDir 是分片聚合临时文件的目录；空串表示 os.TempDir()。
 // 包级变量便于单测指定可观测的临时目录。临时文件在成功与失败路径都会删除。
@@ -220,7 +218,7 @@ func (f *Fetcher) download(ctx context.Context, key string, expectSize int64, ad
 // （ctx 取消/流错误均不残留）→ cas.Open 读回校验；校验失败则 cas.Remove 后
 // 返回 ErrCorrupt（此时块无引用无 pin，Remove 不会 ErrInUse，design.md §7.5）。
 //
-// expectSize 不小于 rangeThreshold 时走四分片并行取数与临时文件聚合，否则走
+// expectSize 不小于 Options.RangeThreshold 时走四分片并行取数与临时文件聚合，否则走
 // 原整对象 Get 经 io.Pipe 直连 cas.Put 的路径。两条路径最终都交给同一个
 // cas.Put 做流式顺序写入与指纹计算，在途字节只在 download 入口按整块计一次。
 func (f *Fetcher) tryOnce(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
@@ -239,7 +237,7 @@ func (f *Fetcher) tryOnce(ctx context.Context, key string, expectSize int64) (ca
 	)
 	// Range 是可选能力：Store 未实现 RangeStore 时退回整对象 Get。
 	var rangeStore objectstore.RangeStore
-	if expectSize >= rangeThreshold {
+	if expectSize >= f.opts.RangeThreshold {
 		rangeStore, _ = f.store.(objectstore.RangeStore)
 	}
 	if rangeStore != nil {

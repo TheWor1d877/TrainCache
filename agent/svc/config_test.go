@@ -40,6 +40,8 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_INDEX_REFRESH_INTERVAL",
 		"TRAINCACHE_LOCAL_GC_INTERVAL",
 		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
+		"TRAINCACHE_OBJSTORE_COMPRESSION",
+		"TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES",
 		"TRAINCACHE_GATEWAY_ENDPOINT",
 		"TRAINCACHE_GATEWAY_SECURE",
 	} {
@@ -142,6 +144,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ObjstoreProbeConditionalWrite {
 		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
+	}
+	if cfg.ObjstoreCompression {
+		t.Error("ObjstoreCompression 默认值 = true, want false(压缩默认关闭)")
+	}
+	if cfg.FetchRangeThresholdBytes != defaultFetchRangeThresholdBytes {
+		t.Errorf("FetchRangeThresholdBytes = %d, want %d(默认 64 MiB)", cfg.FetchRangeThresholdBytes, defaultFetchRangeThresholdBytes)
 	}
 	if cfg.GatewayEndpoint != "" {
 		t.Errorf("GatewayEndpoint 默认值 = %q, want 空(9.1 §5.3:全部直连)", cfg.GatewayEndpoint)
@@ -266,6 +274,8 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_OBJSTORE_SECRET_KEY", "sk-test")
 	t.Setenv("TRAINCACHE_OBJSTORE_BUCKET", "tc-blocks")
 	t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
+	t.Setenv("TRAINCACHE_OBJSTORE_COMPRESSION", "yes")
+	t.Setenv("TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES", "8388608")
 	t.Setenv("TRAINCACHE_GATEWAY_ENDPOINT", "gateway.traincache.svc:9413")
 	t.Setenv("TRAINCACHE_GATEWAY_SECURE", "yes")
 	t.Setenv("TRAINCACHE_HEAT_DECAY_AGE", "48h")
@@ -319,6 +329,12 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !cfg.ObjstoreSecure {
 		t.Error("ObjstoreSecure = false, want true(TRAINCACHE_OBJSTORE_SECURE=1)")
+	}
+	if !cfg.ObjstoreCompression {
+		t.Error("ObjstoreCompression = false, want true(TRAINCACHE_OBJSTORE_COMPRESSION=yes)")
+	}
+	if cfg.FetchRangeThresholdBytes != 8388608 {
+		t.Errorf("FetchRangeThresholdBytes = %d, want 8388608(TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES)", cfg.FetchRangeThresholdBytes)
 	}
 	if cfg.GatewayEndpoint != "gateway.traincache.svc:9413" {
 		t.Errorf("GatewayEndpoint = %q, want gateway.traincache.svc:9413(9.1 §5.3)", cfg.GatewayEndpoint)

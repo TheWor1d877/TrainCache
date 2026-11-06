@@ -12,9 +12,9 @@
 # 127.0.0.1:6060 by the process and is deliberately not exposed here or in the
 # Service.
 #
-# Env: no literal env values. Endpoint, bucket, TLS flag, concurrency,
-# ring-buffer size and the three disk-cache knobs come from traincache-config;
-# credentials come from traincache-objstore.
+# Env: no literal env values. Endpoint, bucket, TLS flag, compression flag,
+# concurrency, ring-buffer size and the three disk-cache knobs come from
+# traincache-config; credentials come from traincache-objstore.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,6 +57,11 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: objstoreSecure
+            - name: TRAINCACHE_OBJSTORE_COMPRESSION
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreCompression
             - name: TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY
               valueFrom:
                 configMapKeyRef:

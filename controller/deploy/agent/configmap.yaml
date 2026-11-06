@@ -37,6 +37,19 @@
 #                              read. The bench harness rewrites it per dataset.
 #   objstoreSecure           — "true"/"1"/"yes" enables TLS to the origin;
 #                              anything else, including "", means plain HTTP.
+#   objstoreCompression      — "true"/"1"/"yes" lets the Agent and the gateway
+#                              declare gzip to the origin; anything else reads
+#                              responses as raw bytes. Off by default: training
+#                              data is already compressed. Written here even
+#                              though it equals the code default, so the switch
+#                              is discoverable in the manifest.
+#   fetchRangeThresholdBytes — Agent-only lower bound for splitting a block into
+#                              four parallel Range GETs; positive integer,
+#                              default 67108864 (64 MiB). Lower it to the block
+#                              size when blocks are smaller. Written here
+#                              because the DaemonSet references it: patching the
+#                              key is the supported way to change the threshold
+#                              per run, and a missing key blocks Pod startup.
 #   gatewayEndpoint          — S3 gateway the Agent routes block GETs to. ""
 #                              means every block GET goes straight to the
 #                              origin; "<host>:<port>" routes them through the
@@ -86,6 +99,8 @@ data:
   objstoreEndpoint: "minio.minio.svc.cluster.local:9000"
   objstoreBucket: "traincache"
   objstoreSecure: "false"
+  objstoreCompression: "false"
+  fetchRangeThresholdBytes: "67108864"
   gatewayEndpoint: ""
   gatewaySecure: "false"
   gatewayBucketConcurrency: "64"

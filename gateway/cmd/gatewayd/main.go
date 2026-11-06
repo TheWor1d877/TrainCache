@@ -49,7 +49,7 @@ func main() {
 	}
 
 	org, err := origin.New(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey, cfg.ObjstoreSecretKey,
-		cfg.Bucket, cfg.ObjstoreSecure)
+		cfg.Bucket, cfg.ObjstoreSecure, cfg.ObjstoreCompression)
 	if err != nil {
 		slog.Error("构造源站客户端失败", "origin", cfg.ObjstoreEndpoint, "err", err)
 		os.Exit(1)

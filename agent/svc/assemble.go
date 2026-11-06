@@ -100,8 +100,9 @@ const gatewayMaxRetries = 1
 // 网关接线(9.1 §4.3/§4.4):GatewayEndpoint 为空时与改动前完全一致,只构造源站 store;
 // 非空时再构造网关 store 并包成 backendStore(Get 走选择器,其余方法直连源站)。
 func Assemble(cfg Config) (*Agent, error) {
-	store, err := objectstore.NewS3Store(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey,
-		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.ObjstoreSecure)
+	store, err := objectstore.NewSourceS3Store(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey,
+		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.ObjstoreSecure,
+		objectstore.Options{Compression: cfg.ObjstoreCompression})
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +113,11 @@ func Assemble(cfg Config) (*Agent, error) {
 	// 网关与 Agent 共用源站凭证/桶(9.1 §1.4);到网关的 TLS 由 GatewaySecure 独立控制(D16)。
 	gateway, err := objectstore.NewS3StoreWithOptions(cfg.GatewayEndpoint, cfg.ObjstoreAccessKey,
 		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.GatewaySecure,
-		objectstore.Options{Region: gatewayRegion, MaxRetries: gatewayMaxRetries})
+		objectstore.Options{
+			Region:      gatewayRegion,
+			MaxRetries:  gatewayMaxRetries,
+			Compression: cfg.ObjstoreCompression,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +167,10 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// (Commit 校验、fetch 读回、rescan/backfill 等)都登记为自打开;显式 Mark 点保留
 	// (幂等无害)。必须在 fetch/prefetcher/rescan/backfill 构造之前完成。
 	ag.selfOpen = prefetch.NewSelfOpenGuard(selfOpenGuardTTL)
-	ag.Fetcher = fetch.New(obj, cs, fetch.Options{OnLocalOpen: ag.selfOpen.Mark}) // 其余零值回退 design §8 默认
+	ag.Fetcher = fetch.New(obj, cs, fetch.Options{
+		OnLocalOpen:    ag.selfOpen.Mark,
+		RangeThreshold: cfg.FetchRangeThresholdBytes, // 零值回退 core/fetch 默认 64 MiB
+	})
 
 	// 指标层带 node 标签(traincache_agent_up / agent_degraded;§5.8 node 为第二正交维度)。
 	ag.Metrics = metrics.New(metrics.Config{

@@ -29,18 +29,19 @@ const (
 
 // env 名（design 9.1 §5.3 冻结；沿用的是全仓同名键）。
 const (
-	envObjstoreEndpoint  = "TRAINCACHE_OBJSTORE_ENDPOINT"
-	envObjstoreAccessKey = "TRAINCACHE_OBJSTORE_ACCESS_KEY"
-	envObjstoreSecretKey = "TRAINCACHE_OBJSTORE_SECRET_KEY"
-	envObjstoreBucket    = "TRAINCACHE_OBJSTORE_BUCKET"
-	envObjstoreSecure    = "TRAINCACHE_OBJSTORE_SECURE"
-	envListen            = "TRAINCACHE_GATEWAY_LISTEN"
-	envBucketConcurrency = "TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY"
-	envBlockBufferBytes  = "TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES"
-	envLogLevel          = "TRAINCACHE_LOG_LEVEL"
-	envCache             = "TRAINCACHE_GATEWAY_CACHE"
-	envCacheDatasetBytes = "TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES"
-	envCacheTotalBytes   = "TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES"
+	envObjstoreEndpoint    = "TRAINCACHE_OBJSTORE_ENDPOINT"
+	envObjstoreAccessKey   = "TRAINCACHE_OBJSTORE_ACCESS_KEY"
+	envObjstoreSecretKey   = "TRAINCACHE_OBJSTORE_SECRET_KEY"
+	envObjstoreBucket      = "TRAINCACHE_OBJSTORE_BUCKET"
+	envObjstoreSecure      = "TRAINCACHE_OBJSTORE_SECURE"
+	envObjstoreCompression = "TRAINCACHE_OBJSTORE_COMPRESSION"
+	envListen              = "TRAINCACHE_GATEWAY_LISTEN"
+	envBucketConcurrency   = "TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY"
+	envBlockBufferBytes    = "TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES"
+	envLogLevel            = "TRAINCACHE_LOG_LEVEL"
+	envCache               = "TRAINCACHE_GATEWAY_CACHE"
+	envCacheDatasetBytes   = "TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES"
+	envCacheTotalBytes     = "TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES"
 )
 
 // Config 是网关进程的完整配置（design 9.1 §5.3）。
@@ -50,10 +51,13 @@ type Config struct {
 	ObjstoreSecretKey string // TRAINCACHE_OBJSTORE_SECRET_KEY，默认空
 	Bucket            string // TRAINCACHE_OBJSTORE_BUCKET，默认 traincache（v1 单桶，D18）
 	ObjstoreSecure    bool   // TRAINCACHE_OBJSTORE_SECURE，默认 false（"1"/"true"/"yes" 为真）
-	Listen            string // TRAINCACHE_GATEWAY_LISTEN，默认 :9413（S3 与探针共用，D25）
-	BucketConcurrency int    // TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY，默认 64（正整数）
-	BlockBufferBytes  int    // TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES，默认 10485760（正整数）
-	LogLevel          string // TRAINCACHE_LOG_LEVEL，默认 info（未知值退化为 info）
+	// ObjstoreCompression 允许网关向源站声明 gzip，默认 false（压缩默认关闭）。
+	// 网关解压后按原始字节扇出，指纹与内容校验不受影响；带 Range 的请求不参与协商。
+	ObjstoreCompression bool
+	Listen              string // TRAINCACHE_GATEWAY_LISTEN，默认 :9413（S3 与探针共用，D25）
+	BucketConcurrency   int    // TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY，默认 64（正整数）
+	BlockBufferBytes    int    // TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES，默认 10485760（正整数）
+	LogLevel            string // TRAINCACHE_LOG_LEVEL，默认 info（未知值退化为 info）
 
 	// 磁盘缓存（D29/D31）。缓存根目录是代码常量，不走 env。
 	Cache             bool  // TRAINCACHE_GATEWAY_CACHE，默认 true（未设置即开；"1"/"true"/"yes" 开，其余取值关）
@@ -96,18 +100,19 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		ObjstoreEndpoint:  endpoint,
-		ObjstoreAccessKey: envOr(envObjstoreAccessKey, ""),
-		ObjstoreSecretKey: envOr(envObjstoreSecretKey, ""),
-		Bucket:            envOr(envObjstoreBucket, defaultObjstoreBucket),
-		ObjstoreSecure:    envBool(envObjstoreSecure),
-		Listen:            listen,
-		BucketConcurrency: concurrency,
-		BlockBufferBytes:  bufferBytes,
-		LogLevel:          logLevel(os.Getenv(envLogLevel)),
-		Cache:             cache,
-		CacheDatasetBytes: cacheDatasetBytes,
-		CacheTotalBytes:   cacheTotalBytes,
+		ObjstoreEndpoint:    endpoint,
+		ObjstoreAccessKey:   envOr(envObjstoreAccessKey, ""),
+		ObjstoreSecretKey:   envOr(envObjstoreSecretKey, ""),
+		Bucket:              envOr(envObjstoreBucket, defaultObjstoreBucket),
+		ObjstoreSecure:      envBool(envObjstoreSecure),
+		ObjstoreCompression: envBool(envObjstoreCompression),
+		Listen:              listen,
+		BucketConcurrency:   concurrency,
+		BlockBufferBytes:    bufferBytes,
+		LogLevel:            logLevel(os.Getenv(envLogLevel)),
+		Cache:               cache,
+		CacheDatasetBytes:   cacheDatasetBytes,
+		CacheTotalBytes:     cacheTotalBytes,
 	}, nil
 }
 

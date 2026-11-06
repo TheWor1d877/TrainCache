@@ -114,7 +114,7 @@ func TestIntegrationCacheSecondRoundFromDisk(t *testing.T) {
 	defer srcSrv.Close()
 
 	org, err := origin.New(strings.TrimPrefix(srcSrv.URL, "http://"),
-		"ak", "sk", integrationBucket, false)
+		"ak", "sk", integrationBucket, false, false)
 	if err != nil {
 		t.Fatalf("origin.New: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestIntegrationCacheDisabledKeepsOriginGet(t *testing.T) {
 	defer srcSrv.Close()
 
 	org, err := origin.New(strings.TrimPrefix(srcSrv.URL, "http://"),
-		"ak", "sk", integrationBucket, false)
+		"ak", "sk", integrationBucket, false, false)
 	if err != nil {
 		t.Fatalf("origin.New: %v", err)
 	}

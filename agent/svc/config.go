@@ -55,6 +55,12 @@ const (
 	envLocalGCInterval = "TRAINCACHE_LOCAL_GC_INTERVAL"
 	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;6.1 §5.12)。
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
+	// envObjstoreCompression 控制 S3 客户端是否声明 gzip(默认关闭;9.0「其他决策」)。
+	envObjstoreCompression = "TRAINCACHE_OBJSTORE_COMPRESSION"
+	// envFetchRangeThresholdBytes 是走四分片并行下载的块大小下限(默认 64 MiB)。
+	envFetchRangeThresholdBytes = "TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES"
+	// defaultFetchRangeThresholdBytes 与 core/fetch 的默认阈值一致。
+	defaultFetchRangeThresholdBytes int64 = 64 << 20
 
 	// envDebugAddr 是 /debug/loglevel 的监听地址(只允许回环;空字符串关闭端点)。
 	envDebugAddr = "TRAINCACHE_DEBUG_ADDR"
@@ -112,7 +118,14 @@ type Config struct {
 	ObjstoreSecretKey string // TRAINCACHE_OBJSTORE_SECRET_KEY,默认空
 	ObjstoreBucket    string // TRAINCACHE_OBJSTORE_BUCKET,默认 traincache(v1 单桶)
 	ObjstoreSecure    bool   // TRAINCACHE_OBJSTORE_SECURE,默认 false("1"/"true"/"yes" 为真)
-	Heat              HeatConfig
+	// ObjstoreCompression 允许 S3 客户端向源站声明 gzip(默认 false,
+	// TRAINCACHE_OBJSTORE_COMPRESSION 覆盖,"1"/"true"/"yes" 为真)。
+	// 网关路径同样使用该开关;带 Range 的请求不参与协商。
+	ObjstoreCompression bool
+	// FetchRangeThresholdBytes 是走四分片并行下载的块大小下限(默认 64 MiB,
+	// TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES 覆盖,需 >0)。
+	FetchRangeThresholdBytes int64
+	Heat                     HeatConfig
 	// ReadStallMinWaitMS 是 read_stall 入直方图的最小等待毫秒(D47/Q15;默认 100,
 	// TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖,需 >0)。
 	ReadStallMinWaitMS int64
@@ -198,6 +211,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	fetchRangeThresholdBytes, err := envPositiveInt64(envFetchRangeThresholdBytes, defaultFetchRangeThresholdBytes)
+	if err != nil {
+		return nil, err
+	}
 	debugAddr, err := loadDebugAddr()
 	if err != nil {
 		return nil, err
@@ -216,6 +233,8 @@ func Load() (*Config, error) {
 		ObjstoreSecretKey:             envOr("TRAINCACHE_OBJSTORE_SECRET_KEY", ""),
 		ObjstoreBucket:                envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
 		ObjstoreSecure:                envBool("TRAINCACHE_OBJSTORE_SECURE"),
+		ObjstoreCompression:           envBool(envObjstoreCompression),
+		FetchRangeThresholdBytes:      fetchRangeThresholdBytes,
 		Heat:                          heat,
 		ReadStallMinWaitMS:            readStallMinWaitMS,
 		ReadStallWindowMS:             readStallWindowMS,

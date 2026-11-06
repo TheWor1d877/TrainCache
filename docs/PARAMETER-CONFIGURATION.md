@@ -27,7 +27,7 @@
 
 ### 2.1 ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，现 15 个配置项，网关缓存层增三项到 18。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`、`gatewayCache`、`gatewayCacheDatasetBytes`、`gatewayCacheTotalBytes`。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`，见本节末尾。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，现 20 个配置项。Agent 读 `prefetchLookahead`、`evictPolicy`、`datasetMetricsWhitelist`、`cacheCapacityBytes`、`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`objstoreCompression`、`fetchRangeThresholdBytes`、`gatewayEndpoint`、`gatewaySecure`；manager 读 `cacheCapacityBytes`、`startupWindowBytes`、`maxFillFraction`、`controllerPollInterval`、`controllerScoreTTL`；网关读 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`objstoreCompression`、`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`、`gatewayCache`、`gatewayCacheDatasetBytes`、`gatewayCacheTotalBytes`。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`，见本节末尾。
 
 | 配置项 | 默认 | 读取方 | 说明 |
 |---|---|---|---|
@@ -40,6 +40,8 @@
 | `objstoreEndpoint` | `"minio.minio.svc.cluster.local:9000"` | Agent | 源站端点，不带 scheme。清单里是集群内 MinIO 的 Service 地址；接 COS/OSS/S3 时改这一处 |
 | `objstoreBucket` | `"traincache"` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`：`SubmitPreheat` 不带桶名，不一致时每个块读取都失败。bench 按数据集改写它 |
 | `objstoreSecure` | `"false"` | Agent | `true` / `1` / `yes` 时用 HTTPS 连源站，其余取值（含空）走明文 |
+| `objstoreCompression` | `"false"` | Agent + 网关 | 传输压缩开关。`true` / `1` / `yes` 时 S3 客户端向源站声明 gzip，传输层解压后按原始字节计算指纹；关闭时不发 `Accept-Encoding`。带 Range 的请求不参与协商。训练数据多为已压缩格式，默认关闭 |
+| `fetchRangeThresholdBytes` | `"67108864"` | Agent | 走四分片并行下载的块大小下限，单位字节，正整数。块不小于该值时拆成 4 条 Range GET；块大小由发布时的 S3 对象决定，bench 的 8MiB 块要把它降到 `"8388608"` 才触发并行路径 |
 | `gatewayEndpoint` | `""` | Agent | 合并回源网关地址，形如 `traincache-gateway.traincache.svc.cluster.local:9413`，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关，`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站 |
 | `gatewaySecure` | `"false"` | Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真，取值独立于 `objstoreSecure`，源站与网关的 TLS 各设一次 |
 | `gatewayBucketConcurrency` | `"64"` | 网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动。改它会重启网关 Deployment |
@@ -50,7 +52,7 @@
 | `controllerPollInterval` | `"1s"` | manager | 轮询 Agent 进度的间隔，代码默认 2s；清单写 1s，让门控放行延迟落在 bench 的测量窗口内 |
 | `controllerScoreTTL` | `"10m"` | manager | 节点分数的有效期，代码默认 5m |
 
-`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` / `gatewayCache` / `gatewayCacheDatasetBytes` / `gatewayCacheTotalBytes` 只被网关读取，改这五项重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。缓存根目录 `/var/lib/traincache-gateway/cache` 是代码常量，不进 ConfigMap，清单只负责把卷挂到这条路径；两个配额与 Agent 的 `cacheCapacityBytes` 落在同一块宿主盘上，两处之和要给节点盘留余量，判据见 9.1 K10。改仓库文件后 apply，再重启读取方：
+`cacheCapacityBytes` 由 Agent 与 manager 共同读取，改它要同时重启两者。`objstoreCompression` 由 Agent 与网关共同读取，改它要同时重启两者。`fetchRangeThresholdBytes` 只被 Agent 读取，改它只重启 Agent。`gatewayEndpoint` / `gatewaySecure` 只被 Agent 读取，改这两个键只重启 Agent（`kubectl -n traincache rollout restart ds/traincache-agentd`），不重启网关。`gatewayBucketConcurrency` / `gatewayBlockBufferBytes` / `gatewayCache` / `gatewayCacheDatasetBytes` / `gatewayCacheTotalBytes` 只被网关读取，改这五项重启网关 Deployment（`kubectl -n traincache rollout restart deploy/traincache-gateway`）。缓存根目录 `/var/lib/traincache-gateway/cache` 是代码常量，不进 ConfigMap，清单只负责把卷挂到这条路径；两个配额与 Agent 的 `cacheCapacityBytes` 落在同一块宿主盘上，两处之和要给节点盘留余量，判据见 9.1 K10。改仓库文件后 apply，再重启读取方：
 
 ```bash
 kubectl apply -f controller/deploy/agent/configmap.yaml

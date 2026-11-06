@@ -78,7 +78,7 @@ func TestFetchParallelRangesMatchWholeObject(t *testing.T) {
 	for i := range pattern {
 		pattern[i] = byte(i*31 + 7)
 	}
-	content := bytes.Repeat(pattern, int(rangeThreshold/int64(len(pattern))))
+	content := bytes.Repeat(pattern, int(defaultRangeThreshold/int64(len(pattern))))
 
 	store := &orderedRangeStore{Mock: objectstore.NewMock(), data: content, chunk: 1 << 20}
 	cs, casDir := newTestCAS(t)
@@ -106,7 +106,7 @@ func TestFetchParallelRangesMatchWholeObject(t *testing.T) {
 	}
 	// 完成顺序故意与区间顺序相反，这里按 start 排序后再校验区间切分。
 	sort.Slice(calls, func(i, j int) bool { return calls[i].start < calls[j].start })
-	wantPart := rangeThreshold / rangeParts
+	wantPart := defaultRangeThreshold / rangeParts
 	for i, c := range calls {
 		wantStart := int64(i) * wantPart
 		wantEnd := wantStart + wantPart - 1
@@ -152,7 +152,7 @@ func (s *failingRangeStore) GetRange(ctx context.Context, key string, start, end
 // TestFetchParallelRangesFailureCleansTemp 覆盖分片失败：Fetch 返回错误，
 // 分片聚合临时文件与 CAS 临时文件都不残留，块目录为空。
 func TestFetchParallelRangesFailureCleansTemp(t *testing.T) {
-	store := &failingRangeStore{Mock: objectstore.NewMock(), data: make([]byte, rangeThreshold)}
+	store := &failingRangeStore{Mock: objectstore.NewMock(), data: make([]byte, defaultRangeThreshold)}
 	cs, casDir := newTestCAS(t)
 
 	oldTempDir := rangeTempDir
@@ -160,7 +160,7 @@ func TestFetchParallelRangesFailureCleansTemp(t *testing.T) {
 	t.Cleanup(func() { rangeTempDir = oldTempDir })
 
 	f := New(store, cs, Options{MaxRetries: 1})
-	_, err := f.Fetch(context.Background(), "ds/blocks/broken#0", rangeThreshold)
+	_, err := f.Fetch(context.Background(), "ds/blocks/broken#0", defaultRangeThreshold)
 	if err == nil {
 		t.Fatal("Fetch 应返回错误")
 	}
@@ -172,6 +172,33 @@ func TestFetchParallelRangesFailureCleansTemp(t *testing.T) {
 	}
 	if empty, err := dirIsEmpty(rangeTempDir); err != nil || !empty {
 		t.Fatalf("失败后分片聚合临时目录未清空: %s (err=%v)", rangeTempDir, err)
+	}
+}
+
+// TestFetchRangeThresholdFromOptions 覆盖阈值来自 Options：块小于默认 64 MiB
+// 时仍按配置值走四分片路径。
+func TestFetchRangeThresholdFromOptions(t *testing.T) {
+	content := []byte("abcdefgh")
+	store := &orderedRangeStore{Mock: objectstore.NewMock(), data: content, chunk: 2}
+	cs, _ := newTestCAS(t)
+
+	oldTempDir := rangeTempDir
+	rangeTempDir = t.TempDir()
+	t.Cleanup(func() { rangeTempDir = oldTempDir })
+
+	f := New(store, cs, Options{RangeThreshold: 4})
+	fp, err := f.Fetch(context.Background(), "ds/blocks/small#0", int64(len(content)))
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if want := fpOf(content); fp != want {
+		t.Fatalf("fp = %s, want %s", fp, want)
+	}
+	if got := readBlock(t, cs, fp); !bytes.Equal(got, content) {
+		t.Fatalf("块内容 = %q, want %q", got, content)
+	}
+	if calls := store.rangedCalls(); len(calls) != rangeParts {
+		t.Fatalf("GetRange 调用 = %d 次，期望 %d 次（阈值取 Options.RangeThreshold）", len(calls), rangeParts)
 	}
 }
 

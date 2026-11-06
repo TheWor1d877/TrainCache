@@ -23,7 +23,8 @@
 
 ### Added
 
-- Agent 下载不小于 64MiB 的块时拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
+- Agent 下载不小于 `fetchRangeThresholdBytes` 的块时拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。阈值进 ConfigMap `traincache-config`，默认 `"67108864"`（64MiB），环境变量 `TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES`。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
+- 新增传输压缩开关 `objstoreCompression`（默认 `"false"`），Agent 与网关共同读取，环境变量 `TRAINCACHE_OBJSTORE_COMPRESSION`。打开后 S3 客户端向源站声明 gzip，传输层解压后交给上层的是原始字节；带 Range 的请求不参与协商。训练数据多为已压缩格式，默认关闭。契约见 `docs/9.1-design.md` §5.3。
 
 ### Changed
 

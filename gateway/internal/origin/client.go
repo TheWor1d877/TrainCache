@@ -39,11 +39,14 @@ type Client struct {
 
 // New 构造源站客户端。endpoint 形如 "127.0.0.1:9000"，不带 scheme；
 // secure 为 true 时网关到源站使用 TLS。accessKey/secretKey 为空时按匿名访问处理。
-func New(endpoint, accessKey, secretKey, bucket string, secure bool) (*Client, error) {
+// compression 为 true 时向源站声明 gzip，传输层解压后交给网关的是原始字节；
+// 带 Range 的请求不参与协商（Go 传输层的行为）。
+func New(endpoint, accessKey, secretKey, bucket string, secure, compression bool) (*Client, error) {
 	transport, err := minio.DefaultTransport(secure)
 	if err != nil {
 		return nil, fmt.Errorf("origin: 构造传输层失败: %w", err)
 	}
+	transport.DisableCompression = !compression
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:     credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure:    secure,

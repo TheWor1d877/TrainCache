@@ -155,7 +155,7 @@ func TestIntegrationMinioClientMergesBlock(t *testing.T) {
 	t.Cleanup(ob.Stop)
 
 	org, err := origin.New(strings.TrimPrefix(srcSrv.URL, "http://"),
-		"ak", "sk", integrationBucket, false)
+		"ak", "sk", integrationBucket, false, false)
 	if err != nil {
 		t.Fatalf("origin.New: %v", err)
 	}
