@@ -53,6 +53,47 @@ func (s *S3Store) Get(ctx context.Context, key string, w io.Writer) error {
 	return nil
 }
 
+// GetRange 实现 Store.GetRange：用 minio-go 的 GetObjectOptions.SetRange 发起
+// 带 Range 头的 GET（区间与 HTTP 的 bytes=start-end 一致，end 含端点）。
+// 网关 Store 与源站 Store 共用本实现：请求打到网关时 Range 头随签名请求透传。
+// 出错点与 Get 相同，统一经 classifyGetError 分类；416 映射为 ErrInvalidRange。
+func (s *S3Store) GetRange(ctx context.Context, key string, start, end int64, w io.Writer) error {
+	if start < 0 || end < start {
+		return ErrInvalidRange
+	}
+	var probe *gatewayProbe
+	if s.probe {
+		ctx, probe = withGatewayProbe(ctx)
+	}
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(start, end); err != nil {
+		return ErrInvalidRange
+	}
+	obj, err := s.client.GetObject(ctx, s.bucket, key, opts)
+	if err != nil {
+		return s.classifyRangeError(ctx, probe, err)
+	}
+	defer obj.Close()
+	n, err := io.Copy(w, obj)
+	if err != nil {
+		return s.classifyRangeError(ctx, probe, err)
+	}
+	// 源站对超出对象末尾的区间会截断返回；按 Store 契约统一报区间不合法。
+	if n != end-start+1 {
+		return ErrInvalidRange
+	}
+	return nil
+}
+
+// classifyRangeError 在 classifyGetError 之上把 416 InvalidRange 映射为
+// ErrInvalidRange；其余错误分类与 Get 逐字一致。
+func (s *S3Store) classifyRangeError(ctx context.Context, probe *gatewayProbe, err error) error {
+	if minio.ToErrorResponse(err).Code == minio.InvalidRange {
+		return ErrInvalidRange
+	}
+	return classifyGetError(ctx, probe, err)
+}
+
 // Put 实现 Store.Put（简单上传语义，ETag 由服务端返回）。
 func (s *S3Store) Put(ctx context.Context, key string, r io.Reader, size int64) (string, error) {
 	info, err := s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{})

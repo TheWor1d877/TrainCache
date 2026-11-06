@@ -19,6 +19,17 @@
 
 # Changelog正文
 
+## 未发布
+
+### Added
+
+- Agent 下载不小于 64MiB 的块时拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
+
+### Changed
+
+- Agent 每个进程的下载任务默认上限从 8 提到 16，预铺仍占一半。大块走 4 路并行时单进程到源站或网关的连接峰值为 64，与 `MaxConnsPerHost` 默认值齐平。
+- 网关到桶并发上限的默认值从 32 提到 64，覆盖预热阶段多个 Agent 同时取数；网关 Deployment 的内存上限同步从 1Gi 提到 1.5Gi。
+
 ## [v0.6.0] - 2026-11-06
 
 ### Added

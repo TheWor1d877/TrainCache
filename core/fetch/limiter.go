@@ -13,7 +13,7 @@ import (
 type Options struct {
 	MaxInflightBytes int64 // 在途下载字节上限（信号量口径，非 goroutine 数），默认 1 GiB；预铺最多占一半
 	MaxConnsPerHost  int   // 单主机连接数上限，默认 64
-	MaxTasks         int   // 最大并发下载任务数，默认 8；预铺最多占一半
+	MaxTasks         int   // 最大并发下载任务数，默认 16；预铺最多占一半
 	MaxRetries       int   // 校验失败重下次数，默认 3
 	// OnLocalOpen 在 Put 成功、Open 读回校验之前以块指纹调用一次（可为 nil）。
 	// 通用钩子：core 不依赖 Agent 侧类型；实现不得阻塞（调用方通常仅做内存记账）。
@@ -24,7 +24,7 @@ type Options struct {
 const (
 	defaultMaxInflightBytes int64 = 1 << 30 // 1 GiB
 	defaultMaxConnsPerHost        = 64
-	defaultMaxTasks               = 8
+	defaultMaxTasks               = 16
 	defaultMaxRetries             = 3
 )
 

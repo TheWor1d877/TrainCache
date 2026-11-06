@@ -18,6 +18,9 @@ var (
 	// ErrConditionalWriteUnsupported 表示后端忽略了条件写前置条件（PutIfMatch
 	// 在 ETag 不匹配时仍然成功）。可用 ProbeConditionalWrite 探测。
 	ErrConditionalWriteUnsupported = errors.New("objectstore: conditional write unsupported")
+	// ErrInvalidRange 表示请求的字节区间不合法或超出对象范围：
+	// start/end 为负、end < start、start 或 end 不小于对象长度。
+	ErrInvalidRange = errors.New("objectstore: requested range is not satisfiable")
 )
 
 // Store 是对 S3 兼容对象存储的最小抽象。
@@ -36,4 +39,15 @@ type Store interface {
 	// List 返回匹配 prefix 的全部对象键（字典序升序）；无匹配返回空切片（D19）。
 	// 供 index.Collector.Sweep 枚举快照对象用。
 	List(ctx context.Context, prefix string) ([]string, error)
+}
+
+// RangeStore 是支持区间读取的 Store。下载编排层对大块走并行分片时使用；
+// 未实现本接口的 Store 退回整对象 Get。
+type RangeStore interface {
+	Store
+	// GetRange 将对象的闭区间 [start, end] 写入 w，语义与 HTTP Range 的
+	// bytes=start-end 一致：start 与 end 都是字节偏移，end 含端点，因此区间
+	// 长度为 end-start+1。start < 0、end < start、start 或 end 超出对象长度时
+	// 返回 ErrInvalidRange；对象不存在返回 ErrNotFound；写入 w 失败返回写错误。
+	GetRange(ctx context.Context, key string, start, end int64, w io.Writer) error
 }

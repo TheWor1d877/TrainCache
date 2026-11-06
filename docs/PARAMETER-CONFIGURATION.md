@@ -42,7 +42,7 @@
 | `objstoreSecure` | `"false"` | Agent | `true` / `1` / `yes` 时用 HTTPS 连源站，其余取值（含空）走明文 |
 | `gatewayEndpoint` | `""` | Agent | 合并回源网关地址，形如 `traincache-gateway.traincache.svc.cluster.local:9413`，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关，`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站 |
 | `gatewaySecure` | `"false"` | Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真，取值独立于 `objstoreSecure`，源站与网关的 TLS 各设一次 |
-| `gatewayBucketConcurrency` | `"32"` | 网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动。改它会重启网关 Deployment |
+| `gatewayBucketConcurrency` | `"64"` | 网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动。改它会重启网关 Deployment |
 | `gatewayBlockBufferBytes` | `"10485760"` | 网关 | 每个在途块环形缓冲的字节数（默认 10MiB），正整数；非法值使网关拒绝启动。改它会重启网关 Deployment |
 | `gatewayCache` | `"true"` | 网关 | 磁盘缓存开关，默认打开。`1`/`true`/`yes` 开，其余取值关；env 未设置也开。关掉后网关只做在途合并，不落盘。该关的四种场合见 9.2 D29：数据集小于节点盘、工作集大于配额、命中侧只有 HDD 或邻居写盘活跃、源站不计费且出口快于集群取速率。改它会重启网关 Deployment |
 | `gatewayCacheDatasetBytes` | `"34359738368"` | 网关 | 单个 dataset 在网关盘上的驻写上限，默认 32GiB，正整数；非法值使网关拒绝启动。超过它先删这个 dataset 里 mtime 最老的块。改它会重启网关 Deployment |

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,6 +43,7 @@ const (
 	codeMethodNotAllowed = "MethodNotAllowed"
 	codeNoSuchBucket     = "NoSuchBucket"
 	codeNoSuchKey        = "NoSuchKey"
+	codeInvalidRange     = "InvalidRange"
 
 	blocksSegment = "/blocks/"
 )
@@ -56,6 +58,8 @@ const (
 type Origin interface {
 	Stat(ctx context.Context, key string) (origin.ObjectInfo, error)
 	Open(ctx context.Context, key string) (*origin.Object, error)
+	// OpenRange 发起带 Range 头的 GET，闭区间 [start, end]；Range 进入源站签名请求。
+	OpenRange(ctx context.Context, key string, start, end int64) (*origin.Object, error)
 }
 
 // Options 是网关服务参数。Registry/Scheduler/Obs 由 cmd 注入；为兼容测试，
@@ -273,6 +277,13 @@ func (s *Server) serveHead(w http.ResponseWriter, r *http.Request, key string) {
 // 读盘命中与回源共用同一个准入槽、同一个扇出路径、同一个环形缓冲
 // （9.2 D34）。
 func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) {
+	// 带 Range 的块 GET 直接透传源站：不进在途合并表、不查盘、不写盘。
+	// 不带 Range 的请求保持原有合并/缓存路径不变。
+	if r.Header.Get("Range") != "" {
+		s.serveBlockRange(w, r, key)
+		return
+	}
+
 	dataset := datasetOf(key)
 
 	s.obs.Get(dataset)
@@ -352,6 +363,199 @@ func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) 
 	go s.pump(e, key, dataset, start)
 
 	s.serveWithSub(w, r, key, dataset, e, sub)
+}
+
+// serveBlockRange 处理带 Range 的块 GET：直接带 Range 头回源并原样透传 206
+// 响应。这条路径不进入在途合并表、不查磁盘缓存、不写盘（design 9.0：Range
+// 只用于 Agent 大块并行下载，不参与合并与缓存）。
+func (s *Server) serveBlockRange(w http.ResponseWriter, r *http.Request, key string) {
+	dataset := datasetOf(key)
+	s.obs.Get(dataset)
+
+	br, ok := parseByteRange(r.Header.Get("Range"))
+	if !ok {
+		s.writeS3Error(w, http.StatusRequestedRangeNotSatisfiable, codeInvalidRange,
+			"unsupported range", false)
+		return
+	}
+	start, end := br.start, br.end
+	total := int64(-1)
+	if br.suffix || br.open {
+		// 开区间与后缀区间依赖对象总长度：先 HEAD 一次再解析。
+		info, err := s.origin.Stat(r.Context(), key)
+		if err != nil {
+			s.writeOriginError(w, r, key, err)
+			return
+		}
+		total = info.Size
+		start, end, ok = br.resolve(info.Size)
+		if !ok {
+			s.writeS3Error(w, http.StatusRequestedRangeNotSatisfiable, codeInvalidRange,
+				"requested range not satisfiable", false)
+			return
+		}
+	}
+
+	rc, err := s.origin.OpenRange(r.Context(), key, start, end)
+	if err != nil {
+		s.writeOriginError(w, r, key, err)
+		return
+	}
+	defer rc.Close()
+	s.obs.Owner(dataset)
+
+	reader := io.Reader(&countingReader{r: rc, add: s.obs.Bytes})
+	first := make([]byte, 32*1024)
+	var n int
+	var rerr error
+	for {
+		n, rerr = reader.Read(first)
+		if n > 0 || rerr != nil {
+			break
+		}
+	}
+
+	if n == 0 {
+		if errors.Is(rerr, io.EOF) {
+			// 空区间：源站成功但零字节，仍回 206 与区间头。
+			info, _ := rc.Stat()
+			s.writeRangeHeaders(w.Header(), info, start, end, total)
+			w.WriteHeader(rangeStatus(info))
+			return
+		}
+		s.writeOriginError(w, r, key, rerr)
+		return
+	}
+
+	// 首读已收到 GET 响应头，Stat 从传输层记录取值、不发新请求。
+	if info, serr := rc.Stat(); serr != nil {
+		s.log.Debug("读取源站元数据失败", "dataset", dataset, "err", serr)
+		s.writeRangeHeaders(w.Header(), origin.ObjectInfo{}, start, end, total)
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		s.writeRangeHeaders(w.Header(), info, start, end, total)
+		w.WriteHeader(rangeStatus(info))
+	}
+	if _, werr := w.Write(first[:n]); werr != nil {
+		return
+	}
+	if rerr != nil {
+		if !errors.Is(rerr, io.EOF) {
+			s.log.Warn("源站响应中断", "dataset", dataset, "err", rerr,
+				"err_class", corelog.Classify(rerr))
+		}
+		return
+	}
+	if _, err := io.Copy(w, reader); err != nil {
+		s.log.Warn("源站响应中断", "dataset", dataset, "err", err,
+			"err_class", corelog.Classify(err))
+	}
+}
+
+// writeRangeHeaders 回填 Range 响应的头部：Accept-Ranges 恒为 bytes；206 时
+// 保留源站的 Content-Range（缺失时按请求区间合成，总长度未知写 *）；
+// Content-Length 取源站给出的区间长度，缺失时用闭区间长度。
+func (s *Server) writeRangeHeaders(h http.Header, info origin.ObjectInfo, start, end, total int64) {
+	h.Set("Accept-Ranges", "bytes")
+	if rangeStatus(info) == http.StatusPartialContent {
+		switch {
+		case info.ContentRange != "":
+			h.Set("Content-Range", info.ContentRange)
+		case total > 0:
+			h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+		default:
+			h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/*", start, end))
+		}
+	}
+	length := end - start + 1
+	if info.Size > 0 {
+		length = info.Size
+	}
+	h.Set("Content-Length", strconv.FormatInt(length, 10))
+	setMetadataHeaders(h, info.ETag, info.LastModified)
+	if info.ContentType != "" {
+		h.Set("Content-Type", info.ContentType)
+	}
+}
+
+// rangeStatus 返回透传的 HTTP 状态码：源站明确给出 200/206 时照抄，
+// 元数据缺失时按 206 处理。
+func rangeStatus(info origin.ObjectInfo) int {
+	if info.StatusCode == http.StatusOK || info.StatusCode == http.StatusPartialContent {
+		return info.StatusCode
+	}
+	return http.StatusPartialContent
+}
+
+// byteRange 是单区间 Range 头的解析结果。suffix 为 true 时 end 暂存后缀长度
+// （bytes=-N）；open 为 true 表示 bytes=N-。
+type byteRange struct {
+	start, end int64
+	suffix     bool
+	open       bool
+}
+
+// parseByteRange 解析单区间 Range 头，支持 bytes=start-end、bytes=start-、
+// bytes=-suffix 三种形式；多区间、其他单位或语法错误返回 ok=false。
+func parseByteRange(v string) (byteRange, bool) {
+	const prefix = "bytes="
+	if !strings.HasPrefix(v, prefix) {
+		return byteRange{}, false
+	}
+	spec := strings.TrimSpace(strings.TrimPrefix(v, prefix))
+	if spec == "" || strings.Contains(spec, ",") {
+		return byteRange{}, false
+	}
+	if strings.HasPrefix(spec, "-") {
+		n, err := strconv.ParseInt(strings.TrimPrefix(spec, "-"), 10, 64)
+		if err != nil || n <= 0 {
+			return byteRange{}, false
+		}
+		return byteRange{suffix: true, end: n}, true
+	}
+	i := strings.IndexByte(spec, '-')
+	if i < 0 {
+		return byteRange{}, false
+	}
+	start, err := strconv.ParseInt(spec[:i], 10, 64)
+	if err != nil || start < 0 {
+		return byteRange{}, false
+	}
+	rest := strings.TrimSpace(spec[i+1:])
+	if rest == "" {
+		return byteRange{start: start, open: true}, true
+	}
+	end, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || end < start {
+		return byteRange{}, false
+	}
+	return byteRange{start: start, end: end}, true
+}
+
+// resolve 按对象总长度把区间解析为闭区间 [start, end]；size <= 0 或区间
+// 越界返回 ok=false。
+func (br byteRange) resolve(size int64) (start, end int64, ok bool) {
+	if size <= 0 {
+		return 0, 0, false
+	}
+	switch {
+	case br.suffix:
+		n := br.end
+		if n > size {
+			n = size
+		}
+		return size - n, size - 1, true
+	case br.open:
+		if br.start >= size {
+			return 0, 0, false
+		}
+		return br.start, size - 1, true
+	default:
+		if br.start >= size || br.end >= size {
+			return 0, 0, false
+		}
+		return br.start, br.end, true
+	}
 }
 
 // lookupCache 查盘。命中返回打开的对象；未命中、开关关闭或出错返回 nil。

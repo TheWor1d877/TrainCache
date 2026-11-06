@@ -38,7 +38,7 @@ func defaultConfig() Config {
 		Bucket:            "traincache",
 		ObjstoreSecure:    false,
 		Listen:            ":9413",
-		BucketConcurrency: 32,
+		BucketConcurrency: 64,
 		BlockBufferBytes:  10485760,
 		LogLevel:          "info",
 		Cache:             true,

@@ -20,7 +20,7 @@ const (
 	defaultObjstoreEndpoint  = "127.0.0.1:9000"
 	defaultObjstoreBucket    = "traincache"
 	defaultListen            = ":9413"
-	defaultBucketConcurrency = 32
+	defaultBucketConcurrency = 64
 	defaultBlockBufferBytes  = 10485760
 	defaultLogLevel          = "info"
 	defaultCacheDatasetBytes = 34359738368 // 32GiB
@@ -51,7 +51,7 @@ type Config struct {
 	Bucket            string // TRAINCACHE_OBJSTORE_BUCKET，默认 traincache（v1 单桶，D18）
 	ObjstoreSecure    bool   // TRAINCACHE_OBJSTORE_SECURE，默认 false（"1"/"true"/"yes" 为真）
 	Listen            string // TRAINCACHE_GATEWAY_LISTEN，默认 :9413（S3 与探针共用，D25）
-	BucketConcurrency int    // TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY，默认 32（正整数）
+	BucketConcurrency int    // TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY，默认 64（正整数）
 	BlockBufferBytes  int    // TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES，默认 10485760（正整数）
 	LogLevel          string // TRAINCACHE_LOG_LEVEL，默认 info（未知值退化为 info）
 

@@ -88,7 +88,7 @@ data:
   objstoreSecure: "false"
   gatewayEndpoint: ""
   gatewaySecure: "false"
-  gatewayBucketConcurrency: "32"
+  gatewayBucketConcurrency: "64"
   gatewayBlockBufferBytes: "10485760"
   gatewayCache: "true"
   gatewayCacheDatasetBytes: "34359738368"

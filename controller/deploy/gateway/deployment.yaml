@@ -119,12 +119,13 @@ spec:
               cpu: 100m
               memory: 256Mi
             limits:
-              # 32 concurrent streams x 10MiB ring buffer, plus the per-
-              # subscriber copies still within one buffer of the writer. 1Gi is
-              # the steady-state ceiling for this shape; the gateway keeps no
-              # object content in memory after a request ends. The disk cache
-              # layer lives on the gateway-cache volume, not in this limit.
-              memory: 1Gi
+              # 64 concurrent streams x 10MiB ring buffer (640MiB), plus the
+              # 32-buffer hot stack and the per-subscriber copies still within
+              # one buffer of the writer. 1.5Gi is the ceiling for this shape;
+              # the gateway keeps no object content in memory after a request
+              # ends. The disk cache layer lives on the gateway-cache volume,
+              # not in this limit.
+              memory: 1.5Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

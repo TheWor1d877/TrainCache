@@ -3,7 +3,9 @@ package fetch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -16,6 +18,17 @@ var ErrTooManyRetries = errors.New("fetch: verification failed after max retries
 
 // backoffBase 是重试退避基数（decisions.md Q6：指数退避 100ms 起、无抖动）。
 const backoffBase = 100 * time.Millisecond
+
+// 大块 Range 并行下载：对象不小于 rangeThreshold 时拆成 rangeParts 个连续区间
+// 并行取，聚合到临时文件后再顺序喂给 CAS。小于该阈值仍走整对象 Get。
+const (
+	rangeThreshold int64 = 64 << 20 // 64 MiB
+	rangeParts           = 4
+)
+
+// rangeTempDir 是分片聚合临时文件的目录；空串表示 os.TempDir()。
+// 包级变量便于单测指定可观测的临时目录。临时文件在成功与失败路径都会删除。
+var rangeTempDir string
 
 // inflightCall 是同 key 合并下载的共享结果：owner 下载完成后写入 fp/err 并 close(done)，
 // 等待者从 done 上接收（channel close 建立 happens-before，无需额外锁）。
@@ -187,7 +200,7 @@ func (f *Fetcher) download(ctx context.Context, key string, expectSize int64, ad
 				return zero, err
 			}
 		}
-		fp, err := f.tryOnce(ctx, key)
+		fp, err := f.tryOnce(ctx, key, expectSize)
 		if err == nil {
 			return fp, nil
 		}
@@ -203,10 +216,14 @@ func (f *Fetcher) download(ctx context.Context, key string, expectSize int64, ad
 	return zero, lastErr
 }
 
-// tryOnce 执行一次完整下载尝试：单主机连接额度 → store.Get 经 io.Pipe 流经 cas.Put
-// 落盘（ctx 取消/流错误均不残留）→ cas.Open 读回校验；校验失败则 cas.Remove 后
+// tryOnce 执行一次完整下载尝试：单主机连接额度 → 取数并流经 cas.Put 落盘
+// （ctx 取消/流错误均不残留）→ cas.Open 读回校验；校验失败则 cas.Remove 后
 // 返回 ErrCorrupt（此时块无引用无 pin，Remove 不会 ErrInUse，design.md §7.5）。
-func (f *Fetcher) tryOnce(ctx context.Context, key string) (cas.Fingerprint, error) {
+//
+// expectSize 不小于 rangeThreshold 时走四分片并行取数与临时文件聚合，否则走
+// 原整对象 Get 经 io.Pipe 直连 cas.Put 的路径。两条路径最终都交给同一个
+// cas.Put 做流式顺序写入与指纹计算，在途字节只在 download 入口按整块计一次。
+func (f *Fetcher) tryOnce(ctx context.Context, key string, expectSize int64) (cas.Fingerprint, error) {
 	var zero cas.Fingerprint
 
 	host := hostOf(key)
@@ -215,19 +232,33 @@ func (f *Fetcher) tryOnce(ctx context.Context, key string) (cas.Fingerprint, err
 	}
 	defer f.lim.hosts.release(host)
 
-	// store.Get 是推模式（写 io.Writer），cas.Put 是拉模式（读 io.Reader），用 io.Pipe 对接。
-	// Get 在独立 goroutine 中执行；无论结果如何都先收尾该 goroutine 再返回（不泄漏）。
-	pr, pw := io.Pipe()
-	getDone := make(chan error, 1)
-	go func() {
-		err := f.store.Get(ctx, key, pw)
-		_ = pw.CloseWithError(err) // err == nil 时等价 Close()，向 Put 交付 EOF
-		getDone <- err
-	}()
+	var (
+		fp     cas.Fingerprint
+		getErr error
+		putErr error
+	)
+	// Range 是可选能力：Store 未实现 RangeStore 时退回整对象 Get。
+	var rangeStore objectstore.RangeStore
+	if expectSize >= rangeThreshold {
+		rangeStore, _ = f.store.(objectstore.RangeStore)
+	}
+	if rangeStore != nil {
+		fp, putErr = f.putRangeBlock(ctx, rangeStore, key, expectSize)
+	} else {
+		// store.Get 是推模式（写 io.Writer），cas.Put 是拉模式（读 io.Reader），用 io.Pipe 对接。
+		// Get 在独立 goroutine 中执行；无论结果如何都先收尾该 goroutine 再返回（不泄漏）。
+		pr, pw := io.Pipe()
+		getDone := make(chan error, 1)
+		go func() {
+			err := f.store.Get(ctx, key, pw)
+			_ = pw.CloseWithError(err) // err == nil 时等价 Close()，向 Put 交付 EOF
+			getDone <- err
+		}()
 
-	fp, _, putErr := f.cs.Put(ctx, pr)
-	_ = pr.CloseWithError(putErr) // Put 提前退出时解除 Get 侧写阻塞
-	getErr := <-getDone
+		fp, _, putErr = f.cs.Put(ctx, pr)
+		_ = pr.CloseWithError(putErr) // Put 提前退出时解除 Get 侧写阻塞
+		getErr = <-getDone
+	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return zero, ctxErr
@@ -251,6 +282,89 @@ func (f *Fetcher) tryOnce(ctx context.Context, key string) (cas.Fingerprint, err
 	}
 	_ = br.Close()
 	return fp, nil
+}
+
+// putRangeBlock 把 [0, size-1] 拆成 rangeParts 个连续区间并行取到临时文件，
+// 全部成功后回到文件头顺序喂给 cas.Put。临时文件在成功与失败路径都删除，
+// 因此 64MiB 块 × 高并发不会把整块内容常驻内存。
+func (f *Fetcher) putRangeBlock(ctx context.Context, store objectstore.RangeStore, key string, size int64) (cas.Fingerprint, error) {
+	var zero cas.Fingerprint
+
+	tmp, err := os.CreateTemp(rangeTempDir, "traincache-range-*")
+	if err != nil {
+		return zero, fmt.Errorf("fetch: create range temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := f.fetchRanges(ctx, store, key, size, tmp); err != nil {
+		return zero, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return zero, fmt.Errorf("fetch: seek range temp file: %w", err)
+	}
+	fp, _, err := f.cs.Put(ctx, tmp)
+	return fp, err
+}
+
+// fetchRanges 并行取 size 字节对象的 rangeParts 个连续闭区间，用 io.OffsetWriter
+// 把各分片写到临时文件的对应偏移。单个分片失败立即取消其余分片；每个分片必须
+// 恰好交付区间长度，短写按 io.ErrUnexpectedEOF 处理，避免残缺数据被算成指纹。
+func (f *Fetcher) fetchRanges(ctx context.Context, store objectstore.RangeStore, key string, size int64, dst *os.File) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	partSize := (size + rangeParts - 1) / rangeParts
+	errCh := make(chan error, rangeParts)
+	var wg sync.WaitGroup
+	for i := 0; i < rangeParts; i++ {
+		start := int64(i) * partSize
+		if start >= size {
+			break
+		}
+		end := start + partSize - 1
+		if end >= size {
+			end = size - 1
+		}
+		wg.Add(1)
+		go func(start, end int64) {
+			defer wg.Done()
+			w := &rangeCountingWriter{w: io.NewOffsetWriter(dst, start)}
+			if err := store.GetRange(ctx, key, start, end, w); err != nil {
+				errCh <- fmt.Errorf("fetch: range [%d,%d]: %w", start, end, err)
+				cancel()
+				return
+			}
+			if want := end - start + 1; w.n != want {
+				errCh <- fmt.Errorf("fetch: range [%d,%d]: %w: got %d bytes, want %d",
+					start, end, io.ErrUnexpectedEOF, w.n, want)
+				cancel()
+			}
+		}(start, end)
+	}
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
+}
+
+// rangeCountingWriter 统计单次 GetRange 实际写入的字节数，用于识别短写。
+type rangeCountingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (w *rangeCountingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	return n, err
 }
 
 // backoffDelay 返回第 retry 次重试前的退避时长：100ms、200ms、400ms…（无抖动，Q6）。

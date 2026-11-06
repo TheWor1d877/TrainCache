@@ -185,7 +185,7 @@ main 上打 tag vX.Y.Z 并推送
 | `objstoreSecure` | `false` | Agent | `true`/`1`/`yes` 时用 HTTPS 连源站 |
 | `gatewayEndpoint` | 空（`""`） | Agent | 合并回源网关地址，不带 scheme；空表示全部直连。非空时只有块 GET 走网关 |
 | `gatewaySecure` | `false` | Agent | Agent 到网关是否 TLS；与 `objstoreSecure` 无关 |
-| `gatewayBucketConcurrency` | `32` | 网关 | 到源站的并发下载上限，正整数；非法值使网关拒绝启动 |
+| `gatewayBucketConcurrency` | `64` | 网关 | 到源站的并发下载上限，正整数；非法值使网关拒绝启动 |
 | `gatewayBlockBufferBytes` | `10485760`（10MiB） | 网关 | 每个在途块环形缓冲的字节数，正整数；非法值使网关拒绝启动 |
 | `gatewayCache` | `true` | 网关 | 磁盘缓存开关，默认打开；`1`/`true`/`yes` 开，其余取值关。关掉后网关只做在途合并，不落盘 |
 | `gatewayCacheDatasetBytes` | `34359738368`（32GiB） | 网关 | 单个 dataset 在网关盘上的驻写上限，正整数；非法值使网关拒绝启动 |
