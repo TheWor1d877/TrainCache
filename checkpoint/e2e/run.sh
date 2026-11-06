@@ -11,8 +11,9 @@
 # A third mode covers the restore give-up exit: the local backend holds a
 # committed step whose data does not match its manifest, every restore is
 # CORRUPT, and checkpointd exits with code 3 once RESTORE_GIVE_UP_AFTER is
-# reached. The workload is a Job: the run proves status.failed accumulates to
-# backoffLimit and the Job turns Failed (10.2 D14).
+# reached. The workload is a Job: the run proves each give-up exit counts as a
+# container restart against backoffLimit and that the Job turns Failed with
+# reason BackoffLimitExceeded (10.2 D14).
 #
 # Usage:
 #   ./checkpoint/e2e/run.sh [clean|setup|run|assert|enospc|loop|restore-giveup]   (default: run)
@@ -640,8 +641,9 @@ sidecar_fds() {
 # run_giveup_scenario 覆盖恢复放弃的出口（10.2 D14）：本地后端的 step-0 有
 # 合法 manifest 但数据与 sha256 不符，恢复每次都 CORRUPT；checkpointd 到
 # RESTORE_GIVE_UP_AFTER 写一条 reason=restore_give_up 的 ERROR 并以退出码 3
-# 退出。断言 restartPolicy: OnFailure 的 Job 把每次放弃计入 status.failed，
-# 累加超过 backoffLimit 后 Job 判 Failed、Pod 被删，而不是无限重启。
+# 退出。断言 restartPolicy: OnFailure 的 Job 把每次放弃计成一次容器重启、
+# 用完 backoffLimit 后以 BackoffLimitExceeded 判 Failed、Pod 被删，而不是无限
+# 重启。
 # 每个放弃周期约 6 分钟（放弃期限 90s + 慢速重试 5 分钟一轮），backoffLimit=2
 # 即三次失败，整体预算约 40 分钟。
 run_giveup_scenario() {
@@ -706,9 +708,12 @@ run_giveup_scenario() {
   [[ "$reason" == "BackoffLimitExceeded" ]] \
     && ok "the Failed reason is BackoffLimitExceeded" \
     || fail "the Failed reason is ${reason:-none}"
-  [[ "$failed" == "$((limit + 1))" ]] \
-    && ok "status.failed accumulated to ${failed} (backoffLimit $limit): each give-up exit counted" \
-    || fail "status.failed=${failed:-0}, expected $((limit + 1))"
+  # OnFailure 的失败记账记在容器重启次数上：Job 控制器把 init 容器的每次重启
+  # 算一次失败，用完 backoffLimit 判 Failed。status.failed 记的是失败的 Pod
+  # 数，这种形态下是 1，不是重启次数。
+  [[ "$failed" == "1" ]] \
+    && ok "status.failed=${failed}（失败的 Pod 数）；每次放弃的重启次数计入 backoffLimit ${limit}" \
+    || fail "status.failed=${failed:-0}, want 1（失败的 Pod 数）"
 
   step "assert the Job stopped restarting"
   for i in $(seq 1 30); do
