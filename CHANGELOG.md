@@ -19,11 +19,15 @@
 
 # Changelog正文
 
-## 未发布
+## [v0.5.3] - 2026-11-06
+
+### Added
+
+- 新增混沌套件 `bench/chaos/`：`run.sh` 逐档注入六种单点故障并断言降级行为，注入脚本在 `bench/chaos/inject/`（Agent 崩溃、网络劣化两档、块数据损坏、源站宕机、订单通道停写、节点丢失）。网络劣化分抖动丢包与加限速两档。产物写到数据层 `~/tcd/chaos/<run-id>/`，规格见 `docs/4.7-chaos-suite.md`。
 
 ### Fixed
 
-- 恢复放弃的记账口径写错：v0.5.2 的条目与 `docs/10.1`、`docs/10.2` 都写成「计入 Job 的 `status.failed`」。实际机制是 `restartPolicy: OnFailure` 下 init 容器在同一个 Pod 里重启，每次重启算一次失败、计入 `backoffLimit`，用完后 Job 以 `BackoffLimitExceeded` 判 Failed 并删除 Pod；`status.failed` 记的是失败的 Pod 数，这种形态下是 1，不是重启次数。kind 1.37 上的实跑与单独探针都确认这一点，`checkpoint/e2e` 的 `restore-giveup` 模式断言随之改为核对 `BackoffLimitExceeded` 与 `status.failed=1`（D14）。
+- 恢复放弃的记账口径写错：v0.5.2 的条目与 `docs/10.1`、`docs/10.2` 都写成「计入 Job 的 `status.failed`」。实际是 `restartPolicy: OnFailure` 下 init 容器在同一个 Pod 里重启，每次重启算一次失败、计入 `backoffLimit`，用完后 Job 以 `BackoffLimitExceeded` 判 Failed 并删除 Pod；`status.failed` 记的是失败的 Pod 数，这种形态下是 1。`checkpoint/e2e` 的 `restore-giveup` 模式断言随之改为核对 `BackoffLimitExceeded` 与 `status.failed=1`（D14）。
 
 ## [v0.5.2] - 2026-11-05
 
