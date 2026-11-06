@@ -21,12 +21,11 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="fluid"
 NS="fluid"
-TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
-# 本档位消费的分片数(run_bench 按 S/M/L 档位下发;缺省取 M 档全量 32 片)。
-# 同步按这个数收窄:桶里共有 32 片,不收窄的话 S 档(只消费 8 片 = 2GiB)会把 8GiB
-# 全同步进来,数据集口径与容量比都失真,DataLoad 预热也要多搬 4 倍字节。
-N_TARS="${N_TARS:-$(cfg TRACK_B_N_TARS)}"
-N_TARS="${N_TARS:-32}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.json}"
+# 本格消费的分片数(run_bench 按格子下发;缺省取主数据集全部 16 片)。
+# 同步按这个数收窄:桶里有 128 片,不收窄会把整桶同步进来,
+# 数据集口径与容量比都失真,DataLoad 预热也要多搬字节。
+N_TARS="${N_TARS:-$(cfg DATASET_SHARDS)}"
 SHARD_INCLUDES="$(shard_include_args "$N_TARS")"
 
 # Fluid 缓存配额(统一 1GiB,数据 ~2.1GiB > 缓存,模拟真实场景)

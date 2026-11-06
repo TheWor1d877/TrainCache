@@ -23,10 +23,9 @@ ACCESS_KEY="$(CFG MINIO_ACCESS_KEY)"
 SECRET_KEY="$(CFG MINIO_SECRET_KEY)"
 SUDO_PASS="$(CFG SUDO_PASS_FILE)"
 DATA_ROOT="$(CFG DATA_ROOT)"
-TRACK_A="$(CFG TRACK_A_DIR)"
-TRACK_B="$(CFG TRACK_B_DIR)"
-TRACK_C="$(CFG TRACK_C_DIR)"
-TRACK_D="$(CFG TRACK_D_DIR)"
+DATASET_DIR="$(CFG DATASET_DIR)"
+TILT_DIR="$(CFG TILT_DIR)"
+TRAIN_DIR="$(CFG TRAIN_DIR)"
 RESULTS_DIR="$(CFG RESULTS_DIR)"
 
 FAILED=0
@@ -123,10 +122,9 @@ status() {
                 "$(ls -1A "$dir" 2>/dev/null | wc -l)" "$dir"
         fi
     }
-    print_dir "A 轨" "$TRACK_A"
-    print_dir "B 轨" "$TRACK_B" 'shard-*.tar'
-    print_dir "C 轨" "$TRACK_C"
-    print_dir "D 轨" "$TRACK_D" 'shard-*.tar'
+    print_dir "主数据集" "$DATASET_DIR" 'shard-*.tar'
+    print_dir "tilt" "$TILT_DIR"
+    print_dir "train" "$TRAIN_DIR" 'shard-*.tar'
     echo "  结果根: $RESULTS_DIR"
 
     echo
@@ -183,7 +181,7 @@ for mod in numpy torch webdataset; do
     if "$PY" -c "import $mod" >/dev/null 2>&1; then
         pass "import $mod"
     else
-        fail "import $mod 失败(D 轨负载器需要)"
+        fail "import $mod 失败(train负载器需要)"
     fi
 done
 if "$PY" -c "import boto3" >/dev/null 2>&1; then
@@ -288,7 +286,7 @@ else
 fi
 
 section "控制面与 Agent"
-# 缓存上限的期望值不写死：环境变量 > 本次 COND(traincache-policy-*/pareto2-*)
+# 缓存上限的期望值不写死：环境变量 > 本次 COND(cache 字段)
 # 的 cache.capacity_bytes > COND 层固定值(1GiB)。输出两行：字节数与来源
 # (env|cond|default)；来源是 default 时说明这一批没声明档位，只比对不判死。
 expected_capacity_bytes() {
@@ -422,7 +420,7 @@ else
     warn "agentd 未部署(首次 make bench-up 或 make ctrl-up 会部署)"
 fi
 
-section "淘汰证据(4.4 §1.7)"
+section "淘汰证据(4.3 §2.6、§3.1)"
 if [ "$HAVE_K8S" -eq 1 ]; then
     agentd_pods="$(kubectl -n traincache get pods -l app=traincache-agentd \
         -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
@@ -485,7 +483,7 @@ if [ "$HAVE_K8S" -eq 1 ]; then
             fail "节点上有 $dir_total 字节的块,但各 agentd 的字节累计最大为 $accum_max → 累计没生效,淘汰闸门不会触发"
         elif [ "$dir_total" -gt 0 ] \
                 && [ "$(awk -v a="$accum_max" -v d="$dir_total" 'BEGIN{print (a+0>1.5*d)?1:0}')" = "1" ]; then
-            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.4 §1.7 判据 2) → 同一批块被重复记账"
+            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.3 §2.4 字节账自洽判据) → 同一批块被重复记账"
         elif [ "$dir_total" -eq 0 ]; then
             pass "缓存目录为空(agentd 复位后),累计 $accum_max 是复位前残账,不作判据"
         else
@@ -551,10 +549,10 @@ PY
             OK*)
                 shard_n="$(printf '%s' "$bucket_report" | sed -n 's/.*shards=\([0-9]*\).*/\1/p')"
                 snap="$(printf '%s' "$bucket_report" | sed -n 's/.*snapshot_8m=\([a-z]*\).*/\1/p')"
-                if [ "${shard_n:-0}" -ge 8 ]; then
+                if [ "${shard_n:-0}" -ge 16 ]; then
                     pass "桶 $BUCKET 有 $shard_n 个 shard-*.tar"
                 elif [ "${shard_n:-0}" -ge 1 ]; then
-                    warn "桶 $BUCKET 只有 $shard_n 个 shard-*.tar,不足 S 档 8 个"
+                    warn "桶 $BUCKET 只有 $shard_n 个 shard-*.tar,不足 16 个"
                 else
                     fail "桶 $BUCKET 没有 shard-*.tar"
                 fi
@@ -627,29 +625,24 @@ else
 fi
 
 section "数据目录与磁盘"
-if [ -n "$TRACK_A" ] && [ -d "$TRACK_A" ] && [ -n "$(ls -A "$TRACK_A" 2>/dev/null)" ]; then
-    pass "A 轨数据在位: $TRACK_A"
-else
-    warn "A 轨未生成(data-up 会生成): $TRACK_A"
-fi
-b_n="$(ls -1 "$TRACK_B"/shard-*.tar 2>/dev/null | wc -l)"
-if [ "$b_n" -ge 8 ]; then
-    pass "B 轨 shard 数 $b_n: $TRACK_B"
+b_n="$(ls -1 "$DATASET_DIR"/shard-*.tar 2>/dev/null | wc -l)"
+if [ "$b_n" -ge 16 ]; then
+    pass "主数据集 shard 数 $b_n: $DATASET_DIR"
 elif [ "$b_n" -ge 1 ]; then
-    warn "B 轨只有 $b_n 个 shard,不足 S 档 8 个: $TRACK_B"
+    warn "主数据集只有 $b_n 个 shard,不足 16 个: $DATASET_DIR"
 else
-    fail "B 轨没有 shard-*.tar: $TRACK_B"
+    fail "主数据集没有 shard-*.tar: $DATASET_DIR"
 fi
-if [ -f "$TRACK_C/hot-shards.txt" ] && [ -f "$TRACK_C/full-shards.txt" ]; then
-    pass "C 轨清单在位: $TRACK_C"
+if [ -f "$TILT_DIR/hot-shards.txt" ] && [ -f "$TILT_DIR/full-shards.txt" ]; then
+    pass "tilt 清单在位: $TILT_DIR"
 else
-    warn "C 轨清单缺失(synth_track_c.py 会生成)"
+    warn "tilt 清单缺失(synth_tilt.py 会生成)"
 fi
-d_n="$(ls -1 "$TRACK_D"/shard-*.tar 2>/dev/null | wc -l)"
+d_n="$(ls -1 "$TRAIN_DIR"/shard-*.tar 2>/dev/null | wc -l)"
 if [ "$d_n" -gt 0 ]; then
-    pass "D 轨 shard 数 $d_n: $TRACK_D"
+    pass "train shard 数 $d_n: $TRAIN_DIR"
 else
-    warn "D 轨未生成(track-d-data 会生成)"
+    warn "train 未生成(track-d-data 会生成)"
 fi
 if [ -e "$SUDO_PASS" ]; then
     mode="$(stat -c '%a' "$SUDO_PASS" 2>/dev/null || echo '?')"

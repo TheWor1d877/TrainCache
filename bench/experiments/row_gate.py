@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""读侧收数的三道过滤(4.4 §1.7、§7.4、§C1)。
+"""读侧收数的三道过滤(4.3 §3.1、4.2 §12、4.2 §11)。
 
-plot.py 与 policy_table.py 从数据层取 `summary.csv` 时都过这三道,按顺序取
+汇总与出表脚本从数据层取 `summary.csv` 时都过这三道,按顺序取
 第一条命中的拒因:
 
-  1. 点目录(装 `summary.csv` 的那个目录)的 `version` 戳等于 `docs/4.6`
+  1. 点目录(装 `summary.csv` 的那个目录)的 `version` 戳等于 `docs/4.5`
      最后一行的当前版本;
-  2. `void` 为假;倾斜两族的行还要 §1.7 三列(`evict_blocks_run`、
-     `b_evictions_of_hot`、`cache_dir_peak_bytes`)齐且非空;
+  2. `void` 为假;倾斜两族的行还要三列淘汰证据(`evict_blocks_run`、
+     `b_evictions_of_hot`、`cache_dir_peak_bytes`)齐且非空(4.3 §2.6);
   3. 倾斜两族的行满足字节地板 `total_makespan ≥ fetch_bytes_run ÷ 该档
-     实测有效带宽`(带宽表在 `bench/config.py`,与 §7.4 同源)。
+     实测有效带宽`(带宽表在 `bench/config.py`,与 4.2 §12 同源)。
 
 只筛 TrainCache 自己的行:`baselines/` 里的 Fluid/JuiceFS/direct 行不带版本戳,
 也不产淘汰证据,属既有对照数据。地板同理只对倾斜两族成立——其余族的预热与
-计算重叠,`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速(4.4 §7.2 的
-13.4/35/61 MB/s 就是这种口径),拿它当上界会误杀。
+计算重叠,`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速(4.2 §12 的
+12.5/37.5/125 MiB/s 就是这种口径),拿它当上界会误杀。
 
 被排除的行既打印也给一份 `results/summary/rejected.csv`,让「谁被排除」入账。
 
@@ -38,14 +38,19 @@ REJECT_FIELDS = ("source", "cond", "group", "rate", "total_makespan",
                  "fetch_bytes_run", "reason")
 
 
-def current_version() -> str | None:
-    """`docs/4.6` 最后一行的版本号。这张表的写入者是 exp.py,寻址口径归它。"""
-    import exp  # 延迟导入:exp.py 也导入本目录的模块,模块级导入会成环
+VERSION_LOG = bench_config.REPO_ROOT / "docs" / "4.5-experiment-version-log.md"
 
-    try:
-        return exp.check_registry()
-    except SystemExit:
+
+def current_version() -> str | None:
+    """`docs/4.5` 最后一行的版本号;表里还没有数据行时给 None。"""
+    if not VERSION_LOG.is_file():
         return None
+    rows = [ln for ln in VERSION_LOG.read_text(encoding="utf-8").splitlines()
+            if ln.strip().startswith("|") and "---" not in ln]
+    if len(rows) < 2:
+        return None
+    cells = [c.strip() for c in rows[-1].strip().strip("|").split("|")]
+    return cells[0] or None
 
 
 def stamp_of(point_dir: Path) -> str | None:
@@ -56,7 +61,8 @@ def stamp_of(point_dir: Path) -> str | None:
 
 
 def _is_tilt(row: dict) -> bool:
-    return str(row.get("cond", "")).startswith(bench_config.TILT_COND_PREFIXES)
+    """按 load 字段判倾斜负载；没有该列的行不按倾斜处理。"""
+    return str(row.get("load", "")).strip() == "tilt"
 
 
 def _first_bad(values) -> str:
@@ -158,6 +164,7 @@ def selftest() -> None:
 
     def tilt_row(cond, makespan, fetch_bytes, **kw):
         row = {"cond": cond, "group": "traincache-cold", "rate": "100mbit",
+               "load": "tilt",
                "void": "False", "total_makespan": f"{makespan:.2f}",
                "fetch_bytes_run": f"{fetch_bytes:.1f}",
                "evict_blocks_run": "128", "b_evictions_of_hot": "0",
@@ -180,8 +187,9 @@ def selftest() -> None:
         point.mkdir(parents=True)
         (point / "version").write_text(version + "\n", encoding="utf-8")
 
-        # 11-01 的产物没有 §1.7 三列,第一道拒因就是缺证据列
+        # 11-01 的产物没有三列淘汰证据,第一道拒因就是缺证据列
         legacy = [{"cond": c, "group": "traincache-cold", "rate": "100mbit",
+                   "load": "tilt",
                    "void": "False", "total_makespan": f"{m:.2f}",
                    "fetch_bytes_run": f"{gib(b):.1f}"}
                   for c, m, b in legacy_spec]

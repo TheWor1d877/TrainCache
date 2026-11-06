@@ -6,7 +6,9 @@
 
 四条不变量：
   1. 一节点一个 Pod（Pod 反亲和），否则同节点的两个 Pod 共用一个 agentd 与
-     一份 hostPath 缓存，合并会被进程内去重吃掉。
+     一份 hostPath 缓存，合并会被进程内去重吃掉。反亲和由 TRAINCACHE_ANTI_AFFINITY
+     控制，默认开启；设为 0/false/off 时关闭，让多个读端落同一节点共用一个 agentd，
+     用于观察进程内去重对合并效果的影响。
   2. 起跑用绝对时刻栅栏：所有 Pod 等到同一个 epoch 秒再读，启动偏差不进入
      合并窗口。
   3. makespan 取各 Pod 的最大值，字节账取各 Pod 之和；origin egress 是集群级，
@@ -14,10 +16,23 @@
   4. 网关计数只作诊断，主判据是源站字节与 makespan。
 """
 import json
+import os
 import time
 
 START_DELAY_S = 25.0          # 提交到统一开跑的间隔，容纳 4 个 Pod 启动
 GATEWAY_DEPLOY = "traincache-gateway"
+ANTI_AFFINITY_ENV = "TRAINCACHE_ANTI_AFFINITY"
+ANTI_AFFINITY_OFF = ("0", "false", "off")
+
+
+def anti_affinity_enabled() -> bool:
+    """读开关而不是常量：同一进程内换取值可以对照两种调度效果。"""
+    raw = os.environ.get(ANTI_AFFINITY_ENV, "1").strip().lower()
+    return raw not in ANTI_AFFINITY_OFF
+
+
+print(f"[gateway] anti-affinity={'on' if anti_affinity_enabled() else 'off'}",
+      flush=True)
 
 
 def trace_for_pod(rb, trace: dict, index: int, readers: int, pattern: str) -> str:
@@ -106,7 +121,7 @@ def _pod_spec(rb, group, pod_name, cm_name, pod_index, readers, start_at,
         "resources": {"requests": {"cpu": "500m", "memory": "1Gi"},
                       "limits": {"cpu": "2", "memory": "4Gi"}},
     }
-    return {
+    spec = {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {"name": pod_name, "namespace": ns,
@@ -128,14 +143,17 @@ def _pod_spec(rb, group, pod_name, cm_name, pod_index, readers, start_at,
                 {"name": "ordersrc",
                  "configMap": {"name": "traincache-ordersrc"}},
             ],
-            # 一节点一读端：同节点会共用一个 agentd，合并被进程内去重吃掉。
-            "affinity": {"podAntiAffinity": {
-                "requiredDuringSchedulingIgnoredDuringExecution": [{
-                    "labelSelector": {"matchLabels": {"app": "train-job"}},
-                    "topologyKey": "kubernetes.io/hostname",
-                }]}},
         },
     }
+    # 一节点一读端：同节点会共用一个 agentd，合并被进程内去重吃掉。关闭时整段
+    # affinity 都不下发，改动其它调度字段会改变已跑过的对照点。
+    if anti_affinity_enabled():
+        spec["spec"]["affinity"] = {"podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [{
+                "labelSelector": {"matchLabels": {"app": "train-job"}},
+                "topologyKey": "kubernetes.io/hostname",
+            }]}}
+    return spec
 
 
 def create_pods(rb, group, run_id, trace, readers, pattern, start_at, t_submit):

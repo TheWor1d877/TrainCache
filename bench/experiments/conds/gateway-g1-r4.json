@@ -1,0 +1,48 @@
+{
+  "schema_version": "4",
+  "name": "gateway-g1-r4",
+  "family": "gateway",
+  "group": "traincache-cold",
+  "load": "dataset",
+  "dataset": {
+    "name": "dataset-4gib",
+    "shards": 16,
+    "shard_size_bytes": 268435456,
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "shuffle": "per-epoch",
+    "readers": 4,
+    "access_pattern": "replicated"
+  },
+  "network": {
+    "rate_mbit": 300
+  },
+  "cache": {
+    "enabled": true,
+    "rho": 4.0,
+    "evict_policy": "heat",
+    "warmup_seconds": 0
+  },
+  "sampling": {
+    "reps": 3
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "gateway_cache": false,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7"
+  },
+  "tags": [
+    "gateway",
+    "arm=g1",
+    "readers=4",
+    "pattern=replicated"
+  ],
+  "notes": "gateway 族格子；arm=g1，rate=300，rho=4，readers=4，pattern=replicated；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
+  "prefetch": {
+    "lookahead": 16,
+    "fanout": 2
+  }
+}

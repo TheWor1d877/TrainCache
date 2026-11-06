@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""COND 契约 v3：解析、校验与翻译。
+"""COND 契约 v4：解析、校验与翻译。
 
-一个 COND = 一个实验点。v3 只保留会变的量：数据规模、轨迹、epoch、读端形态、
-带宽、缓存比例与策略、采样次数、网关开关（`gateway` 与 `gateway_cache`）。
-其余一律取本文件的默认值，实际生效值由每次 run 的 `lock.json` 记录。
+一个 COND = 一个实验点。v4 只保留会变的量：族、负载形态、组态、数据集规模、
+epoch、读端形态、带宽、缓存容量比 rho 与淘汰策略、采样次数、网关开关
+（`gateway` 与 `gateway_cache`）。其余一律取本文件的默认值，实际生效值由每次
+run 的 `lock.json` 记录。
 
-字段全集与校验规则见 `docs/4.4-experiment-protocol.md` 附录 C；runner 遇到未知字段直接拒绝。
+字段全集与校验规则见 `docs/4.2-bench-families.md` §11；runner 遇到未知字段直接拒绝。
 """
 import hashlib
 import json
@@ -17,36 +18,46 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
-VALID_FIGURES = {
-    "fig1", "fig2", "fig3", "pareto1", "pareto2",
-    "compare-d", "compare-b", "policy", "gateway-merge",
+# 族 ID 与产物目录同名；multiconsumer 族的 COND 名前缀用 multi-，与族 ID 不同。
+VALID_FAMILIES = {
+    "compare", "gateway", "evict", "prefetch", "warmup",
+    "switch", "chaos", "multiconsumer", "e2e",
 }
 VALID_GROUPS = {
     "direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm",
     "traincache-cold", "traincache-warm",
 }
 TRAINCACHE_GROUPS = {"traincache-cold", "traincache-warm"}
-VALID_TRACKS = {"B", "C", "D"}
+# 负载形态取代 v3 的 track：dataset 主数据集、tilt 倾斜访问、train 真实训练循环。
+VALID_LOADS = {"dataset", "tilt", "train"}
 VALID_SHUFFLES = {"fixed", "per-epoch", "curriculum"}
 VALID_EVICT_POLICIES = {"heat", "lru", "lfu", "external"}
 VALID_LOOKAHEAD = {8, 16, 32}
 VALID_ACCESS_PATTERNS = {"single", "replicated", "sharded"}
-MAX_READERS = 4
-VALID_CAPACITY_RATIOS = {"S", "M", "L"}
-VALID_EPOCHS = {1, 3, 6}
+MAX_READERS = config.MAX_READERS
+VALID_RHO = set(config.RHO_VALUES)
 VALID_RATES = set(config.TC_RATE_MBITS)
 GATE_MODES = {"gated", "free"}
+
+# v3 的字段名与它在 v4 里的替代者。旧 COND 落进来时要直接指出改哪个字段，
+# 不能只报一句"未知字段"。
+V3_FIELDS = {
+    "figure": "family",
+    "track": "load",
+    "capacity_ratio": "cache.rho",
+    "ratio": "cache.rho",
+}
 
 # 不再写进 COND 的固定量。改这里之前先想清楚：所有历史点会一起变。
 CHUNK_SIZE_BYTES = 8388608
 DEFAULTS = {
     "batch": 32,
     "workers": 4,
-    "steps_per_epoch": 400,
+    "steps_per_epoch": config.EPOCH_STEPS,
     "prefetch_factor": 2,
-    "compute_ms": 200,
+    "compute_ms": config.COMPUTE_MS,
     "delay_ms": 20,
     "window_k": 8,
     "fanout_min": 1,
@@ -56,28 +67,8 @@ DEFAULTS = {
     "k8s_version": "v1.37.0",
 }
 
-COMPARE_CACHE_BYTES = 1 << 30
-COMPARE_SHARD_SIZE_BYTES = config.TRACK_B_TAR_BYTES
-CAPACITY_TIER_RATIO = {"S": 2.0, "M": 8.0, "L": 32.0}
-CAPACITY_TIER_N_TARS = {
-    "S": config.TRACK_B_N_TARS // 4,
-    "M": config.TRACK_B_N_TARS,
-    "L": config.TRACK_B_N_TARS * 4,
-}
-CAPACITY_TIER_REPS = {"S": 3, "M": 3, "L": 1}
-CAPACITY_TIER_REPS_ALLOWED = {"S": {3}, "M": {3}, "L": {1}}
-CAPACITY_TIER_GROUPS = {
-    "S": {"direct", "juicefs-cold", "juicefs-warm",
-          "fluid-cold", "fluid-warm", "traincache-cold", "traincache-warm"},
-    "M": {"direct", "fluid-cold", "traincache-cold"},
-    "L": {"traincache-cold", "fluid-cold"},
-}
-CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
-EXPLORATORY_TIERS = {"L"}
-VALID_DATASET_BYTES = {2 << 30, 8 << 30, 32 << 30}
-
 ALLOWED_TOP = {
-    "schema_version", "name", "figure", "group", "track",
+    "schema_version", "name", "family", "group", "load",
     "dataset", "trace", "workload", "network", "cache",
     "prefetch", "sampling", "environment", "tags", "notes",
 }
@@ -86,8 +77,7 @@ ALLOWED_TRACE = {"file", "sha256", "seed"}
 ALLOWED_WORKLOAD = {"epochs", "shuffle", "curriculum", "readers", "access_pattern"}
 ALLOWED_CURRICULUM = {"stages", "shard_fractions", "boundary_rule"}
 ALLOWED_NETWORK = {"rate_mbit"}
-ALLOWED_CACHE = {"enabled", "capacity_ratio", "ratio", "evict_policy",
-                 "warmup_seconds"}
+ALLOWED_CACHE = {"enabled", "rho", "evict_policy", "warmup_seconds"}
 ALLOWED_PREFETCH = {"lookahead", "fanout", "gate"}
 ALLOWED_GATE = {"mode"}
 ALLOWED_SAMPLING = {"reps"}
@@ -101,14 +91,6 @@ CONDS_DIR_DEFAULT = Path(__file__).resolve().parent / "conds"
 IMAGES_DIR = Path(__file__).resolve().parent / "images"
 
 
-def tier_dataset_bytes(tier: str) -> int:
-    return CAPACITY_TIER_N_TARS[tier] * COMPARE_SHARD_SIZE_BYTES
-
-
-def tier_capacity_bytes(tier: str) -> int:
-    return COMPARE_CACHE_BYTES
-
-
 def burst_k_for_rate(rate_mbit: int) -> int:
     return int(config.burst_for_rate(rate_mbit).rstrip("k"))
 
@@ -119,14 +101,11 @@ def dataset_bytes(cond: dict) -> int:
 
 
 def cache_bytes(cond: dict) -> int:
+    """缓存容量字节。组态不带缓存时给 0，缓存容量只能由 rho 与数据集推导。"""
     cache = cond["cache"]
     if not cache.get("enabled"):
         return 0
-    tier = cache.get("capacity_ratio")
-    if tier:
-        return COMPARE_CACHE_BYTES
-    ratio = float(cache.get("ratio") or 0)
-    return int(dataset_bytes(cond) / ratio) if ratio > 0 else 0
+    return int(dataset_bytes(cond) / float(cache["rho"]))
 
 
 def image_set_path(image_set: str) -> Path:
@@ -161,6 +140,12 @@ def _check_unknown(obj: dict, allowed: set, path: str, errors: list) -> None:
         errors.append(f"{path} 含未知字段: {sorted(unknown)}")
 
 
+def _reject_v3(obj: dict, path: str, errors: list) -> None:
+    for old, new in V3_FIELDS.items():
+        if old in obj:
+            errors.append(f"{path}.{old} 是 schema v3 字段，改用 {new}")
+
+
 def _require(obj: dict, key: str, path: str, errors: list) -> Any:
     if key not in obj or obj[key] is None or obj[key] == "":
         errors.append(f"{path}.{key} 缺失或为空")
@@ -176,9 +161,16 @@ def _digest_ok(value: Any) -> bool:
                 or hexpart == "0" * 64)
 
 
+def _rho_ok(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return float(value) in VALID_RHO
+
+
 def validate_cond(cond: dict) -> list[str]:
     errors: list[str] = []
     _check_unknown(cond, ALLOWED_TOP, "$", errors)
+    _reject_v3(cond, "$", errors)
     if cond.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"schema_version 必须为 {SCHEMA_VERSION!r}"
                       f"(收到 {cond.get('schema_version')!r})")
@@ -186,15 +178,15 @@ def validate_cond(cond: dict) -> list[str]:
     name = _require(cond, "name", "$", errors)
     if isinstance(name, str) and (len(name) > 80 or not _NAME_RE.match(name)):
         errors.append(f"$.name 不符合小写 kebab 规范: {name!r}")
-    figure = _require(cond, "figure", "$", errors)
-    if figure is not None and figure not in VALID_FIGURES:
-        errors.append(f"$.figure 非法: {figure!r}")
+    family = _require(cond, "family", "$", errors)
+    if family is not None and family not in VALID_FAMILIES:
+        errors.append(f"$.family 非法: {family!r}")
     group = _require(cond, "group", "$", errors)
     if group is not None and group not in VALID_GROUPS:
         errors.append(f"$.group 非法: {group!r}")
-    track = _require(cond, "track", "$", errors)
-    if track is not None and track not in VALID_TRACKS:
-        errors.append(f"$.track 非法: {track!r}")
+    load = _require(cond, "load", "$", errors)
+    if load is not None and load not in VALID_LOADS:
+        errors.append(f"$.load 非法: {load!r}")
 
     # ---- dataset ----
     ds = _require(cond, "dataset", "$", errors)
@@ -209,11 +201,15 @@ def validate_cond(cond: dict) -> list[str]:
         if all(isinstance(ds.get(k), int) and ds.get(k) > 0
                for k in ("shards", "shard_size_bytes")):
             total = ds["shards"] * ds["shard_size_bytes"]
-            if total not in VALID_DATASET_BYTES:
-                errors.append(f"shards×shard_size_bytes={total} 不在 2/8/32 GiB 枚举内")
+            if total != config.DATASET_BYTES:
+                errors.append(f"shards×shard_size_bytes={total} 必须等于 "
+                              f"{config.DATASET_BYTES}(4 GiB)")
 
     # ---- trace ----
-    trace = _require(cond, "trace", "$", errors)
+    # 倾斜负载按清单文件消费,清单本身要可复现,所以只有 load=tilt 需要记录。
+    trace = cond.get("trace")
+    if load == "tilt":
+        trace = _require(cond, "trace", "$", errors)
     if isinstance(trace, dict):
         _check_unknown(trace, ALLOWED_TRACE, "$.trace", errors)
         _require(trace, "file", "$.trace", errors)
@@ -229,8 +225,8 @@ def validate_cond(cond: dict) -> list[str]:
     if isinstance(wl, dict):
         _check_unknown(wl, ALLOWED_WORKLOAD, "$.workload", errors)
         ep = _require(wl, "epochs", "$.workload", errors)
-        if ep is not None and ep not in VALID_EPOCHS:
-            errors.append(f"$.workload.epochs={ep} 不在 1/3/6 内")
+        if ep is not None and ep != config.EPOCHS:
+            errors.append(f"$.workload.epochs={ep} 必须为 {config.EPOCHS}")
         shuffle = _require(wl, "shuffle", "$.workload", errors)
         if shuffle is not None and shuffle not in VALID_SHUFFLES:
             errors.append(f"$.workload.shuffle 非法: {shuffle!r}")
@@ -272,35 +268,17 @@ def validate_cond(cond: dict) -> list[str]:
     cache = _require(cond, "cache", "$", errors)
     if isinstance(cache, dict):
         _check_unknown(cache, ALLOWED_CACHE, "$.cache", errors)
+        _reject_v3(cache, "$.cache", errors)
         enabled = cache.get("enabled")
         if not isinstance(enabled, bool):
             errors.append("$.cache.enabled 必须是 bool")
         if enabled:
-            ratio = _require(cache, "ratio", "$.cache", errors)
-            if ratio is not None and (not isinstance(ratio, (int, float)) or ratio <= 0):
-                errors.append("$.cache.ratio 必须是正数")
+            rho = _require(cache, "rho", "$.cache", errors)
+            if rho is not None and not _rho_ok(rho):
+                errors.append(f"$.cache.rho 非法: {rho!r}，只能取 {sorted(VALID_RHO)}")
             ev = _require(cache, "evict_policy", "$.cache", errors)
             if ev is not None and ev not in VALID_EVICT_POLICIES:
                 errors.append(f"$.cache.evict_policy 非法: {ev!r}")
-            tier = cache.get("capacity_ratio")
-            if tier is not None:
-                if tier not in VALID_CAPACITY_RATIOS:
-                    errors.append(f"$.cache.capacity_ratio 非法: {tier!r}")
-                else:
-                    if figure not in {"compare-d", "compare-b", "gateway-merge"}:
-                        errors.append("capacity_ratio 只允许 compare-*/gateway-merge")
-                    if group is not None and group not in CAPACITY_TIER_GROUPS[tier]:
-                        errors.append(f"group={group!r} 不在 {tier} 档参跑组内")
-                    if isinstance(ratio, (int, float)) and abs(
-                            ratio - CAPACITY_TIER_RATIO[tier]) > 0.01:
-                        errors.append(f"capacity_ratio={tier} 要求 ratio="
-                                      f"{CAPACITY_TIER_RATIO[tier]}")
-                    if isinstance(ds, dict) and all(
-                            isinstance(ds.get(k), int) and ds.get(k) > 0
-                            for k in ("shards", "shard_size_bytes")):
-                        if dataset_bytes(cond) != tier_dataset_bytes(tier):
-                            errors.append(f"capacity_ratio={tier} 要求数据量为 "
-                                          f"{tier_dataset_bytes(tier)}")
         ws = cache.get("warmup_seconds")
         if ws is not None and (not isinstance(ws, int) or ws < 0):
             errors.append("$.cache.warmup_seconds 必须是 ≥0 的整数")
@@ -322,26 +300,19 @@ def validate_cond(cond: dict) -> list[str]:
             _check_unknown(gate, ALLOWED_GATE, "$.prefetch.gate", errors)
             if gate.get("mode") not in GATE_MODES:
                 errors.append(f"$.prefetch.gate.mode 非法: {gate.get('mode')!r}")
-        if figure == "fig1" and not (isinstance(gate, dict) and gate.get("mode")):
-            errors.append("fig1 必须写 prefetch.gate.mode")
+        # 预热族的轴就是门控开关，缺 gate.mode 的格子没有可比的实验条件。
+        if family == "warmup" and not (isinstance(gate, dict) and gate.get("mode")):
+            errors.append("warmup 族必须写 prefetch.gate.mode")
 
     # ---- sampling ----
     samp = _require(cond, "sampling", "$", errors)
     if isinstance(samp, dict):
         _check_unknown(samp, ALLOWED_SAMPLING, "$.sampling", errors)
         reps = _require(samp, "reps", "$.sampling", errors)
-        tier = (cache or {}).get("capacity_ratio")
-        if figure == "pareto1":
-            allowed = {7}
-        elif figure == "pareto2":
-            allowed = {2}
-        elif figure in {"compare-d", "compare-b", "gateway-merge"}:
-            allowed = CAPACITY_TIER_REPS_ALLOWED[tier] if tier else {3}
-        else:
-            allowed = {1}
-        if reps is not None and reps not in allowed:
-            errors.append(f"$.sampling.reps 必须为 {sorted(allowed)}"
-                          f"(figure={figure},收到 {reps})")
+        want = config.E2E_REPS if family == "e2e" else config.REPS
+        if reps is not None and reps != want:
+            errors.append(f"$.sampling.reps={reps} 必须为 {want}"
+                          f"（family={family}）")
 
     # ---- environment ----
     env = _require(cond, "environment", "$", errors)
@@ -402,11 +373,8 @@ def cond_to_env(cond: dict) -> dict[str, str]:
     cache = cond["cache"]
     if cache.get("enabled"):
         env["TRAINCACHE_EVICT_POLICY"] = str(cache["evict_policy"])
+        # 缓存容量的唯一注入点：ρ 只在这里变成字节数，被测侧不认识 ρ。
         env["TRAINCACHE_CACHE_CAPACITY_BYTES"] = str(cache_bytes(cond))
-    tier = cache.get("capacity_ratio")
-    if tier:
-        env["CAPACITY_RATIO"] = str(tier)
-        env["COMPARE_TIER"] = str(tier)
     pf = cond.get("prefetch") or {}
     if cond["group"] in TRAINCACHE_GROUPS:
         if "lookahead" in pf:
@@ -414,6 +382,11 @@ def cond_to_env(cond: dict) -> dict[str, str]:
         mode = (pf.get("gate") or {}).get("mode")
         if mode:
             env["TRAINCACHE_GATE_MODE"] = str(mode)
+        # 预热族的窗口轴：门控允许等待的最长时间，写进 WarmupTask 的 gate.tMax。
+        # 0 是「没设窗口」，不注入，让 up.sh 用缺省值。
+        window = cache.get("warmup_seconds")
+        if window:
+            env["TRAINCACHE_GATE_TMAX"] = f"{int(window)}s"
     return env
 
 
@@ -421,7 +394,7 @@ def cond_to_tc_args(cond: dict) -> list[str]:
     return [f"{cond['network']['rate_mbit']}mbit", f"{DEFAULTS['delay_ms']}ms"]
 
 
-def cond_to_track_d_args(cond: dict) -> list[str]:
+def cond_to_train_args(cond: dict) -> list[str]:
     wl = cond["workload"]
     return [
         "--epochs", str(wl["epochs"]),
@@ -439,26 +412,25 @@ EXAMPLE_COND_PATH = Path(__file__).resolve().parent / "fixtures" / "cond-example
 
 def _sample_cond() -> dict:
     return {
-        "schema_version": "3",
-        "name": "sample-cond",
-        "figure": "compare-d",
+        "schema_version": "4",
+        "name": "compare-rho2-r300-traincache-cold",
+        "family": "compare",
         "group": "traincache-cold",
-        "track": "D",
-        "dataset": {"name": "compare-data-8m", "shards": 8,
+        "load": "dataset",
+        "dataset": {"name": "dataset-4gib", "shards": 16,
                     "shard_size_bytes": 268435456, "seed": 20261006},
         "trace": {"file": "traces/x.json", "sha256": "0123456789abcdef" * 4,
                   "seed": 20261015},
         "workload": {"epochs": 3, "shuffle": "per-epoch",
                      "readers": 1, "access_pattern": "single"},
-        "network": {"rate_mbit": 100},
-        "cache": {"enabled": True, "capacity_ratio": "S", "ratio": 2.0,
-                  "evict_policy": "heat"},
+        "network": {"rate_mbit": 300},
+        "cache": {"enabled": True, "rho": 2.0, "evict_policy": "heat"},
         "prefetch": {"lookahead": 16, "fanout": 2},
         "sampling": {"reps": 3},
         "environment": {"gateway": False, "gateway_image": None,
                         "gateway_cache": False,
                         "image_set": "sha256:" + "0" * 64},
-        "tags": ["compare-d"],
+        "tags": ["compare"],
     }
 
 
@@ -480,9 +452,35 @@ def selftest() -> None:
     c["workload"].update({"readers": 4, "access_pattern": "sharded"})
     assert not validate_cond(c), validate_cond(c)
 
-    c["dataset"]["shards"] = 6
-    assert any("整除" in e for e in validate_cond(c)), validate_cond(c)
-    assert any("枚举" in e for e in validate_cond(c)), validate_cond(c)
+    # 数据集固定 4 GiB：shards 与 shard_size_bytes 乘出来不是 4 GiB 就拒绝
+    c = json.loads(json.dumps(good))
+    c["dataset"]["shards"] = 15
+    assert any("4 GiB" in e for e in validate_cond(c)), validate_cond(c)
+
+    # rho 只能取五个值
+    c = json.loads(json.dumps(good))
+    c["cache"]["rho"] = 3
+    assert any("rho" in e for e in validate_cond(c)), validate_cond(c)
+    for rho in config.RHO_VALUES:
+        c["cache"]["rho"] = rho
+        assert not validate_cond(c), (rho, validate_cond(c))
+        assert cache_bytes(c) == config.cache_bytes(rho), (rho, cache_bytes(c))
+
+    # epoch 与 reps 固定 3
+    c = json.loads(json.dumps(good))
+    c["workload"]["epochs"] = 1
+    assert any("epochs" in e for e in validate_cond(c)), validate_cond(c)
+    c["workload"]["epochs"] = 3
+    c["sampling"]["reps"] = 1
+    assert any("reps" in e for e in validate_cond(c)), validate_cond(c)
+
+    # v3 字段要报出替代字段
+    c = json.loads(json.dumps(good))
+    c["figure"] = "compare-d"
+    assert any("family" in e for e in validate_cond(c)), validate_cond(c)
+    c = json.loads(json.dumps(good))
+    c["cache"]["ratio"] = 2.0
+    assert any("cache.rho" in e for e in validate_cond(c)), validate_cond(c)
 
     c = json.loads(json.dumps(good))
     c["environment"]["gateway"] = True
@@ -512,24 +510,32 @@ def selftest() -> None:
     c["environment"].pop("gateway_cache", None)
     assert not validate_cond(c), validate_cond(c)
 
-    assert dataset_bytes(good) == 2 << 30, dataset_bytes(good)
-    assert cache_bytes(good) == 1 << 30, cache_bytes(good)
+    # 预热族的轴是门控，缺 gate.mode 的 COND 无效
+    c = json.loads(json.dumps(good))
+    c["family"] = "warmup"
+    assert any("gate" in e for e in validate_cond(c)), validate_cond(c)
+    c["prefetch"]["gate"] = {"mode": "gated"}
+    assert not validate_cond(c), validate_cond(c)
+
+    assert dataset_bytes(good) == 4 << 30, dataset_bytes(good)
+    assert cache_bytes(good) == 2 << 30, cache_bytes(good)
     env = cond_to_env(good)
-    assert env["TRAINCACHE_CACHE_CAPACITY_BYTES"] == str(1 << 30), env
+    assert env["TRAINCACHE_CACHE_CAPACITY_BYTES"] == str(2 << 30), env
     assert env["TRAINCACHE_READERS"] == "1" and env["TRAINCACHE_GATEWAY"] == "0", env
     assert env["TRAINCACHE_GATEWAY_CACHE"] == "0", env
     cached = json.loads(json.dumps(good))
     cached["environment"]["gateway_cache"] = True
     assert cond_to_env(cached)["TRAINCACHE_GATEWAY_CACHE"] == "1"
 
+    # conds/ 下每个文件都必须是 v4 且通过校验
     files = sorted(CONDS_DIR_DEFAULT.glob("*.json"))
-    assert files, "conds 目录为空"
     for path in files:
         cond = json.loads(path.read_text(encoding="utf-8"))
+        assert cond.get("schema_version") == SCHEMA_VERSION, path.name
         errs = validate_cond(cond)
         assert not errs, (path.name, errs[:3])
 
-    print(f"cond selftest: PASS（{len(files)} 个 COND）")
+    print(f"cond selftest: PASS（{len(files)} 个 COND 全部通过）")
 
 
 if __name__ == "__main__":

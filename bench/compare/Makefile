@@ -100,7 +100,7 @@ juicefs-warm:
 	@bash $(ROOT)/juicefs/warm.sh
 
 # ---- 统一轨迹生成 ----
-TRACE_OUT ?= $(ROOT)/../experiments/traces/track-compare-d-s8-per-epoch.json
+TRACE_OUT ?= $(ROOT)/../experiments/traces/track-16-per-epoch-ep3.json
 trace:
 	@mkdir -p $(dir $(TRACE_OUT))
 	@$(PY) $(ROOT)/trace.py --out $(TRACE_OUT)

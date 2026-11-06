@@ -59,10 +59,10 @@ TrainCache 面向「数据要从远端拉、消费顺序能提前算出来、拉
 ## 功能
 
 - 提交 `WarmupTask` 后，webhook 给匹配的训练 Pod 注入 `traincache.io/warmup` SchedulingGate，Pod 停在 Pending；controller 按 Pod 分片向候选节点拉块，块级就绪度达到门控阈值 `M` 后移除 gate。
-- 超过 `t_max` 仍未就绪，controller 移除 gate，Pod 走默认调度放行（[实验协议](docs/4.4-experiment-protocol.md) §2）。
+- 超过 `t_max` 仍未就绪，controller 移除 gate，Pod 走默认调度放行（[指标与决策](docs/4.3-bench-metrics-and-decisions.md)）。
 - scheduler 插件读 Pod 注释 `traincache.io/node-scores`，按全局位置衰减后的就绪度给候选节点打分，选分数最高的节点。
 - Pod 调度到节点后，agentd 按训练实际消费顺序预取后续块；epoch、shuffle、curriculum 切换事件到达时，按新顺序继续预取（`agent/ordersrc/`）。
-- 每次预热到候选节点的字节记入 `startup_warmup_bytes`，持续预取的字节记入 `sustained_prefetch_bytes`，同一格的所有组态共用这套口径（[实验协议](docs/4.4-experiment-protocol.md) §1.5）。
+- 每次预热到候选节点的字节记入 `startup_warmup_bytes`，持续预取的字节记入 `sustained_prefetch_bytes`，同一格的所有组态共用这套口径（[指标与决策](docs/4.3-bench-metrics-and-decisions.md) §2）。
 
 ## 快速开始
 
@@ -108,7 +108,7 @@ traincache-gateway-<hash>                        1/1     Running
 traincache-webhook-<hash>                        1/1     Running
 ```
 
-scheduler 运行在 `kube-system`，用 `kubectl -n kube-system rollout status deploy/traincache-scheduler` 查看。训练 Pod 的样例清单是 `agent/deploy/train-pod.yaml`，`DataSet` 与 `WarmupTask` 的字段见 [4.3 启动与实验](docs/4.3-startup-and-experiments.md)。
+scheduler 运行在 `kube-system`，用 `kubectl -n kube-system rollout status deploy/traincache-scheduler` 查看。训练 Pod 的样例清单是 `agent/deploy/train-pod.yaml`，`DataSet` 与 `WarmupTask` 的字段见 [4.4 操作手册](docs/4.4-bench-runbook.md)。
 
 卸载：
 
@@ -161,7 +161,7 @@ kubectl delete -f install.yaml
 
 ## 上游关系
 
-Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里部署并测得基准数据，作为七种组态中的对照组（[现勘报告](docs/3-field-survey.md)、[4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md)）。`DataSet` 与 `Runtime` 的命名、nodeAffinity 注入方式参考 Fluid。块级就绪度在 `controller/cmd/controller-manager`，SchedulingGate 注入在 `controller/cmd/webhook`，节点打分在 `controller/cmd/scheduler`，预取在 `agent/cmd/agentd`。上游代码未内嵌，两个项目均为 Apache-2.0：[fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid)、[juicedata/juicefs](https://github.com/juicedata/juicefs)。
+Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里部署并测得基准数据，作为七种组态中的对照组（[现勘报告](docs/3-field-survey.md)、[4.1 装置](docs/4.1-bench-apparatus.md)）。`DataSet` 与 `Runtime` 的命名、nodeAffinity 注入方式参考 Fluid。块级就绪度在 `controller/cmd/controller-manager`，SchedulingGate 注入在 `controller/cmd/webhook`，节点打分在 `controller/cmd/scheduler`，预取在 `agent/cmd/agentd`。上游代码未内嵌，两个项目均为 Apache-2.0：[fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid)、[juicedata/juicefs](https://github.com/juicedata/juicefs)。
 
 
 ## 构建与测试
@@ -184,12 +184,12 @@ make e2e              # kind 集群中的六项断言
 | [1 TrainCache 介绍与背景](docs/1-introduction-and-background.md) | 问题定义、外部事实、与 Fluid/JuiceFS 的定位差异 |
 | [2 TrainCache 三层架构](docs/2-three-layer-architecture.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3-field-survey.md) | Fluid/JuiceFS 的机制现勘与缺口证据 |
-| [4.0 bench 文档导览](docs/4.0-bench-guide.md) | 4.1–4.6 的分工与常驻命令 |
-| [4.1 bench 装置与规则](docs/4.1-bench-setup-and-rules.md) | 装置构成、参数与数据落点 |
-| [4.2 juicefs 与 fluid](docs/4.2-juicefs-and-fluid.md) | 对照组的镜像、起组、预热、运行与拆组 |
-| [4.3 TrainCache 启动与实验](docs/4.3-startup-and-experiments.md) | 镜像构建、控制面拉起、实验族启动 |
-| [4.4 实验协议](docs/4.4-experiment-protocol.md) | 预注册假设、口径、条件矩阵与判据 |
-| [4.5 实验口径决策](docs/4.5-metric-decisions.md) | 已定的验收判据与实验口径 |
+| [4.0 bench 文档索引](docs/4.0-bench-guide.md) | 4.1–4.5 的分工与常驻命令 |
+| [4.1 装置与变量空间](docs/4.1-bench-apparatus.md) | 装置构成、ρ 阶梯、参数、数据生成与落点 |
+| [4.2 实验族与格子](docs/4.2-bench-families.md) | 九个族的轴与格子、COND 契约、机时账 |
+| [4.3 指标与决策](docs/4.3-bench-metrics-and-decisions.md) | 指标算式、判据阈值、D 号决策 |
+| [4.4 操作手册](docs/4.4-bench-runbook.md) | 环境准备、拉起、数据准备、跑族、排障、产物 |
+| [4.5 版本记录](docs/4.5-experiment-version-log.md) | 版本 × 族的产物记录 |
 | [5.x 缓存核心库](docs/5.1-design.md) | 设计要求、计划、决策与测试 |
 | [6.x Agent 服务化](docs/6.1-design.md) | 节点面的接口与决策 |
 | [7.x Controller 与 Scheduler](docs/7.1-design.md) | 控制面的接口与决策 |

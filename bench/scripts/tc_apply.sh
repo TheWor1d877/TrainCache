@@ -9,15 +9,15 @@
 #        [--dry-run] [--self-test] [--help]
 #   minio(默认):kind 内 MinIO Pod 的 eth0 egress —— 既有挂点,行为与改造前一致
 #                (经节点容器 crictl inspectp 找 Pod sandbox netns 后 nsenter 挂点)。
-#   source-d   :宿主机本地通路(v4 D 轨)—— 独立 nginx 源站容器(名取自 config.py 的
-#                TRACK_D_SOURCE_CONTAINER,可被同名环境变量覆盖,便于用一次性容器验收)
+#   source-d   :宿主机本地通路(v4 train)—— 独立 nginx 源站容器(名取自 config.py 的
+#                TRAIN_SOURCE_CONTAINER,可被同名环境变量覆盖,便于用一次性容器验收)
 #                的 eth0 egress;训练进程在宿主机、经该容器端口取数,限其出站带宽。
 #   --dry-run  :只打印将执行的命令,不实际执行(不触碰集群与容器)。
 #   --self-test:自检(不碰集群、不碰容器):burst 推导 / netem 固定时延形态 / 旧调用形态解析。
 #   netem 只挂固定 delay,不加抖动:随机时延逐包重抽会把包序打乱,300mbit 档实测把吞吐
 #   从 35.6MB/s 打到 <0.6MB/s(TCPSackRecovery 占已发段的 15%),详见 docs/4.1 §1 的限速口径。
-#   缺省值:无档位参数时 minio 取 TC_RATE/TC_DELAY、source-d 取 TRACK_D_TC_RATE/
-#           TRACK_D_TC_DELAY;latency 固定 50ms(与既有挂点一致)
+#   缺省值:无档位参数时 minio 取 TC_RATE/TC_DELAY、source-d 取 TRAIN_TC_RATE/
+#           TRAIN_TC_DELAY;latency 固定 50ms(与既有挂点一致)
 #           —— 无参调用行为与改造前一致(make tc-up / cold_reset.sh 依赖此路径)。
 #
 # burst(D31):burst 与 rate 联动,取"约 0.1 秒的传输量"(config.burst_for_rate):
@@ -146,20 +146,20 @@ usage() {
   cat <<'EOF'
 用法: tc_apply.sh <rate> <delay> [burst] [--target minio|source-d]
                  [--dry-run] [--self-test]
-  <rate>    限速值(如 100mbit / 300mbit);缺省:minio=TC_RATE,source-d=TRACK_D_TC_RATE
-  <delay>   延迟值(如 20ms / 10ms);缺省:minio=TC_DELAY,source-d=TRACK_D_TC_DELAY
+  <rate>    限速值(如 100mbit / 300mbit);缺省:minio=TC_RATE,source-d=TRAIN_TC_RATE
+  <delay>   延迟值(如 20ms / 10ms);缺省:minio=TC_DELAY,source-d=TRAIN_TC_DELAY
   [burst]   tbf 突发桶;缺省按 rate 推导(config.burst_for_rate,约 0.1 秒传输量:
             100mbit→1250k、300mbit→3750k、1000mbit→12500k;k 按 1024 解析);
             显式给值以显式为准;rate 解析不出 mbit 时退回 TC_BURST 并告警
   --target minio     默认;kind 内 MinIO Pod 的 eth0 egress(既有行为,不变)
-  --target source-d  v4 D 轨:本地源站容器 TRACK_D_SOURCE_CONTAINER 的 eth0 egress
+  --target source-d  v4 train:本地源站容器 TRAIN_SOURCE_CONTAINER 的 eth0 egress
   --dry-run          只打印将执行的命令,不实际执行
   --self-test        自检:burst 推导 / netem 固定时延 / 旧调用形态解析(不碰集群与容器)
   --help             本用法
 示例:
   tc_apply.sh 100mbit 20ms                    # 兼容既有调用 → MinIO
   tc_apply.sh 300mbit 10ms 1600k              # 兼容既有调用(显式 burst,值不变)→ MinIO
-  tc_apply.sh 100mbit 20ms --target source-d  # D 轨本地源站
+  tc_apply.sh 100mbit 20ms --target source-d  # train 本地源站
 EOF
 }
 
@@ -193,8 +193,8 @@ if [ "$TARGET" = minio ]; then
   RATE="${POS[0]:-$(CFG TC_RATE)}"
   DELAY="${POS[1]:-$(CFG TC_DELAY)}"
 else
-  RATE="${POS[0]:-$(CFG TRACK_D_TC_RATE)}"
-  DELAY="${POS[1]:-$(CFG TRACK_D_TC_DELAY)}"
+  RATE="${POS[0]:-$(CFG TRAIN_TC_RATE)}"
+  DELAY="${POS[1]:-$(CFG TRAIN_TC_DELAY)}"
 fi
 
 # ---- burst(D31):显式值优先;缺省按 rate 推导(=0.1 秒的传输量)----
@@ -268,9 +268,9 @@ nsenter --net="$NETNS" tc qdisc show dev eth0
 EOF
   echo "提示:换档位直接重跑本脚本;拆除用 tc_teardown.sh"
   ;;
-# ================= source-d(v4 D 轨:宿主机本地源站容器挂点)=================
+# ================= source-d(v4 train:宿主机本地源站容器挂点)=================
 source-d)
-  NAME="${TRACK_D_SOURCE_CONTAINER:-$(CFG TRACK_D_SOURCE_CONTAINER)}"
+  NAME="${TRAIN_SOURCE_CONTAINER:-$(CFG TRAIN_SOURCE_CONTAINER)}"
   TC_IMAGE="${TC_IMAGE:-kindest/node:v1.28.15}"   # 本机已有(第一步探针回退实测形态),内含 /usr/sbin/tc
   if [ "$DRY_RUN" = 1 ]; then
     echo "[dry-run] target=source-d container=$NAME rate=$RATE delay=$DELAY latency=50ms"
@@ -291,7 +291,7 @@ EOF
     exit 0
   fi
   PID=$(docker inspect -f '{{.State.Pid}}' "$NAME" 2>/dev/null) \
-    || { echo "错误:容器 $NAME 不存在(先启动 D 轨源站;一次性容器测试可用环境变量 TRACK_D_SOURCE_CONTAINER 覆盖容器名)" >&2; exit 1; }
+    || { echo "错误:容器 $NAME 不存在(先启动 train源站;一次性容器测试可用环境变量 TRAIN_SOURCE_CONTAINER 覆盖容器名)" >&2; exit 1; }
   { [ -n "$PID" ] && [ "$PID" != 0 ]; } || { echo "错误:容器 $NAME 不在运行(PID=$PID)" >&2; exit 1; }
 
   # ---- root 通道探测:root 直跑 > sudo -n > sudo -S(.sudo-pass);皆不可用则 docker 回退 ----

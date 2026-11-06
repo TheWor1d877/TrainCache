@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""五组对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
+"""七组态对照跑分脚本（统一 train-job Pod 形态，预热先于计时）。
 
-七组态各跑 N 次（次数按 4.5 D19/D32 分档：S=3（@100 与 @1000 各 3 次）
-/ M=3 / L=1 探点，--reps 可显式覆盖；GROUPS 是五个受试者展开的七个组态），
+主轴是 rho（数据集字节 ÷ 缓存容量，取值 0.5/1/2/4/8）：数据集固定 4 GiB
+（16 × 256 MiB），换 rho 只改缓存容量这一个量。每格 3 次采样，--reps 可显式
+覆盖（非 3 次只能当冒烟）。GROUPS 是五个基线加两个被测组态；基线只在参考点
+rho=4 跑一次，不随 rho 复制（契约 §5），被测组态跑满五个 rho。
 收集 makespan / stall / 命中率 / 预热时长 / 三笔字节成本，汇总到 summary.csv。
 
 统一形态（任务清单 #5）：
@@ -14,7 +16,7 @@
 
 预热时机（任务清单 #2/#7，D23）：
   预热统一在 group_up 里完成、等完成、不计入 makespan（15 分钟超时整轮作废）。
-  up.sh 里 tc 档位先于预热挂上：预热与测量走同一条限速链路。
+  up.sh 里 tc 限速先于预热挂上：预热与测量走同一条限速链路。
   juicefs 两组的测量 Pod 共置到 jfs-mount 所在节点（CE 单机缓存只在那台）。
     direct        : 无预热（直读 MinIO，零缓存基线）
     juicefs-cold  : 无预热（JFS_WARMUP=0）
@@ -28,15 +30,15 @@
 6.12 统一轨迹：
   measure 主循环真正按 trace.json 消费（分片顺序、shuffle seed、每步样本数），
   不再用线性序 (epoch*steps+step)%n_tars。trace 由本脚本调 trace.py 的
-  build_trace() 现场生成（同一 track+档位的七组态共用、逐字节一致），与 measure.py 一起装进
+  build_trace() 现场生成（七组态与五个 rho 共用一份、逐字节一致），与 measure.py 一起装进
   train-job Pod 的 script ConfigMap（/scripts/trace.json），轨迹 sha256 随
-  产物归档。规模统一到 D 轨口径：S 档 2GiB 数据（8 分片 × 256MiB、每分片
-  1600 样本、batch 32 → 每 epoch 恰好 400 步、一遍全量）。
+  产物归档。规模固定 4 GiB 数据（16 分片 × 256MiB、每分片 1600 样本、
+  batch 32 → 每 epoch 恰好 400 步、一遍全量）。
 
 6.15 stall_ratio 改造（2026-10-24）：
   旧版 measure 是串行"读整片 tar → matmul"，读比算慢两个数量级，
   stall_ratio = wait_s/step_s 恒≈0.98，没有判别力——旧串行版本产物的
-  stall_ratio 一律作废（docs/4.1 §7），需按本口径重跑。
+  stall_ratio 一律作废（4.3 §2.2），需按本口径重跑。
   新版用 COMPUTE_MS=200ms 控制每步算力，读与计算并行（后台 reader 线程
   模拟 DataLoader 异步预取，把接下来若干分片读进内存队列，主循环从队头
   取数据 + 做固定算力）：预取有效（热缓存/预取跟上）→ stall_ratio 趋 0；
@@ -46,7 +48,7 @@
 
 6.16 命中率对账（D25）：
   traincache 组旧口径"块在磁盘存在即 hit"虚高（agent 运行期悄悄回源补块，
-  测量体不知道），已作废。主口径改为训练侧 open-time（4.4 §1.4）：
+  测量体不知道），已作废。主口径改为训练侧 open-time（4.3 §2.3）：
   打开块时本地没有即算未命中，hit_rate = (总读字节 − demand_miss 字节) / 总读字节；
   agent 的 traincache_fetch_bytes_total run 窗口增量单独记 source_saving_ratio
   = (总读字节 − 回源字节) / 总读字节，衡量"省了多少源站流量"，与命中率分开。
@@ -79,45 +81,40 @@
      创建前抓 fetch 计数器基线，运行期定时采样，结束后做窗口增量对账）
   4. 等待完成，解析 RESULT 行与 [EPOCH_BOUNDARY] 标记
   5. down.sh 拆除
-  6. 写入 summary.csv（含 warmup_seconds / tier / status / baseline_substituted /
+  6. 写入 summary.csv（含 warmup_seconds / rho / status / baseline_substituted /
      trace_sha256 / 三笔字节成本 / hit_rate_basis 列）
 
-D30/D32 接线（2026-10-25）：
-  · 参跑组按档位过滤：S 档七组态全跑，M 档 direct/fluid-cold/traincache-cold，
-    L 档 traincache-cold/fluid-cold；显式 --groups 与档位求交集，越档组态被剔除。
+D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
+  · 参跑组按 rho 过滤：rho=4 七组态全跑，其余 rho 只跑 traincache-cold/warm；
+    显式 --group 与允许集求交集，越界组态被剔除。
   · 冷组（含 direct，都无预热）跨 rep 复用控制面：进组前做一次全量 cold_reset +
     group_up，之后每 rep 只做轻冷态（删 train-job Pod + 清四个节点缓存目录），
     组末统一 down；warm 组每 rep 仍整轮 down/up，否则缓存回不了冷态、
     WarmupTask 会停在上一轮 Released（标 warm 实为冷读）。
-  · epochs 随档位联动（S=3、M/L=1），与 conds/compare-*.json 的 workload.epochs 对齐。
+  · epochs 与 reps 固定 3（config.EPOCHS / config.REPS），--reps 只用于冒烟。
   · Fluid 该组每轮都作废 → 落回同冷热档 JuiceFS 顶位，产物标 baseline_substituted。
-  · status 列三态：ok / void（D14：void 不进汇总）/ exploratory（D19：L 档 1 次探点）。
+  · status 列两态：ok / void（D14：void 不进汇总）。
   · D31 带宽格由 runner 现推并打印（rate/burst/BW÷r）；rate 只从 `--rate`
     取，再以 TC_RATE 环境变量连同 TC_DELAY 下发给 up.sh，
     shell 侧据此挂 tc（netem 只有固定 delay）。
 
-用法：
-  python3 bench/compare/run_bench.py --out compare/summary.csv
-  # --out 相对路径按 bench/config.py 的 RESULTS_DIR(~/tcd/bench/results)展开,
-  # 不落到 repo 的当前工作目录;绝对路径原样使用。
-  python3 bench/compare/run_bench.py --tier M --dry-run        # 开跑前核对计划
-  python3 bench/compare/run_bench.py --tier S --rate 300mbit   # S@300 档（BW/r=1.40）
-  python3 bench/compare/run_bench.py --tier S --rate 1000mbit  # S@1000 档
-  CAPACITY_RATIO=M python3 bench/compare/run_bench.py --rate 1000mbit  # M 档（3 组态 × 3 次）
+用法（每格一个目录：results/compare/<格子>/，格子名含 rho/带宽/组态）：
+  python3 bench/compare/run_bench.py --rho 2 --rate 300 --group traincache-cold --dry-run
+  python3 bench/compare/run_bench.py --rho 4 --rate 300 --group traincache-cold
+  python3 bench/compare/run_bench.py --rho 4 --dry-run          # 开跑前核对本轮计划
+  # --out-root 缺省是 bench/config.py 的 family_results_dir("compare")
+  # (~/tcd/bench/results/compare)，产物不落 repo 的当前工作目录。
 
 环境变量（唯一口径集中在本文件顶部，模板/产物不各处写死）：
-  CAPACITY_RATIO=S|M|L   容量档位（D19/D32：S=2GiB数据/1GiB缓存×3（@100 与
-                         @1000 各 3 次）、
-                         M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点）
-  N_TARS                 分片数（缺省按档位：S=8、M=32、L=128；
-                         S 档 8×256MiB≈2GiB，docs/4.1 §3 对照口径）
+  RHO                    数据集字节 ÷ 缓存容量（缺省 4，即基线参考点）
+  N_TARS                 分片数（缺省 config.DATASET_SHARDS=16，即固定的 4 GiB）
   EPOCHS/STEPS_PER_EPOCH/BATCH/IMAGES_PER_TAR/SEED/SHUFFLE
                          统一轨迹参数（默认 3/400/32/1600/20261015/per-epoch，
                          与 bench/config.py D 轨语义对齐：一个 epoch 把全量
                          数据按轨迹顺序恰好过一遍）
-  CHUNK_SIZE             实验块大小，默认 8388608（8MiB，4.5 D20；
+  CHUNK_SIZE             实验块大小，默认 8388608（8MiB，4.3 §4 D20；
                          生产默认 64MiB 不变）
-  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（4.5 D41；
+  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（4.3 §4 D41；
                          MinIO 内该快照由 trainpublish -chunk-size 8388608
                          发布属后续动作，本脚本只按新名引用）
   TRAINCACHE_CACHE_CAPACITY_BYTES  统一缓存容量，默认 1GiB
@@ -125,8 +122,8 @@ D30/D32 接线（2026-10-25）：
                          缓存容量/块大小（1GiB/8MiB=128，D20 重标度）。
                          cold 组用 0 作 bench 哨兵，跳过 WarmupTask；省略 k
                          时由 Controller 自动计算，不属于 bench 口径
-  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4.1 §3；D21 对照三档统一 16）。
-                         agent 侧 lookahead 三档统一 16 块（D21）：8MiB 下
+  TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4.1 §3；D21 对照跑分统一 16）。
+                         agent 侧 lookahead 统一 16 块（D21）：8MiB 下
                          窗口 16×8MiB=128MiB≈缓存 1/8，无退化，不需重标度。
   COMPUTE_MS/READ_WORKERS/READ_QUEUE_DEPTH/READ_TIMEOUT_S
                          6.15 异步预取参数（200/2/2/300）
@@ -166,17 +163,19 @@ CONDS_DIR = BENCH_ROOT / "experiments" / "conds"
 sys.path.insert(0, str(COMPARE_ROOT))
 sys.path.insert(0, str(BENCH_ROOT / "experiments"))
 import trace as trace_mod  # noqa: E402  (bench/compare/trace.py，遮蔽 stdlib trace)
-# 容量档位口径与 cond.py 同源(D19/6.13/D32：单一参数点，不造第二套)
-from cond import (CAPACITY_TIER_EPOCHS, CAPACITY_TIER_GROUPS,  # noqa: E402
-                  CAPACITY_TIER_N_TARS, CAPACITY_TIER_REPS,
-                  CAPACITY_TIER_REPS_ALLOWED, EXPLORATORY_TIERS,
-                  tier_dataset_bytes)
-# D31：带宽档的 burst 推导口径也取自 bench/config.py，shell 与 runner 同一套数
+# rho 阶梯、数据集规模与带宽 burst 的推导口径全部取自 bench/config.py，
+# 本文件不造第二套常量；COND 侧的校验由 experiments/cond.py 负责。
+sys.path.insert(0, str(BENCH_ROOT))
 import config as bench_config  # noqa: E402
 
 GROUPS = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm", "traincache-cold", "traincache-warm"]
-# D31：@300 只有 S 档一个格子，只允许三组（与 M 档参跑组相同）
-S300_GROUPS = ("direct", "fluid-cold", "traincache-cold")
+# summary.csv 的 family 列。对照族固定 compare；multiconsumer 借用本入口时由
+# 调用方用 --family 覆盖（产物根也要给 --out-root 指到该族）。
+FAMILY = "compare"
+# 五个基线只在参考点 rho=4 跑一次（契约 §5），被测组态跑满五个 rho。
+BASELINE_GROUPS = ("direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm")
+TRAINCACHE_GROUPS = ("traincache-cold", "traincache-warm")
+BASELINE_RHO = 4.0
 
 GROUP_NS = {
     "direct": "direct",
@@ -214,32 +213,23 @@ MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "bench-b")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "traincache")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "traincache-probe")
 
-# ---- 容量档位（4.5 D19/D32：S=2GiB数据/1GiB缓存×3、M=8GiB/1GiB×3、L=32GiB/1GiB×1 探点；
-#      正式实验各格统一 3 次，L 档 1 次探点）
-# 取值口径由 bench/experiments/cond.py 的 CAPACITY_TIER_* 常量单点定义 ----
-TIER_PRESETS = {
-    t: {"n_tars": CAPACITY_TIER_N_TARS[t], "reps": CAPACITY_TIER_REPS[t],
-        "epochs": CAPACITY_TIER_EPOCHS[t], "dataset_bytes": tier_dataset_bytes(t)}
-    for t in ("S", "M", "L")
-}
-# L 档 1 次低于 3 次硬纪律：产物标 exploratory，不进正式表（D19，口径见 docs/4.4 §1.9；单点取 cond.py）
-TIER_EXPLORATORY = set(EXPLORATORY_TIERS)
-TIER = os.environ.get("CAPACITY_RATIO", "S").strip().upper() or "S"
-if TIER not in TIER_PRESETS:
-    print(f"[cfg] 非法 CAPACITY_RATIO={TIER!r}（允许 S/M/L），按 S 处理")
-    TIER = "S"
+# ---- rho 轴：缓存容量是唯一随 rho 变的量，数据集固定 4 GiB ----
+# 取值口径单点在 bench/config.py（RHO_VALUES / cache_bytes），本文件只查表。
+RO_PRESETS = {rho: bench_config.cache_bytes(rho) for rho in bench_config.RHO_VALUES}
+RHO = float(os.environ.get("RHO", "4") or 4)
+if RHO not in RO_PRESETS:
+    print(f"[cfg] 非法 RHO={RHO!r}（允许 {sorted(RO_PRESETS)}），按 {BASELINE_RHO} 处理")
+    RHO = BASELINE_RHO
 
-# 显式环境变量优先于档位联动（冒烟要跑 1 epoch 也走这里）；未显式给值时按档位取。
+# 分片数与 epoch 是固定量（冒烟可用环境变量压小，不随 rho 变）。
 ENV_HAS_N_TARS = "N_TARS" in os.environ
-ENV_HAS_EPOCHS = "EPOCHS" in os.environ
-N_TARS = int(os.environ.get("N_TARS", str(TIER_PRESETS[TIER]["n_tars"])))
+N_TARS = int(os.environ.get("N_TARS", str(bench_config.DATASET_SHARDS)))
 # TrainCache DataSet/快照名(6.13/Q12：正式实验一律 8MiB 快照 compare-data-8m;
 # DATASET_NAME 环境变量可切换冒烟前缀,如 compare-data-8m-smoke。
 # 注意:MinIO 里该快照由 trainpublish -chunk-size 8388608 发布属后续动作)
 DATASET_NAME = os.environ.get("DATASET_NAME", "compare-data-8m")
-# D32：epochs 缺省随档位联动（S=3 走 D 轨口径、M/L=1 走 B 轨探点），与
-# conds/compare-*.json 的 workload.epochs 逐个对得上；显式 EPOCHS 环境变量优先。
-EPOCHS = int(os.environ.get("EPOCHS", str(CAPACITY_TIER_EPOCHS[TIER])))
+# 全部格子 3 epoch（COND 的 workload.epochs 同值）；显式 EPOCHS 只给冒烟用。
+EPOCHS = int(os.environ.get("EPOCHS", str(bench_config.EPOCHS)))
 STEPS_PER_EPOCH = int(os.environ.get("STEPS_PER_EPOCH", "400"))   # 6.12：统一 D 轨口径
 BATCH = int(os.environ.get("BATCH", "32"))
 IMAGES_PER_TAR = int(os.environ.get("IMAGES_PER_TAR", "1600"))    # B 轨 256MiB tar 的样本数
@@ -251,12 +241,26 @@ SHARD_SIZE_MB = int(os.environ.get("SHARD_SIZE_MB", "256"))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "8388608"))
 # 分段读粒度：测量脚本按此长度 read()，只累加长度、不保留字节。
 READ_SEGMENT_BYTES = 8 << 20
-CACHE_BYTES = int(os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES", str(1 << 30)))
+# 缓存容量缺省按 rho 查表（rho=4 时 4GiB/4=1GiB）；apply_rho() 逐格重算。
+CACHE_BYTES = int(os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES",
+                                 str(RO_PRESETS[RHO])))
 # warm 组预热块数（显式写入 CRD）：默认 k = 缓存容量 / 块大小（8MiB → 128）。
 # 0 只作 bench 冷启动哨兵，不写进 CRD。
-WARMUP_K = int(os.environ.get("TRAINCACHE_WARMUP_K",
-                              str(max(1, CACHE_BYTES // CHUNK_SIZE))))
-# 消费窗口块数：D21/任务 4.8 要求 lookahead 三档统一 16（8MiB 下窗口
+def warmup_k_for(cache_bytes: int, chunk_count: int = 0) -> int:
+    """warm 组预热块数：缓存容量 ÷ 块大小。
+
+    chunk_count 来自 N_TARS（数据集 shard 数），warmup_k 不能超过它，
+    否则 controller 会拒绝 InvalidSpec（k > chunk_count）。
+    """
+    raw = os.environ.get("TRAINCACHE_WARMUP_K", "").strip()
+    val = int(raw) if raw else max(1, cache_bytes // CHUNK_SIZE)
+    if chunk_count > 0:
+        val = min(val, chunk_count)
+    return val
+
+
+WARMUP_K = warmup_k_for(CACHE_BYTES, N_TARS)
+# 消费窗口块数：D21/任务 4.8 要求 lookahead 统一 16（8MiB 下窗口
 # 16×8MiB=128MiB≈缓存 1/8，无退化）；旧默认 8 与 D21 不符，改为 16。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # Agent 侧持续预取窗口。pareto2 的自变量是它，训练侧消费窗口 PREFETCH_K
@@ -267,7 +271,7 @@ AGENT_PREFETCH_K = int(os.environ.get(
 PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "2"))
 PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
 # fig1/fig3 的自变量：门控开关与数据源。gated 是默认形态；free 去掉
-# SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（4.4 §2.1）。
+# SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（4.2 §6）。
 GATE_MODE = os.environ.get("TRAINCACHE_GATE_MODE", "gated").strip().lower()
 DATA_SOURCE = os.environ.get("TRAINCACHE_DATA_SOURCE", "minio").strip().lower()
 # 网关开关(D23)：只有 "1" 打开;其余取值（含空串/0/true）一律按无网关处理，
@@ -330,15 +334,15 @@ def gateway_cache_flag(on=None):
     return "1" if (GATEWAY_CACHE_ON if on is None else on) else "0"
 
 
-# 图系列(fig1/2/3、pareto1)由 run_figures.py 按 COND 驱动。它们的组态、
-# 次数与带宽档不受 D30/D31/D32 档位约束,所以显式关掉越组过滤与
-# 次数白名单;对照跑分与冒烟保持默认 0,行为不变。
+# 非对照族(evict/prefetch 等)也走本文件的执行体,由 experiments/run.py 按 COND
+# 驱动。它们的组态与带宽不受 rho 选组约束,所以显式关掉越组过滤;
+# 对照跑分保持默认 0,行为不变。
 FIGURE_MODE = os.environ.get("TRAINCACHE_FIGURE_MODE", "").strip() == "1"
 # M5：倾斜双 Job（跑在同一个 measure Pod 里），只用于 pareto2/policy。
 TILT = os.environ.get("TRAINCACHE_TILT", "").strip() == "1"
 
 # ---- D31：带宽档（rate 是实验自变量，取 {100,300,1000} mbit）----
-# 速率只从命令行 --rate 取：S 档缺省 100mbit，M/L 档必填。main() 解析后赋值，
+# 速率只从命令行 --rate 取，缺省 config.TC_RATE。main() 解析后赋值，
 # 再以 TC_RATE 环境变量下发给 up.sh；burst 不写死，由
 # config.burst_for_rate 现推。
 TC_RATE_EFF = None
@@ -358,7 +362,7 @@ SWITCH_WINDOW_S = float(os.environ.get("COMPARE_SWITCH_WINDOW_S", "60"))
 # 单次可能超过周期，实际间隔以产物 sample_max_gap_s 为准。
 SAMPLE_INTERVAL_S = float(os.environ.get("COMPARE_SAMPLE_INTERVAL_S", "5"))
 SAMPLE_JOIN_TIMEOUT_S = float(os.environ.get("COMPARE_SAMPLE_JOIN_TIMEOUT_S", "30"))
-# 4.4 §1.7 淘汰证据的判定余量：目录峰值超过容量这个倍数、且 run 窗口淘汰增量
+# 4.3 §2.4 淘汰证据的判定余量：目录峰值超过容量这个倍数、且 run 窗口淘汰增量
 # 为 0 时才作废。余量给采样间隔内的增长；预取在途的 tmp-* 不在目录峰值里。
 EVICT_GUARD_MARGIN = 1.05
 AGENT_NS = "traincache"
@@ -395,7 +399,7 @@ def pod_timeout_s() -> int:
     return int(floor_s * TILT_TIMEOUT_HEADROOM)
 
 # 命中率口径标注（D25，产物列 hit_rate_basis 显式可见）
-BASIS_TC_OPEN = "open_time_demand_miss_bytes(4.4 §1.4:打开时不在本地即未命中)"
+BASIS_TC_OPEN = "open_time_demand_miss_bytes(4.3 §2.3:打开时不在本地即未命中)"
 BASIS_TC_SAVING = "origin_saving(1-agent_fetch_bytes/训练侧读字节,D25对账)"
 BASIS_TC_UNAVAILABLE = "agent_fetch_unavailable(旧磁盘存在性口径已作废,本轮不报)"
 BASIS_DIRECT = "exact_all_miss(直读全回源)"
@@ -813,7 +817,7 @@ def reset_traincache_agent():
 
 
 # ---------------------------------------------------------------------------
-# 6.12 统一轨迹：现场生成、校验、算 sha256（七组态按 track+档位共用一份）
+# 6.12 统一轨迹：现场生成、校验、算 sha256（七组态与五个 rho 共用一份）
 # ---------------------------------------------------------------------------
 def build_run_trace():
     """按 run_bench 的规模参数生成 trace dict（trace.py build_trace 唯一入口）。"""
@@ -843,9 +847,9 @@ def group_up(group):
     print(f"[up] {group}...")
     env = os.environ.copy()
     env["N_TARS"] = str(N_TARS)
-    # D30/D31：把档位与带宽档显式下发给 up.sh —— burst 由 tc_apply 按 rate 推导，
+    # D31：把 rho 与带宽档显式下发给 up.sh —— burst 由 tc_apply 按 rate 推导，
     # netem 只有固定 delay 一种形态，两侧不再各处写死。
-    env["CAPACITY_RATIO"] = TIER
+    env["RHO"] = str(RHO)
     env["TC_RATE"] = TC_RATE_EFF
     env["TC_DELAY"] = TC_DELAY_EFF
     env["TRAIN_IMAGE"] = TRAIN_IMAGE
@@ -856,7 +860,7 @@ def group_up(group):
     # -chunk-size、WarmupTask k 全部以这里为唯一口径）
     env["CHUNK_BYTES"] = str(CHUNK_SIZE)
     env["TRAINCACHE_CACHE_CAPACITY_BYTES"] = str(CACHE_BYTES)
-    # 统一缓存容量 1GiB(数据 2GiB+ > 缓存,模拟真实场景；D19 三档缓存固定 1GiB)
+    # 缓存容量由 rho 推出（4 GiB ÷ rho），Fluid 按 GiB 取整下发。
     if group.startswith("fluid"):
         env["FLUID_CACHE_GI"] = str(max(1, CACHE_BYTES >> 30))
         env["FLUID_PREHEAT"] = "1" if group == "fluid-warm" else "0"
@@ -1128,7 +1132,7 @@ POD_UID = os.environ.get("POD_UID", "unknown-pod")
 DATASET = os.environ.get("TRAINCACHE_DATASET", "compare-data-8m")
 # 6.13/D20：实验块 8MiB（run_bench.py 经 TRAINCACHE_CHUNK_SIZE 下发，勿写死）
 CHUNK_SIZE = int(os.environ.get("TRAINCACHE_CHUNK_SIZE", "8388608"))
-# D21：对照三档统一 lookahead=16（与 runner 侧 PREFETCH_K 默认值、agent/svc
+# D21：对照跑分统一 lookahead=16（与 runner 侧 PREFETCH_K 默认值、agent/svc
 # assemble.go 的 prefetchLookahead=16 三处对齐）。这里只是 env 缺失时的兜底，
 # 正式跑分由 Pod env 下发（run_bench.py create_measure_pod）。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
@@ -1261,7 +1265,7 @@ def read_shard(shard, phase):
     """traincache 读取路径：逐块读本地缓存，缺块等待 agentd 预取，超时兜底回源。
     返回本片字节数（累加各块长度，不把整片拼起来留在内存里）。
     注意：hits/misses 只是块级诊断(block_hit_rate_diag 列)——"块在磁盘存在即
-    hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(4.5 D25)；
+    hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(4.3 §4 D25)；
     正式命中率由 runner 侧用 open-time 的 demand_miss 字节账计算。
     分阶段字节（4.4）：每个块都计入 read_bytes_phase[phase]；块不存在、走
     等待/回源分支时另计入 demand_miss_phase[phase]（按块 size 计）。"""
@@ -1345,8 +1349,8 @@ READ_TIMEOUT_S = float(os.environ.get("READ_TIMEOUT_S", "300"))   # 队头等待
 # 真实加载器会持有的字节数(≈(深度+线程数+1)×分片大小)改用纯计数
 # logical_resident_bytes 跟踪（不真持有 bytes），峰值见 RESULT 的
 # peak_resident_bytes。旧串行版产物的 stall_ratio 口径作废
-# （docs/4.1 §7）
-# 口径(4.4)：
+# （4.3 §2.2）
+# 口径(4.3 §2.2)：
 #   wait_s = 主循环从队列取"已读好分片"的阻塞等待(真 stall);
 #   work_s = 墙钟算力(compute_work 循环 matmul 直到实测 >= COMPUTE_MS，取实测长度);
 #   stall 样本 = 每步 wait_s / work_s，聚合取 mean 与 p90（不再用 Σwait/Σstep）。
@@ -1398,7 +1402,7 @@ def compute_work():
 # agentd 与节点 hostPath 缓存 —— B 的扫描会把 A 的热块挤出缓存。
 # 记录:A 的块级命中率、A 的等待占比、B 挤占热块的次数。
 # A 的步预算是常量(TILT_A_STEPS,默认 epochs×steps),实际完成步数 a_steps
-# 是响应变量;挤占按热块 present→absent 的转换计数,口径见 4.4 §C3。
+# 是响应变量;挤占按热块 present→absent 的转换计数,口径见 4.2 §11。
 if os.environ.get("TRAINCACHE_TILT", "") == "1":
     import random
     if not group.startswith("traincache"):
@@ -1444,7 +1448,7 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                 present = _present_fps(shard)
                 total_chunks = _chunk_count(shard)
                 # 其余热片每步都观测:块在 A 没读它的时候消失才记挤占;当前片自身
-                # 只更新状态,它的缺失已进 misses(同一件事不记两处,4.4 §C3)。
+                # 只更新状态,它的缺失已进 misses(同一件事不记两处,4.2 §11)。
                 _ev = 0
                 for _other in _hot:
                     if _other != shard:
@@ -1529,7 +1533,7 @@ if os.environ.get("TRAINCACHE_TILT", "") == "1":
                 with _lock:
                     _b["reads"] += 1
                     _b_n = _b["reads"]
-                # B 只做背景扫描，不建模算力，所以 step_s 就是 wait_s（4.4 §C3）。
+                # B 只做背景扫描，不建模算力，所以 step_s 就是 wait_s（4.2 §11）。
                 print("[STEP-B] " + json.dumps({
                     "step": _b_n,
                     "wait_s": round(_b_wait, 6),
@@ -1619,7 +1623,7 @@ def read_pipeline(shards, phase_seq, q, cursor, cursor_lock):
             add_resident(nbytes)
             q.put((shard, nbytes, None, time.perf_counter() - r0))
 
-# 分阶段判定(4.4)：一个 epoch 的前 k_shards 个分片是"预取窗口内的头段"——
+# 分阶段判定(4.3 §2.4)：一个 epoch 的前 k_shards 个分片是"预取窗口内的头段"——
 # epoch0 记 startup（启动预热/首轮填充），epoch>0 记 switch（阶段切换重预取），
 # 其余记 steady（持续预取）。窗口按块数折算成分片数：
 #   chunks_per_shard = SHARD_SIZE_MB*1024*1024 // CHUNK_SIZE
@@ -1630,7 +1634,7 @@ _PREFETCH_K_EFF = int(os.environ.get("TRAINCACHE_PREFETCH_K", "''' + str(PREFETC
 _chunks_per_shard = max(1, _SHARD_BYTES // max(1, _CHUNK_BYTES))
 _k_shards = max(1, (_PREFETCH_K_EFF + _chunks_per_shard - 1) // _chunks_per_shard)
 
-# 快照覆盖校验(4.4)：epoch_occ 里要用到的分片必须都在 snapshot manifest 里。
+# 快照覆盖校验(4.4 §7)：epoch_occ 里要用到的分片必须都在 snapshot manifest 里。
 # 缺片时不能当 0 块静默读成 0 字节（字节账与命中率都会被糊弄），本轮直接作废。
 if group.startswith("traincache"):
     try:
@@ -1778,7 +1782,7 @@ for epoch in range(epochs):
     for th in workers:
         th.join(timeout=READ_TIMEOUT_S)
 
-# stall 聚合(4.4)：mean 与 p90 = 升序第 ceil(0.9*n)-1 个样本；无样本时留空。
+# stall 聚合(4.3 §2.2)：mean 与 p90 = 升序第 ceil(0.9*n)-1 个样本；无样本时留空。
 stall_n = len(stall_samples)
 if stall_n:
     stall_ratio = round(sum(stall_samples) / stall_n, 4)
@@ -2009,7 +2013,7 @@ def create_measure_pod(group, run_id, trace_json):
     # 任务清单 #5:traincache-warm 组走 traincache-scheduler + webhook gate
     # traincache-cold 不走 WarmupTask(bench 冷启动哨兵),普通调度
     # fig1 对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
-    # 调度，用来把「门控的收益」从「预热的收益」里拆出来（4.4 §2.1）。
+    # 调度，用来把「门控的收益」从「预热的收益」里拆出来（4.2 §6）。
     if group == "traincache-warm" and GATE_MODE != "free":
         pod_labels["traincache.io/warmup"] = "enabled"
         pod_spec["spec"]["schedulerName"] = "traincache-scheduler"
@@ -2319,7 +2323,7 @@ def cache_counter_snapshot():
 
 
 # ---------------------------------------------------------------------------
-# 淘汰证据三列（4.4 §1.7）：evict 计数增量、字节累计 gauge、节点目录峰值
+# 淘汰证据三列（4.3 §2.4）：evict 计数增量、字节累计 gauge、节点目录峰值
 # ---------------------------------------------------------------------------
 _EVICT_BLOCKS_RE = re.compile(
     r'^traincache_evict_blocks_total\{[^}]*\}\s+([0-9eE+.\-]+)')
@@ -2329,7 +2333,7 @@ _SOURCE_LABEL_RE = re.compile(r'source="([^"]*)"')
 
 
 def eviction_guard_snapshot():
-    """抓所有 agentd 的淘汰块数与字节累计 gauge，给 4.4 §1.7 的三列用。
+    """抓所有 agentd 的淘汰块数与字节累计 gauge，给 4.3 §2.4 的三列用。
 
     `evict_blocks_total` 是多 Pod 计数器，跨 result 与 Pod 求和；
     `cache_capacity_bytes_total{source="bytes"}` 是每个 agentd 各记本节点一份的
@@ -2400,7 +2404,7 @@ def blocks_dir_peak_bytes():
 
 
 def eviction_guard_columns(guard_base, guard_final, dir_peaks):
-    """4.4 §1.7 三列：run 窗口淘汰块数、字节累计末值、目录峰值字节。
+    """4.3 §2.4 三列：run 窗口淘汰块数、字节累计末值、目录峰值字节。
 
     哪一路证据没抓到，对应列就留空串，不写 0 冒充数据。
     """
@@ -2422,7 +2426,7 @@ def eviction_guard_columns(guard_base, guard_final, dir_peaks):
 
 
 def dir_peak_sampling_stats(peaks, times, nominal_s):
-    """4.4 §1.7 判据三的采样落点：采样点数与实际平均间隔（秒）。
+    """4.3 §2.4 判据三的采样落点：采样点数与实际平均间隔（秒）。
 
     间隔取相邻采样时刻的均值：docker exec 串四个节点会把节拍拉长，判据三上界
     1.16 里 5 s 那一项以产物落的这个数为准，不拿标称值当实测。
@@ -2612,7 +2616,7 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
 
     目录：<cell>/runs/<group>-r<rep>/。单线程负载落一份 per_step_1_w1.jsonl；
     倾斜双 Job（`TRAINCACHE_TILT=1`）落 per_step_a.jsonl + per_step_b.jsonl，
-    且不跑 D40 回落判据——该判据的输入契约是恰好一份 per_step 文件（4.4 §C3）。
+    且不跑 D40 回落判据——该判据的输入契约是恰好一份 per_step 文件（4.2 §11）。
     与 summary.csv 并列，不覆盖旧产物。单线程形态有切换事件时落 recovery.json；
     无事件（1 epoch 或固定 seed 不退化的情况除外）不写。
     """
@@ -2633,7 +2637,7 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
         n_steps += len(records)
     _rate = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
     cond_name = (COND_NAME_OVERRIDE or
-                 _cond_name_for_cell(TIER, [group],
+                 _cond_name_for_cell(RHO, [group],
                                      int(_rate.group(1)) if _rate else 0)
                  or "")
     events = parse_switch_events(logs, STEPS_PER_EPOCH)
@@ -2728,7 +2732,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
                       for p in ("startup", "steady", "switch")]
         miss_b = sum(miss_parts) if all(isinstance(v, int) for v in miss_parts) else None
         metrics["fetch_bytes_run"] = round(fetch_d, 1) if fetch_d is not None else ""
-        # 主口径（4.4 §1.4）：open-time，打开时不在本地即未命中
+        # 主口径（4.3 §2.3）：open-time，打开时不在本地即未命中
         if read_b > 0 and miss_b is not None:
             hit = 1.0 - miss_b / read_b
             metrics["hit_rate"] = round(min(1.0, max(0.0, hit)), 4)
@@ -2747,7 +2751,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
             metrics["source_saving_basis"] = BASIS_TC_UNAVAILABLE
         metrics["block_hit_rate_diag"] = metrics["hit_rate_diag"]
         # ---- 4.4 分阶段命中率 ----
-        # 主口径：训练侧 open-time（打开时块不在本地 = 未命中），与 §1.4 定义一致；
+        # 主口径：训练侧 open-time（打开时块不在本地 = 未命中），与 4.3 §2.3 定义一致；
         # 三个 phase 由 read_bytes/demand_miss 差分得到，缺字节账时留空。
         # agent 的 hits/misses 按它的 phase 窗口计，作交叉校验（窗口内无读时留空）。
         for phase in ("startup", "steady", "switch"):
@@ -2789,7 +2793,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
             print(f"[warn] prefetch 归因与计数增量不一致: "
                   f"sustained+switch={sustained + switch:.0f} "
                   f"prefetch={prefetch_d:.0f} (samples={len(samples)})", flush=True)
-        # ---- 淘汰证据三列（4.4 §1.7）----
+        # ---- 淘汰证据三列（4.3 §2.4）----
         evict_run, cap_final, dir_peak = eviction_guard_columns(
             guard_base, guard_final, dir_peaks)
         metrics["evict_blocks_run"] = evict_run
@@ -2806,7 +2810,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
             if ratio >= 1.5 or ratio <= 0.5:
                 print(f"[warn] 字节累计对不上目录字节: "
                       f"capacity_bytes_final={cap_final} dir_last={dir_last} "
-                      f"比值 {ratio:.2f}（4.4 §1.7 判据 2）", flush=True)
+                      f"比值 {ratio:.2f}（4.3 §2.4 判据 2）", flush=True)
     else:
         if group == "direct":
             metrics["hit_rate_basis"] = BASIS_DIRECT
@@ -2860,56 +2864,72 @@ def measure_void_reason(metrics):
 
 
 # ---------------------------------------------------------------------------
-# D30/D32 接线：档位联动、按档位过滤、rep 复用控制面、status 列、Fluid 替补
+# rho 选组：按 rho 过滤、rep 复用控制面、status 列、Fluid 替补
 # ---------------------------------------------------------------------------
-def tc_cell(tier, rate_str=None):
-    """把 D31 的带宽格落到具体参数：(rate_mbit, burst)。
+def tc_cell(rate_str=None):
+    """把带宽格落到具体参数：(rate_mbit, burst)。
 
     burst 从 config 现推（burst_for_rate），shell 侧与 runner 侧同一套数，
     不再各处写死 1600k。netem 只有固定时延，没有抖动开关。
     """
     rate_str = rate_str or TC_RATE_EFF
-    m = re.search(r"\d+", rate_str)
+    m = re.search(r"\d+", rate_str or "")
     if not m:
         return None, bench_config.TC_BURST
     r = int(m.group())
     return r, bench_config.burst_for_rate(r)
 
 
-def apply_tier(tier):
-    """把档位落到 N_TARS/EPOCHS（D32 联动：S=3ep、M/L=1ep）。
+def rho_label(rho):
+    """rho 写进目录名/COND 名的形态：0.5 → 05，其余整数（COND 名不许有点）。"""
+    return f"{float(rho):g}".replace(".", "")
 
-    显式给过 N_TARS/EPOCHS 环境变量时以显式值为准（冒烟场景），不被档位覆盖。
+
+def cell_name(rho, rate_mbit, group):
+    """一个格子的名字，与 C3 生成的 COND 文件名一字不差。
+
+    `compare-<组态>-rho<ρ>-<带宽>`：rho 用 0.5 写成 05，带宽是纯数字。
+    产物落 results/compare/<这个名字>/，status 按 COND 名扫完成度才对得上。
     """
-    global TIER, N_TARS, EPOCHS
-    TIER = tier
-    if not ENV_HAS_N_TARS:
-        N_TARS = CAPACITY_TIER_N_TARS[tier]
-    if not ENV_HAS_EPOCHS:
-        EPOCHS = CAPACITY_TIER_EPOCHS[tier]
+    return f"compare-{group}-rho{rho_label(rho)}-{rate_mbit}"
 
 
-def select_groups(tier, requested=None):
-    """按档位挑参跑组（D30），返回 (要跑的组态, 被剔除的组态)。
+def apply_rho(rho):
+    """把 rho 落到缓存容量（本文件唯一的容量来源）。
 
-    requested 为空时取该档全部组态（按 GROUPS 顺序）；显式指定时与该档求交集，
-    剔除项回传给调用方打印——M/L 档不该把 warm 组拖进来。
+    数据集、分片数、epoch 都是固定量，只有缓存容量随 rho 变；预热块数由缓存
+    容量推导，必须跟着重算，否则 warm 组会按上一个 rho 的 k 预热。
+    """
+    global RHO, CACHE_BYTES, WARMUP_K
+    RHO = float(rho)
+    # 显式给过容量环境变量时以显式值为准（冒烟场景），不被 rho 覆盖。
+    if not os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES", "").strip():
+        CACHE_BYTES = RO_PRESETS[RHO]
+    WARMUP_K = warmup_k_for(CACHE_BYTES, N_TARS)
+def groups_for_rho(rho):
+    """该 rho 上要跑的组态：基线只在参考点跑一次，被测组态跑满五个 rho。"""
+    if FIGURE_MODE:
+        return list(GROUPS)
+    allowed = (set(BASELINE_GROUPS) | set(TRAINCACHE_GROUPS)
+               if float(rho) == BASELINE_RHO else set(TRAINCACHE_GROUPS))
+    return [g for g in GROUPS if g in allowed]
+
+
+def select_groups(rho, requested=None):
+    """按 rho 挑参跑组，返回 (要跑的组态, 被剔除的组态)。
+
+    rho=4 跑全部七组态（基线只在参考点出现一次）；其余 rho 只跑被测组态。
+    显式 requested 时与允许集求交集，返回顺序按 requested。
     """
     ordered = list(GROUPS) if not requested else list(requested)
-    if FIGURE_MODE:
-        return ordered, []
-    allowed = CAPACITY_TIER_GROUPS[tier]
+    allowed = groups_for_rho(rho)
     return ([g for g in ordered if g in allowed],
             [g for g in (requested or []) if g not in allowed])
 
 
-def row_status(tier, void=False):
-    """产物 status 列：void 轮不进汇总（D14），L 档 1 次是符号探点（D19）。"""
-    if void:
-        return "void"
-    if FIGURE_MODE:
-        return "ok"
-    return "exploratory" if tier in TIER_EXPLORATORY else "ok"
+def row_status(void=False):
+    """产物 status 列：void 轮不进汇总（4.3 §2.4），其余都是 ok（每格固定 3 次）。"""
+    return "void" if void else "ok"
 
 
 # D30：Fluid 整组起不来时落回同冷热档的 JuiceFS 顶位，产物标 baseline_substituted
@@ -3016,7 +3036,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         # 6.16:traincache 组在创建 train-job 前抓 fetch 计数器基线
         base_snap = fetch_snapshot() if is_tc else None
         cache_base = cache_counter_snapshot() if is_tc else None
-        # 4.4 §1.7：淘汰证据基线与目录峰值采样序列
+        # 4.3 §2.4：淘汰证据基线与目录峰值采样序列
         guard_base = eviction_guard_snapshot() if is_tc else None
         dir_peaks = []
         dir_peak_times = []
@@ -3050,7 +3070,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 if snap is not None:
                     samples.append(snap)
                     sample_times.append(t0)
-                # 4.4 §1.7：节点块目录字节与 fetch 同节拍采，取窗口最大值定峰值
+                # 4.3 §2.4：节点块目录字节与 fetch 同节拍采，取窗口最大值定峰值
                 peak = blocks_dir_peak_bytes()
                 if stop_sample.is_set():
                     break
@@ -3200,7 +3220,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 pre_up_snap=pre_up_snap, origin_egress=origin_egress,
                 guard_base=guard_base, guard_final=guard_final,
                 dir_peaks=list(dir_peaks), dir_peak_times=list(dir_peak_times))
-            # 4.4 §1.7：目录装过容量而淘汰没删过一个块 → 容量口径不成立，作废。
+            # 4.3 §2.4：目录装过容量而淘汰没删过一个块 → 容量口径不成立，作废。
             # 已有更具体的作废原因时保留原原因。
             if (not metrics.get("void")
                     and evict_not_engaged(metrics.get("evict_blocks_run"),
@@ -3223,15 +3243,26 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
     return stamp_rows(results, group, substitute_for)
 
 
-def resolve_out_path(raw):
-    """把 --out 落到数据层：相对路径按 bench/config.py 的 RESULTS_DIR 展开。
+def resolve_out_root(raw, family="compare"):
+    """把 --out-root 落到数据层：相对路径按 RESULTS_DIR 展开。
 
-    产物一律实体写 ~/tcd/bench/results/，不在 repo 内 mkdir；绝对路径原样使用。
+    产物一律实体写 ~/tcd/bench/results/<族>/<格子>/，不在 repo 内 mkdir；
+    绝对路径原样使用。缺省是该族的产物根。
     """
+    if not raw:
+        return bench_config.family_results_dir(family)
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = bench_config.RESULTS_DIR / p
     return p.resolve()
+
+
+def cell_out_path(out_root, rho, rate_mbit, group, cell=None):
+    """一个格子的 summary.csv 落点：<族根>/<格子名>/summary.csv（契约 §6）。
+
+    `cell` 给了就用它（调用方钉死 COND 名/格子名），否则按 rho/带宽/组态现拼。
+    """
+    return Path(out_root) / (cell or cell_name(rho, rate_mbit, group)) / "summary.csv"
 
 
 def rate_label(rate_str):
@@ -3240,13 +3271,15 @@ def rate_label(rate_str):
     return f"{m.group()}mbit" if m else str(rate_str or "")
 
 
-def _cond_name_for_cell(tier, groups, rate_mbit):
-    """按档位/带宽/组态找对应的 compare COND，用于取冻结镜像 digest。"""
-    # 命名见 4.4 §C3：S 档是 compare-d-<组态>-<rate>；
-    # M/L 档是 compare-b-<m|l>-<组态>-<rate>。
+def _cond_name_for_cell(rho, groups, rate_mbit):
+    """按 rho/带宽/组态找对应的 compare COND，用于取冻结镜像 digest。
+
+    先按格子名直接找（生成器与 runner 同一套命名）；找不到再退一步按 COND 字段
+    反查，避免生成器改了前缀顺序时这里静默失配（失配只影响 digest 交叉核对，
+    不阻止跑分，所以给两级兜底而不是硬失败）。
+    """
     for g in groups:
-        name = (f"compare-d-{g}-{rate_mbit}" if tier == "S"
-                else f"compare-b-{tier.lower()}-{g}-{rate_mbit}")
+        name = cell_name(rho, rate_mbit, g)
         if (CONDS_DIR / f"{name}.json").is_file():
             return name
     for p in sorted(CONDS_DIR.glob("compare-*.json")):
@@ -3254,10 +3287,23 @@ def _cond_name_for_cell(tier, groups, rate_mbit):
             cond = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        cache = cond.get("cache") or {}
         if (cond.get("network") or {}).get("rate_mbit") == rate_mbit and \
-                (cond.get("cache") or {}).get("capacity_ratio") == tier:
+                (cond.get("group") in groups) and \
+                _rho_of(cond) == float(rho):
             return p.stem
     return None
+
+
+def _rho_of(cond):
+    """COND 里声明的 rho；没开缓存或没写 rho 时给 None。"""
+    cache = cond.get("cache") or {}
+    if not cache.get("enabled"):
+        return None
+    try:
+        return float(cache["rho"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _actual_image(ref):
@@ -3269,18 +3315,18 @@ def _actual_image(ref):
             "digest_source": "docker_repo_digest" if digest else None}
 
 
-def write_cell_lock(out_path, tier, groups, rate_mbit, rate_str):
+def write_cell_lock(out_path, rho, groups, rate_mbit, rate_str):
     """每格写 lock.json：COND 冻结 digest + 本次实际镜像，不一致不阻止跑分。"""
     import lock as lock_mod  # noqa: PLC0415
 
-    cond_name = COND_NAME_OVERRIDE or _cond_name_for_cell(tier, groups, rate_mbit)
+    cond_name = COND_NAME_OVERRIDE or _cond_name_for_cell(rho, groups, rate_mbit)
     if cond_name:
         os.environ["TRAINCACHE_COND"] = cond_name
     else:
         os.environ.pop("TRAINCACHE_COND", None)
     data = lock_mod.snapshot()
-    data["cell"] = {"tier": tier, "rate": rate_label(rate_str),
-                    "groups": list(groups)}
+    data["cell"] = {"rho": float(rho), "cache_bytes": CACHE_BYTES,
+                    "rate": rate_label(rate_str), "groups": list(groups)}
     data["images_actual"] = {
         "training": _actual_image(TRAIN_IMAGE),
         "juicefs": _actual_image(JUICEFS_IMAGE),
@@ -3345,7 +3391,8 @@ def merge_rows(old, new):
 
 
 # summary.csv 的列顺序（模块级：--selftest 也断言这里的列集合）
-CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
+CSV_FIELDNAMES = ["group", "rho", "family", "load", "gateway",
+                  "rate", "rep", "status", "void", "reason",
                   "baseline_substituted",
                   "warmup_seconds", "warmup_time_basis",
                   "startup_makespan", "total_makespan",
@@ -3374,17 +3421,17 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "startup_warmup_model_bytes",
                   "origin_egress_bytes", "origin_reconcile_diff",
                   "prefetch_fanout", "measure_shards",
-                  # 4.4 §1.7 淘汰证据三列（traincache 组才有值，其余留空）；
+                  # 4.3 §2.4 淘汰证据三列（traincache 组才有值，其余留空）；
                   # 后两列记目录峰值的采样点数与实际平均间隔，判据三的上界要靠它读盲区
                   "evict_blocks_run", "capacity_bytes_final",
                   "cache_dir_peak_bytes",
                   "cache_dir_peak_samples", "cache_dir_peak_period_s",
-                  # 4.4 §1.10：每个点可回溯到 COND 与 run ID；曲面与字节族的
+                  # 4.4 §7：每个点可回溯到 COND 与 run ID；曲面与字节族的
                   # 自变量列必须随产物落盘，否则出图只能靠目录名猜。
                   "cond", "run_id", "epochs", "shuffle",
                   "dataset_bytes", "cache_ratio",
                   "prefetch_lookahead", "evict_policy",
-                  "gate_mode", "gateway", "gateway_cache", "data_source",
+                  "gate_mode", "gateway_cache", "data_source",
                   # M5 倾斜双 Job：A 命中率/等待占比、B 挤占热块次数
                   "a_hit_ratio", "a_wait_ratio", "b_evictions_of_hot",
                   "a_steps", "b_steps", "tilt_hot_shards", "tilt_a_budget",
@@ -3397,7 +3444,7 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
 
 
 def write_csv(path, results):
-    # 列：四指标 + warmup_seconds(任务#8) + tier/rate/trace_sha256(6.12/6.13/D31)
+    # 列：四指标 + warmup_seconds(任务#8) + rho/rate/trace_sha256(6.12/6.13/D31)
     #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
     #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
     #     + gateway(D23：1=经合并回源网关，0=直连源站)
@@ -3413,13 +3460,21 @@ def write_csv(path, results):
     old = existing_rows(path)
     rows = merge_rows(old, results)
     new_keys = {_row_key(r) for r in results if not _is_void(r)}
-    expect = (TIER, rate_label(TC_RATE_EFF))
+    expect_rho, expect_rate = f"{RHO:g}", rate_label(TC_RATE_EFF)
+
+    def _same_rho(value):
+        try:
+            return float(value) == float(expect_rho)
+        except (TypeError, ValueError):
+            return False
+
     foreign = [r for r in old
-               if (r.get("tier", ""), r.get("rate", "")) != expect
+               if (not _same_rho(r.get("rho", ""))
+                   or r.get("rate", "") != expect_rate)
                and _row_key(r) not in new_keys]
     if foreign:
-        print(f"[csv] 警告：{path.name} 里 {len(foreign)} 行的档位/带宽与本次 "
-              f"{expect[0]}/{expect[1]} 不同，按只追加口径保留", flush=True)
+        print(f"[csv] 警告：{path.name} 里 {len(foreign)} 行的 rho/带宽与本次 "
+              f"{expect_rho}/{expect_rate} 不同，按只追加口径保留", flush=True)
     if old:
         print(f"[csv] 追加写：既有 {len(old)} 行，本次 {len(results)} 行顶掉 "
               f"{len(new_keys & {_row_key(r) for r in old})} 个样本点，"
@@ -3429,10 +3484,11 @@ def write_csv(path, results):
         w.writeheader()
         for r in rows:
             row = {k: r.get(k, "") for k in fieldnames}
-            row["tier"] = row.get("tier") or TIER
+            row["rho"] = row.get("rho") or expect_rho
             row["rate"] = row.get("rate") or rate_label(TC_RATE_EFF)
-            row["status"] = row.get("status") or row_status(
-                row["tier"], bool(r.get("void")))
+            row["family"] = row.get("family") or FAMILY
+            row["load"] = row.get("load") or ("tilt" if TILT else "dataset")
+            row["status"] = row.get("status") or row_status(bool(r.get("void")))
             row["baseline_substituted"] = r.get("baseline_substituted") or ""
             row["chunk_size_bytes"] = row.get("chunk_size_bytes") or CHUNK_SIZE
             row["cache_bytes"] = row.get("cache_bytes") or CACHE_BYTES
@@ -3445,7 +3501,7 @@ def write_csv(path, results):
                                 N_TARS * SHARD_SIZE_MB * 1024 * 1024)
             row["cond"] = (r.get("cond") or COND_NAME_OVERRIDE or
                            _cond_name_for_cell(
-                               TIER, [row["group"]],
+                               RHO, [row["group"]],
                                int(str(row["rate"]).replace("mbit", "").strip()))
                            or "")
             row["run_id"] = r.get("run_id") or str(row["rep"]).zfill(2)
@@ -3478,15 +3534,15 @@ def selftest():
          清后判空命令形态正确；
       5. 读队列超时那一步的 wait 照实计入诊断账、本轮标 void（bad 步不进
          stall 样本，避免除零）；快照缺片的作废原因落 read_error；
-      6. D30/D31/D32 接线的纯函数口径：按档位过滤参跑组、status 三态、
-         档位 epochs 联动、带宽格的 burst 推导、Fluid 全废才顶位；
+      6. rho 口径的纯函数：按 rho 过滤参跑组、status 两态、带宽格的
+         burst 推导、Fluid 全废才顶位；
       7. D23 网关开关：summary.csv 的 gateway 列位次、取值映射 1/0、透传给 up.sh；
       8. 产物写入的只追加口径：补跑同一张 CSV 不得截断既有行；
       9. 逐步打点的两种形态：倾斜双 Job 落 per_step_a/b 两份且不跑 D40 判据，
          单线程形态仍是一份 per_step_1_w1.jsonl；
-      10. 淘汰证据三列（4.4 §1.7）：指标行解析、counter 归零起算、证据缺失留空、
+      10. 淘汰证据三列（4.3 §2.4）：指标行解析、counter 归零起算、证据缺失留空、
          作废判据的边界，以及三列进 summary.csv 的形态；
-      11. C 轨挤占口径与 A 步预算（4.4 §C3）：状态机四条边界、模板里旧的集合
+      11. C 轨挤占口径与 A 步预算（4.2 §11）：状态机四条边界、模板里旧的集合
          差集已删、预算从 runner 下发进 Pod 并随产物落盘；
       12. 倾斜 run 的 Pod 闸门按字节地板推导：非倾斜档仍用常量，倾斜档由
          epoch 数、分片数与限速带宽推出，正常推进的 run 不再被截成 pod_failed；
@@ -3672,30 +3728,25 @@ def selftest():
           f"bad 步不进 stall 样本(n={timeout_metrics['stall_n']})，本轮 void=1 "
           f"reason=read_queue_timeout；快照缺片 reason=read_error")
 
-    # ---- 6) D30/D31/D32 接线：档位过滤 / 探点状态 / 带宽格推导 / 替补判定 ----
-    m_pick, m_drop = select_groups("M")
-    if set(m_pick) != CAPACITY_TIER_GROUPS["M"] or m_drop:
-        raise AssertionError(f"自测：M 档默认参跑组不对 picked={m_pick} dropped={m_drop}")
-    l_pick, l_drop = select_groups("L", ["traincache-warm", "fluid-warm",
-                                        "traincache-cold"])
-    if l_pick != ["traincache-cold"] or l_drop != ["traincache-warm", "fluid-warm"]:
-        raise AssertionError(f"自测：L 档越组态没被剔除 picked={l_pick} dropped={l_drop}")
-    s_pick, _ = select_groups("S")
-    if s_pick != GROUPS:
-        raise AssertionError("自测：S 档应七组态全跑")
-    if row_status("S") != "ok" or row_status("S", True) != "void":
-        raise AssertionError("自测：S 档 status 映射不对")
-    if row_status("L") != "exploratory" or row_status("L", True) != "void":
-        raise AssertionError("自测：L 档探点/作废标记不对")
-    if TIER_PRESETS["S"]["epochs"] != 3 or TIER_PRESETS["M"]["epochs"] != 1 \
-            or TIER_PRESETS["L"]["epochs"] != 1:
-        raise AssertionError("自测：档位 epochs 联动不对（S=3/M=1/L=1）")
-    for t in ("S", "M", "L"):
-        for r in (100, 300, 1000):
-            got_r, got_burst = tc_cell(t, f"{r}mbit")
-            if got_r != r or got_burst != bench_config.burst_for_rate(r):
-                raise AssertionError(f"自测：D31 格子推导不对 {t}@{r} → "
-                                     f"burst={got_burst}")
+    # ---- 6) rho 选组 / status / 带宽格推导 / 替补判定 ----
+    four_pick, four_drop = select_groups(4.0)
+    if four_pick != GROUPS or four_drop:
+        raise AssertionError(f"自测：rho=4 应七组态全跑 picked={four_pick}")
+    eight_pick, _ = select_groups(8.0)
+    if eight_pick != list(TRAINCACHE_GROUPS):
+        raise AssertionError(f"自测：rho=8 只应跑被测组态 picked={eight_pick}")
+    mix_pick, mix_drop = select_groups(8.0, ["traincache-warm", "fluid-warm",
+                                             "traincache-cold"])
+    if mix_pick != ["traincache-warm", "traincache-cold"] or \
+            mix_drop != ["fluid-warm"]:
+        raise AssertionError(f"自测：rho=8 越界组态没被剔除 "
+                             f"picked={mix_pick} dropped={mix_drop}")
+    if row_status() != "ok" or row_status(True) != "void":
+        raise AssertionError("自测：status 映射不对")
+    for r in (100, 300, 1000):
+        got_r, got_burst = tc_cell(f"{r}mbit")
+        if got_r != r or got_burst != bench_config.burst_for_rate(r):
+            raise AssertionError(f"自测：带宽格推导不对 @{r} → burst={got_burst}")
     if hasattr(bench_config, "jitter_enabled"):
         raise AssertionError("自测：config.jitter_enabled 应已撤除（抖动轴不在协议里）")
     all_void = [{"void": True}, {"void": True}]
@@ -3707,15 +3758,15 @@ def selftest():
     if stamped[0]["group"] != "juicefs-cold" or \
             stamped[0]["baseline_substituted"] != "fluid-cold":
         raise AssertionError("自测：替补标记没落到行上")
-    print(f"[selftest] 6) D30/D32 接线：M 档跑 {m_pick}（L 档剔除 {l_drop}）；"
-          f"status ok/void/exploratory 三态、S/M/L epochs 3/1/1、"
-          f"三档 burst 推导、抖动轴已撤、替补全废判据均自洽")
+    print(f"[selftest] 6) rho 选组：rho=4 跑 {four_pick}，rho=8 跑 {eight_pick}"
+          f"（越界剔除 {mix_drop}）；status ok/void、带宽 burst 推导、"
+          f"替补全废判据均自洽")
 
     # ---- 7) D23 网关开关：新列、取值映射与透传 ----
+    if CSV_FIELDNAMES[:5] != ["group", "rho", "family", "load", "gateway"]:
+        raise AssertionError("自测：group 之后应为 rho/family/load/gateway")
     if "gateway" not in CSV_FIELDNAMES:
         raise AssertionError("自测：summary.csv 缺 gateway 列")
-    if CSV_FIELDNAMES.index("gateway") != CSV_FIELDNAMES.index("gate_mode") + 1:
-        raise AssertionError("自测：gateway 列应紧跟 gate_mode")
     if gateway_flag(True) != "1" or gateway_flag(False) != "0":
         raise AssertionError(f"自测：gateway_flag 映射不对 "
                              f"{gateway_flag(True)!r}/{gateway_flag(False)!r}")
@@ -3724,7 +3775,7 @@ def selftest():
     import inspect  # noqa: PLC0415
     if 'env["TRAINCACHE_GATEWAY"]' not in inspect.getsource(group_up):
         raise AssertionError("自测：group_up 没有把网关开关透传给 up.sh")
-    print(f"[selftest] 7) D23 网关开关：gateway 列紧随 gate_mode，"
+    print(f"[selftest] 7) D23 网关开关：gateway 列紧随 load，gateway_cache 紧随 gate_mode，"
           f"映射 1/0 正确，GATEWAY_ON={GATEWAY_ON} 已透传到 up.sh")
 
     # ---- 8) 只追加不覆盖：同格补跑不得截断既有行 ----
@@ -3789,7 +3840,7 @@ def selftest():
     print("[selftest] 9) 倾斜双 Job 落 per_step_a/b 两份且不跑 D40；"
           "单线程形态仍是一份 per_step_1_w1.jsonl")
 
-    # ---- 10) 淘汰证据三列（4.4 §1.7）：指标解析、增量口径、作废判据与产物列 ----
+    # ---- 10) 淘汰证据三列（4.3 §2.4）：指标解析、增量口径、作废判据与产物列 ----
     _guard_line = (
         'traincache_evict_blocks_total{dataset="compare-data-8m",result="normal"} 7\n'
         'traincache_evict_blocks_total{dataset="compare-data-8m",result="danger"} 3\n'
@@ -3829,7 +3880,7 @@ def selftest():
     if "-name \"*.blk\"" not in _BLOCKS_DIR_BYTES_SCRIPT \
             or "tmp-" in _BLOCKS_DIR_BYTES_SCRIPT:
         raise AssertionError("自测：目录峰值脚本应只统计 .blk，不计 tmp-* 半成品")
-    # 判据三的采样落产物（4.4 §1.7）：点数照实记，节拍取相邻时刻的均值，
+    # 判据三的采样落产物（4.3 §2.4）：点数照实记，节拍取相邻时刻的均值，
     # docker exec 拖长时不能用标称 5 s 冒充；时刻不足两个退回标称值。
     if dir_peak_sampling_stats([1 << 30, 2 << 30, None], [0.0, 5.0, 10.0], 5.0) != (3, 5.0):
         raise AssertionError("自测：目录峰值采样点数与节拍应落产物（3 点、间隔 5.0 s）")
@@ -3868,10 +3919,10 @@ def selftest():
                                                 "cache_dir_peak_period_s")):
             raise AssertionError("自测：淘汰证据三列与采样节拍两列没进 summary.csv，"
                                  "或非 traincache 组没留空")
-    print("[selftest] 10) 淘汰证据三列 + 目录峰值采样节拍两列（4.4 §1.7）："
+    print("[selftest] 10) 淘汰证据三列 + 目录峰值采样节拍两列（4.3 §2.4）："
           "指标解析、归零起算、留空口径、作废判据边界、节拍实测均值与产物列落盘均自洽")
 
-    # ---- 11) C 轨挤占口径与 A 步预算（4.4 §C3）----
+    # ---- 11) C 轨挤占口径与 A 步预算（4.2 §11）----
     _hot_ns = {}
     exec(HOT_EDGE_DEF_SRC, _hot_ns)
     _edges = _hot_ns["hot_eviction_edges"]
@@ -3905,7 +3956,7 @@ def selftest():
         raise AssertionError("自测：A 步预算未替换无界循环的 cycle 计数")
     if "_hot_present" in _names:
         raise AssertionError("自测：模板仍在用「累积在位集合减当前片」的旧口径"
-                            "（该式恒等于 64×a_steps，4.4 §C3 已作废）")
+                            "（该式恒等于 64×a_steps，4.2 §11 已作废）")
     if '"TILT_A_STEPS"' not in inspect.getsource(create_measure_pod):
         raise AssertionError("自测：TILT_A_STEPS 没下发进测量 Pod，Pod 内会退回"
                              "模板默认值，产物 tilt_a_budget 与实跑脱节")
@@ -3977,8 +4028,8 @@ def selftest():
     # ---- 13) D23/M5 网关磁盘缓存开关：新列、取值映射、环境变量与透传 ----
     if "gateway_cache" not in CSV_FIELDNAMES:
         raise AssertionError("自测：summary.csv 缺 gateway_cache 列")
-    if CSV_FIELDNAMES.index("gateway_cache") != CSV_FIELDNAMES.index("gateway") + 1:
-        raise AssertionError("自测：gateway_cache 列应紧跟 gateway")
+    if CSV_FIELDNAMES.index("gateway_cache") != CSV_FIELDNAMES.index("gate_mode") + 1:
+        raise AssertionError("自测：gateway_cache 列应紧跟 gate_mode")
     if gateway_cache_flag(True) != "1" or gateway_cache_flag(False) != "0":
         raise AssertionError(f"自测：gateway_cache_flag 映射不对 "
                              f"{gateway_cache_flag(True)!r}/"
@@ -4015,125 +4066,134 @@ def selftest():
         rows = list(csv.DictReader(open(p, newline="")))
         if len(rows) != 1 or rows[0]["gateway_cache"] != gateway_cache_flag():
             raise AssertionError(f"自测：gateway_cache 列没随产物落盘：{rows}")
-    print(f"[selftest] 13) D23 缓存开关：gateway_cache 列紧随 gateway，映射 1/0 正确，"
+    print(f"[selftest] 13) D23 缓存开关：gateway_cache 列紧随 gate_mode，映射 1/0 正确，"
           f"GATEWAY_CACHE_ON={GATEWAY_CACHE_ON} 已透传到 up.sh，列随产物落盘")
     print("run_bench selftest: PASS")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="五组对照跑分")
-    parser.add_argument("--reps", type=int, default=None,
-                        help="每点采样次数；缺省按档位取 D19/D32 值（S=3/M=3/L=1）")
-    parser.add_argument("--tier", choices=("S", "M", "L"), default=TIER,
-                        help="容量档位(默认取 CAPACITY_RATIO 环境变量,缺省 S)")
+    parser = argparse.ArgumentParser(description="七组态对照跑分")
+    parser.add_argument("--rho", type=float, choices=bench_config.RHO_VALUES,
+                        default=4.0,
+                        help="数据集字节 ÷ 缓存容量；缺省 4（基线参考点）")
+    parser.add_argument("--tier", choices=("S", "M", "L"), default=None,
+                        help="[legacy] 容量档位；S→rho=2, M→rho=8, L→rho=32 语义占位，映射到 RHO=4")
+    parser.add_argument("--reps", type=int, default=bench_config.REPS,
+                        help="每点采样次数（缺省 3；非 3 次只当冒烟）")
     parser.add_argument("--rate", type=str, default=None,
-                        help="带宽档（如 300mbit）；S 档缺省 100mbit，M/L 档必填")
-    parser.add_argument("--groups", nargs="+", default=None,
-                        help="要跑的组态；缺省按档位取（D30：S=七组态，M=direct/fluid-cold/"
-                             "traincache-cold，L=traincache-cold/fluid-cold）。"
-                             "显式指定时与该档求交集，越档的组态会被剔除")
-    parser.add_argument("--out", type=str,
-                        default=str(bench_config.SCORES_RESULTS_DIR / "compare" / "summary.csv"))
+                        help=f"带宽（如 300mbit）；缺省 {bench_config.TC_RATE}")
+    parser.add_argument("--group", dest="groups", nargs="+", default=None,
+                        choices=GROUPS,
+                        help="要跑的组态；rho=4 缺省七组态，其余 rho 缺省 "
+                             "traincache-cold/warm")
+    parser.add_argument("--groups", dest="groups2", nargs="+", default=None,
+                        choices=GROUPS,
+                        help="[legacy] 等同于 --group")
+    parser.add_argument("--out-root", type=str, default=None,
+                        help='产物根；缺省 config.family_results_dir("compare")')
+    parser.add_argument("--cell", type=str, default=None,
+                        help="整格名覆盖（COND 文件名）；只能与单个 --group 同用")
+    parser.add_argument("--family", type=str, default="compare",
+                        help="summary.csv 的 family 列（缺省 compare）")
     parser.add_argument("--selftest", action="store_true",
                         help="离线自检（不连集群、不起 Pod）后退出")
     parser.add_argument("--dry-run", action="store_true",
-                        help="只打印本轮实验计划（组态×次数×epochs、D31 带宽格、trace sha），"
+                        help="只打印每格的 COND 名/数据字节/缓存字节/rate/reps，"
                              "不连集群、不起 Pod（开跑前核对用）")
     args = parser.parse_args()
+    # legacy 参数合并
+    if getattr(args, "groups2", None) and not args.groups:
+        args.groups = args.groups2
+    if getattr(args, "tier", None):
+        # tier 模式：显式联动 n_tars/epochs，rho 固定给 apply_rho 走
+        CAPACITY_TIER_N_TARS = {"S": 8, "M": 32, "L": 128}
+        CAPACITY_TIER_EPOCHS = {"S": 3, "M": 1, "L": 1}
+        if "N_TARS" not in os.environ:
+            globals()["N_TARS"] = CAPACITY_TIER_N_TARS.get(args.tier, 8)
+        if "EPOCHS" not in os.environ:
+            globals()["EPOCHS"] = CAPACITY_TIER_EPOCHS.get(args.tier, 3)
+        if args.rho is None:
+            args.rho = 4.0  # tier 模式默认 rho=4
+        # args.rho 是 float 字符串时 apply_rho 会正确设全局 RHO
+    # warmup_k 必须 <= N_TARS（chunk_count），否则 controller InvalidSpec
+    WARMUP_K = warmup_k_for(CACHE_BYTES, N_TARS)
 
     if args.selftest:
         selftest()
         return
 
-    tier = args.tier
-    # 速率只从 --rate 取：S 档缺省 100mbit；M/L 只有 @1000 格，不传会落到
-    # 预注册外的档位，直接退出。
     global TC_RATE_EFF
-    if args.rate is not None:
-        TC_RATE_EFF = args.rate
-    elif tier == "S":
-        TC_RATE_EFF = bench_config.TC_RATE
-    else:
-        raise SystemExit(
-            f"[cfg] {tier} 档只有 @1000 格，必须显式传 --rate"
-            f"（如 --rate 1000mbit），退出")
-    apply_tier(tier)                      # D32：档位联动 n_tars / epochs
-    tier_reps = TIER_PRESETS[tier]["reps"]
-    allowed_reps = CAPACITY_TIER_REPS_ALLOWED[tier]
-    if args.reps is None:
-        reps = tier_reps
-    else:
-        reps = args.reps
-        if FIGURE_MODE:
-            pass
-        elif reps not in allowed_reps:
-            print(f"[warn] --reps={reps} 不在 {tier} 档的合法次数 "
-                  f"{sorted(allowed_reps)}（规定值 {tier_reps}）内；"
-                  f"这轮产物只能当冒烟，不进正式表")
-        elif reps != tier_reps:
-            print(f"[note] --reps={reps} 是 {tier} 档的合法值"
-                  f"（规定值 {tier_reps}，D32）")
-
-    picked, dropped = select_groups(tier, args.groups)
+    TC_RATE_EFF = args.rate if args.rate is not None else bench_config.TC_RATE
+    reps = args.reps
+    if reps != bench_config.REPS:
+        print(f"[warn] --reps={reps} 不等于规定值 {bench_config.REPS}；"
+              f"这轮产物只能当冒烟")
+    apply_rho(args.rho)
+    picked, dropped = select_groups(args.rho, args.groups)
     if dropped:
-        print(f"[cfg] D30 档位过滤：{tier} 档剔除越档组态 {dropped}")
+        print(f"[cfg] rho={args.rho:g} 剔除不允许的组态 {dropped}")
     if not picked:
-        raise SystemExit(f"[cfg] {tier} 档没有可跑组态（请求 {args.groups}），退出")
+        raise SystemExit(f"[cfg] rho={args.rho:g} 没有可跑组态"
+                         f"（请求 {args.groups}），退出")
+    if args.cell and len(picked) != 1:
+        raise SystemExit("[cfg] --cell 只能与单个 --group 同用")
+    if args.cell:
+        globals()["COND_NAME_OVERRIDE"] = args.cell
+    global FAMILY
+    FAMILY = args.family
 
-    rate_mbit, burst_eff = tc_cell(tier, TC_RATE_EFF)
-    if tier == "S" and rate_mbit == 300 and not FIGURE_MODE:
-        if args.groups is None:
-            raise SystemExit(
-                "[cfg] S@300 只允许 direct/fluid-cold/traincache-cold 三组，"
-                "必须显式传 --groups，退出")
-        extra = [g for g in args.groups if g not in S300_GROUPS]
-        if extra:
-            raise SystemExit(
-                f"[cfg] S@300 不接受组态 {extra}，只允许 {list(S300_GROUPS)}，退出")
+    rate_mbit, burst_eff = tc_cell(TC_RATE_EFF)
+    if rate_mbit is None:
+        raise SystemExit(f"[cfg] 无法解析 --rate={TC_RATE_EFF!r}，退出")
     if rate_mbit not in bench_config.TC_RATE_MBITS:
-        print(f"[warn] --rate={TC_RATE_EFF} 不在 D31 带宽轴 "
+        print(f"[warn] --rate={TC_RATE_EFF} 不在带宽轴 "
               f"{list(bench_config.TC_RATE_MBITS)} 内，这轮不是正式实验点")
 
     trace = build_run_trace()
     trace_sha = trace_mod.trace_sha256(trace)
     trace_json = json.dumps(trace, ensure_ascii=False, indent=2) + "\n"
 
-    print(f"[cfg] tier={tier} n_tars={N_TARS}(数据集≈{N_TARS*SHARD_SIZE_MB}MiB) "
+    out_root = resolve_out_root(args.out_root, FAMILY)
+    data_bytes = N_TARS * SHARD_SIZE_MB * 1024 * 1024
+
+    print(f"[cfg] rho={RHO:g} cache={CACHE_BYTES}B data={data_bytes}B "
+          f"n_tars={N_TARS}(≈{N_TARS*SHARD_SIZE_MB}MiB) "
           f"epochs={EPOCHS} steps_per_epoch={STEPS_PER_EPOCH} batch={BATCH} "
           f"images_per_tar={IMAGES_PER_TAR} shuffle={TRACE_SHUFFLE} seed={TRACE_SEED}")
-    print(f"[cfg] chunk={CHUNK_SIZE}B cache={CACHE_BYTES}B warmup_k(warm)={WARMUP_K} "
+    print(f"[cfg] chunk={CHUNK_SIZE}B warmup_k(warm)={WARMUP_K} "
           f"prefetch_k={PREFETCH_K} agent_lookahead={AGENT_PREFETCH_K} "
           f"compute_ms={COMPUTE_MS} workers={READ_WORKERS} "
           f"depth={READ_QUEUE_DEPTH} dataset={DATASET_NAME}")
-    print(f"[cfg] D31 带宽格: rate={TC_RATE_EFF} delay={TC_DELAY_EFF} "
+    print(f"[cfg] 带宽格: rate={TC_RATE_EFF} delay={TC_DELAY_EFF} "
           f"burst={burst_eff} netem=固定 delay "
-          f"(BW/r={bench_config.bw_over_r(tier, rate_mbit):.2f}，"
-          f"<1 链路受限、>2 计算主导)")
-    print(f"[cfg] D32 核对: {tier} 档每点 {tier_reps} 次"
-          f"（合法 {sorted(allowed_reps)}），本轮 reps={reps}；"
-          f"参跑组态={picked}；trace sha256={trace_sha}")
+          f"(BW/r={rate_mbit/100:.2f}，<1 链路受限、>2 计算主导)")
+    print(f"[cfg] 每点 {reps} 次；参跑组态={picked}；trace sha256={trace_sha}")
 
     if args.dry_run:
-        print(f"[dry-run] 计划：{len(picked)} 个组态 × {reps} 次 = "
-              f"{len(picked) * reps} 轮 → " +
-              " ".join(f"{g}×{reps}" for g in picked))
+        print(f"[dry-run] 计划：rho={RHO:g} rate={rate_mbit}mbit "
+              f"{len(picked)} 个格子 × {reps} 次 = {len(picked) * reps} 轮")
+        for group in picked:
+            cell = args.cell or cell_name(RHO, rate_mbit, group)
+            print(f"[dry-run] {cell} → {out_root / cell / 'summary.csv'} "
+                  f"(data={data_bytes}B cache={CACHE_BYTES}B "
+                  f"rate={rate_mbit} reps={reps})")
         print("[dry-run] 冷组（含 direct）跨 rep 复用控制面，warm 组每轮整组 down/up；"
               "Fluid 全轮作废时按 D30 落回 JuiceFS 同冷热档顶位")
-        print(f"[dry-run] 未连集群、未起 Pod，产物 {args.out} 未写入")
+        print(f"[dry-run] 未连集群、未起 Pod，{out_root} 未写入")
         return
 
-    out_path = resolve_out_path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     # 图系列的缓存容量与策略逐 COND 变化：先把 ConfigMap 对齐，再起组。
-    # 三档参数与默认值相同，这里是空操作。
+    # 对照族各格参数不同，这里按当前 rho 对齐一次。
     ensure_agent_config()
-    write_cell_lock(out_path, tier, picked, rate_mbit, TC_RATE_EFF)
 
     all_results = []
     for group in picked:
-        results = run_group(group, reps, out_path, trace_json, trace_sha)
+        cell_csv = cell_out_path(out_root, RHO, rate_mbit, group, args.cell)
+        cell_csv.parent.mkdir(parents=True, exist_ok=True)
+        write_cell_lock(cell_csv, RHO, [group], rate_mbit, TC_RATE_EFF)
+        results = run_group(group, reps, cell_csv, trace_json, trace_sha)
         all_results.extend(results)
-        write_csv(out_path, all_results)
+        write_csv(cell_csv, results)
         # D30：Fluid 整组起不来 → 落回同冷热档的 JuiceFS 顶位并标记
         sub = SUBSTITUTE_GROUP.get(group)
         if sub and needs_substitution(results):
@@ -4143,12 +4203,12 @@ def main():
             else:
                 print(f"[substitute] {group} 全 {len(results)} 轮作废 → 用 {sub} 顶位"
                       f"（产物标 baseline_substituted={group}，D30）", flush=True)
-                sub_rows = run_group(sub, reps, out_path, trace_json, trace_sha,
+                sub_rows = run_group(sub, reps, cell_csv, trace_json, trace_sha,
                                      substitute_for=group)
                 all_results.extend(sub_rows)
-                write_csv(out_path, all_results)
+                write_csv(cell_csv, sub_rows)
 
-    print(f"\n[done] 结果写入 {out_path}")
+    print(f"\n[done] 结果写入 {out_root}")
     print(f"[done] 共 {len(all_results)} 条记录，{sum(1 for r in all_results if r.get('void'))} 条作废")
 
 

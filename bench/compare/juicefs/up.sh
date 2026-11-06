@@ -22,12 +22,11 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="juicefs"
 NS="juicefs"
-TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
-# 本档位消费的��片数(run_bench 按 S/M/L 档位下发;缺省取 M 档全量 32 片)。
-# 同步与预热都按这个数收窄:桶里共有 32 片,不收窄的话 S 档(只消费 8 片 = 2GiB)
-# 会把 8GiB 全同步进来,数据集口径与容量比都失真。
-N_TARS="${N_TARS:-$(cfg TRACK_B_N_TARS)}"
-N_TARS="${N_TARS:-32}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.json}"
+# 本格消费的分片数(run_bench 按格子下发;缺省取主数据集全部 16 片)。
+# 同步与预热都按这个数收窄:桶里有 128 片,不收窄会把整桶同步进来,
+# 数据集口径与容量比都失真。
+N_TARS="${N_TARS:-$(cfg DATASET_SHARDS)}"
 SHARD_INCLUDES="$(shard_include_args "$N_TARS")"
 
 # JuiceFS 缓存容量(与其他组对齐,默认 1GiB = 数据集 2GiB 的 50%)

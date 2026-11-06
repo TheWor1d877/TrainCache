@@ -87,8 +87,8 @@ TRAIN_IMAGE="${TRAIN_IMAGE:-python:3.12-alpine}"
 # 分片命名 shard-%05d.tar。juicefs sync 的 --include 可重复传入,且必须配合 --exclude
 # (include 的语义是「不排除匹配该模式的 key」)。这里把「0..N-1」拆成若干条
 # 「前缀 + 数字区间」模式,精确覆盖本档位的分片,不误伤桶里更大的分片。
-# 不加这段的话,juicefs/fluid 会把桶里全部 32 片(8GiB)同步进自己的文件系统,
-# S 档(本档只消费 8 片 = 2GiB)的数据量口径就被撑大了 4 倍。
+# 不加这段的话,juicefs/fluid 会把桶里全部 128 片同步进自己的文件系统,
+# 本格只消费 16 片(4 GiB)的数据量口径就被撑大了。
 # 用法: shard_include_args <n>  →  打印若干行 `--include "shard-xxxxx.tar"`
 shard_include_args() {
   "$PY" - "$1" <<'PYEOF'

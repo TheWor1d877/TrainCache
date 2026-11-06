@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""阶段切换「回落稳态」判据的生产者(docs/4.5 D40)。
+"""阶段切换「回落稳态」判据的生产者(docs/4.3 §4 D40)。
 
 判据(照 D40 逐条实现,口径不做任何改动):
   * 基线 = 切换前 20 步 stall 均值(warmup 步不计);
@@ -23,8 +23,8 @@
       打点若未写 run.json 则从这里取切换事件)
   历史旧格式打点(行缺 phase、事件缺 at_step)会明确报错,不做静默降级。
 
-输出:默认 <run_dir>/recovery_q9.json(--out 可改);plot.py 的 fig3 消费其中的
-recovery_time_s(recovered 事件)与删失率。
+输出:默认 <run_dir>/recovery_q9.json(--out 可改)。文件里的
+recovery_time_s(recovered 事件)与删失率供 4.3 §3.2 的 switch 判据读取。
 
 用法:
   python3 bench/experiments/recovery.py RUN_DIR [RUN_DIR...] [--out FILE]

@@ -10,8 +10,8 @@
 #     复用 controller/e2e/manifests 的 CR 结构,数据指向共享 MinIO bucket。
 #
 # 数据对齐:
-#   * DataSet.spec.shards 与 trace.json 的 n_tars 一致(默认 8 = S 档 2GiB;
-#     正式跑分由 run_bench.py 按容量档位 S/M/L 下发 N_TARS,此处只是独立调用时的兜底)
+#   * DataSet.spec.shards 与 trace.json 的 n_tars 一致(默认 16 = 4 GiB;
+#     run_bench.py 按格子下发 N_TARS,此处只是独立调用时的兜底)
 #   * chunkSize 实验口径 8MiB(D20/6.13:1GiB 缓存切 128 块,预取窗口占 1/8;
 #     生产默认 64MiB 不动;可用 CHUNK_BYTES 环境变量覆盖)
 #   * bucket 取 config.py MINIO_BUCKET(bench-b),与其他组共享
@@ -25,7 +25,7 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="traincache"
 NS="traincache"
-TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.json}"
 # DataSet/快照名(冒烟或并行实验可指向独立前缀,如 compare-data-smoke;
 # 默认 compare-data-8m——8MiB 块快照,D20/6.13/Q12;旧 64MiB 快照 compare-data
 # 只留作历史产物复现,正式实验不再引用。快照发布本身是后续动作)
@@ -41,18 +41,16 @@ IMG_AGENT="${IMG_AGENT:-ghcr.io/thewor1d877/traincache/traincache-agentd:$TAG}"
 # DataSet 参数
 # 实验块大小 8MiB(D20/6.13;生产默认 64MiB 不动;环境变量 CHUNK_BYTES 可覆盖)
 CHUNK_BYTES="${CHUNK_BYTES:-8388608}"
-N_TARS="${N_TARS:-$(cfg TRACK_B_N_TARS)}"   # 分片取自 track_b(256MiB/份),不是 D 轨 128MiB 份
-N_TARS="${N_TARS:-32}"                        # M 档全量(8GiB);run_bench 按档位覆盖
-# WarmupTask 预热块数:启动窗口口径=预热 1GiB 字节(=1GiB 缓存容量整档;
-# 对 M 档 8GiB 数据即"预热至多覆盖 1/8"的 D19 口径(见 docs/4.4 §1.9),与旧 64MiB×16 块同字节量)。
+N_TARS="${N_TARS:-$(cfg DATASET_SHARDS)}"   # 主数据集分片数,由 run_bench 按格子下发
+# WarmupTask 预热块数:缺省按 1 GiB 字节算(1GiB / 8MiB = 128 块);
+# run_bench.py 按格子的 cache 容量下发 TRAINCACHE_WARMUP_K,这里是独立调用时的兜底。
 # 块大小 8MiB 后 k = 1GiB / 8MiB = 128;块大小改档时按 字节量/CHUNK_BYTES 重算。
 # 0 = bench 冷启动哨兵:跳过 WarmupTask 创建与 gate,不把 0 写进 CRD 的 podDetails[].k。
 # 可用 TRAINCACHE_WARMUP_K 覆盖。
 WARMUP_K="${TRAINCACHE_WARMUP_K:-128}"
 
 # 本地 tar 数据源(trainpublish 读本地文件切块上传)
-TRACK_B_DIR="${TRACK_B_DIR:-$(cfg TRACK_B_DIR)}"
-TRACK_B_DIR="${TRACK_B_DIR:-$BENCH_ROOT/data/track_b/tars}"
+DATASET_DIR="${DATASET_DIR:-$(cfg DATASET_DIR)}"
 
 # trainpublish 二进制(缺失时从源码构建)
 TRAINPUBLISH_BIN="${TRAINPUBLISH_BIN:-$BENCH_ROOT/scripts/trainpublish}"
@@ -114,13 +112,13 @@ print(len(paths))' "$idx_tmp" 2>/dev/null || echo 0)"
     echo "${n:-0}"
   }
 
-  # 全部分片进一份快照:S/M/L 的轨迹只决定消费前几个,不另发布小快照
+  # 全部分片进一份快照:轨迹只决定消费顺序,不另发布小快照
   local tars=() f
-  for f in "$TRACK_B_DIR"/shard-*.tar; do
+  for f in "$DATASET_DIR"/shard-*.tar; do
     [ -f "$f" ] && tars+=("$f")
   done
   if [ "${#tars[@]}" -eq 0 ]; then
-    log_group "$GROUP" "错误: $TRACK_B_DIR 下没有 shard-*.tar" >&2
+    log_group "$GROUP" "错误: $DATASET_DIR 下没有 shard-*.tar" >&2
     return 1
   fi
   local want="${#tars[@]}" have
@@ -150,7 +148,7 @@ print(len(paths))' "$idx_tmp" 2>/dev/null || echo 0)"
   node_ip="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
   local node_port="${MINIO_NODEPORT:-30090}"
   # work-dir 必须落在数据层:默认 /tmp 是 16 GiB tmpfs,128 分片全量快照会写爆
-  local work_dir="${TRAINPUBLISH_WORK_DIR:-$TRACK_B_DIR/../../_trainpublish}"
+  local work_dir="${TRAINPUBLISH_WORK_DIR:-$DATASET_DIR/../../_trainpublish}"
   mkdir -p "$work_dir"
   log_group "$GROUP" "发布 ${#tars[@]} 个 shard 到 MinIO (dataset=$DATASET, work=$work_dir)..."
   "$TRAINPUBLISH_BIN" \
@@ -209,7 +207,7 @@ fi
 # 生成 shards 列表:按实际文件大小计算 chunk 数(与 trainpublish 发布的快照一致)
 SHARDS_YAML=""
 for i in $(seq 0 $(( N_TARS - 1 ))); do
-  f="$(printf '%s/shard-%05d.tar' "$TRACK_B_DIR" "$i")"
+  f="$(printf '%s/shard-%05d.tar' "$DATASET_DIR" "$i")"
   shard_size="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
   count=$(( (shard_size + CHUNK_BYTES - 1) / CHUNK_BYTES ))
   last=$(( shard_size % CHUNK_BYTES ))
@@ -267,8 +265,17 @@ bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
 # gate 绝对超时。全档统一 10m:100mbit × fanout 2 预热 1GiB 实测 332–343s,
 # 原估的 172s 低估了 tc 限速下的实际吞吐,5m 会在半程判 Degraded 废掉整轮
-# (抬档的实测依据见 4.4 §2.1 的门控参数行)。
+# (抬档的实测依据见 4.2 §6 的门控参数行)。
 GATE_TMAX="${TRAINCACHE_GATE_TMAX:-10m}"
+# 门控开关：gated 等 WarmupTask Released 再起训练；free 不等，训练与预热并行。
+GATE_MODE="${TRAINCACHE_GATE_MODE:-gated}"
+# free:阈值置 0,tMax 1s,闸门在第一轮判定就放行,预热在后台继续;
+# gated:阈值 0.9,等预热就绪再放行,窗口由 tMax 决定。
+GATE_THRESHOLD=0.9
+if [ "$GATE_MODE" = "free" ]; then
+  GATE_THRESHOLD=0
+  GATE_TMAX=1s
+fi
 WARM_SECONDS=0
 kubectl -n "$NS" delete warmuptask compare-task --ignore-not-found --wait=true 2>/dev/null || true
 
@@ -318,7 +325,7 @@ spec:
           cpu: 500m
           memory: 256Mi
   gate:
-    threshold: 0.9
+    threshold: $GATE_THRESHOLD
     gapMin: 0.1
     slopeMin: 0.001
     tMax: $GATE_TMAX
@@ -376,7 +383,7 @@ EOF
   done
 fi
 
-log_group "$GROUP" "up 完成:DataSet Ready,WarmupTask 已 Released,预热时长=${WARM_SECONDS}s"
+log_group "$GROUP" "up 完成:DataSet Ready,gate=$GATE_MODE,预热时长=${WARM_SECONDS}s"
 echo "等待 train-job-0 被 webhook gate 放行: kubectl -n $NS get pod train-job-0 -w"
 echo "查看 WarmupTask: kubectl -n $NS get warmuptask compare-task"
 echo "拆除: make -C $COMPARE_ROOT compare-down GROUP=traincache"

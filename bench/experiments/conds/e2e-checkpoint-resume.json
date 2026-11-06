@@ -1,0 +1,46 @@
+{
+  "schema_version": "4",
+  "name": "e2e-checkpoint-resume",
+  "family": "e2e",
+  "group": "traincache-cold",
+  "load": "train",
+  "dataset": {
+    "name": "dataset-4gib",
+    "shards": 16,
+    "shard_size_bytes": 268435456,
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "shuffle": "per-epoch",
+    "readers": 1,
+    "access_pattern": "single"
+  },
+  "network": {
+    "rate_mbit": 1000
+  },
+  "cache": {
+    "enabled": true,
+    "rho": 4.0,
+    "evict_policy": "heat",
+    "warmup_seconds": 0
+  },
+  "sampling": {
+    "reps": 2
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "gateway_cache": false,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7"
+  },
+  "tags": [
+    "e2e",
+    "scenario=checkpoint-resume"
+  ],
+  "notes": "e2e 族格子；scenario=checkpoint-resume，rho=4，rate=1000，reps=2，run_min=70；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
+  "prefetch": {
+    "lookahead": 16,
+    "fanout": 2
+  }
+}

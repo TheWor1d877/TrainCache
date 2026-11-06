@@ -1,0 +1,48 @@
+{
+  "schema_version": "4",
+  "name": "prefetch-la16-fan1-rho1",
+  "family": "prefetch",
+  "group": "traincache-cold",
+  "load": "dataset",
+  "dataset": {
+    "name": "dataset-4gib",
+    "shards": 16,
+    "shard_size_bytes": 268435456,
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "shuffle": "per-epoch",
+    "readers": 1,
+    "access_pattern": "single"
+  },
+  "network": {
+    "rate_mbit": 1000
+  },
+  "cache": {
+    "enabled": true,
+    "rho": 1.0,
+    "evict_policy": "heat",
+    "warmup_seconds": 0
+  },
+  "sampling": {
+    "reps": 3
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "gateway_cache": false,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7"
+  },
+  "tags": [
+    "prefetch",
+    "lookahead=16",
+    "fanout=1",
+    "rho=1.0"
+  ],
+  "notes": "prefetch 族格子；lookahead=16，fanout=1，rho=1.0，rate=1000；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
+  "prefetch": {
+    "lookahead": 16,
+    "fanout": 1
+  }
+}

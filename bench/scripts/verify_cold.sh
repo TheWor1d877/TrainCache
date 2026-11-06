@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 过关标准验证:两次冷读结果对得上。
-# 冷读 = 集群内 busybox Pod 经 MinIO Service 全量下载 B 轨 tar(受 tc 限速),
+# 冷读 = 集群内 busybox Pod 经 MinIO Service 全量下载 主数据集 tar(受 tc 限速),
 # 每轮前执行冷态规程;两次冷读相对差 ≤10% 判"对上"。
 # 用法:verify_cold.sh [--quick](quick 只读 1 个 tar,秒级;默认全量 8GB,约 11 分钟/轮)
 set -euo pipefail
@@ -16,7 +16,7 @@ cold_read() {
   if [ "$QUICK" = "--quick" ]; then
     shards="shard-00000.tar"
   else
-    shards="$(seq -f 'shard-%05g.tar' 0 $(( $(CFG TRACK_B_N_TARS) - 1 )) | tr '\n' ' ')"
+    shards="$(seq -f 'shard-%05g.tar' 0 $(( $(CFG DATASET_SHARDS) - 1 )) | tr '\n' ' ')"
   fi
   pod="cold-reader-$(date +%s)"
   # 冷读 8GB 需 ~11 分钟,远超 kubectl run --rm 的默认 60s 超时,

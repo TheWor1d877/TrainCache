@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 B 轨 tar 分片上传到 kind 内 MinIO 的 bench-b 桶(经 nodePort 30090)。
+"""把 主数据集 tar 分片上传到 kind 内 MinIO 的 bench-b 桶(经 nodePort 30090)。
 
 只追加不覆盖(Q12):桶里已有的 shard-*.tar 一律跳过,重跑本脚本是安全的补洞动作;
 确要重写源数据,显式设 UPLOAD_FORCE=1。
@@ -60,9 +60,9 @@ def main():
     }))
     print("bucket 公开读 policy 已设")
 
-    tars = sorted(config.TRACK_B_DIR.glob("shard-*.tar"))
+    tars = sorted(config.DATASET_DIR.glob("shard-*.tar"))
     if not tars:
-        sys.exit("B 轨 tar 不存在,先跑 synth_track_b.py")
+        sys.exit("主数据集 tar 不存在,先跑 synth_dataset.py")
     t0 = time.time()
     # Q12:bench-b/shard-*.tar 是五组共同的只读源数据,只追加不覆盖。
     # 已存在的对象一律跳过;确要重写源数据得显式 UPLOAD_FORCE=1。

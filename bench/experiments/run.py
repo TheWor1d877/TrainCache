@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""M2 实验 runner:冷态→tc→负载→采集→归档,重复采样。
+"""COND 执行体:一个 COND 一轮跑分,重复采样。
 
-cond 名以 policy- 开头时转交 run_policy.py(M5 C 轨淘汰×预取),不走本文件的 D 轨负载。
+按 COND 的 load 字段选执行体,不看名字前缀:
+  dataset → compare/run_bench.py(集群内跑分,由它写 summary.csv)
+  tilt    → run_policy.py(倾斜双 Job,淘汰×预取)
+  train   → scripts/load_train.py + collect.py(本文件的冷态→tc→负载→采集→归档流程)
 
 流程(run_once):
   1. 创建产物目录 reps_dir/<run_id>/
   2. 冷态:cold_reset.sh
   3. 挂 tc:tc_apply.sh <rate> <delay> [--target source-d|minio]
   4. 注入 TRAINCACHE_JOB_CREATED_AT = 当前 RFC3339
-  5. 跑负载:bench_track_d.py --out-dir <run_dir> ...
+  5. 跑负载:load_train.py --out-dir <run_dir> ...
   6. 采集:collect.py --run-dir <run_dir>
   7. 写 lock.json(lock.py)
 任一步失败:写 VOID 标记,返回目录路径(不抛异常)。
@@ -36,19 +39,19 @@ SCRIPTS_DIR = BENCH_ROOT / "scripts"
 sys.path.insert(0, str(BENCH_ROOT))
 import config as bench_config  # noqa: E402
 
-RESULTS_DIR = bench_config.RESULTS_DIR
-
 COLD_RESET_SH = SCRIPTS_DIR / "cold_reset.sh"
 TC_APPLY_SH = SCRIPTS_DIR / "tc_apply.sh"
-BENCH_TRACK_D = SCRIPTS_DIR / "bench_track_d.py"
+LOAD_TRAIN = SCRIPTS_DIR / "load_train.py"
 COLLECT_PY = EXPERIMENTS_DIR / "collect.py"
+RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"
 
 PY = sys.executable  # 与 Makefile 的 $(PY) 同口径(系统 3.12);此处用当前解释器
 
 # ---- 汇总层产物列(任务 2.5:jsonl/metrics.csv → summary.csv)----
 # 列名与对照装置 compare/run_bench.py 的 summary.csv 同口径,两边产物能直接对账。
 SUMMARY_FIELDS = [
-    "cond", "rep", "group", "tier", "exploratory", "void", "reason",
+    "cond", "rep", "group", "family", "load", "gateway", "rho",
+    "exploratory", "void", "reason",
     "warmup_seconds",
     "startup_makespan", "total_makespan", "stall_ratio", "hit_rate",
     "startup_makespan_mean", "startup_makespan_ci_low",
@@ -95,14 +98,8 @@ def _run_cmd(cmd: list[str], env: dict | None = None,
 
 
 def _tc_target(cond: dict) -> str | None:
-    """根据 dataset.source 决定 tc_apply.sh 的 --target。
-
-    local-nginx(D 轨本地源站)→ source-d;minio(B/C 轨)→ 默认(minio,不传 --target)。
-    """
-    source = cond.get("dataset", {}).get("source")
-    if source == "local-nginx":
-        return "source-d"
-    return None
+    """tc_apply.sh 的 --target:train 负载读宿主机本地源站,其余走 MinIO。"""
+    return "source-d" if cond.get("load") == "train" else None
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +140,8 @@ def _read_metrics_row(run_dir: Path) -> dict:
 def _read_jsonl_stall(run_dir: Path) -> float | None:
     """从 per_step_*.jsonl 算 stall 占比。
 
-    口径:非 warmup 步的 mean(wait_s / step_s),与 bench/scripts/bench_track_d.py
-    的 stall() 同源(4.4 §1.2:扫点用 mean,中位数只判形态)。
+    口径:非 warmup 步的 mean(wait_s / step_s),与 bench/scripts/load_train.py
+    的 stall() 同源(4.3 §2.2:扫点用 mean,中位数只判形态)。
     没有 jsonl 或没有可用步时返回 None。
     """
     vals = []
@@ -242,11 +239,13 @@ def summarize_run(run_dir: Path, cond: dict, rep: int) -> dict:
 
     四指标:启动 makespan / 全程 makespan / stall 占比 / 命中率。
     三笔字节成本:启动预热(计数器已含 fanout 重复,不再二次乘)+ 持续预取 +
-    阶段切换重预取。tier 取 COND 的 cache.capacity_ratio;exploratory 在 L 档为真。
+    阶段切换重预取。rho 取 COND 的 cache.rho;exploratory 看 COND 的 tags。
     """
     run_dir = Path(run_dir)
     row = _read_metrics_row(run_dir)
-    tier = (cond.get("cache") or {}).get("capacity_ratio") or ""
+    cache = cond.get("cache") or {}
+    rho = cache.get("rho") if cache.get("enabled") else ""
+    exploratory = "exploratory" in (cond.get("tags") or [])
 
     void_marker = run_dir / "VOID"
     void = void_marker.is_file() or row.get("void", "").strip().lower() == "true"
@@ -263,8 +262,11 @@ def summarize_run(run_dir: Path, cond: dict, rep: int) -> dict:
         "cond": cond.get("name", "") or row.get("cond", ""),
         "rep": rep,
         "group": cond.get("group", "") or row.get("group", ""),
-        "tier": tier,
-        "exploratory": "true" if tier in cond_mod.EXPLORATORY_TIERS else "false",
+        "family": cond.get("family", ""),
+        "load": cond.get("load", ""),
+        "gateway": "true" if cond.get("environment", {}).get("gateway") else "false",
+        "rho": "" if rho is None else rho,
+        "exploratory": "true" if exploratory else "false",
         "void": "true" if void else "false",
         "reason": reason,
         "warmup_seconds": _measured_warmup_seconds(run_dir, row),
@@ -286,7 +288,7 @@ def summarize_run(run_dir: Path, cond: dict, rep: int) -> dict:
 def _attach_ci(rows: list[dict]) -> None:
     """给每行补上本 COND 的平均数与 bootstrap 95% CI。
 
-    void 轮不进统计(4.5 D14)。L 档只有 1 次采样,按预注册 1.9 只报单点值、
+    void 轮不进统计(4.3 §4 D14)。end-to-end 族每场景 2 次采样,只做二值判定,
     不报 CI,CI 列留空。
     """
     valid = [r for r in rows if r.get("void") != "true"]
@@ -368,11 +370,13 @@ def run_once(cond: dict, run_id: str, reps_dir: Path) -> Path:
     base_env["TRAINCACHE_RUN_ID"] = run_id
 
     # ---- 5. 跑负载 ----
-    td_args = cond_mod.cond_to_track_d_args(cond)
-    td_cmd = [PY, str(BENCH_TRACK_D)] + td_args + ["--out-dir", str(run_dir)]
+    td_args = cond_mod.cond_to_train_args(cond)
+    td_cmd = ([PY, str(LOAD_TRAIN)] + td_args
+              + ["--n-tars", str(cond["dataset"]["shards"]),
+                 "--out-dir", str(run_dir)])
     rc, out, err = _run_cmd(td_cmd, env=base_env)
     if rc != 0:
-        reason = f"bench_track_d 失败(rc={rc}): {err.strip()[:500]}"
+        reason = f"load_train 失败(rc={rc}): {err.strip()[:500]}"
         _write_void(run_dir, reason)
         print(f"[{run_id}] {reason}", file=sys.stderr)
         return run_dir
@@ -401,18 +405,65 @@ def run_once(cond: dict, run_id: str, reps_dir: Path) -> Path:
     return run_dir
 
 
-def run_reps(cond_name: str, reps: int,
+def run_reps(cond_name: str, reps: int | None = None,
              conds_dir: Path | None = None) -> list[Path]:
-    """跑 reps 轮。每轮前做冷态。cond_name 传给 load_cond。
+    """跑一个 COND;reps=None 取 COND 的 sampling.reps。
 
-    返回每轮产物目录列表。
+    按 load 选执行体:dataset 交给 run_bench.py,tilt 交给 run_policy.py,
+    train 走本文件的逐轮流程(每轮前做冷态)。
     """
     cond = cond_mod.load_cond(cond_name, conds_dir)
     errors = cond_mod.validate_cond(cond)
     if errors:
         raise ValueError(f"COND {cond_name} 校验失败:\n" + "\n".join(errors))
+    if reps is None:
+        reps = int(cond["sampling"]["reps"])
 
-    reps_dir = RESULTS_DIR / cond_name
+    if cond.get("load") == "dataset":
+        return _run_bench_cond(cond, reps)
+    if cond.get("load") == "tilt":
+        import run_policy  # noqa: PLC0415
+        return run_policy.run_reps(cond_name, reps, conds_dir)
+    return _run_train_cond(cond, reps)
+
+
+def _axis_env(cond: dict) -> dict[str, str]:
+    """族轴上 cond_to_env 没覆盖的旋钮。
+
+    run_bench 在 import 时读 TRAINCACHE_PREHEAT_FANOUT，prefetch 族的 fanout 轴
+    只能这样进去；其余轴（lookahead / gate / evict / rho）由 cond_to_env 给。
+    """
+    fanout = (cond.get("prefetch") or {}).get("fanout")
+    return {} if fanout is None else {"TRAINCACHE_PREHEAT_FANOUT": str(fanout)}
+
+
+def _run_bench_cond(cond: dict, reps: int) -> list[Path]:
+    """dataset 负载:一格一次 run_bench.py,产物落在 results/<族>/<COND 名>/。"""
+    root = bench_config.family_results_dir(cond["family"])
+    cache = cond.get("cache") or {}
+    cmd = [PY, str(RUN_BENCH)]
+    if cache.get("enabled"):
+        cmd += ["--rho", str(cache["rho"])]
+    cmd += ["--rate", f"{cond['network']['rate_mbit']}mbit",
+            "--group", cond["group"],
+            "--reps", str(reps),
+            "--out-root", str(root),
+            "--cell", cond["name"],
+            "--family", cond["family"]]
+    env = os.environ.copy()
+    env.update(cond_mod.cond_to_env(cond))
+    env.update(_axis_env(cond))
+    print(f"[run] {cond['name']} reps={reps}")
+    rc, _out, err = _run_cmd(cmd, env=env)
+    if rc != 0:
+        raise SystemExit(f"run_bench 失败(rc={rc}): {err.strip()[:500]}")
+    return [root]
+
+
+def _run_train_cond(cond: dict, reps: int) -> list[Path]:
+    """train 负载:逐轮冷态→tc→负载→采集,再汇成 summary.csv。"""
+    cond_name = cond["name"]
+    reps_dir = bench_config.family_results_dir(cond["family"]) / cond_name
     reps_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[Path] = []
@@ -439,7 +490,7 @@ def main() -> None:
         description="M2 实验 runner:冷态→tc→负载→采集→归档,重复采样")
     ap.add_argument("--cond", help="COND 名(conds/<name>.json)")
     ap.add_argument("--reps", type=int, default=None,
-                    help="重复次数(policy-* 默认取 COND 的采样次数,其余默认 7)")
+                    help="重复次数(缺省取 COND 的 sampling.reps)")
     ap.add_argument("--conds-dir", type=Path, default=None,
                     help="COND 目录(默认 bench/experiments/conds)")
     ap.add_argument("--selftest", action="store_true",
@@ -452,15 +503,7 @@ def main() -> None:
     if not args.cond:
         ap.error("需要 --cond(或用 --selftest 跑汇总层自检)")
 
-    # policy-*/pareto2-* 属于 M5 淘汰×预取实验(C 轨),执行体是 run_policy.py。
-    # make bench 已在 Makefile 侧分流;这里兜住直接调用 run.py 的情况。
-    if args.cond.startswith(("policy-", "pareto2-")):
-        import run_policy  # noqa: PLC0415
-        run_policy.run_reps(args.cond, args.reps, args.conds_dir)
-        return
-
-    run_reps(args.cond, 7 if args.reps is None else args.reps,
-             args.conds_dir)
+    run_reps(args.cond, args.reps, args.conds_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -528,11 +571,16 @@ def _write_mock_run(run_dir: Path, startup_s: float, full_s: float,
 
 
 def selftest() -> None:
-    """汇总层自检:列名、四指标口径、CI、tier/exploratory、void 处理。"""
+    """汇总层自检:列名、四指标口径、CI、rho/exploratory、void 处理。"""
     cond_s = {"name": "mock-s", "group": "traincache",
-              "cache": {"capacity_ratio": "S"}}
+              "family": "compare", "load": "train",
+              "cache": {"enabled": True, "rho": 2.0},
+              "environment": {"gateway": False}}
     cond_l = {"name": "mock-l", "group": "traincache",
-              "cache": {"capacity_ratio": "L"}}
+              "family": "compare", "load": "train",
+              "cache": {"enabled": True, "rho": 8.0},
+              "environment": {"gateway": False},
+              "tags": ["exploratory"]}
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -544,7 +592,9 @@ def selftest() -> None:
                 summarize_run(root / "r2", cond_s, 2),
                 summarize_run(root / "r3", cond_s, 3)]
         assert rows[0]["cond"] == "mock-s" and rows[0]["rep"] == 1
-        assert rows[0]["tier"] == "S", rows[0]
+        assert rows[0]["rho"] == 2.0, rows[0]
+        assert rows[0]["family"] == "compare" and rows[0]["load"] == "train", rows[0]
+        assert rows[0]["gateway"] == "false", rows[0]
         assert rows[0]["exploratory"] == "false", rows[0]
         assert rows[0]["group"] == "traincache"
         assert rows[0]["void"] == "false"
@@ -583,12 +633,12 @@ def selftest() -> None:
             got = list(csv.DictReader(f))
         assert list(got[0].keys()) == SUMMARY_FIELDS, list(got[0].keys())
         assert len(got) == 3, len(got)
-        assert got[0]["cond"] == "mock-s" and got[0]["tier"] == "S"
+        assert got[0]["cond"] == "mock-s" and got[0]["rho"] == "2.0"
         assert got[2]["void"] == "true"
 
-        # L 档:标 exploratory 且不报 CI(预注册 1.9)
+        # tags 带 exploratory 的格子只报单点值、不报 CI
         lrow = summarize_run(root / "r1", cond_l, 1)
-        assert lrow["tier"] == "L" and lrow["exploratory"] == "true", lrow
+        assert lrow["rho"] == 8.0 and lrow["exploratory"] == "true", lrow
         _attach_ci([lrow])
         assert lrow["startup_makespan_ci_low"] == "" and \
             lrow["startup_makespan_ci_high"] == "", lrow

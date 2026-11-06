@@ -194,7 +194,7 @@ if [ -n "$NEW_POD" ]; then
   fi
 fi
 
-# ---- 观测:rescan 阶段 + 回源字节 + 隔离块(判据口径见 docs/4.7-chaos-suite.md 第 1 档)----
+# ---- 观测:rescan 阶段 + 回源字节 + 隔离块(判据口径见 docs/4.3-bench-metrics-and-decisions.md §3.2 的 kill_agent 行)----
 RESCAN_PHASE=""
 NEW_NODE="$(chaos_agentd_pod_rows "$NS" | awk -v p="$NEW_POD" '$1==p {print $2; exit}')"
 if [ -n "$NEW_POD" ]; then

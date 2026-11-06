@@ -14,19 +14,26 @@ REPO_ROOT = ROOT.parent
 # repo 内不放数据,也不放指向数据层的软链接。CI 用 TRAINCACHE_DATA_ROOT 改到 workspace 内。
 DATA_ROOT = Path(os.environ.get("TRAINCACHE_DATA_ROOT") or (REPO_ROOT.parent / "traincachedata")).resolve()
 DATA_DIR = DATA_ROOT / "bench" / "data"
-TRACK_A_DIR = DATA_DIR / "track_a" / "files"
-TRACK_B_DIR = DATA_DIR / "track_b" / "tars"
-TRACK_C_DIR = DATA_DIR / "track_c"
+# 数据层的目录名是磁盘现状,不随后续命名调整:数据集仍在 track_b/tars 下。
+DATASET_DIR = DATA_DIR / "track_b" / "tars"
+TILT_DIR = DATA_DIR / "track_c"
+TRAIN_DIR = DATA_DIR / "track_d"
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
-# 结果层的分区目录，名字只描述装的是什么，不携带里程碑编号与轮次后缀（docs/4.1 §4）。
-SCORES_RESULTS_DIR = RESULTS_DIR / "scores"      # 五组对照跑分，按容量/带宽格分目录
-BASELINE_RESULTS_DIR = RESULTS_DIR / "baselines" # 对照组既有跑分，只读，汇总层按组态补入
-FIGURES_RESULTS_DIR = RESULTS_DIR / "figures"    # fig1/fig2/fig3/pareto1 逐点产物
-POLICY_RESULTS_DIR = RESULTS_DIR / "policy"      # policy 与 pareto2 族
-GATEWAY_RESULTS_DIR = RESULTS_DIR / "gateway"    # 网关合并实验（多读端）
+# 产物根下按族 ID 分片:results/<族>/<格子>/。族名与 COND 的 family 字段同源,
+# 一个族一个目录,汇总与出图按族各自读自己的目录。
+BENCH_FAMILIES = ("compare", "gateway", "evict", "prefetch", "warmup",
+                  "switch", "chaos", "multiconsumer", "e2e")
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
 COMPARE_LOGS_DIR = DATA_ROOT / "bench" / "compare" / "logs"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"
+
+
+def family_results_dir(family: str) -> Path:
+    """该族的产物根。族名拼错时立刻失败,避免把产物写到不存在的目录里。"""
+    if family not in BENCH_FAMILIES:
+        raise ValueError(f"未知族: {family!r}")
+    return RESULTS_DIR / family
+
 
 # ---- kind 集群 ----
 CLUSTER_NAME = "traincache"
@@ -37,56 +44,67 @@ MINIO_NODEPORT = 30090             # 宿主机上传用(经节点 InternalIP 访
 MINIO_ACCESS_KEY = "traincache"
 MINIO_SECRET_KEY = "traincache-probe"
 
-# ---- 三轨数据 ----
 SEED = 20261006
 
-# A 轨:元数据压力臂(io_uring 战场,本地目录)
-TRACK_A_N_FILES = 1_000_000        # 100 万个
-TRACK_A_FILE_KB = 4
-TRACK_A_SUBDIRS = 100              # 每子目录 1 万个文件
+# ---- 变量空间 ----
+# 主轴 rho = 数据集字节 ÷ 缓存容量。数据集固定 4 GiB,换 rho 只改缓存容量这一个
+# 环境变量,因此 rho 与数据集规模、epoch 数、采样次数互不影响。
+RHO_VALUES = (0.5, 1.0, 2.0, 4.0, 8.0)
+EPOCHS = 3                        # 全部格子 3 epoch,不再由档位推导
+REPS = 3                          # 每格 3 次采样
+E2E_REPS = 2                      # 端到端族按场景 2 次,只做二值判定
+MAX_READERS = 4                   # 单格并发读端上限,与 kind 的 4 个 worker 对齐
+EPOCH_STEPS = 400                 # 每 epoch 步数
+COMPUTE_MS = 200                  # 每步计算耗时;只做相对比较,不与真实模型等价
 
-# B 轨:真实分片主臂(正式数字以此为准)
-TRACK_B_N_TARS = 32                # 32 × 256MB ≈ 8GB
-TRACK_B_IMGS_PER_TAR = 1600        # 1600 × ~160KB ≈ 256MB/tar
-TRACK_B_IMG_SIZE = 512
-TRACK_B_JPEG_QUALITY = 85
-TRACK_B_TARGET_IMG_KB = 160        # σ 自动校准到该体积
-TRACK_B_TAR_BYTES = 1 << 28        # 256MB(tar 目标大小,用于校验)
 
-# C 轨:多 Job 倾斜(热分片比例;数据复用 B 轨,只生成清单)
-TRACK_C_HOT_RATIO = 0.10
+def cache_bytes(rho: float) -> int:
+    """缓存容量字节:数据集字节 ÷ rho。rho ≤ 1 数据装得下,> 1 每轮都要回源。"""
+    return int(DATASET_BYTES / rho)
 
-# ---- D 轨:全程收益专用(单 Job 连续 10 epoch,缓存欠配 50%,宿主机本地源)----
+
+# ---- 主数据集:16 × 256 MiB = 4 GiB,固定不随实验变量变化 ----
+DATASET_SHARDS = 16
+DATASET_SHARD_BYTES = 1 << 28      # 256 MiB
+DATASET_BYTES = DATASET_SHARDS * DATASET_SHARD_BYTES
+DATASET_IMGS_PER_TAR = 1600        # 1600 × ~160KB ≈ 256MiB/tar
+DATASET_IMG_SIZE = 512
+DATASET_JPEG_QUALITY = 85
+DATASET_TARGET_IMG_KB = 160        # σ 自动校准到该体积
+
+# ---- 倾斜负载:热分片比例;数据复用主数据集,只生成清单 ----
+TILT_HOT_RATIO = 0.10
+
+# ---- 训练负载:单 Job 连续多 epoch,宿主机本地源 ----
 # 16×800 张 512px JPEG q85(~160KB/张)≈2GiB,落宿主机本地,经独立 nginx 容器
 # traincache-source-d(端口 9100)供训练进程读取,不上传 MinIO;每 epoch 换 seed。
-TRACK_D_N_TARS = 16
-TRACK_D_IMAGES_PER_TAR = 800
-TRACK_D_IMG_SIZE = 512
-TRACK_D_JPEG_QUALITY = 85
-TRACK_D_TARGET_IMG_KB = 160
-TRACK_D_SEED = 20261015
-TRACK_D_EPOCHS = 10
-TRACK_D_WORKERS = 4
-TRACK_D_BATCH = 32
-TRACK_D_STEPS_PER_EPOCH = 400      # 16*800/32
-TRACK_D_CACHE_MB = 1024            # 欠配:2GiB 数据集的 50%
-TRACK_D_WARMUP = 10                # 仅 epoch0 前 10 步,口径与探针 C 一致
-TRACK_D_SOURCE_CONTAINER = "traincache-source-d"
-TRACK_D_SOURCE_PORT = 9100
-TRACK_D_DIR = DATA_DIR / "track_d"                 # 宿主机数据目录(shard-*.tar)
-TRACK_D_SOURCE_MOUNT = TRACK_D_DIR                 # docker -v 挂载源(需绝对路径)
-TRACK_D_SOURCE_HTML = "track-d"                    # 容器内挂到 /usr/share/nginx/html/track-d
-TRACK_D_URL = "http://127.0.0.1:9100/track-d/shard-%06d.tar"   # %06d 取 0..15
-TRACK_D_RESULTS_DIR = RESULTS_DIR / "track_d"
-TRACK_D_TC_RATE = "100mbit"
-TRACK_D_TC_DELAY = "20ms"
+TRAIN_N_TARS = 16
+TRAIN_IMAGES_PER_TAR = 800
+TRAIN_IMG_SIZE = 512
+TRAIN_JPEG_QUALITY = 85
+TRAIN_TARGET_IMG_KB = 160
+TRAIN_SEED = 20261015
+TRAIN_EPOCHS = 10                  # 负载器自身的缺省值;正式格子的 epoch 由 COND 注入
+TRAIN_WORKERS = 4
+TRAIN_BATCH = 32
+TRAIN_STEPS_PER_EPOCH = EPOCH_STEPS
+TRAIN_CACHE_MB = 1024              # 欠配:2GiB 数据集的 50%
+TRAIN_WARMUP = 10                  # 仅 epoch0 前 10 步,口径与探针 C 一致
+TRAIN_SOURCE_CONTAINER = "traincache-source-d"
+TRAIN_SOURCE_PORT = 9100
+TRAIN_SOURCE_MOUNT = TRAIN_DIR                 # docker -v 挂载源(需绝对路径)
+TRAIN_SOURCE_HTML = "track-d"                  # 容器内挂到 /usr/share/nginx/html/track-d
+TRAIN_URL = "http://127.0.0.1:9100/track-d/shard-%06d.tar"   # %06d 取 0..15
+TRAIN_RESULTS_DIR = RESULTS_DIR / "train"
+TRAIN_TC_RATE = "100mbit"
+TRAIN_TC_DELAY = "20ms"
 
-# ---- M1 打点口径(预注册 §1.3/§4.1)----
-TRACK_D_SHARD_BYTES = 128 << 20      # 单个 tar 目标字节(2GiB / 16)
-TRACK_D_CHUNK_BYTES = 64 << 20       # DataSet.spec.chunkSize
-TRACK_D_WINDOW_K = 8                 # 启动/切换窗口块数
-TRACK_D_BASELINE_STEPS = 20          # 回落基线:切换前 20 步
-TRACK_D_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
+# ---- 训练负载打点口径 ----
+TRAIN_SHARD_BYTES = 128 << 20      # 单个 tar 目标字节(2GiB / 16)
+TRAIN_CHUNK_BYTES = 64 << 20       # DataSet.spec.chunkSize
+TRAIN_WINDOW_K = 8                 # 启动/切换窗口块数
+TRAIN_BASELINE_STEPS = 20          # 回落基线:切换前 20 步
+TRAIN_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
 
 # ---- tc 限速档位(扫点实验的自变量)----
 TC_RATE = "100mbit"
@@ -98,21 +116,6 @@ TC_DELAY = "20ms"
 # ---- 带宽档口径(D31:带宽是实验自变量)----
 # rate 的取值集合;COND 的 network.rate_mbit 只能取这些值。
 TC_RATE_MBITS = (100, 300, 1000)
-# 每步读量 r 的推导口径:数据集字节 ÷ (每 epoch 步数 × 每步计算耗时)。
-# S 档 2GiB/80s ≈ 26.8 MB/s、M 档 8GiB/80s ≈ 107 MB/s、L 档 32GiB/80s ≈ 429 MB/s。
-TIER_STEPS_PER_EPOCH = 400
-TIER_COMPUTE_MS = 200
-TIER_DATA_BYTES = {"S": 2 << 30, "M": 8 << 30, "L": 32 << 30}
-
-
-def tier_read_rate_bps(tier: str) -> float:
-    """每步读量 r(字节/秒):数据集字节 ÷ (steps_per_epoch × compute 秒)。"""
-    return TIER_DATA_BYTES[tier] / (TIER_STEPS_PER_EPOCH * TIER_COMPUTE_MS / 1000)
-
-
-def bw_over_r(tier: str, rate_mbit: int) -> float:
-    """链路带宽 ÷ 每步读量。<1 链路受限,>2 计算主导,[1,2] 临界。"""
-    return rate_mbit * 125000.0 / tier_read_rate_bps(tier)
 
 
 def burst_for_rate(rate_mbit: int) -> str:
@@ -134,13 +137,11 @@ def burst_for_rate(rate_mbit: int) -> str:
     return f"{round(rate_mbit * 125 * 0.1)}k"
 
 
-# ---- 倾斜两族的字节地板(4.4 §7.4;读侧过滤 row_gate.py 的除数)----
-# 倾斜两族的 COND 前缀。两族统一 @100 mbit(D31),回源是串行阻塞,所以
-# 「跑完 time ÷ 有效带宽」才是这一族成立的物理下界;其余族的预热与计算
-# 重叠,同一比值普遍高于线速,不套这道地板。
-TILT_COND_PREFIXES = ("policy-", "pareto2-")
+# ---- 倾斜族的字节地板(读侧过滤 row_gate.py 的除数)----
+# 倾斜负载走 @100 mbit 时回源是串行阻塞,所以「跑完 time ÷ 有效带宽」才是这一族
+# 成立的物理下界;其余族的预热与计算重叠,同一比值普遍高于线速,不套这道地板。
 # 每档实测有效带宽(MB/s)。@100 = 2026-11-02 集群内只读探针,同一对象四种
-# 取法同值;@300 = §7.4 的 35.6(95% 线速)。表里没有的档位给不出地板,
+# 取法同值;@300 = 4.2 §12 的 35.6(95% 线速)。表里没有的档位给不出地板,
 # 读侧跳过第三条而不是猜一个值。
 TILT_EFF_BW_MB_S = {100: 11.95, 300: 35.6}
 
@@ -152,8 +153,11 @@ def rate_mbit(value) -> int | None:
 
 
 def tilt_floor_seconds(row: dict) -> float | None:
-    """该行回源字节走完整整形链路所需的最短秒数;取不到给 None。"""
-    if not str(row.get("cond", "")).startswith(TILT_COND_PREFIXES):
+    """该行回源字节走完整整形链路所需的最短秒数;取不到给 None。
+
+    按 load 字段判定是不是倾斜负载,不看 COND 名前缀:改名与新增族都不会漏判。
+    """
+    if row.get("load") != "tilt":
         return None
     bw = TILT_EFF_BW_MB_S.get(rate_mbit(row.get("rate")))
     try:

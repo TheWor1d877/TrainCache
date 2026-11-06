@@ -10,6 +10,7 @@
 ### Added
 - `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
 
+- bench 装置重排为九族实验：97 个 COND，入口 `python3 bench/run.py <族>`，`python3 bench/run.py status` 打印各族完成格子数。新增出图脚本 `bench/experiments/plot_families.py`（11 张图，输出中英两套 PNG 与聚合 CSV）与报告页 `bench/experiments/report.py`（首屏决策表加逐族结论）。混沌族新增节点丢失档 `bench/chaos/inject/node_loss.sh`。装置说明见 `docs/4.1-bench-apparatus.md` 到 `docs/4.4-bench-runbook.md`。
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
 

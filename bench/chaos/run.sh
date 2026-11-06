@@ -41,7 +41,8 @@ EXTRA_ARGS=()
 PASSTHRU=0
 
 MANDATORY_FAULTS="kill_agent netem_degrade netem_degrade_rate minio_down tamper_block stop_ordersrc"
-ALL_FAULTS="$MANDATORY_FAULTS"
+# node_loss 按需复现,不进 --all:它停的是 kind 节点容器,影响整节点上的全部 Pod。
+ALL_FAULTS="$MANDATORY_FAULTS node_loss"
 RATE_TIER_DEFAULT="300mbit"
 
 usage() {
@@ -65,6 +66,7 @@ usage() {
   minio_down        MinIO Deployment 缩到 0 副本,测源站整体不可用
   tamper_block      原地改坏 agent 本地缓存里的一个块文件,测数据面校验
   stop_ordersrc     冻结 ordersrc sidecar 写端,让订单 ring 停摆,测降级判定
+  node_loss         停掉 kind 节点容器,测 DataSet 与 WarmupTask 的降级与恢复(按需,不进 --all)
 EOF
 }
 
@@ -99,13 +101,14 @@ fault_meaning() {
     minio_down)         printf 'MinIO Deployment 缩到 0 副本,测源站整体不可用' ;;
     tamper_block)       printf '原地改坏 agent 本地缓存里的一个块文件,测数据面校验' ;;
     stop_ordersrc)      printf '冻结 ordersrc sidecar 写端,让订单 ring 停摆,测降级判定' ;;
+    node_loss)          printf '停掉 kind 节点容器,测 DataSet 与 WarmupTask 的降级与恢复' ;;
     *)                  printf '<未知故障>' ;;
   esac
 }
 
 fault_script() {
   case "$1" in
-    kill_agent|netem_degrade|netem_degrade_rate|minio_down|tamper_block|stop_ordersrc)
+    kill_agent|netem_degrade|netem_degrade_rate|minio_down|tamper_block|stop_ordersrc|node_loss)
       case "$1" in
         netem_degrade_rate) printf '%s/inject/netem_degrade.sh' "$CHAOS_ROOT" ;;
         *)                  printf '%s/inject/%s.sh' "$CHAOS_ROOT" "$1" ;;
