@@ -516,7 +516,7 @@ if [ "$HAVE_K8S" -eq 1 ]; then
             fail "节点上有 $dir_total 字节的块,但各 agentd 的字节累计最大为 $accum_max → 累计没生效,淘汰闸门不会触发"
         elif [ "$dir_total" -gt 0 ] \
                 && [ "$(awk -v a="$accum_max" -v d="$dir_total" 'BEGIN{print (a+0>1.5*d)?1:0}')" = "1" ]; then
-            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.3 §2.4 字节账自洽判据) → 同一批块被重复记账"
+            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.3 §2.6 字节账自洽判据) → 同一批块被重复记账"
         elif [ "$dir_total" -eq 0 ]; then
             pass "缓存目录为空(agentd 复位后),累计 $accum_max 是复位前残账,不作判据"
         else
