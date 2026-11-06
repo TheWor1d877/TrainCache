@@ -23,6 +23,8 @@ const (
 	defaultBucketConcurrency = 32
 	defaultBlockBufferBytes  = 10485760
 	defaultLogLevel          = "info"
+	defaultCacheDatasetBytes = 34359738368 // 32GiB
+	defaultCacheTotalBytes   = 68719476736 // 64GiB
 )
 
 // env 名（design 9.1 §5.3 冻结；沿用的是全仓同名键）。
@@ -36,6 +38,9 @@ const (
 	envBucketConcurrency = "TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY"
 	envBlockBufferBytes  = "TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES"
 	envLogLevel          = "TRAINCACHE_LOG_LEVEL"
+	envCache             = "TRAINCACHE_GATEWAY_CACHE"
+	envCacheDatasetBytes = "TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES"
+	envCacheTotalBytes   = "TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES"
 )
 
 // Config 是网关进程的完整配置（design 9.1 §5.3）。
@@ -49,10 +54,16 @@ type Config struct {
 	BucketConcurrency int    // TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY，默认 32（正整数）
 	BlockBufferBytes  int    // TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES，默认 10485760（正整数）
 	LogLevel          string // TRAINCACHE_LOG_LEVEL，默认 info（未知值退化为 info）
+
+	// 磁盘缓存（D29/D31）。缓存根目录是代码常量，不走 env。
+	Cache             bool  // TRAINCACHE_GATEWAY_CACHE，默认 true（未设置即开；"1"/"true"/"yes" 开，其余取值关）
+	CacheDatasetBytes int64 // TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES，默认 34359738368（32GiB，正整数）
+	CacheTotalBytes   int64 // TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES，默认 68719476736（64GiB，正整数，且不小于单 dataset 上限）
 }
 
 // Load 从环境变量加载配置并校验（design 9.1 §6.7）：
 // 整数必须 >0，端口必须 1..65535，枚举外的日志级别退化为 info 而不报错。
+// 缓存开关取宽松口径：未设置即开，只有 "1"/"true"/"yes" 为真，其余取值一律当作关（D29）。
 func Load() (*Config, error) {
 	listen, err := loadListen()
 	if err != nil {
@@ -70,6 +81,19 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	cache := loadCache()
+	cacheDatasetBytes, err := envPositiveInt64(envCacheDatasetBytes, defaultCacheDatasetBytes)
+	if err != nil {
+		return nil, err
+	}
+	cacheTotalBytes, err := envPositiveInt64(envCacheTotalBytes, defaultCacheTotalBytes)
+	if err != nil {
+		return nil, err
+	}
+	if cacheDatasetBytes > cacheTotalBytes {
+		return nil, fmt.Errorf("config: %s=%d 非法(不得大于 %s=%d)",
+			envCacheDatasetBytes, cacheDatasetBytes, envCacheTotalBytes, cacheTotalBytes)
+	}
 
 	return &Config{
 		ObjstoreEndpoint:  endpoint,
@@ -81,6 +105,9 @@ func Load() (*Config, error) {
 		BucketConcurrency: concurrency,
 		BlockBufferBytes:  bufferBytes,
 		LogLevel:          logLevel(os.Getenv(envLogLevel)),
+		Cache:             cache,
+		CacheDatasetBytes: cacheDatasetBytes,
+		CacheTotalBytes:   cacheTotalBytes,
 	}, nil
 }
 
@@ -162,4 +189,36 @@ func envPositiveInt(key string, def int) (int, error) {
 		return 0, fmt.Errorf("config: %s=%d 非法(需 > 0)", key, n)
 	}
 	return n, nil
+}
+
+// envPositiveInt64 解析正整数 env（int64 口径，缓存配额用）。
+// 未设置或全空白 → 默认值；非法取值或 ≤0 → 错误。
+func envPositiveInt64(key string, def int64) (int64, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q 非法(需整数): %w", key, v, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("config: %s=%d 非法(需 > 0)", key, n)
+	}
+	return n, nil
+}
+
+// loadCache 读取 TRAINCACHE_GATEWAY_CACHE（D29：默认开，关闭要显式写 false）。
+// 未设置或全空白 → true（未设置即开）；"1"/"true"/"yes" 开；其余取值一律当作关，
+// 不报错——与 TRAINCACHE_OBJSTORE_SECURE 同一宽松口径。
+func loadCache() bool {
+	v := strings.TrimSpace(os.Getenv(envCache))
+	if v == "" {
+		return true
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }

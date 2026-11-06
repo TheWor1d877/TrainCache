@@ -12,9 +12,9 @@
 # 127.0.0.1:6060 by the process and is deliberately not exposed here or in the
 # Service.
 #
-# Env: no literal env values. Endpoint, bucket, TLS flag, concurrency and
-# ring-buffer size come from traincache-config; credentials come from
-# traincache-objstore.
+# Env: no literal env values. Endpoint, bucket, TLS flag, concurrency,
+# ring-buffer size and the three disk-cache knobs come from traincache-config;
+# credentials come from traincache-objstore.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,6 +67,21 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: gatewayBlockBufferBytes
+            - name: TRAINCACHE_GATEWAY_CACHE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayCache
+            - name: TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayCacheDatasetBytes
+            - name: TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayCacheTotalBytes
             - name: TRAINCACHE_OBJSTORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -107,7 +122,8 @@ spec:
               # 32 concurrent streams x 10MiB ring buffer, plus the per-
               # subscriber copies still within one buffer of the writer. 1Gi is
               # the steady-state ceiling for this shape; the gateway keeps no
-              # object content after a request ends.
+              # object content in memory after a request ends. The disk cache
+              # layer lives on the gateway-cache volume, not in this limit.
               memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
@@ -116,3 +132,13 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65534
+          volumeMounts:
+            - name: gateway-cache
+              mountPath: /var/lib/traincache-gateway/cache
+      volumes:
+        # Disk cache layer (D35): the cache root is a code constant, so the
+        # manifest only mounts a writable volume onto it. No sizeLimit: the
+        # gateway enforces its own quotas and evicts blocks itself, kubelet
+        # eviction would turn cache pressure into a scheduling event.
+        - name: gateway-cache
+          emptyDir: {}

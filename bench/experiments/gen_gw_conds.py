@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""生成网关合并实验的 12 个 COND（3 读法 × 2 带宽 × 开关）。
+"""生成网关合并实验的 18 个 COND（3 读法 × 2 带宽 × 开关 + 每档一条带缓存臂）。
 
 实验族 `gateway-merge`，COND 前缀 `gw`。读法：
   r1       单读端，量网关自身开销
   r4repl   4 节点读同一份数据，同 key 并发最密（收益臂）
   r4shard  4 节点各读不相交分片（阴性对照）
+
+每档除 `off`/`on` 两条外，还产出一条带网关磁盘缓存的 COND：`<on 名>-cache`，
+即 `gw-<rate>-<short>-on-cache`，environment.gateway=true 且 gateway_cache=true，
+其余字段（dataset / trace / reps / digest）与同档 `-on` 臂一致。
 
 网关镜像位必须写真实 digest：本脚本从 kind 节点 containerd 读，读不到就退出，
 不写占位符。镜像变了要重新生成，`make -C bench gw-conds` 做这件事。
@@ -78,10 +82,16 @@ def _trace() -> tuple[str, str]:
     return f"traces/{TRACE_NAME}", sha
 
 
-def build(template: dict, digest: str, rate: int, short: str, on: bool) -> dict:
+def build(template: dict, digest: str, rate: int, short: str, on: bool,
+          cache: bool = False) -> dict:
+    """构造一条 COND。cache=True 时产出带网关磁盘缓存的臂（必须 on=True）。"""
     readers, pattern = READERS[short]
     c = json.loads(json.dumps(template))
     name = f"gw-{rate}-{short}-{'on' if on else 'off'}"
+    if cache:
+        if not on:
+            raise SystemExit("带缓存的臂必须同时开网关")
+        name += "-cache"
     c["name"] = name
     c["figure"] = "gateway-merge"
     c["group"] = "traincache-cold"
@@ -91,14 +101,25 @@ def build(template: dict, digest: str, rate: int, short: str, on: bool) -> dict:
     c["workload"]["access_pattern"] = pattern
     c["network"] = {"rate_mbit": rate}
     c["sampling"] = {"reps": 3}
-    c["environment"]["gateway"] = on
-    c["environment"]["gateway_image"] = digest if on else None
+    # environment 的键序固定：gateway / gateway_image / gateway_cache / image_set
+    image_set = c["environment"]["image_set"]
+    c["environment"] = {
+        "gateway": on,
+        "gateway_image": digest if on else None,
+    }
+    if cache:
+        c["environment"]["gateway_cache"] = True
+    c["environment"]["image_set"] = image_set
     path, sha = _trace()
     c["trace"]["file"] = path
     c["trace"]["sha256"] = sha
     c["tags"] = ["gateway-merge"]
     c["notes"] = ("网关合并实验：r1=单读端开销，r4repl=同 key 并发，"
                   "r4shard=不相交分片阴性对照")
+    if cache:
+        c["tags"].append("gateway-cache")
+        c["notes"] += ("；本臂开网关磁盘缓存(gateway_cache=true)，"
+                       "与同档不带缓存的 -on 臂对照")
     return c
 
 
@@ -117,8 +138,14 @@ def main() -> int:
         raise SystemExit(f"digest 形态不合法：{digest!r}")
 
     template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
-    conds = [build(template, digest, rate, short, on)
-             for rate in RATES for short in READERS for on in (False, True)]
+    conds = []
+    for rate in RATES:
+        for short in READERS:
+            conds.append(build(template, digest, rate, short, False))
+            conds.append(build(template, digest, rate, short, True))
+            # 每档一条带网关磁盘缓存的臂，与同档 -on 臂同参，
+            # 只有 environment.gateway_cache 不同。
+            conds.append(build(template, digest, rate, short, True, cache=True))
     errs = []
     for c in conds:
         e = cond_mod.validate_cond(c)

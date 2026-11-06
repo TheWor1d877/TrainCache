@@ -2,8 +2,8 @@
 """COND 契约 v3：解析、校验与翻译。
 
 一个 COND = 一个实验点。v3 只保留会变的量：数据规模、轨迹、epoch、读端形态、
-带宽、缓存比例与策略、采样次数、网关开关。其余一律取本文件的默认值，实际生效
-值由每次 run 的 `lock.json` 记录。
+带宽、缓存比例与策略、采样次数、网关开关（`gateway` 与 `gateway_cache`）。
+其余一律取本文件的默认值，实际生效值由每次 run 的 `lock.json` 记录。
 
 字段全集与校验规则见 `docs/4.4-experiment-protocol.md` 附录 C；runner 遇到未知字段直接拒绝。
 """
@@ -91,7 +91,7 @@ ALLOWED_CACHE = {"enabled", "capacity_ratio", "ratio", "evict_policy",
 ALLOWED_PREFETCH = {"lookahead", "fanout", "gate"}
 ALLOWED_GATE = {"mode"}
 ALLOWED_SAMPLING = {"reps"}
-ALLOWED_ENVIRONMENT = {"gateway", "gateway_image", "image_set"}
+ALLOWED_ENVIRONMENT = {"gateway", "gateway_image", "image_set", "gateway_cache"}
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -355,6 +355,13 @@ def validate_cond(cond: dict) -> list[str]:
             errors.append("gateway=true 时 gateway_image 必须是真实 digest")
         if gw is False and gw_img is not None:
             errors.append("gateway=false 时 gateway_image 必须是 null")
+        # D23：网关磁盘缓存开关。没写这个键按 false（只做在途合并），
+        # 既有 COND 的口径不动；gateway=false 时它必须是 false。
+        gw_cache = env.get("gateway_cache", False)
+        if not isinstance(gw_cache, bool):
+            errors.append("$.environment.gateway_cache 必须是 bool")
+        elif gw is False and gw_cache:
+            errors.append("gateway=false 时 gateway_cache 必须是 false")
         image_set = _require(env, "image_set", "$.environment", errors)
         if isinstance(image_set, str):
             hexpart = image_set.split("sha256:", 1)[-1]
@@ -388,6 +395,9 @@ def cond_to_env(cond: dict) -> dict[str, str]:
         "TRAINCACHE_READERS": str(cond["workload"]["readers"]),
         "TRAINCACHE_ACCESS_PATTERN": cond["workload"]["access_pattern"],
         "TRAINCACHE_GATEWAY": "1" if cond["environment"].get("gateway") else "0",
+        # D23：磁盘缓存开关。没写这个键按 0（只做在途合并）。
+        "TRAINCACHE_GATEWAY_CACHE":
+            "1" if cond["environment"].get("gateway_cache") else "0",
     }
     cache = cond["cache"]
     if cache.get("enabled"):
@@ -446,6 +456,7 @@ def _sample_cond() -> dict:
         "prefetch": {"lookahead": 16, "fanout": 2},
         "sampling": {"reps": 3},
         "environment": {"gateway": False, "gateway_image": None,
+                        "gateway_cache": False,
                         "image_set": "sha256:" + "0" * 64},
         "tags": ["compare-d"],
     }
@@ -477,11 +488,39 @@ def selftest() -> None:
     c["environment"]["gateway"] = True
     assert any("gateway_image" in e for e in validate_cond(c)), validate_cond(c)
 
+    # D23：gateway=false 且 gateway_cache=true 是非法 COND
+    c = json.loads(json.dumps(good))
+    c["environment"]["gateway"] = False
+    c["environment"]["gateway_cache"] = True
+    assert any("gateway_cache" in e for e in validate_cond(c)), validate_cond(c)
+    c["environment"]["gateway_cache"] = False
+    assert not validate_cond(c), validate_cond(c)
+    # gateway=true 时 gateway_cache 可开可关，两个值都合法
+    c = json.loads(json.dumps(good))
+    c["environment"]["gateway"] = True
+    c["environment"]["gateway_image"] = (
+        "docker.io/library/x@sha256:" + "0123456789abcdef" * 4)
+    c["environment"]["gateway_cache"] = True
+    assert not validate_cond(c), validate_cond(c)
+    c["environment"]["gateway_cache"] = False
+    assert not validate_cond(c), validate_cond(c)
+    # 非 bool 值非法
+    c["environment"]["gateway_cache"] = "1"
+    assert any("bool" in e for e in validate_cond(c)), validate_cond(c)
+    # 没写这个键按 false，既有 COND 的口径不变
+    c = json.loads(json.dumps(good))
+    c["environment"].pop("gateway_cache", None)
+    assert not validate_cond(c), validate_cond(c)
+
     assert dataset_bytes(good) == 2 << 30, dataset_bytes(good)
     assert cache_bytes(good) == 1 << 30, cache_bytes(good)
     env = cond_to_env(good)
     assert env["TRAINCACHE_CACHE_CAPACITY_BYTES"] == str(1 << 30), env
     assert env["TRAINCACHE_READERS"] == "1" and env["TRAINCACHE_GATEWAY"] == "0", env
+    assert env["TRAINCACHE_GATEWAY_CACHE"] == "0", env
+    cached = json.loads(json.dumps(good))
+    cached["environment"]["gateway_cache"] = True
+    assert cond_to_env(cached)["TRAINCACHE_GATEWAY_CACHE"] == "1"
 
     files = sorted(CONDS_DIR_DEFAULT.glob("*.json"))
     assert files, "conds 目录为空"

@@ -20,6 +20,7 @@ import (
 	"github.com/minio/minio-go/v7"
 
 	corelog "traincache/core/logging"
+	"traincache/gateway/internal/cache"
 	"traincache/gateway/internal/merge"
 	"traincache/gateway/internal/obs"
 	"traincache/gateway/internal/origin"
@@ -45,6 +46,12 @@ const (
 	blocksSegment = "/blocks/"
 )
 
+// 条目结束行的 from 字段取值：字节来自源站还是来自盘（design 9.1 §7.2）。
+const (
+	fromOrigin = "origin"
+	fromCache  = "cache"
+)
+
 // Origin 是 server 对源站客户端的最小依赖（origin.Client 实现）。
 type Origin interface {
 	Stat(ctx context.Context, key string) (origin.ObjectInfo, error)
@@ -61,6 +68,12 @@ type Options struct {
 	Registry  *merge.Registry
 	Scheduler *sched.Scheduler
 	Obs       *obs.Logger
+
+	// Cache 是磁盘缓存存储；为 nil 表示没有磁盘缓存。
+	Cache *cache.Store
+	// CacheEnabled 是磁盘缓存开关。Cache 为 nil 或该开关为 false 时网关
+	// 不查盘、不写盘，行为与加缓存之前完全一致（9.2 D29）。
+	CacheEnabled bool
 }
 
 // Server 持有路由、探针与排水状态。HTTP server 的 Shutdown 由 cmd 调用，
@@ -73,6 +86,11 @@ type Server struct {
 	registry  *merge.Registry
 	scheduler *sched.Scheduler
 	obs       *obs.Logger
+
+	// cacheStore 是磁盘缓存存储；cacheOn 是缓存开关的最终判定（存储非 nil
+	// 且开关打开）。两者都不成立时网关不查盘、不写盘。
+	cacheStore *cache.Store
+	cacheOn    bool
 
 	// createMu 串行化「再次 Attach → Create」临界区，保证同一 key 同时只有
 	// 一个拉取协程（M4 不变量 7）。
@@ -111,14 +129,16 @@ func New(org Origin, opts Options, log *slog.Logger) *Server {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		origin:    org,
-		opts:      opts,
-		log:       log,
-		registry:  opts.Registry,
-		scheduler: opts.Scheduler,
-		obs:       opts.Obs,
-		baseCtx:   ctx,
-		cancel:    cancel,
+		origin:     org,
+		opts:       opts,
+		log:        log,
+		registry:   opts.Registry,
+		scheduler:  opts.Scheduler,
+		obs:        opts.Obs,
+		cacheStore: opts.Cache,
+		cacheOn:    opts.CacheEnabled && opts.Cache != nil,
+		baseCtx:    ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -245,42 +265,82 @@ func (s *Server) serveHead(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 // serveBlock 处理块键 GET 的合并路径（design 9.1 §6.1）：
-// Attach 命中即转为订阅者；否则取准入槽后再次 Attach，仍未命中才建条目、
-// 起拉取协程，并把发起请求本身作为第一个订阅者。
+// 先 Attach 命中在途条目；不在途且开关打开时 Lookup 查盘；仍未命中则
+// Acquire 占准入槽（排队 2s、队列 64，超时回 SlowDown）；拿到槽后再试一次
+// Attach、再试一次 Lookup（并发请求可能已建条目或刚 rename 落盘）；两者都
+// 没有才从源站回源建条目。
+//
+// 读盘命中与回源共用同一个准入槽、同一个扇出路径、同一个环形缓冲
+// （9.2 D34）。
 func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) {
 	dataset := datasetOf(key)
 
 	s.obs.Get(dataset)
 
+	// 1) 在途优先。
 	if e, ok := s.registry.Attach(key); ok {
 		s.serveAttached(w, r, key, dataset, e, nil)
 		return
 	}
 
+	// 2) 不在途且开关打开时先查盘。命中与否都要占准入槽，读盘扇出与回源
+	// 用同一把额度（9.2 D34）。
+	var probed *cache.Object
+	if s.cacheOn && !s.registry.InFlight(key) {
+		probed = s.lookupCache(dataset, key)
+	}
+
+	// 3) 占准入槽。
 	release, ok := s.acquire(w, r, dataset)
 	if !ok {
+		if probed != nil {
+			_ = probed.Close()
+		}
 		return
 	}
 
-	// 拿槽期间可能已有其他请求建成条目。
+	// 4) 拿槽后再试一次 Attach 与一次 Lookup。
 	s.createMu.Lock()
 	if e, ok := s.registry.Attach(key); ok {
 		s.createMu.Unlock()
+		if probed != nil {
+			_ = probed.Close()
+		}
 		s.serveAttached(w, r, key, dataset, e, release)
 		return
 	}
 	if s.registry.InFlight(key) {
 		// 条目在途但 written > C：不加入、也不新建同名条目，独立回源
-		// （design 9.1 §6.2；9.2 D8）。仍占一个准入槽。
+		// （design 9.1 §6.2；9.2 D8）。仍占一个准入槽。条目还在表里就
+		// 意味着块还没 rename 落盘，这一分支不查盘。
 		s.createMu.Unlock()
+		if probed != nil {
+			_ = probed.Close()
+		}
 		s.serveIndependent(w, r, key, dataset, release)
 		return
+	}
+
+	obj := s.lookupCache(dataset, key)
+	if obj == nil {
+		// 首次探到的对象在第二次查盘时被淘汰了，但已打开的描述符仍能读到
+		// 文件尾（design 9.1 §6.2）。
+		obj = probed
 	}
 
 	buf := s.registry.GetBuffer()
 	e := s.registry.Create(key, buf)
 	s.createMu.Unlock()
 
+	if obj != nil {
+		if probed != nil && probed != obj {
+			_ = probed.Close()
+		}
+		s.serveCacheHit(w, r, key, dataset, e, obj, release)
+		return
+	}
+
+	// 5) 都没有命中：回源建条目。
 	e.SetRelease(release)
 	s.obs.Owner(dataset)
 	s.log.Debug("条目创建", "dataset", dataset, "key", key)
@@ -290,6 +350,45 @@ func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) 
 	start := time.Now()
 
 	go s.pump(e, key, dataset, start)
+
+	s.serveWithSub(w, r, key, dataset, e, sub)
+}
+
+// lookupCache 查盘。命中返回打开的对象；未命中、开关关闭或出错返回 nil。
+// 读命中会刷新 last-touch 表（9.2 D33）。
+func (s *Server) lookupCache(dataset, key string) *cache.Object {
+	if !s.cacheOn {
+		return nil
+	}
+	obj, err := s.cacheStore.Lookup(key)
+	if err != nil {
+		if !errors.Is(err, cache.ErrNotFound) {
+			s.log.Debug("读盘失败", "dataset", dataset, "key", key,
+				"err", err, "err_class", corelog.Classify(err))
+		}
+		return nil
+	}
+	return obj
+}
+
+// serveCacheHit 用盘上的对象当 owner 侧读手：条目按普通扇出路径供订阅者
+// 读取，.meta 里的 ETag 与 Last-Modified 回填进 200 响应（design 9.1 §6.1
+// 第 6 步；9.2 D32、D34）。
+func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, key, dataset string,
+	e *merge.Entry, obj *cache.Object, release func()) {
+	e.SetRelease(release)
+	meta := obj.Metadata()
+	e.SetMetadata(meta.ETag, meta.LastModified)
+
+	// 读盘命中单独记账，不计入 owners（owners 是真实源站 GET 数）。
+	s.obs.CacheHit()
+	s.log.Debug("读盘命中", "dataset", dataset, "key", key)
+
+	sub := e.Subscribe()
+	s.log.Debug("订阅者加入", "dataset", dataset, "subs", e.Subscribers())
+	start := time.Now()
+
+	go s.pumpCache(e, key, dataset, start, obj)
 
 	s.serveWithSub(w, r, key, dataset, e, sub)
 }
@@ -322,6 +421,8 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, dataset string)
 // pump 是每个条目的唯一拉取协程：从源站读、写环形缓冲，结束时 Finish。
 // pumpCtx 是服务级 baseCtx 的子 ctx；单个订阅者断开不会中止共享下载，
 // 但所有订阅者都离开时 Entry 会取消它，底层源站 Read 随之返回（9.2 D10）。
+//
+// 开关打开时，同一批字节也写进 BeginPut 打开的 .tmp（design 9.1 §6.8）。
 func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 	pumpCtx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
@@ -330,14 +431,34 @@ func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 	rc, err := s.origin.Open(pumpCtx, key)
 	if err != nil {
 		e.Finish(err)
-		s.logEntryEnd(e, dataset, key, start, err)
+		s.logEntryEnd(e, dataset, key, start, err, fromOrigin)
 		return
 	}
 	defer rc.Close()
 
 	src := &metadataReader{r: rc, obj: rc, e: e, log: s.log, dataset: dataset}
-	err = e.Pump(pumpCtx, &countingReader{r: src, add: s.obs.Bytes})
-	s.logEntryEnd(e, dataset, key, start, err)
+	var reader io.Reader = &countingReader{r: src, add: s.obs.Bytes}
+
+	var tee *cacheTee
+	if s.cacheOn {
+		if writer := s.beginCachePut(pumpCtx, dataset, key); writer != nil {
+			tee = &cacheTee{
+				s:       s,
+				r:       reader,
+				w:       writer,
+				dataset: dataset,
+				key:     key,
+				meta:    func() (string, time.Time) { return e.Metadata() },
+				auto:    true,
+			}
+			reader = tee
+			// 正常收尾后是空操作；中途失败时删掉 .tmp，盘上不留半成品。
+			defer tee.abort()
+		}
+	}
+
+	err = e.Pump(pumpCtx, reader)
+	s.logEntryEnd(e, dataset, key, start, err, fromOrigin)
 	if err != nil && !errors.Is(err, context.Canceled) && e.Written() > 0 {
 		// 写响应体后才失败：状态码已发出，只记录源站失败（§6.3）。
 		resp := minio.ToErrorResponse(err)
@@ -351,13 +472,26 @@ func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 	}
 }
 
-func (s *Server) logEntryEnd(e *merge.Entry, dataset, key string, start time.Time, err error) {
+// pumpCache 是读盘条目的拉取协程：把盘上的字节读进环形缓冲，结束后关闭文件。
+// 与回源共用同一个扇出路径（9.2 D34）。
+func (s *Server) pumpCache(e *merge.Entry, key, dataset string, start time.Time, obj *cache.Object) {
+	pumpCtx, cancel := context.WithCancel(s.baseCtx)
+	defer cancel()
+	e.SetCancel(cancel)
+
+	err := e.Pump(pumpCtx, obj)
+	_ = obj.Close()
+	s.logEntryEnd(e, dataset, key, start, err, fromCache)
+}
+
+func (s *Server) logEntryEnd(e *merge.Entry, dataset, key string, start time.Time, err error, from string) {
 	s.log.Debug("条目结束",
 		"dataset", dataset,
 		"key", key,
 		"written", e.Written(),
 		"duration_ms", time.Since(start).Milliseconds(),
 		"subs", e.Subscribers(),
+		"from", from,
 		"err", err,
 		"err_class", corelog.Classify(err),
 	)
@@ -456,6 +590,8 @@ func (s *Server) serveWithSub(w http.ResponseWriter, r *http.Request, key, datas
 //
 // minio 的 4xx/5xx 在首次 Read 才暴露，所以必须先读第一块再决定状态码：
 // 首读就失败时把源站状态码与 Code 透传给客户端（§6.3），不能先写 200。
+//
+// 开关打开时这条分支的字节同样按 §6.8 的协议落盘。
 func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, dataset string, release func()) {
 	defer release()
 
@@ -469,7 +605,26 @@ func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, d
 
 	s.obs.Owner(dataset)
 
-	src := &countingReader{r: rc, add: s.obs.Bytes}
+	var info origin.ObjectInfo
+	src := io.Reader(&countingReader{r: rc, add: s.obs.Bytes})
+
+	var tee *cacheTee
+	if s.cacheOn {
+		if writer := s.beginCachePut(ctx, dataset, key); writer != nil {
+			tee = &cacheTee{
+				s:       s,
+				r:       src,
+				w:       writer,
+				dataset: dataset,
+				key:     key,
+				meta:    func() (string, time.Time) { return info.ETag, info.LastModified },
+			}
+			src = tee
+			// 正常收尾后是空操作；中途失败时删掉 .tmp，盘上不留半成品。
+			defer tee.abort()
+		}
+	}
+
 	first := make([]byte, 32*1024)
 	var n int
 	var rerr error
@@ -493,9 +648,10 @@ func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, d
 
 	// 首读已收到 GET 响应头，Stat 从传输层记录里取值、不发新请求；失败只记
 	// Debug，不能因此阻断已经成功的下载（9.2 D28）。
-	if info, serr := rc.Stat(); serr != nil {
+	if stat, serr := rc.Stat(); serr != nil {
 		s.log.Debug("读取源站元数据失败", "dataset", dataset, "err", serr)
 	} else {
+		info = stat
 		setMetadataHeaders(w.Header(), info.ETag, info.LastModified)
 	}
 
@@ -510,6 +666,11 @@ func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, d
 				"err", rerr,
 				"err_class", corelog.Classify(rerr),
 			)
+			return
+		}
+		// 首读就是 EOF：整块已读完，正常收尾落盘。
+		if tee != nil {
+			tee.finish()
 		}
 		return
 	}
@@ -519,7 +680,114 @@ func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, d
 			"err", err,
 			"err_class", corelog.Classify(err),
 		)
+		return
 	}
+	// 整块读完：写 .meta 再 rename 成正式名。
+	if tee != nil {
+		tee.finish()
+	}
+}
+
+// cacheTee 把读到的同一批字节写进缓存的 .tmp（design 9.1 §6.8）：
+// 读到 EOF 视为正常收尾，写 .meta 再 rename 成正式名；中途失败删掉 .tmp，
+// 盘上不留半成品。
+//
+// 写盘失败（配额放不下、磁盘满、键分段过长）不影响响应：字节照常交给上层，
+// 只记一条写盘失败 Warn。
+type cacheTee struct {
+	s       *Server
+	r       io.Reader
+	w       *cache.Writer
+	meta    func() (string, time.Time)
+	dataset string
+	key     string
+	// auto 为 true 时读到 EOF 立即收尾。回源条目路径用 true：条目的元数据
+	// 在首次读字节时就已写好，rename 早于条目摘除（design 9.1 §6.1 第 8 步）。
+	// 独立回源路径用 false：元数据要等首读之后的 Stat，收尾由调用方触发。
+	auto bool
+	done bool
+	eof  bool
+}
+
+// Read 读上层给的字节，并把这批字节写进 .tmp。
+func (t *cacheTee) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 && t.w != nil {
+		if _, werr := t.w.Write(p[:n]); werr != nil {
+			// 写盘失败：不再写盘，字节照常返回。
+			t.abort()
+			t.s.logCacheWriteFailure(t.dataset, t.key, "write", werr)
+		}
+	}
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			t.eof = true
+			if t.auto {
+				t.finish()
+			}
+		} else {
+			t.abort()
+		}
+	}
+	return n, err
+}
+
+// finish 正常收尾：写 .meta 再 rename。失败只记一条写盘失败 Warn。
+func (t *cacheTee) finish() {
+	if t.w == nil || t.done {
+		return
+	}
+	w := t.w
+	t.w = nil
+	t.done = true
+
+	etag, lastModified := t.meta()
+	if err := w.Close(cache.Metadata{ETag: etag, LastModified: lastModified}); err != nil {
+		t.s.logCacheWriteFailure(t.dataset, t.key, "close", err)
+	}
+}
+
+// abort 中途失败：删掉 .tmp。已经收尾时什么都不做。
+func (t *cacheTee) abort() {
+	if t.w == nil || t.done {
+		return
+	}
+	w := t.w
+	t.w = nil
+	t.done = true
+
+	if err := w.Abort(); err != nil {
+		t.s.log.Debug("写盘中止失败", "dataset", t.dataset, "key", t.key,
+			"err", err, "err_class", corelog.Classify(err))
+	}
+}
+
+// logCacheWriteFailure 记一条写盘失败 Warn。写盘失败不改变响应。
+func (s *Server) logCacheWriteFailure(dataset, key, reason string, err error) {
+	s.log.Warn("写盘失败",
+		"dataset", dataset,
+		"key", key,
+		"reason", reason,
+		"err", err,
+		"err_class", corelog.Classify(err),
+	)
+}
+
+// beginCachePut 打开写盘句柄。写盘失败不影响响应：只记一条写盘失败 Warn，
+// 字节照原路返回（design 9.1 §6.8）。ctx 已取消导致的失败属于正常中止，
+// 记 Debug，不算写盘失败。
+func (s *Server) beginCachePut(ctx context.Context, dataset, key string) *cache.Writer {
+	writer, err := s.cacheStore.BeginPut(ctx, key)
+	if err != nil {
+		if ctx.Err() != nil {
+			s.log.Debug("写盘中止", "dataset", dataset, "key", key,
+				"err", err, "err_class", corelog.Classify(err))
+		} else {
+			s.logCacheWriteFailure(dataset, key, "begin_put", err)
+		}
+		return nil
+	}
+	return writer
 }
 
 // metadataReader 在第一次读到字节时补齐条目元数据，再把这次字节交给上层。

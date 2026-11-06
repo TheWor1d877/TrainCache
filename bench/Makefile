@@ -111,7 +111,7 @@ selftest:
 	@echo "== 装置自检通过 =="
 
 # ---- 网关合并实验（多读端） ----
-# 生成 12 个 COND：3 读法 × 2 带宽 × 开关。digest 从 kind 节点 containerd 读，
+# 生成 18 个 COND：3 读法 × 2 带宽 × (off/on/on-cache)。digest 从 kind 节点 containerd 读，
 # 读不到就退出，不写占位符；镜像重建后要重新生成本组 COND。
 gw-conds:
 	@$(PY_FALLBACK) $(ROOT)/experiments/gen_gw_conds.py --from-cluster

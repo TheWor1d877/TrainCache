@@ -133,6 +133,12 @@ D30/D32 接线（2026-10-25）：
   COMPARE_SWITCH_WINDOW_S epoch 切换重预取的归因窗口（默认 60s）
   PROMETHEUS_URL         非空则 fetch 对账走 Prometheus，否则 kubectl raw 抓 agentd
   POD_TIMEOUT            单轮 Pod 超时（默认 1800s）
+  TRAINCACHE_GATEWAY_CACHE  网关磁盘缓存开关（D23）："1" 开、"0" 关，透传到
+                         up.sh → ctrl_up.sh，patch 进 ConfigMap
+                         traincache-config 的 gatewayCache（"1"→true、
+                         "0"→false），改完 configMapKeyRef 不热生效，由
+                         ctrl_up.sh 重启网关 Deployment。缺省按 COND 的
+                         environment.gateway_cache 取（没有则 0=只做在途合并）。
 """
 import argparse
 import ast
@@ -283,10 +289,47 @@ def gateway_flag(on=None):
     """summary.csv 的 gateway 列：1=经网关，0=agentd 直连源站。"""
     return "1" if (GATEWAY_ON if on is None else on) else "0"
 
+
 EVICT_POLICY = os.environ.get("TRAINCACHE_EVICT_POLICY", "heat").strip().lower()
 # 扫点脚本可显式指定本条产物的 COND 名（fig1/fig2/fig3/pareto1 的 COND
 # 不叫 compare-*，_cond_name_for_cell 匹配不到）。
 COND_NAME_OVERRIDE = os.environ.get("TRAINCACHE_COND_NAME", "").strip()
+
+
+# ---- D23/M5：网关磁盘缓存开关 ----
+# 起跑链路的环境变量 TRAINCACHE_GATEWAY_CACHE 取 "1"/"0"，透传到 up.sh，
+# 最终由 ctrl_up.sh patch 进 ConfigMap traincache-config 的 gatewayCache
+# （"1"→true、"0"→false）。环境变量没给时按 COND 的
+# environment.gateway_cache 取（COND 里也没有则 0=只做在途合并）。
+def _cond_gateway_cache() -> bool:
+    """COND 文件里的 environment.gateway_cache；文件缺失或读不到按 false。"""
+    name = COND_NAME_OVERRIDE or os.environ.get("TRAINCACHE_COND", "").strip()
+    if not name:
+        return False
+    try:
+        cond = json.loads(
+            (CONDS_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool((cond.get("environment") or {}).get("gateway_cache"))
+
+
+def _gateway_cache_on() -> bool:
+    """缓存开关取值：环境变量优先（只有 "1" 开），否则回落到 COND。"""
+    raw = os.environ.get("TRAINCACHE_GATEWAY_CACHE", "").strip()
+    if raw:
+        return raw == "1"
+    return _cond_gateway_cache()
+
+
+GATEWAY_CACHE_ON = _gateway_cache_on()
+
+
+def gateway_cache_flag(on=None):
+    """summary.csv 的 gateway_cache 列：1=网关落盘缓存开，0=只做在途合并。"""
+    return "1" if (GATEWAY_CACHE_ON if on is None else on) else "0"
+
+
 # 图系列(fig1/2/3、pareto1)由 run_figures.py 按 COND 驱动。它们的组态、
 # 次数与带宽档不受 D30/D31/D32 档位约束,所以显式关掉越组过滤与
 # 次数白名单;对照跑分与冒烟保持默认 0,行为不变。
@@ -830,6 +873,9 @@ def group_up(group):
         env["DATASET"] = DATASET_NAME
         # D23：网关开关透传到 ctrl_up.sh，决定 gatewayEndpoint 与网关副本数
         env["TRAINCACHE_GATEWAY"] = "1" if GATEWAY_ON else "0"
+        # D23/M5：磁盘缓存开关透传到 ctrl_up.sh，patch 进 traincache-config
+        # 的 gatewayCache（"1"→true、"0"→false），改完由 ctrl_up.sh 重启网关
+        env["TRAINCACHE_GATEWAY_CACHE"] = gateway_cache_flag()
     rc, out, err = run_cmd(["bash", str(GROUP_UP[group])], env=env, timeout=3600)
     if rc != 0:
         print(f"[up] {group} 失败(rc={rc}): {err[:800]}")
@@ -3338,7 +3384,7 @@ CSV_FIELDNAMES = ["group", "tier", "rate", "rep", "status", "void", "reason",
                   "cond", "run_id", "epochs", "shuffle",
                   "dataset_bytes", "cache_ratio",
                   "prefetch_lookahead", "evict_policy",
-                  "gate_mode", "gateway", "data_source",
+                  "gate_mode", "gateway", "gateway_cache", "data_source",
                   # M5 倾斜双 Job：A 命中率/等待占比、B 挤占热块次数
                   "a_hit_ratio", "a_wait_ratio", "b_evictions_of_hot",
                   "a_steps", "b_steps", "tilt_hot_shards", "tilt_a_budget",
@@ -3355,7 +3401,13 @@ def write_csv(path, results):
     #     + 三笔字节成本与命中率口径标注(6.16/D5/D25) + 实验参数归档(6.13/6.15)
     #     + status/baseline_substituted(D19/D30：探点与替补一眼可辨，void 不进汇总)
     #     + gateway(D23：1=经合并回源网关，0=直连源站)
+    #     + gateway_cache(D23：1=网关落盘缓存开，0=只做在途合并)
     fieldnames = CSV_FIELDNAMES
+    # D23/M5：gateway_cache 与 gateway 并列。本轮新行写当前生效的臂；
+    # 既有行保留自己那一列的值（老 CSV 没有这一列时按 0 记——缓存层落地前
+    # 的产物本就没有磁盘缓存），追加口径下不改历史行的臂。
+    for r in results:
+        r.setdefault("gateway_cache", gateway_cache_flag())
     # 生效 fanout 与本次 measure 实际用到的分片数（N_TARS），逐行同值
     fanout_eff = s3_fanout_count()
     old = existing_rows(path)
@@ -3406,6 +3458,7 @@ def write_csv(path, results):
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
             row["gateway"] = gateway_flag()
+            row["gateway_cache"] = r.get("gateway_cache") or "0"
             row["readers"] = r.get("readers") or READERS
             row["access_pattern"] = r.get("access_pattern") or ACCESS_PATTERN
             row["data_source"] = r.get("data_source") or DATA_SOURCE
@@ -3415,7 +3468,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查十二件事：
+    查十三件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3436,7 +3489,10 @@ def selftest():
       11. C 轨挤占口径与 A 步预算（4.4 §C3）：状态机四条边界、模板里旧的集合
          差集已删、预算从 runner 下发进 Pod 并随产物落盘；
       12. 倾斜 run 的 Pod 闸门按字节地板推导：非倾斜档仍用常量，倾斜档由
-         epoch 数、分片数与限速带宽推出，正常推进的 run 不再被截成 pod_failed。
+         epoch 数、分片数与限速带宽推出，正常推进的 run 不再被截成 pod_failed；
+      13. D23 网关磁盘缓存开关：summary.csv 的 gateway_cache 列位次与取值映射
+         1/0、环境变量 TRAINCACHE_GATEWAY_CACHE 的取值口径、透传到 up.sh，
+         以及这一列随产物落盘。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -3917,6 +3973,50 @@ def selftest():
     print(f"[selftest] 12) Pod 闸门：非倾斜沿用 {POD_TIMEOUT}s，倾斜按 EPOCHS×N_TARS×"
           f"分片字节 ÷ 带宽推导（本档地板 {floor_s:.0f}s × {TILT_TIMEOUT_HEADROOM:.0f}"
           f"= {int(floor_s * TILT_TIMEOUT_HEADROOM)}s），显式 POD_TIMEOUT 优先")
+
+    # ---- 13) D23/M5 网关磁盘缓存开关：新列、取值映射、环境变量与透传 ----
+    if "gateway_cache" not in CSV_FIELDNAMES:
+        raise AssertionError("自测：summary.csv 缺 gateway_cache 列")
+    if CSV_FIELDNAMES.index("gateway_cache") != CSV_FIELDNAMES.index("gateway") + 1:
+        raise AssertionError("自测：gateway_cache 列应紧跟 gateway")
+    if gateway_cache_flag(True) != "1" or gateway_cache_flag(False) != "0":
+        raise AssertionError(f"自测：gateway_cache_flag 映射不对 "
+                             f"{gateway_cache_flag(True)!r}/"
+                             f"{gateway_cache_flag(False)!r}")
+    if gateway_cache_flag() != ("1" if GATEWAY_CACHE_ON else "0"):
+        raise AssertionError("自测：gateway_cache 列没有跟随 TRAINCACHE_GATEWAY_CACHE")
+    saved_cache_env = os.environ.get("TRAINCACHE_GATEWAY_CACHE")
+    try:
+        os.environ["TRAINCACHE_GATEWAY_CACHE"] = "1"
+        if not _gateway_cache_on():
+            raise AssertionError("自测：TRAINCACHE_GATEWAY_CACHE=1 应为开")
+        os.environ["TRAINCACHE_GATEWAY_CACHE"] = "0"
+        if _gateway_cache_on():
+            raise AssertionError("自测：TRAINCACHE_GATEWAY_CACHE=0 应为关")
+        os.environ.pop("TRAINCACHE_GATEWAY_CACHE", None)
+        if _gateway_cache_on() != _cond_gateway_cache():
+            raise AssertionError("自测：环境变量缺省时该回落到 COND 的 gateway_cache")
+    finally:
+        if saved_cache_env is None:
+            os.environ.pop("TRAINCACHE_GATEWAY_CACHE", None)
+        else:
+            os.environ["TRAINCACHE_GATEWAY_CACHE"] = saved_cache_env
+    if 'env["TRAINCACHE_GATEWAY_CACHE"]' not in inspect.getsource(group_up):
+        raise AssertionError("自测：group_up 没有把缓存开关透传给 up.sh")
+    # 这一列要随产物落盘：新行记当前臂，既有行保留自己的值
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "summary.csv"
+        saved_rate = TC_RATE_EFF
+        globals()["TC_RATE_EFF"] = "100mbit"
+        try:
+            write_csv(p, [{"group": "direct", "rep": 0, "total_makespan": 1.0}])
+        finally:
+            globals()["TC_RATE_EFF"] = saved_rate
+        rows = list(csv.DictReader(open(p, newline="")))
+        if len(rows) != 1 or rows[0]["gateway_cache"] != gateway_cache_flag():
+            raise AssertionError(f"自测：gateway_cache 列没随产物落盘：{rows}")
+    print(f"[selftest] 13) D23 缓存开关：gateway_cache 列紧随 gateway，映射 1/0 正确，"
+          f"GATEWAY_CACHE_ON={GATEWAY_CACHE_ON} 已透传到 up.sh，列随产物落盘")
     print("run_bench selftest: PASS")
 
 
