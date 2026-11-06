@@ -8,8 +8,9 @@
 #
 # The workload is a Job (restartPolicy: OnFailure, backoffLimit: 2) instead of
 # the bare Pods of the other modes: this run proves that each give-up exit is
-# accounted in status.failed and that the Job turns Failed once backoffLimit is
-# exceeded, rather than restarting forever. The sidecar is written by hand like
+# counted as a container restart against the Job's backoffLimit and that the
+# Job turns Failed with reason BackoffLimitExceeded once the limit is used up,
+# rather than restarting forever. The sidecar is written by hand like
 # pod-enospc.yaml: the webhook-injected Pod cannot pin the restore deadlines,
 # the local plugin or the fake backend.
 apiVersion: batch/v1
