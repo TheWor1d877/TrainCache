@@ -43,6 +43,9 @@ const (
 	EnvCacheCapacityBytes = "TRAINCACHE_CACHE_CAPACITY_BYTES"
 	EnvStartupWindowBytes = "TRAINCACHE_STARTUP_WINDOW_BYTES"
 	EnvMaxFillFraction    = "TRAINCACHE_MAX_FILL_FRACTION"
+	// EnvGateNetworkBandwidthBytes 是 controller 告诉 gate 的"网络上限 bytes/sec"。
+	// 默认 0 表示不启用带宽判断；非零值时 gate 对比 agent 观测吞吐是否接近上限。
+	EnvGateNetworkBandwidthBytes = "TRAINCACHE_GATE_NETWORK_BANDWIDTH"
 )
 
 // DefaultDebugAddr is the default /debug/loglevel listener: loopback only.
@@ -76,6 +79,9 @@ type Config struct {
 	CacheCapacityBytes int64
 	StartupWindowBytes int64
 	MaxFillFraction    float64
+	// GateNetworkBandwidthBytes 是 gate 带宽跳过判断的上限（bytes/sec）。
+	// 0 = 不启用，正数时 gate 对比 agent 观测吞吐。
+	GateNetworkBandwidthBytes int64
 	// CheckpointImage 是本次发布里 checkpointd 镜像的取值（空 = 没有发布
 	// 默认值，准入要求用户自己提供镜像）。
 	CheckpointImage string
@@ -128,6 +134,9 @@ func load(lookup func(string) (string, bool)) (*Config, error) {
 		return nil, err
 	}
 	if cfg.MaxFillFraction, err = envFloat(lookup, EnvMaxFillFraction, DefaultMaxFillFraction); err != nil {
+		return nil, err
+	}
+	if cfg.GateNetworkBandwidthBytes, err = envInt64(lookup, EnvGateNetworkBandwidthBytes, 0); err != nil {
 		return nil, err
 	}
 
@@ -184,6 +193,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxFillFraction <= 0 || c.MaxFillFraction > 0.25 {
 		return fmt.Errorf("config: %s: %v is outside (0,0.25]", EnvMaxFillFraction, c.MaxFillFraction)
+	}
+	if c.GateNetworkBandwidthBytes < 0 {
+		return fmt.Errorf("config: %s: must be >= 0", EnvGateNetworkBandwidthBytes)
 	}
 
 	if c.Namespace != "" && !validNamespace(c.Namespace) {

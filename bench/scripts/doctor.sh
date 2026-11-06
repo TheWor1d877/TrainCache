@@ -420,6 +420,39 @@ else
     warn "agentd 未部署(首次 make bench-up 或 make ctrl-up 会部署)"
 fi
 
+# gate 网络带宽上限(bytes/sec):0 = 不启用带宽判断,门控只看数据量与进度。
+# 期望值来自环境变量 TRAINCACHE_GATE_NETWORK_BANDWIDTH,缺省 0;没给这一项时
+# 只比对不判死(本批没声明带宽档位)。
+if [ "$HAVE_K8S" -eq 1 ]; then
+    gnb="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.gateNetworkBandwidthBytes}' 2>/dev/null || true)"
+    exp_gnb="${TRAINCACHE_GATE_NETWORK_BANDWIDTH:-0}"
+    if [ -z "$gnb" ]; then
+        fail "traincache-config 缺少 gateNetworkBandwidthBytes(期望 $exp_gnb)"
+    elif [ "$gnb" != "$exp_gnb" ]; then
+        if [ -n "${TRAINCACHE_GATE_NETWORK_BANDWIDTH:-}" ]; then
+            fail "traincache-config 的 gateNetworkBandwidthBytes=$gnb,本批期望 $exp_gnb;make ctrl-up 会重新对齐"
+        else
+            warn "traincache-config 的 gateNetworkBandwidthBytes=$gnb,与缺省 $exp_gnb 不同(本批未给 env)"
+        fi
+    else
+        pass "gate 网络带宽上限 $gnb 字节/秒"
+    fi
+    # configMapKeyRef 不热生效:值在起 Pod 时才进容器,改了 ConfigMap 没重启的
+    # 时候,带宽判断用的还是旧上限。
+    cm_pods="$(kubectl -n traincache get pods \
+        -l app.kubernetes.io/name=traincache-controller-manager \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+    for pod in $cm_pods; do
+        live="$(kubectl -n traincache exec "$pod" -- \
+            printenv TRAINCACHE_GATE_NETWORK_BANDWIDTH 2>/dev/null || true)"
+        if [ "$live" != "$gnb" ]; then
+            fail "controller-manager $pod 容器内 TRAINCACHE_GATE_NETWORK_BANDWIDTH=${live:-未设置},ConfigMap 声明 $gnb"
+        fi
+    done
+fi
+
 section "淘汰证据(4.3 §2.6、§3.1)"
 if [ "$HAVE_K8S" -eq 1 ]; then
     agentd_pods="$(kubectl -n traincache get pods -l app=traincache-agentd \

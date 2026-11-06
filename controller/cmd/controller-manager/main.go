@@ -119,18 +119,21 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 			log.Warn("close agent client pool", "err", err)
 		}
 	}()
+	metricsFetcher := &agentclient.MetricsFetcher{Resolver: resolver}
 	warmupReconciler := &warmupcontroller.Reconciler{
-		Client:             mgr.GetClient(),
-		Agents:             agents,
-		Recorder:           mgr.GetEventRecorderFor("warmuptask-controller"),
-		Log:                log.With("controller", "warmup"),
-		Metrics:            registry,
-		PollInterval:       cfg.PollInterval,
-		ScoreAnnotation:    cfg.ScoreAnnotation,
-		GateName:           cfg.GateName,
-		CacheCapacityBytes: cfg.CacheCapacityBytes,
-		StartupWindowBytes: cfg.StartupWindowBytes,
-		MaxFillFraction:    cfg.MaxFillFraction,
+		Client:                mgr.GetClient(),
+		Agents:                agents,
+		Recorder:              mgr.GetEventRecorderFor("warmuptask-controller"),
+		Log:                   log.With("controller", "warmup"),
+		Metrics:               registry,
+		PollInterval:          cfg.PollInterval,
+		ScoreAnnotation:       cfg.ScoreAnnotation,
+		GateName:              cfg.GateName,
+		CacheCapacityBytes:    cfg.CacheCapacityBytes,
+		StartupWindowBytes:    cfg.StartupWindowBytes,
+		MaxFillFraction:       cfg.MaxFillFraction,
+		NetworkBandwidthBytes: cfg.GateNetworkBandwidthBytes,
+		MetricsFetcher:        metricsFetcher,
 	}
 	if err := warmupReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("register warmup controller: %w", err)

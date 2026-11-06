@@ -62,6 +62,15 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: maxFillFraction
+            # Network ceiling in bytes/sec used by the warmup gate. The gate
+            # compares the throughput the Agent reports against 0.8 of this
+            # value and releases early when the link is already saturated.
+            # "0" turns that check off.
+            - name: TRAINCACHE_GATE_NETWORK_BANDWIDTH
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gateNetworkBandwidthBytes
           ports:
             - name: metrics
               containerPort: 9412

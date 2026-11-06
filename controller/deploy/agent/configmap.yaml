@@ -81,6 +81,15 @@
 #                              schedulerScoreTTL, in traincache-scheduler-config
 #                              (kube-system): a configMapKeyRef cannot cross
 #                              namespaces, so the scheduler cannot read this CM.
+#   gateNetworkBandwidthBytes — Controller-only network ceiling in bytes/sec.
+#                               The warmup gate compares the throughput the
+#                               Agent reports against 0.8 of this value and
+#                               releases the gate early when the link is
+#                               already saturated. "0" turns the check off.
+#                               Written here because the manager Deployment
+#                               references it: patching the key is the
+#                               supported way to change the ceiling per run,
+#                               and a missing key blocks Pod startup.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -110,3 +119,4 @@ data:
   gatewayCacheTotalBytes: "68719476736"
   controllerPollInterval: "1s"
   controllerScoreTTL: "10m"
+  gateNetworkBandwidthBytes: "0"

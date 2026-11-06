@@ -22,6 +22,10 @@
 #      gatewayEndpoint(开网关指向 traincache-gateway.<NS>.svc:9413,关网关置空)
 #      与本轮的 PREFETCH_LOOKAHEAD/EVICT_POLICY(apply 会盖回清单默认,所以在 apply 之后对齐);
 #      只有取值真的变化才 patch 并重启一次 agentd
+#   8b. gate 网络带宽上限(TRAINCACHE_GATE_NETWORK_BANDWIDTH):patch
+#      traincache-config 的 gateNetworkBandwidthBytes,再重启
+#      deployment/traincache-controller-manager(configMapKeyRef 不热生效)。
+#      缺省 0 = 不启用带宽判断。见 ensure_gate_bandwidth
 #   9. 五个工作负载 rollout 就绪(开网关时含网关),打印 Ready 数与 Pod UID
 #
 # 幂等:清单哈希记在 namespace 注解 traincache.io/deploy-hash。哈希未变且
@@ -46,6 +50,16 @@ MAX_FILL_FRACTION="0.125"
 # 这两项就停在清单默认,不额外触发滚动重启。
 PREFETCH_LOOKAHEAD="${TRAINCACHE_PREFETCH_LOOKAHEAD:-16}"
 EVICT_POLICY="${TRAINCACHE_EVICT_POLICY:-heat}"
+# gate 网络带宽上限(bytes/sec):门控把 Agent 上报吞吐与该值的 0.8 倍比较,接近
+# 上限即认为带宽够快、跳过门控。取值来自环境变量,bench 侧不写死集群专有数值;
+# 缺省 0 = 不启用带宽判断,门控行为与加这一项之前一致。
+GATE_NETWORK_BANDWIDTH="${TRAINCACHE_GATE_NETWORK_BANDWIDTH:-0}"
+case "$GATE_NETWORK_BANDWIDTH" in
+  ''|*[!0-9]*)
+    log_group "$GROUP" "错误: TRAINCACHE_GATE_NETWORK_BANDWIDTH='$GATE_NETWORK_BANDWIDTH' 非法(要非负整数字节/秒)" >&2
+    exit 1
+    ;;
+esac
 CLUSTER_NAME="${CLUSTER_NAME:-$(cfg CLUSTER_NAME)}"
 CLUSTER_NAME="${CLUSTER_NAME:-traincache}"
 WEBHOOK_CA_B64=""
@@ -397,6 +411,28 @@ ensure_gateway_cache() {
   fi
 }
 
+# ---- gate 网络带宽上限:patch traincache-config 的 gateNetworkBandwidthBytes ----
+# configMapKeyRef 不热生效:改完必须重启 controller-manager Deployment 才吃到新值。
+# 值没变就不 patch 也不重启(与 agentd 配置同一口径,重复调用不滚 Pod)。
+ensure_gate_bandwidth() {
+  local cur
+  cur="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gateNetworkBandwidthBytes}' 2>/dev/null || true)"
+  if [ "$cur" = "$GATE_NETWORK_BANDWIDTH" ]; then
+    log_group "$GROUP" "gate 网络带宽上限已是 gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH,不改值不重启"
+    return 0
+  fi
+  kubectl -n "$NS" patch configmap traincache-config --type merge \
+    -p "{\"data\":{\"gateNetworkBandwidthBytes\":\"$GATE_NETWORK_BANDWIDTH\"}}" >/dev/null
+  log_group "$GROUP" "gate 网络带宽上限已 patch: gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH"
+  kubectl -n "$NS" rollout restart deployment/traincache-controller-manager >/dev/null
+  if ! kubectl -n "$NS" rollout status deployment/traincache-controller-manager --timeout=240s >/dev/null 2>&1; then
+    log_group "$GROUP" "错误: controller-manager 滚动更新未在 240s 内就绪(gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH)" >&2
+    kubectl -n "$NS" get pods -l app.kubernetes.io/name=traincache-controller-manager -o wide >&2 || true
+    return 1
+  fi
+  log_group "$GROUP" "controller-manager 已重启,带宽上限生效(gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH)"
+}
+
 # ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数/网关端点/预取提前量/淘汰策略)----
 # 这六处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
 # 引用,改值不再动工作负载清单。桶以前由 `kubectl set env` 直接覆盖 DaemonSet 的
@@ -503,7 +539,8 @@ ensure_control_plane
 ensure_gateway_cache
 ensure_gateway
 ensure_ca_bundle
+ensure_gate_bandwidth
 ensure_agent_config
 wait_ready
 print_status
-log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON gatewayCache=${WANT_GATEWAY_CACHE:-<未设置,保持现状>})"
+log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON gatewayCache=${WANT_GATEWAY_CACHE:-<未设置,保持现状>} gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH)"

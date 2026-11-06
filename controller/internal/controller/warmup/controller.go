@@ -102,10 +102,21 @@ type Reconciler struct {
 	CacheCapacityBytes int64
 	StartupWindowBytes int64
 	MaxFillFraction    float64
+	// NetworkBandwidthBytes is the gate's configured network ceiling (bytes/sec).
+	// Zero disables the "bandwidth fast enough" skip condition (#37).
+	NetworkBandwidthBytes int64
 	// Rand overrides the GWAA tie-breaking source. Tests set it to a fixed seed;
 	// the manager leaves it nil so gwaaRand seeds each task from its own UID and
 	// generation (D32).
 	Rand *rand.Rand
+
+	// MetricsFetcher 可选地从 agent 9411 /metrics 抓取 observed throughput，
+	// 用于 gate 的带宽够快跳过条件。nil 时条件不启用。
+	MetricsFetcher *agentclient.MetricsFetcher
+
+	// lastMetricSample 是每个 node 上次 metrics 采样（用于计算增量）。
+	// 首次 nil，第一次 bestObservedThroughput 会初始化。
+	lastMetricSample map[string]nodeMetricSample
 
 	// progress holds seq high-water marks, consecutive failure counters and
 	// rateHistory. It is intentionally in-memory only (D24); a restart starts
@@ -472,6 +483,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 
 		evaluation := r.evaluateGate(task)
+
+		// #37: 前置跳过条件（数据集太小 / 带宽够快）。
+		// 只有门控仍处于 Hold 时才采样 agent /metrics：门控已 Released 后再抓一次
+		// 没有判断价值，而每个候选节点一次 5s 超时会按候选节点数放大 reconcile 延迟。
+		// 不采样时 lastMetricSample 基线保持不变，下次 Hold 仍能算出吞吐增量。
+		if evaluation.Decision.State == gate.Hold {
+			totalBytes := dataSetTotalBytes(ds)
+			observedThroughput := r.bestObservedThroughput(ctx, log, candidates)
+			if reason, skip := shouldSkipGate(totalBytes, r.CacheCapacityBytes,
+				observedThroughput, r.NetworkBandwidthBytes); skip {
+				log.Info("gate skipped (#37)",
+					"reason", reason,
+					"total_bytes", totalBytes,
+					"cache_capacity_bytes", r.CacheCapacityBytes,
+					"observed_throughput", observedThroughput,
+					"network_bandwidth_bytes", r.NetworkBandwidthBytes)
+				evaluation.Decision.State = gate.Released
+				evaluation.Decision.Reason = reason
+			}
+		}
+
+		// #38: 至少有一个 agent 上报非零 ready → 提前放行
+		if evaluation.Decision.State == gate.Hold && hasMinProgress(evaluation.Pods) {
+			log.Info("gate early release: min progress met (#38)")
+			evaluation.Decision.State = gate.Released
+			evaluation.Decision.Reason = "min_progress_any_node"
+		}
+
 		logGateDecision(log, taskKey, evaluation)
 		if evaluation.Decision.State == gate.Hold {
 			r.Metrics.ObserveGateTask(taskKey, metrics.GateHold, r.now())
@@ -685,4 +724,48 @@ func sortedErrorKeys(m map[string]error) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// bestObservedThroughput 从所有 candidate node 里取最大 observed throughput（bytes/sec）。
+// 每次调用更新每个 node 的内部采样基线（首次采样只有 counter 值，没有时间差，返回 0）。
+// MetricsFetcher 为 nil 或 NetworkBandwidthBytes == 0 时直接返回 0，不做 HTTP 调用。
+func (r *Reconciler) bestObservedThroughput(ctx context.Context, log *slog.Logger, nodes []string) float64 {
+	if r.MetricsFetcher == nil || r.NetworkBandwidthBytes <= 0 {
+		return 0
+	}
+	if r.lastMetricSample == nil {
+		r.lastMetricSample = make(map[string]nodeMetricSample)
+	}
+	best := 0.0
+	now := r.now()
+	for _, node := range nodes {
+		nm, err := r.MetricsFetcher.FetchNodeMetrics(ctx, node)
+		if err != nil {
+			log.Debug("agent metrics fetch failed (skip bandwidth gate check)",
+				"node", node, "err", err)
+			continue
+		}
+		if nm == nil || nm.FetchBytesTotal <= 0 {
+			continue
+		}
+		cur := nodeMetricSample{bytesTotal: nm.FetchBytesTotal, at: now}
+		if last, ok := r.lastMetricSample[node]; ok {
+			delta := cur.bytesTotal - last.bytesTotal
+			elapsed := cur.at.Sub(last.at).Seconds()
+			if delta > 0 && elapsed > 0 {
+				tp := delta / elapsed
+				if tp > best {
+					best = tp
+				}
+			}
+		}
+		r.lastMetricSample[node] = cur
+	}
+	return best
+}
+
+// nodeMetricSample 是 bestObservedThroughput 的 per-node 内部采样。
+type nodeMetricSample struct {
+	bytesTotal float64
+	at         time.Time
 }

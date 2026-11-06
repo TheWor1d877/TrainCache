@@ -113,7 +113,7 @@ main 上打 tag vX.Y.Z 并推送
 | 候选构建成功             | release-smoke：候选文件齐全且哈希对得上、六个 digest 可解析、临时 kind 装机链路通                                 | 由 `release.yml` 断言 |
 | push tag `v*`            | 断言候选 version 与 tag 一致 → 断言同 sha 有成功 smoke → 候选 digest 晋升 `:vX.Y.Z` → 打单 tar → 建 Release 并转正 | 发布本身              |
 
-### 4.2 纪律
+### 4.2 要求
 
 - `main` 只收 PR，`verify` 与 `kind e2e` 设 required；`dev` 允许直推。
 - CI 不跑 bench：bench 依赖本机数据层和 32G 内存，属于实验装置。
@@ -168,38 +168,41 @@ main 上打 tag vX.Y.Z 并推送
 
 ### 5.3 运行时参数
 
-运行时参数在两个 ConfigMap：`traincache` namespace 的 `traincache-config`（`controller/deploy/agent/configmap.yaml`，现 15 个配置项，网关缓存层增三项到 18）与 kube-system 的 `traincache-scheduler-config`（`controller/deploy/scheduler/kube-scheduler-config.yaml`，scheduler 的 2 个配置项，同一对象还挂 `scheduler.yaml`）。scheduler 单独一份，是因为 `configMapKeyRef` 只在本 Pod 的 namespace 找对象，kube-system 里的 scheduler 引用不到 `traincache-config`。下表「归属」列写每个 key 由谁读取。
+运行时参数在两个 ConfigMap：`traincache` namespace 的 `traincache-config`（`controller/deploy/agent/configmap.yaml`，现 21 个配置项）与 kube-system 的 `traincache-scheduler-config`（`controller/deploy/scheduler/kube-scheduler-config.yaml`，scheduler 的 2 个配置项，同一对象还挂 `scheduler.yaml`）。scheduler 单独一份，是因为 `configMapKeyRef` 只在本 Pod 的 namespace 找对象，kube-system 里的 scheduler 引用不到 `traincache-config`。下表「归属」列写每个 key 由谁读取。
 
-改值只需编辑 ConfigMap 并重启对应工作负载。`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者；`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`、`gatewayCache`、`gatewayCacheDatasetBytes`、`gatewayCacheTotalBytes` 只被网关读取，改这五个键重启网关 Deployment。五份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
+改值只需编辑 ConfigMap 并重启对应工作负载。`cacheCapacityBytes` 同时被 Agent 与 Controller 读取，改它要重启两者；`objstoreEndpoint`、`objstoreBucket`、`objstoreSecure`、`objstoreCompression` 同时被 Agent 与网关读取，改这四个键要重启两者；`fetchRangeThresholdBytes` 只被 Agent 读取，`gateNetworkBandwidthBytes` 只被 Controller 读取。其余键各有一个读取方，见表「归属」列：`gatewayBucketConcurrency`、`gatewayBlockBufferBytes`、`gatewayCache`、`gatewayCacheDatasetBytes`、`gatewayCacheTotalBytes` 只被网关读取，改这五个键重启网关 Deployment；scheduler 的两个键只被 scheduler 读取，改完重启 scheduler Deployment。五份工作负载清单里没有任何 `value:` 字面量 env：等于代码默认的参数不写清单，凭证走 Secret，节点名走 Downward API，落位判据见 [参数配置](PARAMETER-CONFIGURATION.md) 的「落位判据」一节。
 
-| key | 默认值 | 归属 | 说明 |
-|---|---|---|---|
-| `cacheCapacityBytes` | `0` | Agent、Controller | 本地缓存字节上限（Controller 只用它算 `K_cache`）。`0` 关闭字节维度，淘汰只看磁盘水位；设正整数时淘汰循环额外按字节阈值触发（1GiB 写 `1073741824`） |
-| `prefetchLookahead` | `16` | Agent | 游标之后持续预取的邻域块数 |
-| `evictPolicy` | `heat` | Agent | 淘汰顺序，取 `heat`/`lru`/`lfu`；非法值使 Agent 拒绝启动 |
-| `datasetMetricsWhitelist` | 空（`""`） | Agent | 逗号分隔的 DataSet 名。为空时所有 DataSet 的指标 `dataset` 标签全部归并为 `other`；只有白名单内的名字保留原名 |
-| `startupWindowBytes` | `536870912`（512MiB） | Controller | 自动算 K 的启动窗口，必须 `>0`：`K_window = ceil(startupWindowBytes / chunkSize)`；1GiB 写 `1073741824` |
-| `maxFillFraction` | `0.125`（八分之一） | Controller | 全部 Pod 的预热总量占缓存容量的比例，取值 `(0,0.25]`：`K_cache = floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`；`cacheCapacityBytes=0` 时不参与 |
-| `objstoreEndpoint` | `minio.minio.svc.cluster.local:9000` | Agent | 源站端点，不带 scheme；接 COS/OSS/S3 时改这一处 |
-| `objstoreBucket` | `traincache` | Agent | 单桶名，必须等于 `DataSet.spec.bucket`；`SubmitPreheat` 不带桶名，不一致时每个块读取都失败 |
-| `objstoreSecure` | `false` | Agent | `true`/`1`/`yes` 时用 HTTPS 连源站 |
-| `gatewayEndpoint` | 空（`""`） | Agent | 合并回源网关地址，不带 scheme；空表示全部直连。非空时只有块 GET 走网关 |
-| `gatewaySecure` | `false` | Agent | Agent 到网关是否 TLS；与 `objstoreSecure` 无关 |
-| `gatewayBucketConcurrency` | `64` | 网关 | 到源站的并发下载上限，正整数；非法值使网关拒绝启动 |
-| `gatewayBlockBufferBytes` | `10485760`（10MiB） | 网关 | 每个在途块环形缓冲的字节数，正整数；非法值使网关拒绝启动 |
-| `gatewayCache` | `true` | 网关 | 磁盘缓存开关，默认打开；`1`/`true`/`yes` 开，其余取值关。关掉后网关只做在途合并，不落盘 |
-| `gatewayCacheDatasetBytes` | `34359738368`（32GiB） | 网关 | 单个 dataset 在网关盘上的驻写上限，正整数；非法值使网关拒绝启动 |
-| `gatewayCacheTotalBytes` | `68719476736`（64GiB） | 网关 | 全局驻写上限，正整数且不小于 `gatewayCacheDatasetBytes`，否则网关拒绝启动 |
-| `controllerPollInterval` | `1s` | Controller | 轮询 Agent 进度的间隔，代码默认 2s |
-| `controllerScoreTTL` | `10m` | Controller | 节点分数有效期，代码默认 5m |
-| `schedulerScoreTTL` | `10m` | Scheduler，写在 `traincache-scheduler-config` | 分数过期判定，必须与 `controllerScoreTTL` 同值 |
-| `schedulerLogLevel` | `debug` | Scheduler，写在 `traincache-scheduler-config` | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info` |
+| key                         | 默认值                                 | 归属                                          | 说明                                                                                                                                                                    |
+|-----------------------------|----------------------------------------|-----------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `cacheCapacityBytes`        | `"0"`                                  | Agent、Controller                             | 本地缓存字节上限（Controller 只用它算 `K_cache`）。`0` 关闭字节维度，淘汰只看磁盘水位；设正整数时淘汰循环额外按字节阈值触发（1GiB 写 `1073741824`）                     |
+| `prefetchLookahead`         | `"16"`                                 | Agent                                         | 游标之后持续预取的邻域块数                                                                                                                                              |
+| `evictPolicy`               | `"heat"`                               | Agent                                         | 淘汰顺序，取 `heat`/`lru`/`lfu`；非法值使 Agent 拒绝启动                                                                                                                |
+| `datasetMetricsWhitelist`   | 空（`""`）                             | Agent                                         | 逗号分隔的 DataSet 名。为空时所有 DataSet 的指标 `dataset` 标签全部归并为 `other`；只有白名单内的名字保留原名                                                           |
+| `startupWindowBytes`        | `"536870912"`（512MiB）                | Controller                                    | 自动算 K 的启动窗口，必须 `>0`：`K_window = ceil(startupWindowBytes / chunkSize)`；1GiB 写 `1073741824`                                                                 |
+| `maxFillFraction`           | `"0.125"`（八分之一）                  | Controller                                    | 全部 Pod 的预热总量占缓存容量的比例，取值 `(0,0.25]`：`K_cache = floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`；`cacheCapacityBytes=0` 时不参与 |
+| `objstoreEndpoint`          | `"minio.minio.svc.cluster.local:9000"` | Agent、网关                                   | 源站端点，不带 scheme；接 COS/OSS/S3 时改这一处                                                                                                                         |
+| `objstoreBucket`            | `"traincache"`                         | Agent、网关                                   | 单桶名，必须等于 `DataSet.spec.bucket`；`SubmitPreheat` 不带桶名，不一致时每个块读取都失败                                                                              |
+| `objstoreSecure`            | `"false"`                              | Agent、网关                                   | `true`/`1`/`yes` 时用 HTTPS 连源站                                                                                                                                      |
+| `objstoreCompression`       | `"false"`                              | Agent、网关                                   | 传输压缩开关；`true`/`1`/`yes` 时向源站声明 gzip，其余取值关                                                                                                            |
+| `fetchRangeThresholdBytes`  | `"67108864"`（64MiB）                  | Agent                                         | 块大小下限，单位字节，正整数；块不小于它时拆成 4 条 Range GET 并行下载                                                                                                  |
+| `gatewayEndpoint`           | 空（`""`）                             | Agent                                         | 合并回源网关地址，不带 scheme；空表示全部直连。非空时只有块 GET 走网关                                                                                                  |
+| `gatewaySecure`             | `"false"`                              | Agent                                         | Agent 到网关是否 TLS；与 `objstoreSecure` 无关                                                                                                                          |
+| `gatewayBucketConcurrency`  | `"64"`                                 | 网关                                          | 到源站的并发下载上限，正整数；非法值使网关拒绝启动                                                                                                                      |
+| `gatewayBlockBufferBytes`   | `"10485760"`（10MiB）                  | 网关                                          | 每个在途块环形缓冲的字节数，正整数；非法值使网关拒绝启动                                                                                                                |
+| `gatewayCache`              | `"true"`                               | 网关                                          | 磁盘缓存开关，默认打开；`1`/`true`/`yes` 开，其余取值关。关掉后网关只做在途合并，不落盘                                                                                 |
+| `gatewayCacheDatasetBytes`  | `"34359738368"`（32GiB）               | 网关                                          | 单个 dataset 在网关盘上的驻写上限，正整数；非法值使网关拒绝启动                                                                                                         |
+| `gatewayCacheTotalBytes`    | `"68719476736"`（64GiB）               | 网关                                          | 全局驻写上限，正整数且不小于 `gatewayCacheDatasetBytes`，否则网关拒绝启动                                                                                               |
+| `controllerPollInterval`    | `"1s"`                                 | Controller                                    | 轮询 Agent 进度的间隔，代码默认 2s                                                                                                                                      |
+| `controllerScoreTTL`        | `"10m"`                                | Controller                                    | 节点分数有效期，代码默认 5m                                                                                                                                             |
+| `gateNetworkBandwidthBytes` | `"0"`                                  | Controller                                    | 网络带宽上限，单位 bytes/sec；`0` 关闭门控的带宽判断，非零时门控拿 0.8 倍与 Agent 上报吞吐比较                                                                          |
+| `schedulerScoreTTL`         | `"10m"`                                | Scheduler，写在 `traincache-scheduler-config` | 分数过期判定，必须与 `controllerScoreTTL` 同值                                                                                                                          |
+| `schedulerLogLevel`         | `"debug"`                              | Scheduler，写在 `traincache-scheduler-config` | 每个 (pod,node) 决策打一行 `scheduler score`；manager 与 webhook 用代码默认 `info`                                                                                      |
 
 `k` 的确定：`k` 为 0 或省略时 Controller 自动计算并写回 `spec`，发 Normal 事件 `KDefaulted`；自动值 `K_i = clamp(min(W_i, K_window, K_cache), 1, W_i)`，`W_i` 是该 Pod 实际分到的块数。显式 `k` 的有效范围是 1..`W_i`；`k > W_i` 置 `Condition InvalidSpec=False` 并拒绝，不钳制、不截断。实际预热块数 = `min(max(K_i, score.cutoff), W_i)`。全部 Pod 的实际请求块数合计超过 `cacheCapacityBytes × maxFillFraction` 时发 Warning 事件 `KExceedsFillLimit`，任务继续执行。
 
 指标口径：`dataset` 标签只对白名单内的 DataSet 取原名，其余一律归并 `other`，目的是限制该标签的基数（D35）。白名单为空时所有带 `dataset` 标签的指标都归并到 `other`，按 dataset 拆分的看板看不出数据集差异，排查单数据集时再把名字加回白名单。
 
-ConfigMap 的配置项用 camelCase。Agent 的九项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_GATEWAY_ENDPOINT`、`TRAINCACHE_GATEWAY_SECURE`。Controller 的五项、scheduler 的两项同样由各自 Deployment 用 `configMapKeyRef` 注入。网关的八项由 `controller/deploy/gateway/deployment.yaml` 用 `configMapKeyRef` 注入：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY`、`TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES`、`TRAINCACHE_GATEWAY_CACHE`、`TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES`、`TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES`；AK/SK 另走 Secret `traincache-objstore`。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。完整参数表（集群、数据集、训练任务）见 [参数配置](PARAMETER-CONFIGURATION.md)。
+ConfigMap 的配置项用 camelCase。Agent 的 11 项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_OBJSTORE_COMPRESSION`、`TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES`、`TRAINCACHE_GATEWAY_ENDPOINT`、`TRAINCACHE_GATEWAY_SECURE`。Controller 的 6 项由 `controller/deploy/manager/deployment.yaml` 注入：`CONTROLLER_POLL_INTERVAL`、`CONTROLLER_SCORE_TTL`、`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_STARTUP_WINDOW_BYTES`、`TRAINCACHE_MAX_FILL_FRACTION`、`TRAINCACHE_GATE_NETWORK_BANDWIDTH`。scheduler 的 2 项由 `controller/deploy/scheduler/deployment.yaml` 注入：`SCHEDULER_SCORE_TTL`、`CONTROLLER_LOG_LEVEL`。网关的 9 项由 `controller/deploy/gateway/deployment.yaml` 注入：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_OBJSTORE_COMPRESSION`、`TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY`、`TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES`、`TRAINCACHE_GATEWAY_CACHE`、`TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES`、`TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES`；AK/SK 另走 Secret `traincache-objstore`。webhook 另有一条 `CHECKPOINT_IMAGE`，值取自 `traincache-checkpoint-image` ConfigMap，是注入训练 Pod 的镜像引用。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。完整参数表（集群、数据集、训练任务）见 [参数配置](PARAMETER-CONFIGURATION.md)。
 
 ## 6. CLI 下发
 

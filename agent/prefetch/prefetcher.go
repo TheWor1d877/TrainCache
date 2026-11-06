@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"traincache/agent/logagg"
@@ -262,6 +263,12 @@ type PersistentPrefetcher struct {
 	// (不会出现后写 Set 覆盖为旧值)。
 	fetchInflightMu sync.Mutex
 	fetchInflight   int64
+
+	// warmupDone 标记是否已离开 warmup 阶段。agent 启动时置 false,第一次训练进程
+	// 通过 OnConsumeSideAdvance 消费块后置 true。warmup 阶段 P0 块走 AdmissionReading
+	// (占满 MaxTasks),之后退回 AdmissionSpeculative (半额 specTasks)。
+	// 消费钩子与下载协程并发读写,用 atomic。
+	warmupDone atomic.Bool
 }
 
 // New 构造持久预取器(design §5.2 冻结签名)。cat/f/cs/m 分别提供索引查找、下载编排、
@@ -312,6 +319,9 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 	if err := ctx.Err(); err != nil {
 		return false
 	}
+	// 第一次训练进程消费块 → warmup 阶段结束,P0 块退回 AdmissionSpeculative。
+	// 幂等:多次调用无副作用。
+	p.warmupDone.Store(true)
 	var (
 		report  bool
 		leads   int64
@@ -804,8 +814,10 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 	}
 	reason := t.fetchReason()
 	adm := fetch.AdmissionSpeculative
-	if reason == metrics.FetchReasonDemand {
-		// 需求读补块走在读：不受预铺半额额度约束，也不用给预取让路。
+	if reason == metrics.FetchReasonDemand || (t.p0 && !p.warmupDone.Load()) {
+		// Demand 读补块走在读,不受半额约束;
+		// warmup 阶段的 P0 预热块也走在读,占满 MaxTasks(此时 Pod 尚未调度,
+		// 没有在读请求在途,半额保护多余)。
 		adm = fetch.AdmissionReading
 	}
 	p.reportFetchStart(t.dataset)

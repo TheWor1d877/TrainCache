@@ -38,6 +38,8 @@ func TestLoadDefaults(t *testing.T) {
 		CacheCapacityBytes: 0,
 		StartupWindowBytes: 536870912,
 		MaxFillFraction:    0.125,
+		// 缺省 0:门控不做带宽判断。
+		GateNetworkBandwidthBytes: 0,
 	}
 	if *cfg != want {
 		t.Fatalf("defaults = %#v, want %#v", *cfg, want)
@@ -46,24 +48,25 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadCustomValues(t *testing.T) {
 	cfg, err := load(lookupFrom(map[string]string{
-		EnvMetricsAddr:        "127.0.0.1:19412",
-		EnvHealthAddr:         ":18081",
-		EnvWebhookAddr:        ":19443",
-		EnvNamespace:          "train-system",
-		EnvAgentPort:          "19410",
-		EnvAgentTimeout:       "250ms",
-		EnvPollInterval:       "750ms",
-		EnvScoreTTL:           "90s",
-		EnvSchedulerScoreTTL:  "45s",
-		EnvScoreAnnotation:    "example.io/node-scores",
-		EnvGateName:           "example.io/warmup",
-		EnvLeaderElection:     "true",
-		EnvMaxChunks:          "42",
-		EnvLogLevel:           "DEBUG",
-		EnvDebugAddr:          "127.0.0.1:16060",
-		EnvCacheCapacityBytes: "1073741824",
-		EnvStartupWindowBytes: "268435456",
-		EnvMaxFillFraction:    "0.25",
+		EnvMetricsAddr:               "127.0.0.1:19412",
+		EnvHealthAddr:                ":18081",
+		EnvWebhookAddr:               ":19443",
+		EnvNamespace:                 "train-system",
+		EnvAgentPort:                 "19410",
+		EnvAgentTimeout:              "250ms",
+		EnvPollInterval:              "750ms",
+		EnvScoreTTL:                  "90s",
+		EnvSchedulerScoreTTL:         "45s",
+		EnvScoreAnnotation:           "example.io/node-scores",
+		EnvGateName:                  "example.io/warmup",
+		EnvLeaderElection:            "true",
+		EnvMaxChunks:                 "42",
+		EnvLogLevel:                  "DEBUG",
+		EnvDebugAddr:                 "127.0.0.1:16060",
+		EnvCacheCapacityBytes:        "1073741824",
+		EnvStartupWindowBytes:        "268435456",
+		EnvMaxFillFraction:           "0.25",
+		EnvGateNetworkBandwidthBytes: "104857600",
 	}))
 	if err != nil {
 		t.Fatalf("load() error = %v", err)
@@ -85,6 +88,20 @@ func TestLoadCustomValues(t *testing.T) {
 	}
 	if cfg.CacheCapacityBytes != 1073741824 || cfg.StartupWindowBytes != 268435456 || cfg.MaxFillFraction != 0.25 {
 		t.Fatalf("K inputs not parsed: %#v", cfg)
+	}
+	if cfg.GateNetworkBandwidthBytes != 104857600 {
+		t.Fatalf("GateNetworkBandwidthBytes = %d, want 104857600", cfg.GateNetworkBandwidthBytes)
+	}
+}
+
+// TestLoadGateNetworkBandwidthZero 显式写 0 表示不启用带宽判断,合法。
+func TestLoadGateNetworkBandwidthZero(t *testing.T) {
+	cfg, err := load(lookupFrom(map[string]string{EnvGateNetworkBandwidthBytes: "0"}))
+	if err != nil {
+		t.Fatalf("load() error = %v", err)
+	}
+	if cfg.GateNetworkBandwidthBytes != 0 {
+		t.Fatalf("GateNetworkBandwidthBytes = %d, want 0", cfg.GateNetworkBandwidthBytes)
 	}
 }
 
@@ -116,6 +133,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"zero fill fraction", map[string]string{EnvMaxFillFraction: "0"}, EnvMaxFillFraction},
 		{"fill fraction too high", map[string]string{EnvMaxFillFraction: "0.26"}, EnvMaxFillFraction},
 		{"bad fill fraction", map[string]string{EnvMaxFillFraction: "eighth"}, EnvMaxFillFraction},
+		{"negative gate network bandwidth", map[string]string{EnvGateNetworkBandwidthBytes: "-1"}, EnvGateNetworkBandwidthBytes},
+		{"bad gate network bandwidth", map[string]string{EnvGateNetworkBandwidthBytes: "100MB"}, EnvGateNetworkBandwidthBytes},
 		{"debug addr without host", map[string]string{EnvDebugAddr: ":6060"}, EnvDebugAddr},
 		{"debug addr not loopback", map[string]string{EnvDebugAddr: "0.0.0.0:6060"}, EnvDebugAddr},
 		{"debug addr not host port", map[string]string{EnvDebugAddr: "6060"}, EnvDebugAddr},
@@ -130,6 +149,19 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("error = %q, want it to mention %s", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLoadGateNetworkBandwidthDefault env 未设置时 gate 带宽上限取默认 0，
+// 即不启用带宽判断。
+func TestLoadGateNetworkBandwidthDefault(t *testing.T) {
+	cfg, err := load(lookupFrom(nil))
+	if err != nil {
+		t.Fatalf("load() error = %v", err)
+	}
+	if cfg.GateNetworkBandwidthBytes != 0 {
+		t.Fatalf("GateNetworkBandwidthBytes = %d, want 0 when %s is unset",
+			cfg.GateNetworkBandwidthBytes, EnvGateNetworkBandwidthBytes)
 	}
 }
 

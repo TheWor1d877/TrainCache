@@ -692,3 +692,81 @@ func podScoreSnapshot(
 	}
 	return nodeScores
 }
+
+// hasMinProgress 检查是否至少有一个 assigned node 上报了非零 ready。
+// 满足返回 true 表示门控不该继续等 gateThreshold,直接放行。
+//
+// 对应 #38 最小放行条件。issue 原文:第一轮 reconcile 全是 0% 和 agent 注册慢
+// 两种场景下,门控 Hold 是浪费——agent 刚上报任何 ready 就放。
+//
+// 注意:GWAA handoff 场景下 rival 刚接手也会触发此条件(rival 有 ready 但没追
+// 上 threshold)。这是 issue 原文设计的 trade-off——优先覆盖"等了白等"的场景,
+// handoff 场景下的提前放行接受为可接受的副作用。
+func hasMinProgress(pods []gate.PodGateState) bool {
+	for _, pod := range pods {
+		for _, node := range pod.AssignedNodes {
+			if pod.ReadyByNode[node] > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// 门控前置跳过的原因串。命中哪个子条件就返回哪个原因，
+// 日志的 reason 字段与 status.gateDecision.reason 都取这个值。
+const (
+	// skipReasonDatasetTooSmall 是条件 1（数据集太小）命中的原因。
+	skipReasonDatasetTooSmall = "dataset_too_small"
+	// skipReasonBandwidthFastEnough 是条件 2（带宽够快）命中的原因。
+	skipReasonBandwidthFastEnough = "bandwidth_fast_enough"
+)
+
+// shouldSkipGate 聚合 gate 的前置跳过条件，返回命中的原因与是否跳过。
+// 不跳过时原因返回空串。两个条件都命中时按条件 1 记原因。
+//
+// 两个条件：
+//
+//	条件 1（数据集太小）: totalBytes < cacheCapacityBytes/20，cacheCapacityBytes 未配置(0)时不触发。
+//	条件 2（带宽够快）: observedThroughput > 0.8*networkBandwidthBytesPerSec，且 dataset 不算大（totalBytes < 5GiB）。
+//	networkBandwidthBytesPerSec 为 0 时条件 2 不启用。
+//
+// issue 原文的三个条件里:
+//
+//	条件 1(候选节点 ≤ 1):分析后发现单 node 场景下门控依然有价值(让那台节点
+//	至少有几块就绪),只意味着 node-scores 白算,不等于门控整体没用。不做。
+//
+// 对应 #37 前置跳过判断。条件 2 是本次增量（#37 issue 条件 2）。
+func shouldSkipGate(totalBytes int64, cacheCapacityBytes int64, observedThroughput float64, networkBandwidthBytesPerSec int64) (string, bool) {
+	// 条件 1: 数据集太小。
+	if cacheCapacityBytes > 0 && totalBytes > 0 && totalBytes < cacheCapacityBytes/20 {
+		return skipReasonDatasetTooSmall, true
+	}
+	// 条件 2: 带宽够快。
+	//   - networkBandwidthBytesPerSec == 0 表示 controller 未配置网络上限 → 跳过条件
+	//   - observedThroughput > 0 → 必须有数据
+	//   - observedThroughput > 0.8 * networkBandwidthBytesPerSec → agent 已跑满
+	//   - totalBytes 不算太小（这里设 5GiB 阈值，避免小数据集也触发带宽判断）
+	if networkBandwidthBytesPerSec > 0 && observedThroughput > 0 {
+		if observedThroughput > float64(networkBandwidthBytesPerSec)*0.8 && totalBytes < 5*1024*1024*1024 {
+			return skipReasonBandwidthFastEnough, true
+		}
+	}
+	return "", false
+}
+
+// dataSetTotalBytes 按 BlockLayout 精确计算 DataSet 的总字节数。
+func dataSetTotalBytes(ds *traincachev1alpha1.DataSet) int64 {
+	if ds == nil {
+		return 0
+	}
+	var total int64
+	for _, layout := range ds.Status.BlockLayout {
+		chunks := int64(layout.Count)
+		if chunks > 1 {
+			total += (chunks - 1) * ds.Spec.ChunkSize
+		}
+		total += layout.LastChunkSize
+	}
+	return total
+}

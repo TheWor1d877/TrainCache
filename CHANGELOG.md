@@ -11,6 +11,7 @@
 - `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
 
 - bench 装置重排为九族实验：97 个 COND，入口 `python3 bench/run.py <族>`，`python3 bench/run.py status` 打印各族完成格子数。新增出图脚本 `bench/experiments/plot_families.py`（11 张图，输出中英两套 PNG 与聚合 CSV）与报告页 `bench/experiments/report.py`（首屏决策表加逐族结论）。混沌族新增节点丢失档 `bench/chaos/inject/node_loss.sh`。装置说明见 `docs/4.1-bench-apparatus.md` 到 `docs/4.4-bench-runbook.md`。
+- 门控新增两条前置放行条件与一条最小放行条件：数据集总字节小于缓存容量的 5% 时直接放行（原因 `dataset_too_small`）；Agent 上报吞吐超过网络带宽上限的 0.8 倍时直接放行（原因 `bandwidth_fast_enough`）；任一预热节点对某 Pod 上报过非零 ready 块数时放行（原因 `min_progress_any_node`）。带宽上限进 ConfigMap `traincache-config` 的 `gateNetworkBandwidthBytes`，默认 `"0"`（不启用带宽判断），环境变量 `TRAINCACHE_GATE_NETWORK_BANDWIDTH`。契约见 `docs/7.2-decisions.md` D50、`docs/7.1-design.md`。
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
 
@@ -32,6 +33,8 @@
 - Agent 每个进程的下载任务默认上限从 8 提到 16，预铺仍占一半。大块走 4 路并行时单进程到源站或网关的连接峰值为 64，与 `MaxConnsPerHost` 默认值齐平。
 - 网关到桶并发上限的默认值从 32 提到 64，覆盖预热阶段多个 Agent 同时取数；网关 Deployment 的内存上限同步从 1Gi 提到 1.5Gi。
 
+- Agent 在 warmup 阶段让 P0 预热块走读准入（占满 `MaxTasks`），训练进程开始消费块后退回预铺档位。warmup 阶段没有在读请求在途，半额保护没有保护对象。契约见 `docs/6.2-decisions.md` D66、`docs/6.1-design.md`。
+- `docs/PARAMETER-CONFIGURATION.md` 按配置层重排为集群运行时、数据集、训练任务三节，每节按落位对象分小节，补术语表、每个键的影响面与作用范围。
 ## [v0.6.0] - 2026-11-06
 
 ### Added

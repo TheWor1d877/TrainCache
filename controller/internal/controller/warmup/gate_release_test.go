@@ -204,13 +204,14 @@ func TestReleaseTMaxDegradesAndRequeuesNothing(t *testing.T) {
 func TestGateCycleRequeuesAfterTerminalPoll(t *testing.T) {
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	task.Spec.Gate.Threshold = 1
-	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})
+	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1", "n2"})
 	pool := newFakeProgressPool()
-	// Agent reports Ready (terminal) but only one block is ready, below K.
-	pool.set("train/t1/p0", "n1", doneResponse(3, []byte{0b01}))
+	// 两个 node 都有 terminal 响应（done），但 ready 都是 0 → gate holds, #38 不触发
+	pool.set("train/t1/p0", "n1", doneResponse(3, []byte{0b00}))
+	pool.set("train/t1/p0", "n2", doneResponse(3, []byte{0b00}))
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	base := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), gatedPod(0))
+	base := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureNode("n2"), fixtureAgentPod("n2"), gatedPod(0))
 	r := &Reconciler{Client: base, Agents: pool, Log: log, PollInterval: 2 * time.Second}
 
 	result, err := reconcileResult(t, r)
