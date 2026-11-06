@@ -19,6 +19,12 @@
 
 # Changelog正文
 
+## 未发布
+
+### Fixed
+
+- 恢复放弃的记账口径写错：v0.5.2 的条目与 `docs/10.1`、`docs/10.2` 都写成「计入 Job 的 `status.failed`」。实际机制是 `restartPolicy: OnFailure` 下 init 容器在同一个 Pod 里重启，每次重启算一次失败、计入 `backoffLimit`，用完后 Job 以 `BackoffLimitExceeded` 判 Failed 并删除 Pod；`status.failed` 记的是失败的 Pod 数，这种形态下是 1，不是重启次数。kind 1.37 上的实跑与单独探针都确认这一点，`checkpoint/e2e` 的 `restore-giveup` 模式断言随之改为核对 `BackoffLimitExceeded` 与 `status.failed=1`（D14）。
+
 ## [v0.5.2] - 2026-11-05
 
 ### Added

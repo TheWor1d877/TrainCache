@@ -21,8 +21,8 @@ import (
 const exitConfig = 2
 
 // exitRestoreGiveUp 是恢复放弃的退出码（design 10.1 §6.5、10.2 D14）：与配置
-// 非法的 2 分开，restartPolicy: OnFailure 下 kubelet 会重启 init 容器并计入 Job 的
-// status.failed，重拉镜像对这个失败没有任何帮助。
+// 非法的 2 分开，restartPolicy: OnFailure 下 kubelet 在同一 Pod 内重启 init
+// 容器，每次重启计入 Job 的 backoffLimit，重拉镜像对这个失败没有任何帮助。
 const exitRestoreGiveUp = 3
 
 // version 由构建时 -ldflags "-X main.version=..." 注入。
