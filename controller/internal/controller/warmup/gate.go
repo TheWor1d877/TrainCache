@@ -57,7 +57,7 @@ func isTerminal(task *traincachev1alpha1.WarmupTask) bool {
 // failures are treated as stopped nodes so a Pod is not assigned to a node
 // whose initial Submit already failed. previous is this round's ledger: pairs
 // still running at the current generation are the hysteresis input (docs/7.1-design.md
-//《GWAA 分配》, docs/7.2 D45) that keeps an incumbent from being replaced just because another
+// 《GWAA 分配》, docs/7.2 D45) that keeps an incumbent from being replaced just because another
 // node landed one block first.
 func (r *Reconciler) computePlacement(
 	task *traincachev1alpha1.WarmupTask,

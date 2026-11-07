@@ -278,7 +278,8 @@ func dirIsEmpty(dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(entries) == 0, nil}
+	return len(entries) == 0, nil
+}
 
 // TestFetchRangeParallelTempFileInBlockDir 分片聚合的临时文件必须建在块目录内。
 // Agent 的容器根文件系统只读，系统临时目录不可写；临时文件落到系统临时目录
