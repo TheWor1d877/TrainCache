@@ -25,16 +25,21 @@
 
 ### Added
 
-- Agent 下载不小于 `fetchRangeThresholdBytes` 的块时拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。阈值进 ConfigMap `traincache-config`，默认 `"67108864"`（64MiB），环境变量 `TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES`。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
+- Agent 把每个块拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。开关进 ConfigMap `traincache-config`，键 `fetchRangeParallel`，默认 `"true"`，环境变量 `TRAINCACHE_FETCH_RANGE_PARALLEL`；关掉后每个块走一条整对象 GET。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
 - 新增传输压缩开关 `objstoreCompression`（默认 `"false"`），Agent 与网关共同读取，环境变量 `TRAINCACHE_OBJSTORE_COMPRESSION`。打开后 S3 客户端向源站声明 gzip，传输层解压后交给上层的是原始字节；带 Range 的请求不参与协商。训练数据多为已压缩格式，默认关闭。契约见 `docs/9.1-design.md` §5.3。
 
 ### Changed
 
-- Agent 每个进程的下载任务默认上限从 8 提到 16，预铺仍占一半。大块走 4 路并行时单进程到源站或网关的连接峰值为 64，与 `MaxConnsPerHost` 默认值齐平。
+- Agent 每个进程的下载任务默认上限从 8 提到 16，预铺仍占一半。每块走 4 路并行时单进程到源站或网关的连接峰值为 64，与 `MaxConnsPerHost` 默认值齐平。
 - 网关到桶并发上限的默认值从 32 提到 64，覆盖预热阶段多个 Agent 同时取数；网关 Deployment 的内存上限同步从 1Gi 提到 1.5Gi。
 
 - Agent 在 warmup 阶段让 P0 预热块走读准入（占满 `MaxTasks`），训练进程开始消费块后退回预铺档位。warmup 阶段没有在读请求在途，半额保护没有保护对象。契约见 `docs/6.2-decisions.md` D66、`docs/6.1-design.md`。
 - `docs/PARAMETER-CONFIGURATION.md` 按配置层重排为集群运行时、数据集、训练任务三节，每节按落位对象分小节，补术语表、每个键的影响面与作用范围。
+
+### Removed
+
+- 块大小阈值取消：ConfigMap 键 `fetchRangeThresholdBytes` 与环境变量 `TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES` 一并撤掉，并行 Range 下载改由布尔开关 `fetchRangeParallel` 承担，默认打开。
+
 ## [v0.6.0] - 2026-11-06
 
 ### Added

@@ -41,7 +41,7 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_LOCAL_GC_INTERVAL",
 		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
 		"TRAINCACHE_OBJSTORE_COMPRESSION",
-		"TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES",
+		"TRAINCACHE_FETCH_RANGE_PARALLEL",
 		"TRAINCACHE_GATEWAY_ENDPOINT",
 		"TRAINCACHE_GATEWAY_SECURE",
 	} {
@@ -148,8 +148,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ObjstoreCompression {
 		t.Error("ObjstoreCompression 默认值 = true, want false(压缩默认关闭)")
 	}
-	if cfg.FetchRangeThresholdBytes != defaultFetchRangeThresholdBytes {
-		t.Errorf("FetchRangeThresholdBytes = %d, want %d(默认 64 MiB)", cfg.FetchRangeThresholdBytes, defaultFetchRangeThresholdBytes)
+	if !cfg.FetchRangeParallel {
+		t.Error("FetchRangeParallel 默认值 = false, want true(并行下载默认打开)")
 	}
 	if cfg.GatewayEndpoint != "" {
 		t.Errorf("GatewayEndpoint 默认值 = %q, want 空(9.1 §5.3:全部直连)", cfg.GatewayEndpoint)
@@ -275,7 +275,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_OBJSTORE_BUCKET", "tc-blocks")
 	t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
 	t.Setenv("TRAINCACHE_OBJSTORE_COMPRESSION", "yes")
-	t.Setenv("TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES", "8388608")
+	t.Setenv("TRAINCACHE_FETCH_RANGE_PARALLEL", "false")
 	t.Setenv("TRAINCACHE_GATEWAY_ENDPOINT", "gateway.traincache.svc:9413")
 	t.Setenv("TRAINCACHE_GATEWAY_SECURE", "yes")
 	t.Setenv("TRAINCACHE_HEAT_DECAY_AGE", "48h")
@@ -333,8 +333,8 @@ func TestLoadEnvOverride(t *testing.T) {
 	if !cfg.ObjstoreCompression {
 		t.Error("ObjstoreCompression = false, want true(TRAINCACHE_OBJSTORE_COMPRESSION=yes)")
 	}
-	if cfg.FetchRangeThresholdBytes != 8388608 {
-		t.Errorf("FetchRangeThresholdBytes = %d, want 8388608(TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES)", cfg.FetchRangeThresholdBytes)
+	if cfg.FetchRangeParallel {
+		t.Error("FetchRangeParallel = true, want false(TRAINCACHE_FETCH_RANGE_PARALLEL=false)")
 	}
 	if cfg.GatewayEndpoint != "gateway.traincache.svc:9413" {
 		t.Errorf("GatewayEndpoint = %q, want gateway.traincache.svc:9413(9.1 §5.3)", cfg.GatewayEndpoint)
@@ -428,6 +428,47 @@ func TestLoadObjstoreSecureBool(t *testing.T) {
 			}
 			if cfg.ObjstoreSecure {
 				t.Errorf("ObjstoreSecure = true, want false(env=%q)", v)
+			}
+		})
+	}
+}
+
+// TestLoadFetchRangeParallel:并行下载开关(默认打开,不做块大小判定)。
+// 未设置 → true;"false"/"0"/"no" → false;"true"/"1"/"yes" → true;
+// 其余取值 → 拒绝启动(配置错即拦,不静默回退)。
+func TestLoadFetchRangeParallel(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		set     bool
+		want    bool
+		wantErr bool
+	}{
+		{name: "缺省打开", want: true},
+		{name: "显式打开", set: true, value: "true", want: true},
+		{name: "显式关闭", set: true, value: "false", want: false},
+		{name: "显式关闭零", set: true, value: "0", want: false},
+		{name: "非法取值", set: true, value: "on", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			if tc.set {
+				t.Setenv("TRAINCACHE_FETCH_RANGE_PARALLEL", tc.value)
+			}
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load 未报错，期望拒绝非法开关取值 %q", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.FetchRangeParallel != tc.want {
+				t.Errorf("FetchRangeParallel = %v, want %v(env=%q)", cfg.FetchRangeParallel, tc.want, tc.value)
 			}
 		})
 	}

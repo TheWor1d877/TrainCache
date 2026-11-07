@@ -168,8 +168,8 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// (幂等无害)。必须在 fetch/prefetcher/rescan/backfill 构造之前完成。
 	ag.selfOpen = prefetch.NewSelfOpenGuard(selfOpenGuardTTL)
 	ag.Fetcher = fetch.New(obj, cs, fetch.Options{
-		OnLocalOpen:    ag.selfOpen.Mark,
-		RangeThreshold: cfg.FetchRangeThresholdBytes, // 零值回退 core/fetch 默认 64 MiB
+		OnLocalOpen:   ag.selfOpen.Mark,
+		RangeParallel: cfg.FetchRangeParallel, // 默认打开:每个块拆成 4 条 Range GET 并行取
 	})
 
 	// 指标层带 node 标签(traincache_agent_up / agent_degraded;§5.8 node 为第二正交维度)。

@@ -43,13 +43,13 @@
 #                              data is already compressed. Written here even
 #                              though it equals the code default, so the switch
 #                              is discoverable in the manifest.
-#   fetchRangeThresholdBytes — Agent-only lower bound for splitting a block into
-#                              four parallel Range GETs; positive integer,
-#                              default 67108864 (64 MiB). Lower it to the block
-#                              size when blocks are smaller. Written here
-#                              because the DaemonSet references it: patching the
-#                              key is the supported way to change the threshold
-#                              per run, and a missing key blocks Pod startup.
+#   fetchRangeParallel      — Agent-only switch for splitting every block into
+#                              four parallel Range GETs; "true"/"1"/"yes" turns
+#                              it on, "false"/"0"/"no" turns it off. On by
+#                              default. Written here because the DaemonSet
+#                              references it: patching the key is the supported
+#                              way to change it per run, and a missing key
+#                              blocks Pod startup.
 #   gatewayEndpoint          — S3 gateway the Agent routes block GETs to. ""
 #                              means every block GET goes straight to the
 #                              origin; "<host>:<port>" routes them through the
@@ -109,7 +109,7 @@ data:
   objstoreBucket: "traincache"
   objstoreSecure: "false"
   objstoreCompression: "false"
-  fetchRangeThresholdBytes: "67108864"
+  fetchRangeParallel: "true"
   gatewayEndpoint: ""
   gatewaySecure: "false"
   gatewayBucketConcurrency: "64"

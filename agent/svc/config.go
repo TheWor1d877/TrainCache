@@ -57,10 +57,10 @@ const (
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
 	// envObjstoreCompression 控制 S3 客户端是否声明 gzip(默认关闭;9.0「其他决策」)。
 	envObjstoreCompression = "TRAINCACHE_OBJSTORE_COMPRESSION"
-	// envFetchRangeThresholdBytes 是走四分片并行下载的块大小下限(默认 64 MiB)。
-	envFetchRangeThresholdBytes = "TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES"
-	// defaultFetchRangeThresholdBytes 与 core/fetch 的默认阈值一致。
-	defaultFetchRangeThresholdBytes int64 = 64 << 20
+	// envFetchRangeParallel 控制每个块是否拆成 4 条 Range GET 并行下载(默认开)。
+	envFetchRangeParallel = "TRAINCACHE_FETCH_RANGE_PARALLEL"
+	// defaultFetchRangeParallel 是并行下载开关的默认值:默认打开。
+	defaultFetchRangeParallel = true
 
 	// envDebugAddr 是 /debug/loglevel 的监听地址(只允许回环;空字符串关闭端点)。
 	envDebugAddr = "TRAINCACHE_DEBUG_ADDR"
@@ -122,10 +122,10 @@ type Config struct {
 	// TRAINCACHE_OBJSTORE_COMPRESSION 覆盖,"1"/"true"/"yes" 为真)。
 	// 网关路径同样使用该开关;带 Range 的请求不参与协商。
 	ObjstoreCompression bool
-	// FetchRangeThresholdBytes 是走四分片并行下载的块大小下限(默认 64 MiB,
-	// TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES 覆盖,需 >0)。
-	FetchRangeThresholdBytes int64
-	Heat                     HeatConfig
+	// FetchRangeParallel 控制每个块是否拆成 4 条 Range GET 并行下载(默认 true,
+	// TRAINCACHE_FETCH_RANGE_PARALLEL 覆盖,非法值拒绝启动)。
+	FetchRangeParallel bool
+	Heat               HeatConfig
 	// ReadStallMinWaitMS 是 read_stall 入直方图的最小等待毫秒(D47/Q15;默认 100,
 	// TRAINCACHE_READ_STALL_MIN_WAIT_MS 覆盖,需 >0)。
 	ReadStallMinWaitMS int64
@@ -174,7 +174,8 @@ func (c Config) localGCInterval() time.Duration {
 
 // Load 从环境变量加载配置并校验(design §8):
 // NODE_NAME 必填非空(D8);TRAINCACHE_VERIFY 仅接受 xxh3 / xxh3+sha256;
-// TRAINCACHE_HEAT_* 非法取值报错(D30:duration 走 time.ParseDuration,百分比 0..100)。
+// TRAINCACHE_HEAT_* 非法取值报错(D30:duration 走 time.ParseDuration,百分比 0..100);
+// TRAINCACHE_FETCH_RANGE_PARALLEL 只接受 1/true/yes 与 0/false/no,其余取值报错。
 func Load() (*Config, error) {
 	node, err := nodeid.FromEnv()
 	if err != nil {
@@ -211,7 +212,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	fetchRangeThresholdBytes, err := envPositiveInt64(envFetchRangeThresholdBytes, defaultFetchRangeThresholdBytes)
+	fetchRangeParallel, err := envBoolStrict(envFetchRangeParallel, defaultFetchRangeParallel)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +235,7 @@ func Load() (*Config, error) {
 		ObjstoreBucket:                envOr("TRAINCACHE_OBJSTORE_BUCKET", defaultObjstoreBucket),
 		ObjstoreSecure:                envBool("TRAINCACHE_OBJSTORE_SECURE"),
 		ObjstoreCompression:           envBool(envObjstoreCompression),
-		FetchRangeThresholdBytes:      fetchRangeThresholdBytes,
+		FetchRangeParallel:            fetchRangeParallel,
 		Heat:                          heat,
 		ReadStallMinWaitMS:            readStallMinWaitMS,
 		ReadStallWindowMS:             readStallWindowMS,
@@ -341,6 +342,23 @@ func envBool(key string) bool {
 		return true
 	}
 	return false
+}
+
+// envBoolStrict 解析布尔 env,取值口径与 envBool 一致:"1"/"true"/"yes" 为真,
+// "0"/"false"/"no" 为假,大小写不敏感。
+// 未设置或全空白 → 默认值;其余取值 → 错误(配置错即拒绝启动,不静默回退)。
+func envBoolStrict(key string, def bool) (bool, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes":
+		return true, nil
+	case "0", "false", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("svc: %s=%q 非法(需 true/false 开关值,如 1/true/yes)", key, v)
 }
 
 // splitList 逗号切分、TrimSpace、丢空项(TRAINCACHE_DATASET_WHITELIST 解析口径)。

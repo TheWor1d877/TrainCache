@@ -54,7 +54,7 @@
 | `objstoreBucket` | `TRAINCACHE_OBJSTORE_BUCKET` | `"traincache"` | Agent + 网关 | 重启 Agent 与网关 | 单桶名，必须等于 `DataSet.spec.bucket`：`SubmitPreheat` 不带桶名，不一致时每个块读取都失败。bench 按数据集改写它 |
 | `objstoreSecure` | `TRAINCACHE_OBJSTORE_SECURE` | `"false"` | Agent + 网关 | 重启 Agent 与网关 | `true` / `1` / `yes` 时用 HTTPS 连源站，其余取值（含空）走明文 |
 | `objstoreCompression` | `TRAINCACHE_OBJSTORE_COMPRESSION` | `"false"` | Agent + 网关 | 重启 Agent 与网关 | 传输压缩开关。`true` / `1` / `yes` 时 S3 客户端向源站声明 gzip，传输层解压后按原始字节计算指纹；关闭时不发 `Accept-Encoding`。带 Range 的请求不参与协商。训练数据多为已压缩格式，默认关闭 |
-| `fetchRangeThresholdBytes` | `TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES` | `"67108864"` | Agent | 重启 Agent | 走四分片并行下载的块大小下限，单位字节，正整数。块不小于该值时拆成 4 条 Range GET；块大小由发布时的 S3 对象决定，bench 的 8MiB 块要把它降到 `"8388608"` 才触发并行路径 |
+| `fetchRangeParallel` | `TRAINCACHE_FETCH_RANGE_PARALLEL` | `"true"` | Agent | 重启 Agent | Range 并行下载开关，默认打开。打开时每个块拆成 4 条 Range GET 并行取，拼成完整块后算指纹落盘；关闭时每个块走一条整对象 GET。块大小不参与判定，非法值使 Agent 拒绝启动 |
 | `gatewayEndpoint` | `TRAINCACHE_GATEWAY_ENDPOINT` | `""` | Agent | 重启 Agent | 合并回源网关地址，形如 `traincache-gateway.traincache.svc.cluster.local:9413`，不带 scheme；空表示全部直连源站。非空时只有块 GET 走网关，`Put`/`List`/`GetETag`/`PutIfMatch`/`Delete` 仍直连源站 |
 | `gatewaySecure` | `TRAINCACHE_GATEWAY_SECURE` | `"false"` | Agent | 重启 Agent | Agent 到网关是否 TLS，`true`/`1`/`yes` 为真，取值独立于 `objstoreSecure`，源站与网关的 TLS 各设一次 |
 | `gatewayBucketConcurrency` | `TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY` | `"64"` | 网关 | 重启网关 | 到源站的并发下载上限，正整数；`0` 或非整数使网关拒绝启动 |

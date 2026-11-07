@@ -85,11 +85,11 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: objstoreCompression
-            - name: TRAINCACHE_FETCH_RANGE_THRESHOLD_BYTES
+            - name: TRAINCACHE_FETCH_RANGE_PARALLEL
               valueFrom:
                 configMapKeyRef:
                   name: traincache-config
-                  key: fetchRangeThresholdBytes
+                  key: fetchRangeParallel
             - name: TRAINCACHE_OBJSTORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
