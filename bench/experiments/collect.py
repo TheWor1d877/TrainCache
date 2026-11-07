@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M1 离线采集器:把 run.json + K8s 状态 + Prometheus 计数器汇成 metrics.csv。
 
-口径(4.3 §2.1/§2.3/§2.4):
+口径(4.3 启动与全程 makespan、命中率、三笔字节成本):
   * makespan 两条边界全部来自 run.json(t_submit/t_first_step/t_last_step);
     t_pod_ready 从 K8s Pod condition 取,只做拆分,不改主口径;
   * 三笔字节成本 = 启动窗口、steady 窗口、每个 switch 窗口的计数器增量。

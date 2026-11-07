@@ -18,7 +18,7 @@ make e2e    # create a kind cluster, load images, run six assertions
 
 ## Background
 
-Fluid 1.1.0-alpha.9 runs DataLoad apart from scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md) §2.2). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid. §0). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and trigger no rescheduling, so the blocks written at startup stop matching what later epochs read, and no component fetches ahead of the reader.
+Fluid 1.1.0-alpha.9 runs DataLoad apart from scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md), the zero webhook injection diff section). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid., the conclusion section). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and trigger no rescheduling, so the blocks written at startup stop matching what later epochs read, and no component fetches ahead of the reader.
 
 ## Where it applies
 
@@ -184,12 +184,11 @@ Documents under `docs/` are written in Chinese.
 | [1 Introduction and background](docs/1-introduction-and-background.md) | Problem statement, external facts, positioning against Fluid and JuiceFS |
 | [2 Three-layer architecture](docs/2-three-layer-architecture.md) | Control plane, node plane, data sources and data-plane conventions |
 | [3 Field survey](docs/3-field-survey.md) | How Fluid and JuiceFS work, and the gaps found |
-| [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.5 and standing commands |
+| [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.4 and standing commands |
 | [4.1 Apparatus and variable space](docs/4.1-bench-apparatus.md) | Rig, ρ ladder, parameters, data generation and locations |
-| [4.2 Families and grids](docs/4.2-bench-families.md) | Nine experiment families, cell matrices, COND contract, machine-hour account |
+| [4.2 Families and grids](docs/4.2-bench-families.md) | Ten experiment families, cell matrices, COND contract, machine-hour account |
 | [4.3 Metrics and decisions](docs/4.3-bench-metrics-and-decisions.md) | Metric formulas, pass criteria, numbered decisions |
 | [4.4 Runbook](docs/4.4-bench-runbook.md) | Environment, startup, data preparation, running a family, troubleshooting, artifacts |
-| [4.5 Version log](docs/4.5-experiment-version-log.md) | Version × family artifact records |
 | [5.x Cache core library](docs/5.1-design.md) | Requirements, plan, decisions and tests |
 | [6.x Agent service](docs/6.1-design.md) | Node-plane interfaces and decisions |
 | [7.x Controller and Scheduler](docs/7.1-design.md) | Control-plane interfaces and decisions |

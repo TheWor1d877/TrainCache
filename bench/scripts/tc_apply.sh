@@ -3,7 +3,7 @@
 #
 # 挂点依据(现勘/探针实证,勿回退):必须挂"出站方"容器 netns 内 eth0 的 egress;
 # docker0 桥主设备与宿主机 veth 的 host 侧 egress 均被实证否决(见
-# probes/probe_a/tc_setup.sh 顶部记录与 docs/4.1 §1)。
+# probes/probe_a/tc_setup.sh 顶部记录与 docs/4.1 的回源带宽整形一节)。
 #
 # 用法:tc_apply.sh <rate> <delay> [burst] [--target minio|source-d]
 #        [--per-conn <rate>] [--loss <pct>] [--dry-run] [--self-test] [--help]
@@ -20,7 +20,7 @@
 #   --self-test:自检(不碰集群、不碰容器):burst 推导 / netem 形态 / 单流上限形态 /
 #                丢包参数拼装 / 旧调用形态解析。
 #   netem 只挂固定 delay,不加抖动:随机时延逐包重抽会把包序打乱,300mbit 档实测把吞吐
-#   从 35.6MB/s 打到 <0.6MB/s(TCPSackRecovery 占已发段的 15%),详见 docs/4.1 §1 的限速口径。
+#   从 35.6MB/s 打到 <0.6MB/s(TCPSackRecovery 占已发段的 15%),详见 docs/4.1 的回源带宽整形一节 的限速口径。
 #   缺省值:无档位参数时 minio 取 TC_RATE/TC_DELAY、source-d 取 TRAIN_TC_RATE/
 #           TRAIN_TC_DELAY;latency 固定 50ms(与既有挂点一致)
 #           —— 无参调用行为与改造前一致(make tc-up / cold_reset.sh 依赖此路径)。

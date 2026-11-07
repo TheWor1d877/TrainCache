@@ -273,7 +273,7 @@ bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" ${TC_EXTRA_ARGS[@]
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置
 # gate 绝对超时。全档统一 10m:100mbit × fanout 2 预热 1GiB 实测 332–343s,
 # 原估的 172s 低估了 tc 限速下的实际吞吐,5m 会在半程判 Degraded 废掉整轮
-# (抬档的实测依据见 4.2 §6 的门控参数行)。
+# (抬档的实测依据见 4.2 的预热族一节的门控参数行)。
 GATE_TMAX="${TRAINCACHE_GATE_TMAX:-10m}"
 # 门控开关：gated 等 WarmupTask Released 再起训练；free 不等，训练与预热并行。
 GATE_MODE="${TRAINCACHE_GATE_MODE:-gated}"

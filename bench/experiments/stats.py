@@ -30,6 +30,13 @@ def mean(values: list[float]) -> float:
     return float(np.mean(np.asarray(values, dtype=float)))
 
 
+def median(values: list[float]) -> float:
+    """返回中位数。空列表返回 0.0。"""
+    if not values:
+        return 0.0
+    return float(np.median(np.asarray(values, dtype=float)))
+
+
 def bootstrap_ci(values: list[float], iters: int = 10000, alpha: float = 0.05,
                  seed: int | None = None) -> tuple[float, float]:
     """返回 (low, high) 置信区间。

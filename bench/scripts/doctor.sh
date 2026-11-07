@@ -453,7 +453,7 @@ if [ "$HAVE_K8S" -eq 1 ]; then
     done
 fi
 
-section "淘汰证据(4.3 §2.6、§3.1)"
+section "淘汰证据(4.3 缓存峰值与声明容量、全体判据)"
 if [ "$HAVE_K8S" -eq 1 ]; then
     agentd_pods="$(kubectl -n traincache get pods -l app=traincache-agentd \
         -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
@@ -516,7 +516,7 @@ if [ "$HAVE_K8S" -eq 1 ]; then
             fail "节点上有 $dir_total 字节的块,但各 agentd 的字节累计最大为 $accum_max → 累计没生效,淘汰闸门不会触发"
         elif [ "$dir_total" -gt 0 ] \
                 && [ "$(awk -v a="$accum_max" -v d="$dir_total" 'BEGIN{print (a+0>1.5*d)?1:0}')" = "1" ]; then
-            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.3 §2.6 字节账自洽判据) → 同一批块被重复记账"
+            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.3 全体判据的字节账自洽) → 同一批块被重复记账"
         elif [ "$dir_total" -eq 0 ]; then
             pass "缓存目录为空(agentd 复位后),累计 $accum_max 是复位前残账,不作判据"
         else
@@ -653,7 +653,7 @@ PYEOF
         warn "tc qdisc 在位但读不到 rate/burst 字段,跳过 burst 断言: $tbf_line"
     fi
     # 单流限速档的形态:根 tbf 之下挂 fq,fq 的 maxrate 给出每连接上限,netem
-    # 挂在 fq 的 leaf class 上(4.2 §13)。挂了 fq 就要能看到 maxrate。
+    # 挂在 fq 的 leaf class 上(4.2 的并行下载族一节)。挂了 fq 就要能看到 maxrate。
     if printf '%s' "$tc_out" | grep -q 'qdisc fq'; then
         fq_line="$(printf '%s\n' "$tc_out" | grep -m1 'qdisc fq' || true)"
         if printf '%s' "$fq_line" | grep -q 'maxrate'; then

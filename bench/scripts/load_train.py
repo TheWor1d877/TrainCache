@@ -78,7 +78,7 @@ SHUFFLE_BUFFER = 100       # 样本级 shuffle 缓冲(同 probe_c)
 WINDOW = 20                # verify 窗口步数(报告项口径,同第一步)
 VERIFY_TOL = 0.10          # verify 阈值缺省;实际由 train_verify.sh 传
                            # bench/config.py 的 COLD_VERIFY_TOLERANCE
-BASELINE_STEPS = config.TRAIN_BASELINE_STEPS  # 切换回落基线步数(4.3 §3.2「switch·回落」)
+BASELINE_STEPS = config.TRAIN_BASELINE_STEPS  # 切换回落基线步数(4.3 按族的判据「switch·回落」)
 
 
 def shard_of_key(key: str) -> int:
@@ -111,7 +111,7 @@ def parse_rfc3339(text: str) -> datetime:
 
 
 def stage_of(epoch: int, epochs: int, fractions) -> int:
-    """curriculum stage 归属(4.2 §7):E<3 全 stage 0,否则 equal-thirds。"""
+    """curriculum stage 归属(4.2 的阶段切换族一节):E<3 全 stage 0,否则 equal-thirds。"""
     if epochs < 3:
         return 0
     if epoch < epochs // 3:
@@ -377,7 +377,7 @@ def write_run_json(path, run):
 
 
 def switch_baseline(records, n=BASELINE_STEPS):
-    """切换前 n 个实测步的 stall 基线(4.3 §3.2「switch·回落」;warmup 不计)。"""
+    """切换前 n 个实测步的 stall 基线(4.3 按族的判据「switch·回落」;warmup 不计)。"""
     vals = [stall(r) for r in records if not r.get("warmup")][-n:]
     if not vals:
         return {"baseline_n": 0, "baseline_stall": None,
@@ -447,7 +447,7 @@ def main():
                     help="epoch0 前 N 步标记 warmup 排除(缺省 config.TRAIN_WARMUP)")
     ap.add_argument("--shuffle", choices=("fixed", "per-epoch", "curriculum"),
                     default="per-epoch",
-                    help="消费顺序形态(4.2 §7;缺省 per-epoch,保持旧行为)")
+                    help="消费顺序形态(4.2 的阶段切换族一节;缺省 per-epoch,保持旧行为)")
     ap.add_argument("--window-k", type=int, default=config.TRAIN_WINDOW_K,
                     help="启动/切换窗口块数 K(缺省 config.TRAIN_WINDOW_K)")
     ap.add_argument("--chunk-bytes", type=int, default=config.TRAIN_CHUNK_BYTES,
@@ -623,7 +623,7 @@ def main():
                 t1 = time.perf_counter()
                 batch_wall = utc_now()
                 if t_first_step is None:
-                    # 4.3 §2.1:batch 就绪后、forward 前
+                    # 4.3 启动与全程 makespan:batch 就绪后、forward 前
                     t_first_step = batch_wall
                 for _ in range(COMPUTE_ITERS):
                     _ = A @ B             # 极小 compute 替身(量级校准见探针 config)

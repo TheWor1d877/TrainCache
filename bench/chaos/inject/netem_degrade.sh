@@ -9,7 +9,7 @@
 #     crictl inspectp <cid> | grep -oE '"/var/run/netns/[^"]+"' → sandbox netns
 #     nsenter --net=<netns> tc qdisc ... dev eth0
 # 必须在"出站方"容器 netns 内挂 eth0 egress:docker0 桥主设备与宿主机 veth 的
-# host 侧 egress 都已被实证否决(bench/scripts/tc_apply.sh:4-6、docs/4.1 §1)。
+# host 侧 egress 都已被实证否决(bench/scripts/tc_apply.sh:4-6、docs/4.1 的回源带宽整形一节)。
 #
 # 与 tc_apply.sh 的分工(两个脚本各管各的,别混用):
 #   tc_apply.sh     吞吐实验的测量口径:只有固定时延、无抖动、tbf 限速+netem;

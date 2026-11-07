@@ -4,7 +4,7 @@
 格子名带臂后缀（D23）：`gateway=1` 记 `+gw`，`gateway_cache=1` 再叠 `+cache`，
 两列各自成组，带网关与带缓存的产物不混进同一格。
 
-口径来源 docs/4.3：§3.1 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
+口径来源 docs/4.3：全体判据一节的平均数 + 10,000 次重采样的 95% CI 与胜负判据，
 作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
 
 用法：
@@ -95,13 +95,13 @@ def _arm_suffix(row: dict) -> str:
     return suffix
 
 
-def _read_root(root: Path, version: str | None = None,
+def _read_root(root: Path, filtered: bool = False,
                rejected: list[dict] | None = None
                ) -> dict[tuple[str, str], list[dict]]:
     """收一份 root 下的 summary.csv。
 
-    `version` 给了就按读侧三道过滤筛 TrainCache 行（row_gate.py：版本戳、
-    三列淘汰证据与 void、倾斜两族的字节地板）；不给时保留旧行为，只按
+    `filtered` 打开时按读侧两道过滤筛 TrainCache 行（row_gate.py：void、
+    三列淘汰证据、倾斜两族的字节地板）；关掉时保留旧行为，只按
     void/顶替行剔除。被排除的行随 `rejected` 带出，让「谁被排除」入账。
     """
     cells: dict[tuple[str, str], list[dict]] = {}
@@ -115,10 +115,9 @@ def _read_root(root: Path, version: str | None = None,
         if not parts or parts[0].startswith("_"):
             continue
         cell = parts[0]
-        stamp = row_gate.stamp_of(path.parent) if version else None
         with open(path) as f:
             for row in csv.DictReader(f):
-                reason = row_gate.reject_reason(row, stamp, version) if version else ""
+                reason = row_gate.reject_reason(row) if filtered else ""
                 if reason:
                     if rejected is not None:
                         rejected.append({"source": str(path.parent),
@@ -144,7 +143,7 @@ def _read_root(root: Path, version: str | None = None,
 
 
 def read_cells(root: Path, fallback: Path | None = None,
-               version: str | None = None,
+               filtered: bool = False,
                rejected: list[dict] | None = None
                ) -> dict[tuple[str, str], list[dict]]:
     """返回 {(格子, 组态): [有效行]}；下划线目录（汇总/临时）不取。
@@ -152,11 +151,14 @@ def read_cells(root: Path, fallback: Path | None = None,
     `fallback` 只补非 traincache 组：本轮重跑只做 traincache 两组态，
     direct/juicefs/fluid 沿用既有产物（它们不读 TrainCache 快照）。同一
     (格子, 组态) 在 root 已有行时一律用 root，fallback 不覆盖。
+
+    `filtered` 打开时按 row_gate 的拒因筛 TrainCache 行，被排除的行随
+    `rejected` 带出。
     """
-    cells = _read_root(root, version, rejected)
+    cells = _read_root(root, filtered, rejected)
     if fallback is None or fallback == root or not fallback.is_dir():
         return cells
-    for (cell, group), rows in _read_root(fallback, version, rejected).items():
+    for (cell, group), rows in _read_root(fallback, filtered, rejected).items():
         if group.startswith("traincache") or (cell, group) in cells:
             continue
         for r in rows:
@@ -233,7 +235,7 @@ def build_verdict(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
     out = []
     for cell in _cell_order({cell for cell, _g in cells}):
         if cell.startswith("L-"):
-            continue  # 探点不做判定（4.1 §2）
+            continue  # 探点不做判定
         for group, bases in BASELINES.items():
             grows = cells.get((cell, group))
             if not grows:
@@ -473,9 +475,8 @@ def main() -> int:
         return 1
     fallback = None if args.no_fallback else (
         args.fallback or config.BASELINE_RESULTS_DIR)
-    version = row_gate.current_version()
     rejected: list[dict] = []
-    cells = read_cells(root, fallback, version, rejected)
+    cells = read_cells(root, fallback, True, rejected)
     if rejected:
         row_gate.print_rejects(rejected, config.RESULTS_DIR)
     rows = build_table(cells)

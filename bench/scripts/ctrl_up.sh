@@ -450,8 +450,8 @@ ensure_gate_bandwidth() {
 # 显式 env,那份覆盖会在下次 `kubectl apply -k` 时被仓库清单盖回去。
 # 同一件事也发生在 ConfigMap 上:apply -k 会把整份 data 回到清单里的默认值,所以
 # run_bench.py 起跑前写的 prefetchLookahead/evictPolicy 会被 up.sh 盖掉。这里在
-# apply 之后按环境变量再对齐一次,COND 的自变量才留得住(4.2 §4 的淘汰矩阵、
-# §5.2 的 lookahead 扫点都靠它)。
+# apply 之后按环境变量再对齐一次,COND 的自变量才留得住(4.2 的淘汰策略族与预取参数族
+# 两节都靠它)。
 ensure_agent_config() {
   local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw cur_la cur_ep cur_frp changed=0
   cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"

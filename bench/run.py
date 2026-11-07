@@ -217,7 +217,7 @@ def _rho_args(cond: dict) -> list[str]:
 def _run_bench_cmd(cond: dict, reps: int) -> list[str]:
     """run_bench 的调用面：rho/rate/group/reps + 族产物根。
 
-    compare 的格子名由 run_bench 按 COND 规则拼（契约 §6）；非 compare 族没有
+    compare 的格子名由 run_bench 按 COND 规则拼（docs/4.2 的 COND 契约一节）；非 compare 族没有
     族专用 CLI 轴，用 --cell 把 COND 名钉成格子名、--family 决定 summary 的 family 列。
     """
     family = cond["family"]

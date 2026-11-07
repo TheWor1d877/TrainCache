@@ -4,7 +4,7 @@
 # 注入动作:
 #   docker stop <节点容器名>。kind 的节点容器名与 k8s 节点名相同。
 #
-# 判据(与 docs/4.3-bench-metrics-and-decisions.md §3.2 的 node_loss 行一致):
+# 判据(与 docs/4.3-bench-metrics-and-decisions.md 混沌族判据一节的 node_loss 行一致):
 #   · DataSet 的 condition NoAccessibleNodes 变成 True
 #   · WarmupTask 的 status.phase 落到 Degraded
 #   · 容器启动回来后节点重新 Ready,上面两条回到 False 与非 Degraded

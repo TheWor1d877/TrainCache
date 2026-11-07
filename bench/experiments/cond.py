@@ -6,7 +6,7 @@ epoch、读端形态、带宽、缓存容量比 rho 与淘汰策略、采样次�
 （`gateway` 与 `gateway_cache`）。其余一律取本文件的默认值，实际生效值由每次
 run 的 `lock.json` 记录。
 
-字段全集与校验规则见 `docs/4.2-bench-families.md` §11；runner 遇到未知字段直接拒绝。
+字段全集与校验规则见 `docs/4.2-bench-families.md` 的 COND 契约一节；runner 遇到未知字段直接拒绝。
 """
 import hashlib
 import json
@@ -265,7 +265,7 @@ def validate_cond(cond: dict) -> list[str]:
         if rate is not None and rate not in VALID_RATES:
             errors.append(f"$.network.rate_mbit 非法: {rate!r}")
         # 单流上限(逐连接限速):0 表示不限单流,qdisc 形态是 根 tbf → netem;
-        # 正值时形态多一层 fq(maxrate)。见 4.2 §13。
+        # 正值时形态多一层 fq(maxrate)。见 4.2 的并行下载族一节。
         per_conn = net.get("per_conn_mbit", 0)
         if not isinstance(per_conn, int) or isinstance(per_conn, bool) or per_conn < 0:
             errors.append("$.network.per_conn_mbit 必须是 ≥0 的整数(0 表示不限单流)")

@@ -82,7 +82,10 @@ def family_rows(family: str) -> list[dict]:
             for row in csv.DictReader(f):
                 if str(row.get("family") or "") != family:
                     continue
-                if str(row.get("status") or "").strip().lower() != "ok":
+                # status 列缺省按 ok 认：训练负载那支写手不落这一列，
+                # 作废轮由 void 列单独拦。
+                status = str(row.get("status") or "").strip().lower()
+                if status and status != "ok":
                     continue
                 if str(row.get("void") or "").strip().lower() in ("true", "1"):
                     continue
@@ -126,10 +129,30 @@ def _dump_csv(fname: str, data: dict) -> None:
                              round(mean, 6), round(low, 6), round(high, 6)])
 
 
+def _label_text(value) -> str:
+    """柱顶标注的数值文本：整数不带小数点，位数随量级走。"""
+    if value is None:
+        return ""
+    number = float(value)
+    if number == int(number):
+        return f"{int(number)}"
+    if abs(number) >= 100:
+        return f"{number:.0f}"
+    if abs(number) >= 10:
+        return f"{number:.1f}"
+    return f"{number:.2f}"
+
+
 def _render(data, fname, title, ylabel, xlabel, kind="bar",
             facet_order=None, x_order=None, series_order=None,
             colors=None, color_by="series", facet_fmt=None, x_fmt=None,
-            series_fmt=None, show_legend=True):
+            series_fmt=None, show_legend=True, value_labels=False,
+            hlines=None, stack=False, notes=None, xpad=None):
+    """画一张图并落盘。
+
+    `value_labels` 打开时柱顶标数值；`hlines` 是 {分面: [(y, 文字)]}，
+    画参考线并在右侧标注；`stack` 把同一横轴位置的多个系列叠成一根柱。
+    """
     if not data:
         print(f"[skip] {fname}: 无数据", file=sys.stderr)
         return
@@ -147,26 +170,59 @@ def _render(data, fname, title, ylabel, xlabel, kind="bar",
         ax = flat[index]
         local_xs = [x for x in xs
                     if any(k[0] == facet and k[1] == x for k in data)]
+        ymax = 0.0
         if kind == "bar":
-            width = 0.8 / max(1, len(series))
+            width = 0.6 if stack else 0.8 / max(1, len(series))
+            bottoms = [0.0] * len(local_xs)
             for si, s in enumerate(series):
-                positions, means, lows, highs, bars = [], [], [], [], []
+                positions, means, lows, highs, bases, idxs, xs_drawn = \
+                    [], [], [], [], [], [], []
                 for xi, x in enumerate(local_xs):
                     point = data.get((facet, x, s))
                     if point is None:
                         continue
-                    positions.append(xi + (si - (len(series) - 1) / 2) * width)
+                    positions.append(xi if stack else xi + (si - (len(series) - 1) / 2) * width)
                     means.append(point[0])
                     lows.append(point[0] - point[1])
                     highs.append(point[2] - point[0])
-                    bars.append(x)
+                    bases.append(bottoms[xi])
+                    idxs.append(xi)
+                    xs_drawn.append(x)
+                if not positions:
+                    continue
                 if color_by == "x":
-                    bar_colors = [(colors or {}).get(x, "#4b5563") for x in bars]
+                    bar_colors = [(colors or {}).get(x, "#4b5563") for x in xs_drawn]
                 else:
                     bar_colors = (colors or {}).get(s)
-                ax.bar(positions, means, width, label=series_fmt(s) if series_fmt else str(s),
-                       color=bar_colors, yerr=[lows, highs], capsize=2,
-                       error_kw={"elinewidth": 0.8, "ecolor": plot_style.MUTED})
+                if stack:
+                    ax.bar(positions, means, width, bottom=bases,
+                           label=series_fmt(s) if series_fmt else str(s),
+                           color=bar_colors, zorder=2)
+                else:
+                    ax.bar(positions, means, width,
+                           label=series_fmt(s) if series_fmt else str(s),
+                           color=bar_colors, yerr=[lows, highs], capsize=2,
+                           error_kw={"elinewidth": 0.8, "ecolor": plot_style.MUTED},
+                           zorder=2)
+                for xi, mean, high, base in zip(idxs, means, highs, bases):
+                    tops = base + mean
+                    top = tops + (high if not stack else 0)
+                    ymax = max(ymax, top)
+                    if stack:
+                        bottoms[xi] = tops
+                    if value_labels:
+                        if stack:
+                            # 堆叠柱的标注写在段内，字色取白以免压在深色上读不出。
+                            ax.annotate(_label_text(mean),
+                                        xy=(xi, base + mean / 2), ha="center",
+                                        va="center", fontsize=8, color="white",
+                                        zorder=3)
+                        else:
+                            ax.annotate(_label_text(tops),
+                                        xy=(positions[idxs.index(xi)], top),
+                                        xytext=(0, 4), textcoords="offset points",
+                                        ha="center", fontsize=8,
+                                        color=plot_style.MUTED, zorder=3)
         else:
             for si, s in enumerate(series):
                 positions, means, lows, highs = [], [], [], []
@@ -182,23 +238,65 @@ def _render(data, fname, title, ylabel, xlabel, kind="bar",
                             markersize=3.5, linewidth=1.4,
                             color=(colors or {}).get(s),
                             label=series_fmt(s) if series_fmt else str(s),
-                            capsize=2, elinewidth=0.8, ecolor=plot_style.MUTED)
+                            capsize=2, elinewidth=0.8, ecolor=plot_style.MUTED,
+                            zorder=2)
+                if means:
+                    ymax = max(ymax, max(means) + max(highs))
+        for spec in (hlines or {}).get(facet, []):
+            y, label = spec[0], spec[1]
+            band_top = spec[2] if len(spec) > 2 else None
+            if band_top is not None and band_top > y:
+                ax.axhspan(y, band_top, color="#eef2f7", zorder=0)
+            ax.axhline(y, color="#9aa0a6", linestyle=(0, (4, 3)), linewidth=0.9,
+                       zorder=1)
+            if label:
+                ax.annotate(label, xy=(0.02, y), xycoords=("axes fraction", "data"),
+                            xytext=(0, 3), textcoords="offset points", ha="left",
+                            fontsize=8, color=plot_style.MUTED, zorder=3,
+                            bbox=dict(facecolor="white", edgecolor="none",
+                                      alpha=0.85, pad=1.0))
+        note = (notes or {}).get(facet)
+        if note:
+            ax.annotate(note, xy=(0.03, 0.96), xycoords="axes fraction",
+                        ha="left", va="top", fontsize=8.5, color=plot_style.MUTED,
+                        zorder=3)
         ax.set_xticks(range(len(local_xs)))
         labels = [x_fmt(x) if x_fmt else str(x) for x in local_xs]
         ax.set_xticklabels(labels, rotation=25 if max(map(len, labels), default=0) > 6 else 0,
                            ha="right" if max(map(len, labels), default=0) > 6 else "center")
+        if xpad is not None and local_xs:
+            ax.set_xlim(-xpad, len(local_xs) - 1 + xpad)
         ax.set_title(facet_fmt(facet) if facet_fmt else str(facet))
         ax.grid(axis="y")
+        if kind == "bar":
+            ax.set_ylim(bottom=0)
+            top = ax.get_ylim()[1]
+            if ymax > top:
+                ax.set_ylim(0, ymax)
+            if value_labels or (show_legend and len(series) > 1):
+                ax.set_ylim(0, ax.get_ylim()[1] * 1.22)
+        else:
+            ax.margins(y=0.22)
         if index % ncols == 0:
             ax.set_ylabel(ylabel)
         if index >= len(facets) - ncols:
             ax.set_xlabel(xlabel)
-        if show_legend and len(series) > 1:
-            ax.legend(frameon=False, loc="best")
     for index in range(len(facets), len(flat)):
         flat[index].set_visible(False)
-    fig.suptitle(title, fontsize=12)
-    fig.tight_layout()
+    if show_legend and len(series) > 1:
+        handles, labels_ = [], []
+        for ax in flat[:len(facets)]:
+            got_handles, got_labels = ax.get_legend_handles_labels()
+            for handle, label in zip(got_handles, got_labels):
+                if label not in labels_:
+                    handles.append(handle)
+                    labels_.append(label)
+        if handles:
+            fig.legend(handles, labels_, loc="upper left",
+                       bbox_to_anchor=(0.01, 0.93), ncol=min(len(labels_), 4),
+                       frameon=False, borderaxespad=0.0)
+    fig.suptitle(title, fontsize=12, x=0.01, ha="left", y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.86 if nrows == 1 else 0.9))
     plot_style.bolden(fig)
     FIG_ROOT.mkdir(parents=True, exist_ok=True)
     fig.savefig(FIG_ROOT / f"{fname}.{LANG}.png", dpi=plot_style.SAVE_DPI,
@@ -243,6 +341,54 @@ def _placement(row):
     return "?"
 
 
+def _rangepar_parts(row):
+    """COND 名 rangepar-<档>-<臂> → (档, 臂)。"""
+    match = re.match(r"^rangepar-(l\d+)-(par-on|par-off)$", _cell(row))
+    if not match:
+        return "?", "?"
+    return match.group(1), match.group(2)
+
+
+def _e2e_scenario(row):
+    """COND 名 e2e-<场景> → 场景名。"""
+    match = re.match(r"^e2e-(.+)$", _cell(row))
+    return match.group(1) if match else "?"
+
+
+def _chaos_rho(cond_name):
+    """COND 名 chaos-<故障>-rho<ρ> → ρ 标签。"""
+    match = re.search(r"-rho(\d+)$", cond_name)
+    return f"ρ={match.group(1)}" if match else "?"
+
+
+RANGEPAR_TIER_CN = {
+    "l0": "l0 单流不限",
+    "l1": "l1 单流 32 Mbit",
+    "l2": "l2 单流 16 Mbit",
+    "l3": "l3 高时延丢包",
+}
+RANGEPAR_TIER_EN = {
+    "l0": "l0 no per-conn cap",
+    "l1": "l1 32 Mbit per conn",
+    "l2": "l2 16 Mbit per conn",
+    "l3": "l3 high delay and loss",
+}
+CHAOS_FAULT_CN = {
+    "kill_agent": "agentd 被杀",
+    "minio_down": "源站下线",
+    "tamper_block": "块被改坏",
+    "netem_degrade": "源站降速",
+    "netem_degrade_rate": "源站降速加限速",
+    "stop_ordersrc": "订单写端停摆",
+    "node_loss": "节点掉线",
+}
+E2E_SCENARIO_CN = {
+    "checkpoint-resume": "断点续跑",
+    "checkpoint-version": "换数据版本后恢复",
+    "dual-restart": "训练与 agentd 同时重启",
+}
+
+
 def _rate_key(row):
     return _rate(row)
 
@@ -267,6 +413,13 @@ def _rho_fmt(value):
 
 def _rho_mark(value):
     return f"ρ={value}" if LANG == "zh" else f"rho={value}"
+
+
+def _rangepar_arm_label(value):
+    """臂名：par-on 是 Range 并行打开，par-off 是关掉。"""
+    if LANG == "zh":
+        return {"par-on": "并行开", "par-off": "并行关"}.get(value, str(value))
+    return {"par-on": "parallel on", "par-off": "parallel off"}.get(value, str(value))
 
 
 def plot_compare(rows):
@@ -397,6 +550,152 @@ def plot_multiconsumer(rows):
                 colors=dict(zip(placements, SERIES_COLORS)))
 
 
+def plot_rangepar(rows):
+    """并行下载族：同档两臂的耗时，以及关臂与开臂的耗时比。"""
+    buckets: dict[tuple[str, str], list[float]] = {}
+    for row in rows:
+        tier, arm = _rangepar_parts(row)
+        value = _num(row.get("total_makespan"))
+        if tier == "?" or value is None:
+            continue
+        buckets.setdefault((tier, arm), []).append(value)
+    tiers = sorted({tier for tier, _arm in buckets})
+    if not tiers:
+        print("[skip] rangepar: 无可比读数", file=sys.stderr)
+        return
+    arms = ["par-off", "par-on"]
+
+    data = {}
+    for tier in tiers:
+        for arm in arms:
+            values = buckets.get((tier, arm))
+            if not values:
+                continue
+            mean = sum(values) / len(values)
+            if len(values) > 1:
+                low, high = stats.bootstrap_ci(values, seed=7)
+            else:
+                low = high = mean
+            data[("", tier, arm)] = (mean, low, high, len(values))
+    _render(data, "rangepar-makespan",
+            t("并行下载族：同一链路档下两臂的全程耗时",
+              "rangepar: total makespan of both arms per link tier"),
+            t("全程 makespan (s)", "total makespan (s)"),
+            t("链路条件档", "link tier"), facet_order=[""], x_order=tiers,
+            series_order=arms, colors={"par-off": "#9aa0a6", "par-on": "#2f6db5"},
+            series_fmt=_rangepar_arm_label,
+            x_fmt=lambda v: (RANGEPAR_TIER_CN if LANG == "zh" else RANGEPAR_TIER_EN).get(v, v),
+            value_labels=True)
+
+    # 比值图：每个档一格，柱高是关臂耗时除以开臂耗时，虚线是该档的合格区间。
+    ratio = {}
+    bounds = {}
+    notes = {}
+    for tier in tiers:
+        on, off = buckets.get((tier, "par-on")), buckets.get((tier, "par-off"))
+        if not on or not off:
+            continue
+        on_median, off_median = stats.median(on), stats.median(off)
+        if not on_median:
+            continue
+        value = off_median / on_median
+        ratio[(tier, "比值", "all")] = (value, value, value, min(len(on), len(off)))
+        low, high = config.RANGEPAR_RATIO.get(tier, (None, None))
+        marks = []
+        if low is not None and high is not None:
+            marks.append((low, None, high))
+            marks.append((high, None, None))
+            notes[tier] = t(f"合格区间 {low}–{high}", f"qualified {low}–{high}")
+        elif low is not None:
+            marks.append((low, None, None))
+            notes[tier] = t(f"合格下限 {low}", f"lower bound {low}")
+        bounds[tier] = marks
+    if ratio:
+        _render(ratio, "rangepar-speedup",
+                t("并行下载族：关臂耗时除以开臂耗时",
+                  "rangepar: off-arm makespan over on-arm makespan"),
+                t("耗时比", "makespan ratio"), "",
+                facet_order=[tier for tier in tiers if tier in ratio],
+                x_order=["比值"], series_order=["all"],
+                colors={"all": "#2f6db5"}, facet_fmt=lambda v: (
+                    RANGEPAR_TIER_CN if LANG == "zh" else RANGEPAR_TIER_EN).get(v, v),
+                x_fmt=lambda v: "", hlines=bounds, notes=notes, xpad=0.9,
+                value_labels=True)
+
+
+def plot_e2e(rows):
+    """端到端族：三个恢复场景的全程耗时与读错误数。"""
+    scenarios = []
+    for row in rows:
+        scenario = _e2e_scenario(row)
+        if scenario != "?" and scenario not in scenarios:
+            scenarios.append(scenario)
+    if not scenarios:
+        print("[skip] e2e: 无产物", file=sys.stderr)
+        return
+    data = _collect(rows, "total_makespan", lambda r: "", _e2e_scenario,
+                    lambda r: "all")
+    _render(data, "e2e-makespan",
+            t("端到端族：三个恢复场景的全程耗时",
+              "e2e: total makespan per recovery scenario"),
+            t("全程 makespan (s)", "total makespan (s)"),
+            t("恢复场景", "recovery scenario"), facet_order=[""], x_order=scenarios,
+            series_order=["all"], colors={"all": "#2f6db5"}, show_legend=False,
+            x_fmt=lambda v: (E2E_SCENARIO_CN.get(v, v) if LANG == "zh" else v),
+            value_labels=True)
+    data = _collect(rows, "read_errors", lambda r: "", _e2e_scenario,
+                    lambda r: "all")
+    if data:
+        _render(data, "e2e-read-errors",
+                t("端到端族：各场景的读错误数",
+                  "e2e: read errors per recovery scenario"),
+                t("读错误数", "read errors"),
+                t("恢复场景", "recovery scenario"), facet_order=[""],
+                x_order=scenarios, series_order=["all"],
+                colors={"all": "#c0392b"}, show_legend=False,
+                x_fmt=lambda v: (E2E_SCENARIO_CN.get(v, v) if LANG == "zh" else v),
+                value_labels=True)
+
+
+def chaos_rows(family: str = "chaos") -> list[dict]:
+    """混沌族的逐轮结果：results/chaos/<格子>/<轮次>/summary.txt 里的 PASS/FAIL。"""
+    root = config.family_results_dir(family)
+    rows: list[dict] = []
+    if not root.is_dir():
+        return rows
+    for path in sorted(root.glob("*/*/summary.txt")):
+        cond = path.parent.parent.name
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].startswith(("PASS", "FAIL")):
+                rows.append({"cond": cond, "_cell": cond, "run": path.parent.name,
+                             "fault": parts[0],
+                             "status": "PASS" if parts[1].startswith("PASS") else "FAIL"})
+    return rows
+
+
+def plot_chaos(rows):
+    """混沌族：每个故障在各轮里的 PASS/FAIL 计数。"""
+    counts: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        key = (_chaos_rho(row["cond"]), row["fault"], row["status"])
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        print("[skip] chaos: 无产物", file=sys.stderr)
+        return
+    data = {key: (count, count, count, count) for key, count in counts.items()}
+    facets = sorted({key[0] for key in data})
+    faults = sorted({key[1] for key in data})
+    _render(data, "chaos-results",
+            t("混沌族：各故障在各轮里的判定结果",
+              "chaos: verdict per fault at each rho"),
+            t("轮次数", "rounds"), t("故障", "fault"),
+            facet_order=facets, x_order=faults, series_order=["PASS", "FAIL"],
+            colors={"PASS": "#2f8f6b", "FAIL": "#c0392b"}, stack=True,
+            x_fmt=lambda v: (CHAOS_FAULT_CN.get(v, v) if LANG == "zh" else v),
+            value_labels=True)
+
+
 FAMILY_PLOTS = {
     "compare": plot_compare,
     "gateway": plot_gateway,
@@ -405,12 +704,19 @@ FAMILY_PLOTS = {
     "warmup": plot_warmup,
     "switch": plot_switch,
     "multiconsumer": plot_multiconsumer,
+    "chaos": plot_chaos,
+    "e2e": plot_e2e,
+    "rangepar": plot_rangepar,
 }
+
+# 混沌族的产物是 summary.txt,不是 summary.csv,单独取行。
+FAMILY_ROWS = {"chaos": chaos_rows}
 
 
 def generate(langs=LANGS) -> dict[str, list[dict]]:
     global plt, LANG
-    rows_by_family = {family: family_rows(family) for family in FAMILY_PLOTS}
+    rows_by_family = {family: FAMILY_ROWS.get(family, family_rows)(family)
+                      for family in FAMILY_PLOTS}
     for lang in langs:
         plt = plot_style.setup(lang)
         LANG = lang

@@ -18,7 +18,7 @@ make e2e    # 建 kind 集群、加载镜像、跑六项断言
 
 ## 背景
 
-Fluid 1.1.0-alpha.9 的 DataLoad 与调度互不影响：Pod 创建后立刻进入调度，预热进度不参与选点（[现勘报告](docs/3-field-survey.md) §2.2）。JuiceFS 社区版只提供本地缓存，分布式缓存组、IORPC 与 RDMA 属于企业版（同上 §0）。训练 Pod 从 epoch 0 跑到结束常驻同一节点，epoch 与 shuffle 切换发生在 Pod 内，不触发重新调度；启动阶段写入节点本地盘的块在后续 epoch 不再命中，也没有组件提前拉取。
+Fluid 1.1.0-alpha.9 的 DataLoad 与调度互不影响：Pod 创建后立刻进入调度，预热进度不参与选点（[现勘报告](docs/3-field-survey.md) 的 webhook 注入前后 diff 为零一节）。JuiceFS 社区版只提供本地缓存，分布式缓存组、IORPC 与 RDMA 属于企业版（同文档的结论与缺口判定一节）。训练 Pod 从 epoch 0 跑到结束常驻同一节点，epoch 与 shuffle 切换发生在 Pod 内，不触发重新调度；启动阶段写入节点本地盘的块在后续 epoch 不再命中，也没有组件提前拉取。
 
 ## 适用场景
 
@@ -184,12 +184,11 @@ make e2e              # kind 集群中的六项断言
 | [1 TrainCache 介绍与背景](docs/1-introduction-and-background.md) | 问题定义、外部事实、与 Fluid/JuiceFS 的定位差异 |
 | [2 TrainCache 三层架构](docs/2-three-layer-architecture.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3-field-survey.md) | Fluid/JuiceFS 的机制现勘与缺口证据 |
-| [4.0 bench 文档索引](docs/4.0-bench-guide.md) | 4.1–4.5 的分工与常驻命令 |
+| [4.0 bench 文档索引](docs/4.0-bench-guide.md) | 4.1–4.4 的分工与常驻命令 |
 | [4.1 装置与变量空间](docs/4.1-bench-apparatus.md) | 装置构成、ρ 阶梯、参数、数据生成与落点 |
-| [4.2 实验族与格子](docs/4.2-bench-families.md) | 九个族的轴与格子、COND 契约、机时账 |
+| [4.2 实验族与格子](docs/4.2-bench-families.md) | 十个族的轴与格子、COND 契约、机时账 |
 | [4.3 指标与决策](docs/4.3-bench-metrics-and-decisions.md) | 指标算式、判据阈值、D 号决策 |
 | [4.4 操作手册](docs/4.4-bench-runbook.md) | 环境准备、拉起、数据准备、跑族、排障、产物 |
-| [4.5 版本记录](docs/4.5-experiment-version-log.md) | 版本 × 族的产物记录 |
 | [5.x 缓存核心库](docs/5.1-design.md) | 设计要求、计划、决策与测试 |
 | [6.x Agent 服务化](docs/6.1-design.md) | 节点面的接口与决策 |
 | [7.x Controller 与 Scheduler](docs/7.1-design.md) | 控制面的接口与决策 |

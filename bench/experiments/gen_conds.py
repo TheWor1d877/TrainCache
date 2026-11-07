@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""生成九个实验族的 COND（schema v4）。
+"""生成十个实验族的 COND（schema v4）。
 
-族、轴与取值取自 docs/4.2-bench-families.md §1–§10，与
-/tmp/tc-bench-v2-contract.md §2、§2.1 一致。一个族只动该族的轴，其余参数取默认值：
+族、轴与取值取自 docs/4.2-bench-families.md 的族总表与各族一节。一个族只动该族的轴，其余参数取默认值：
 
   · 数据集固定 16 × 256 MiB = 4 GiB，epoch 全部 3；
   · 基线五组（direct、juicefs-cold/warm、fluid-cold/warm）只在 rho=4 生成一次；

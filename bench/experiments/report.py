@@ -40,16 +40,16 @@ FAMILY_Q = {
     "rangepar": "把每个块拆成 4 条 Range GET 并行取，在什么链路条件下端到端变快",
 }
 FAMILY_CRITERION = {
-    "compare": "4.3 §3.2「compare·组间胜负」",
-    "gateway": "4.3 §3.2「gateway·复制读合并」「gateway·臂间比较」",
-    "evict": "4.3 §3.2「evict·策略可分辨」「evict·策略不可分辨」",
-    "prefetch": "4.3 §3.2「prefetch·转平」「prefetch·重复字节」",
-    "warmup": "4.3 §3.2「warmup·门控有效」「warmup·门控无价值」「warmup·门控负收益」",
-    "switch": "4.3 §3.2「switch·回落」「switch·差异」「switch·右删失」",
-    "chaos": "4.3 §3.2 混沌族逐故障判据",
-    "multiconsumer": "4.3 §3.2「multiconsumer·热比例效应」",
-    "e2e": "4.3 §3.2「e2e·恢复成功」",
-    "rangepar": "4.3 §3.2「rangepar·并行收益」「rangepar·字节守恒」「rangepar·命中不退化」",
+    "compare": "4.3 按族的判据「compare·组间胜负」",
+    "gateway": "4.3 按族的判据「gateway·复制读合并」「gateway·臂间比较」",
+    "evict": "4.3 按族的判据「evict·策略可分辨」「evict·策略不可分辨」",
+    "prefetch": "4.3 按族的判据「prefetch·转平」「prefetch·重复字节」",
+    "warmup": "4.3 按族的判据「warmup·门控有效」「warmup·门控无价值」「warmup·门控负收益」",
+    "switch": "4.3 按族的判据「switch·回落」「switch·差异」「switch·右删失」",
+    "chaos": "4.3 混沌族判据",
+    "multiconsumer": "4.3 按族的判据「multiconsumer·热比例效应」",
+    "e2e": "4.3 按族的判据「e2e·恢复成功」",
+    "rangepar": "4.3 按族的判据「rangepar·并行收益」「rangepar·字节守恒」「rangepar·命中不退化」",
 }
 FAMILY_FIGURES = {
     "compare": ["compare-groups-rho4", "compare-rho"],
@@ -59,6 +59,9 @@ FAMILY_FIGURES = {
     "warmup": ["warmup-startup"],
     "switch": ["switch-recovery"],
     "multiconsumer": ["multiconsumer-hit", "multiconsumer-makespan"],
+    "chaos": ["chaos-results"],
+    "e2e": ["e2e-makespan", "e2e-read-errors"],
+    "rangepar": ["rangepar-makespan", "rangepar-speedup"],
 }
 FAMILY_METRICS = {
     "compare": ["startup_makespan", "total_makespan", "hit_rate", "fetch_bytes_run"],
@@ -264,15 +267,7 @@ def verdict_multiconsumer(rows):
     return "；".join(facts) or "样本不足"
 
 
-# 并行下载族的比值合格区间(4.3 §3.2):下限为 0 时只看上限。
-RANGEPAR_RATIO = {
-    "l0": (0.9, 1.1),
-    "l1": (1.8, None),
-    "l2": (1.8, None),
-    "l3": (1.5, None),
-}
-
-
+# 并行下载族的比值合格区间在 bench/config.py(与出图共用一份)。
 RANGEPAR_CELL_RE = re.compile(r"^rangepar-(l\d+)-(par-on|par-off)$")
 
 
@@ -298,7 +293,7 @@ def verdict_rangepar(rows):
         if not on_ms or not off_ms:
             continue
         ratio = off_ms / on_ms
-        low, high = RANGEPAR_RATIO.get(tier, (None, None))
+        low, high = config.RANGEPAR_RATIO.get(tier, (None, None))
         if low is not None and ratio < low:
             mark = f"未达下限 {low}"
         elif high is not None and ratio > high:
@@ -402,30 +397,6 @@ def _figure(family):
     return "".join(parts) or "<p>没有图。</p>"
 
 
-def _family_versions(family):
-    found = set()
-    root = config.family_results_dir(family)
-    if root.is_dir():
-        for path in root.glob("*/version"):
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-            if text:
-                found.add(text)
-    return "、".join(sorted(found)) or "无"
-
-
-def _versions():
-    found = set()
-    for family in config.BENCH_FAMILIES:
-        root = config.family_results_dir(family)
-        if not root.is_dir():
-            continue
-        for path in root.glob("*/version"):
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-            if text:
-                found.add(text)
-    return sorted(found)
-
-
 def _completion(rows_by_family):
     conds_dir = BENCH / "experiments" / "conds"
     total = done = 0
@@ -462,17 +433,28 @@ figcaption{color:#6b7280;font-size:12px;margin-top:4px}
 """
 
 
+def _chaos_table(results):
+    """混沌族的逐轮判定表：故障、结果、轮次目录。"""
+    if not results:
+        return "<p>没有产物。</p>"
+    rows = "".join(
+        f"<tr><td>{html.escape(fault)}</td><td>{html.escape(status)}</td>"
+        f"<td>{html.escape(run)}</td></tr>" for fault, status, run in results)
+    return ("<table><thead><tr><th>故障</th><th>结果</th><th>轮次目录</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table>")
+
+
 def build() -> Path:
-    rows_by_family = {family: pf.family_rows(family) for family in config.BENCH_FAMILIES}
+    rows_by_family = {family: pf.FAMILY_ROWS.get(family, pf.family_rows)(family)
+                      for family in config.BENCH_FAMILIES}
     done, total = _completion(rows_by_family)
-    versions = _versions()
-    version_text = "、".join(versions) if versions else "无版本文件"
     verdicts = {family: VERDICTS[family](rows_by_family[family])
                 for family in VERDICTS}
     verdicts["chaos"] = verdict_chaos()
 
     table_rows = []
     sections = []
+    chaos = chaos_results()
     for family in config.BENCH_FAMILIES:
         rows = rows_by_family[family]
         grids = len({pf._cell(row) for row in rows})
@@ -485,28 +467,23 @@ def build() -> Path:
             f"<td>{html.escape(FAMILY_CRITERION[family])}</td>"
             f"<td>{samples}</td>"
             "</tr>")
-        sections.append(
+        section = (
             f"<h2 id=\"{family}\">{html.escape(FAMILY_CN[family])}"
             f"（{html.escape(family)}）</h2>"
             f"<p class=meta>判据：{html.escape(FAMILY_CRITERION[family])}；"
-            f"版本：{html.escape(_family_versions(family))}；样本：{samples}</p>"
-            + _figure(family)
-            + _cell_table(family, rows))
-    chaos = chaos_results()
-    if chaos:
-        rows = "".join(
-            f"<tr><td>{html.escape(fault)}</td><td>{html.escape(status)}</td>"
-            f"<td>{html.escape(run)}</td></tr>" for fault, status, run in chaos)
-        sections.append("<h2>混沌族逐轮结果</h2><table><thead><tr>"
-                        "<th>故障</th><th>结果</th><th>轮次目录</th>"
-                        f"</tr></thead><tbody>{rows}</tbody></table>")
+            f"样本：{samples}</p>"
+            + _figure(family))
+        # 混沌族的产物是每轮一份 summary.txt，没有 summary.csv 的逐格读数表。
+        section += (_chaos_table(chaos) if family == "chaos"
+                    else _cell_table(family, rows))
+        sections.append(section)
 
     doc = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>bench 实验结果报告</title><style>{CSS}</style></head><body>
 <h1>bench 实验结果报告</h1>
-<p class=meta>产物根 {html.escape(str(config.RESULTS_DIR))}；版本 {html.escape(version_text)}；
+<p class=meta>产物根 {html.escape(str(config.RESULTS_DIR))}；
 完成格子 {done}/{total}</p>
 <h2>决策表</h2>
 <table><thead><tr><th>族</th><th>要回答的问题</th><th>结论</th><th>判据</th>
