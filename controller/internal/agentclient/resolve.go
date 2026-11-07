@@ -4,6 +4,7 @@ package agentclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -40,6 +41,17 @@ type AddressResolver interface {
 	Resolve(ctx context.Context, node string) (string, error)
 }
 
+// CandidateResolver maps a Node name to the ordered list of Agent gRPC
+// endpoints that may reach the Agent on that Node. The first entry is the
+// preferred one.
+type CandidateResolver interface {
+	ResolveCandidates(ctx context.Context, node string) ([]string, error)
+}
+
+// ErrNoAgentAddress means the Node has no Agent address at all: no Agent Pod
+// runs on it and the Node itself exposes no usable address.
+var ErrNoAgentAddress = errors.New("agentclient: node has no agent address")
+
 // StaticResolver is an explicit node -> address map. It has the highest
 // priority and is useful for tests and for deployments that route Agent
 // traffic through a fixed address (e.g. a NodePort or a proxy).
@@ -54,8 +66,18 @@ func (s StaticResolver) Resolve(_ context.Context, node string) (string, error) 
 	return addr, nil
 }
 
-type resolvedAddress struct {
-	addr    string
+// ResolveCandidates implements CandidateResolver. A static map has exactly one
+// address per node.
+func (s StaticResolver) ResolveCandidates(ctx context.Context, node string) ([]string, error) {
+	addr, err := s.Resolve(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	return []string{addr}, nil
+}
+
+type resolvedAddresses struct {
+	addrs   []string
 	expires time.Time
 }
 
@@ -67,6 +89,10 @@ type resolvedAddress struct {
 //  3. the Node's InternalIP (falling back to ExternalIP) with Port, which is
 //     the DaemonSet hostPort route.
 //
+// Resolve returns the first candidate; ResolveCandidates returns the whole
+// list in the order above, so a client that can try several routes gets the
+// podIP route first and the hostPort route second.
+//
 // Results are cached per Node for CacheTTL (30s by default). Failures are not
 // cached. The resolver only reads Nodes and Pods.
 type Resolver struct {
@@ -77,7 +103,7 @@ type Resolver struct {
 	Overrides map[string]string
 
 	mu    sync.Mutex
-	cache map[string]resolvedAddress
+	cache map[string]resolvedAddresses
 }
 
 // NewResolver builds a Kubernetes-backed resolver using port for both the
@@ -91,34 +117,55 @@ func NewResolver(reader client.Reader, port int) *Resolver {
 		Port:     port,
 		CacheTTL: DefaultResolveCacheTTL,
 		Now:      time.Now,
-		cache:    map[string]resolvedAddress{},
+		cache:    map[string]resolvedAddresses{},
 	}
 }
 
-// Resolve implements AddressResolver.
+// Resolve implements AddressResolver. It returns the preferred candidate.
 func (r *Resolver) Resolve(ctx context.Context, node string) (string, error) {
+	addrs, err := r.ResolveCandidates(ctx, node)
+	if err != nil {
+		return "", err
+	}
+	return addrs[0], nil
+}
+
+// ResolveCandidates implements CandidateResolver. It returns every Agent
+// endpoint known for the Node, in preference order: the Agent Pod IP first,
+// the Node hostPort route second. A missing Agent Pod or a missing Node
+// address only drops its own candidate; the lookup fails when neither is
+// available.
+func (r *Resolver) ResolveCandidates(ctx context.Context, node string) ([]string, error) {
 	if node == "" {
-		return "", fmt.Errorf("%w: empty node name", ErrAgentUnavailable)
+		return nil, fmt.Errorf("%w: empty node name", ErrAgentUnavailable)
 	}
 	if addr := r.Overrides[node]; addr != "" {
-		return addr, nil
+		return []string{addr}, nil
 	}
-	if addr, ok := r.cached(node); ok {
-		return addr, nil
+	if addrs, ok := r.cached(node); ok {
+		return addrs, nil
 	}
 	if r.Reader == nil {
-		return "", fmt.Errorf("%w: no Kubernetes reader for node %s", ErrAgentUnavailable, node)
+		return nil, fmt.Errorf("%w: no Kubernetes reader for node %s", ErrAgentUnavailable, node)
 	}
 
-	addr, err := r.discoverPodAddress(ctx, node)
-	if err != nil {
-		addr, err = r.nodeAddress(ctx, node)
-		if err != nil {
-			return "", err
-		}
+	podAddr, podErr := r.discoverPodAddress(ctx, node)
+	nodeAddr, nodeErr := r.nodeAddress(ctx, node)
+
+	var addrs []string
+	if podErr == nil {
+		addrs = append(addrs, podAddr)
 	}
-	r.store(node, addr)
-	return addr, nil
+	if nodeErr == nil {
+		addrs = append(addrs, nodeAddr)
+	}
+	if len(addrs) == 0 {
+		// 两路查找各自带自己的原因,合成一条给出:哪个 Pod 查不到、哪个节点查不到。
+		return nil, fmt.Errorf("%w: node %s: %w",
+			ErrNoAgentAddress, node, errors.Join(podErr, nodeErr))
+	}
+	r.store(node, addrs)
+	return addrs, nil
 }
 
 func (r *Resolver) discoverPodAddress(ctx context.Context, node string) (string, error) {
@@ -187,7 +234,7 @@ func (r *Resolver) now() time.Time {
 	return time.Now()
 }
 
-func (r *Resolver) cached(node string) (string, bool) {
+func (r *Resolver) cached(node string) ([]string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.cache[node]
@@ -195,18 +242,21 @@ func (r *Resolver) cached(node string) (string, bool) {
 		if ok {
 			delete(r.cache, node)
 		}
-		return "", false
+		return nil, false
 	}
-	return entry.addr, true
+	return append([]string(nil), entry.addrs...), true
 }
 
-func (r *Resolver) store(node, addr string) {
+func (r *Resolver) store(node string, addrs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cache == nil {
-		r.cache = map[string]resolvedAddress{}
+		r.cache = map[string]resolvedAddresses{}
 	}
-	r.cache[node] = resolvedAddress{addr: addr, expires: r.now().Add(r.ttl())}
+	r.cache[node] = resolvedAddresses{
+		addrs:   append([]string(nil), addrs...),
+		expires: r.now().Add(r.ttl()),
+	}
 }
 
 func podReady(pod *corev1.Pod) bool {

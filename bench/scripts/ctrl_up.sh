@@ -350,14 +350,42 @@ workloads_present() {
     && kubectl -n "$NS" get deployment traincache-gateway >/dev/null 2>&1
 }
 
+# 集群里五个工作负载的镜像引用,与清单渲染结果比对。清单哈希只覆盖仓库文件,
+# 集群里的对象被别处改过(例如 e2e 脚本 set image)时哈希不变,残留就纠正不掉,
+# 后续任何一次滚动更新都会拉不到镜像。这一项把这种残留判出来。
+live_images() {
+  {
+    kubectl -n "$NS" get deployment traincache-controller-manager \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n "$NS" get deployment traincache-webhook \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n kube-system get deployment traincache-scheduler \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n "$NS" get daemonset traincache-agentd \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n "$NS" get deployment traincache-gateway \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+  } | tr ' ' '\n' | grep -v '^$' | sort -u
+}
+
+images_match_manifest() {
+  local want have
+  want="$(rendered_images | sort -u)"
+  have="$(live_images)"
+  [ -n "$want" ] && [ "$want" = "$have" ]
+}
+
 ensure_control_plane() {
   local want cur
   want="$(deploy_hash)"
   cur="$(kubectl -n "$NS" get namespace "$NS" \
     -o jsonpath='{.metadata.annotations.traincache\.io/deploy-hash}' 2>/dev/null || true)"
-  if [ "$want" = "$cur" ] && workloads_present; then
+  if [ "$want" = "$cur" ] && workloads_present && images_match_manifest; then
     log_group "$GROUP" "控制面清单未变化且五个工作负载都在,跳过 apply(hash=${want:0:12})"
     return 0
+  fi
+  if [ "$want" = "$cur" ] && ! images_match_manifest; then
+    log_group "$GROUP" "集群里的镜像引用与清单不一致(清单哈希未变,对象被别处改过),重新 apply"
   fi
   log_group "$GROUP" "应用控制面清单 kubectl apply -k controller/deploy"
   kubectl apply -k "$DEPLOY_DIR" >/dev/null

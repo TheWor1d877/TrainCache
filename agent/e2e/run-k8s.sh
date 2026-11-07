@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # run-k8s.sh — TrainCache Agent 服务化「kind 集群端到端」演练。
 #
-# 前置:复用已部署的 kind 集群(traincache),镜像 traincache-agentd:dev /
-#       traincache-ordersrc:dev / busybox:latest 已 kind load(见 agent/deploy/*.yaml 头注释)。
+# 前置:复用已部署的 kind 集群(traincache),镜像
+#       ghcr.io/thewor1d877/traincache/traincache-agentd:dev /
+#       traincache-ordersrc:dev / busybox:latest 已用
+#       ./hack/kind-load.sh <集群> <镜像> 送进集群(节点里的镜像名与本机 tag 一致)。
+#       守护集的镜像引用不改:清单里的 ghcr 全名就是 kind load 后的名字,
+#       改成裸名会让后续滚动更新拉不到镜像,且控制面脚本按清单哈希判断是否
+#       重新应用清单,哈希没变就不纠正这个残留。
 #       脚本先 kubectl apply 四个清单(namespace、configmap、daemonset、train-pod;
 #       幂等:已存在则不改),再逐条演练验收。configmap 必须排在 daemonset 之前,
 #       DaemonSet 用 configMapKeyRef 取值,ConfigMap 缺失时 Pod 卡在
@@ -58,8 +63,6 @@ kubectl -n "$NS" get configmap traincache-config >/dev/null 2>&1 \
   || kubectl apply -f "$REPO_ROOT/controller/deploy/agent/configmap.yaml" >>"$RAW_LOG" 2>&1 \
   || fail "apply agent configmap 失败"
 kubectl apply -f "$REPO_ROOT/controller/deploy/agent/daemonset.yaml" >>"$RAW_LOG" 2>&1 || fail "apply agent daemonset 失败"
-# 演练用本地构建的镜像：清单里写的是推送后的 ghcr 引用，这里替换成 kind load 的名字。
-kubectl -n "$NS" set image ds/"$DS" agentd=traincache-agentd:dev >>"$RAW_LOG" 2>&1 || fail "set image 失败"
 kubectl apply -f "$REPO_ROOT/agent/deploy/train-pod.yaml" >>"$RAW_LOG" 2>&1 || fail "apply train-pod.yaml 失败"
 kubectl -n "$NS" rollout status ds/"$DS" --timeout=120s >>"$RAW_LOG" 2>&1 && ok "DaemonSet $DS ready" || fail "DaemonSet 未在 120s 内 ready"
 kubectl -n "$NS" wait --for=condition=Ready pod/"$TRAIN_POD" --timeout=120s >>"$RAW_LOG" 2>&1 && ok "Pod $TRAIN_POD ready" || fail "train pod 未 ready"

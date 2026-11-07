@@ -26,7 +26,7 @@ import (
 // phaseState 是单个 dataset 的阶段状态(phaseTracker.mu 保护)。
 type phaseState struct {
 	hasOrder     bool // 是否见过该 dataset 的订单/切换
-	startupDone  bool // 启动窗口(或已被 switch 取代)完成
+	startupDone  bool // 阶段首批(或已被 switch 取代)完成
 	switchActive bool // 切换窗口进行中(优先于 startup)
 
 	// 窗口就绪按去重块计数(同一块重复完成不重复推进)。

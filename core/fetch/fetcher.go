@@ -23,8 +23,9 @@ const backoffBase = 100 * time.Millisecond
 // 并行取，聚合到临时文件后再顺序喂给 CAS；关闭时走整对象 Get。块大小不参与判定。
 const rangeParts = 4
 
-// rangeTempDir 是分片聚合临时文件的目录；空串表示 os.TempDir()。
+// rangeTempDir 是分片聚合临时文件的目录覆盖；空串表示用 CAS 块目录。
 // 包级变量便于单测指定可观测的临时目录。临时文件在成功与失败路径都会删除。
+// 默认不落在系统临时目录：Agent 的容器根文件系统只读，os.TempDir() 不可写。
 var rangeTempDir string
 
 // inflightCall 是同 key 合并下载的共享结果：owner 下载完成后写入 fp/err 并 close(done)，
@@ -288,11 +289,22 @@ func (f *Fetcher) tryOnce(ctx context.Context, key string, expectSize int64) (ca
 func (f *Fetcher) putRangeBlock(ctx context.Context, store objectstore.RangeStore, key string, size int64) (cas.Fingerprint, error) {
 	var zero cas.Fingerprint
 
-	tmp, err := os.CreateTemp(rangeTempDir, "traincache-range-*")
+	// 分片聚合的临时文件与 Put 的临时文件同卷：块目录内。不落在系统临时目录，
+	// 容器根文件系统只读时 os.TempDir() 不可写。
+	var (
+		tmp     *os.File
+		tmpPath string
+		err     error
+	)
+	if rangeTempDir != "" {
+		tmp, err = os.CreateTemp(rangeTempDir, "traincache-range-*")
+	} else {
+		tmp, err = f.cs.CreateTempFile("tmp-range-*")
+	}
 	if err != nil {
 		return zero, fmt.Errorf("fetch: create range temp file: %w", err)
 	}
-	tmpPath := tmp.Name()
+	tmpPath = tmp.Name()
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)

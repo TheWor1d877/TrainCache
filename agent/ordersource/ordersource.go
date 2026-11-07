@@ -35,7 +35,7 @@ type ConsumeOrder struct {
 	StageID        string     `json:"stage_id"`
 	ShuffleSeed    int64      `json:"shuffle_seed"`
 	BatchSize      int64      `json:"batch_size"`
-	PrefetchChunks int        `json:"prefetch_chunks"` // 启动窗口大小 K
+	PrefetchChunks int        `json:"prefetch_chunks"` // 阶段首批块数(阶段开头按高优先级预取的块数)
 	Chunks         []ChunkRef `json:"chunks"`          // 本阶段消费顺序(有序块引用列表)
 }
 

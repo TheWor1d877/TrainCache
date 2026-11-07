@@ -60,6 +60,7 @@ show_tc() {
             | grep -oE "\"/var/run/netns/[^\"]+\"" | head -1 | tr -d "\"")
         [ -n "$netns" ] || { echo "  找不到 Pod netns"; exit 0; }
         nsenter --net="$netns" tc qdisc show dev eth0
+        nsenter --net="$netns" tc class show dev eth0 2>/dev/null || true
     ' _ "$pod" 2>/dev/null || echo "  读取失败(docker/crictl/nsenter 不可用)"
 }
 
@@ -610,6 +611,7 @@ fi
 
 section "tc qdisc"
 tc_out="$(show_tc 2>/dev/null || true)"
+# 两形态:不给单流上限时是 根 tbf → netem;给单流上限时是 htb → netem → fq。
 if printf '%s' "$tc_out" | grep -q 'tbf'; then
     pass "tc qdisc 在位(MinIO Pod eth0)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'
@@ -656,19 +658,32 @@ PYEOF
     else
         warn "tc qdisc 在位但读不到 rate/burst 字段,跳过 burst 断言: $tbf_line"
     fi
-    # 单流限速档的形态:根 tbf 之下挂 fq,fq 的 maxrate 给出每连接上限,netem
-    # 挂在 fq 的 leaf class 上(4.2 的并行下载族一节)。挂了 fq 就要能看到 maxrate。
-    if printf '%s' "$tc_out" | grep -q 'qdisc fq'; then
-        fq_line="$(printf '%s\n' "$tc_out" | grep -m1 'qdisc fq' || true)"
-        if printf '%s' "$fq_line" | grep -q 'maxrate'; then
-            pass "fq maxrate 在位: $fq_line"
-        else
-            fail "qdisc 里有 fq 但读不到 maxrate(单流上限没挂上): $fq_line"
-        fi
+elif printf '%s' "$tc_out" | grep -q 'qdisc htb'; then
+    # 单流上限档的形态:根 htb(类给聚合带宽)→ netem → fq(maxrate 给单流上限)。
+    # tbf 不是 classful,挂不了子 qdisc,所以这一档的根是 htb。
+    pass "tc qdisc 在位(单流上限档:htb → netem → fq)"
+    printf '%s\n' "$tc_out" | sed 's/^/      /'
+    htb_line="$(printf '%s\n' "$tc_out" | grep -m1 'class htb' || true)"
+    htb_rate="$(printf '%s\n' "$htb_line" | sed -n 's/.* rate \([0-9.][0-9.]*[A-Za-z]*\).*/\1/p')"
+    htb_ceil="$(printf '%s\n' "$htb_line" | sed -n 's/.* ceil \([0-9.][0-9.]*[A-Za-z]*\).*/\1/p')"
+    if [ -n "$htb_rate" ] && [ "$htb_rate" = "$htb_ceil" ]; then
+        pass "htb 类的 rate 与 ceil 相同(聚合带宽是硬上限): rate=$htb_rate"
+    else
+        fail "htb 类的 rate 与 ceil 不一致(聚合带宽不是硬上限): $htb_line"
     fi
 else
     warn "tc qdisc 未挂(跑分前 make tc-up 或 cold_reset 会挂)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'
+fi
+# fq maxrate 检查(两形态共用):单流上限档的 fq 给出每连接上限,挂了 fq 就要能
+# 看到 maxrate,否则单流上限没生效(4.2 的并行下载族一节)。
+if printf '%s' "$tc_out" | grep -q 'qdisc fq'; then
+    fq_line="$(printf '%s\n' "$tc_out" | grep -m1 'qdisc fq' || true)"
+    if printf '%s' "$fq_line" | grep -q 'maxrate'; then
+        pass "fq maxrate 在位: $fq_line"
+    else
+        fail "qdisc 里有 fq 但读不到 maxrate(单流上限没挂上): $fq_line"
+    fi
 fi
 
 section "数据目录与磁盘"
@@ -691,15 +706,33 @@ if [ "$d_n" -gt 0 ]; then
 else
     warn "train 未生成(track-d-data 会生成)"
 fi
-if [ -e "$SUDO_PASS" ]; then
+cache_reset_via=""
+cache_reset_node=""
+if [ "$(id -u)" = "0" ]; then
+    cache_reset_via="root 直跑"
+elif sudo -n true 2>/dev/null; then
+    cache_reset_via="sudo -n"
+elif have kind && have docker; then
+    for n in $(kind get nodes --name "$CLUSTER" 2>/dev/null); do
+        # /proc 挂载是 ro 就写不进 drop_caches(容器内 uid 0 也一样)。
+        if docker exec "$n" awk '$2=="/proc"{print $4}' /proc/mounts 2>/dev/null | grep -q '^rw'; then
+            cache_reset_via="kind 节点容器"
+            cache_reset_node="$n"
+            break
+        fi
+    done
+fi
+if [ -n "$cache_reset_via" ]; then
+    pass "清页缓存通道可用: $cache_reset_via${cache_reset_node:+ ($cache_reset_node)}"
+elif [ -e "$SUDO_PASS" ]; then
     mode="$(stat -c '%a' "$SUDO_PASS" 2>/dev/null || echo '?')"
     if [ "$mode" = "600" ]; then
-        pass "$SUDO_PASS 存在且权限 600"
+        pass "$SUDO_PASS 存在且权限 600(可作 sudo -S 通道)"
     else
         warn "$SUDO_PASS 权限 $mode,期望 600"
     fi
 else
-    fail "$SUDO_PASS 不存在(cold_reset/drop_caches 需要 sudo)"
+    fail "没有可用的清页缓存通道(root 直跑 / sudo -n / kind 节点容器 / .sudo-pass 至少要有一条通)"
 fi
 if [ -n "$DATA_ROOT" ] && [ -d "$DATA_ROOT" ]; then
     avail_g="$(df -Pk "$DATA_ROOT" 2>/dev/null | awk 'NR==2{printf "%d", $4/1024/1024}')"

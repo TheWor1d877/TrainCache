@@ -5,9 +5,16 @@
 #   docker stop <节点容器名>。kind 的节点容器名与 k8s 节点名相同。
 #
 # 判据(与 docs/4.3-bench-metrics-and-decisions.md 混沌族判据一节的 node_loss 行一致):
-#   · DataSet 的 condition NoAccessibleNodes 变成 True
+#   · 节点 NotReady
 #   · WarmupTask 的 status.phase 落到 Degraded
-#   · 容器启动回来后节点重新 Ready,上面两条回到 False 与非 Degraded
+#   · 容器启动回来后节点重新 Ready,phase 仍是 Degraded
+#
+# 两条状态线的读法:门控决策落库后本代不再重算,所以 phase 停在 Degraded
+# 不退回,节点回来也不变。DataSet 的 accessibleNodes 只按标签解析、不看
+# 节点 Ready,WarmupTask 的 candidateNodes 在门控决策后不再更新,两者都不
+# 反映这次掉线;该节点上 agent Pod 的状态同样不更新——kubelet 随节点容器
+# 一起停了,Pod 状态冻结在上报前的取值,要等节点回来才刷新。所以判据只读
+# 节点 Ready 条件与 WarmupTask 的 phase 这两条。
 #
 # 与其它故障的区别:本脚本直接操作宿主机上的 docker,不删集群对象。
 # 停容器期间该节点上的 Pod 全部失联,脚本不并发跑其它族。
@@ -78,12 +85,6 @@ node_ready() {
     -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true
 }
 
-dataset_conditions() {
-  chaos_kubectl -n "$NS" get datasets \
-    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="NoAccessibleNodes")].status}{"\n"}{end}' \
-    2>/dev/null || true
-}
-
 warmup_phases() {
   chaos_kubectl -n "$NS" get warmuptasks \
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' \
@@ -98,10 +99,10 @@ if [ "$DRY_RUN" = 1 ]; then
   chaos_show_raw "docker inspect -f '{{.State.Running}}' \$CONTAINER"
   chaos_show_raw "docker stop \$CONTAINER"
   chaos_show_cmd get node "\$NODE" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}'
-  chaos_show_cmd -n "$NS" get datasets -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="NoAccessibleNodes")].status}{"\n"}{end}'
+  chaos_show_cmd -n "$NS" get pods -l app=traincache-agentd -o jsonpath='{range .items[*]}{.spec.nodeName}{" "}{.status.phase}{"\n"}{end}'
   chaos_show_cmd -n "$NS" get warmuptasks -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}'
   chaos_show_raw "docker start \$CONTAINER"
-  chaos_note "[dry-run]   ↑ 恢复后重读节点 Ready、DataSet condition 与 WarmupTask phase"
+  chaos_note "[dry-run]   ↑ 恢复后重读节点 Ready、agent Pod 与 WarmupTask phase"
   exit 0
 fi
 
@@ -133,9 +134,7 @@ fi
 STATE_BEFORE="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
 [ "$STATE_BEFORE" = "true" ] || chaos_die "容器 $CONTAINER 当前不在运行(State.Running=$STATE_BEFORE)"
 
-BEFORE_DATASET="$(dataset_conditions)"
 BEFORE_WARMUP="$(warmup_phases)"
-[ -n "$BEFORE_DATASET" ] || chaos_die "namespace $NS 里没有 DataSet,判据取不到对象"
 [ -n "$BEFORE_WARMUP" ] || chaos_die "namespace $NS 里没有 WarmupTask,判据取不到对象"
 
 ctx="$(chaos_record_context)"
@@ -144,19 +143,17 @@ chaos_note "目标节点=$NODE 容器=$CONTAINER 停前 Ready=$(node_ready)"
 
 T0="$(date +%s)"
 docker stop "$CONTAINER" >/dev/null
-chaos_note "已停容器 $CONTAINER,等节点 NotReady 与两条状态线降级…"
+chaos_note "已停容器 $CONTAINER,等节点 NotReady 与 WarmupTask 降级…"
 
 # ---- 等降级 ----
 READY_AFTER=""
-DATASET_HIT=""
 WARMUP_HIT=""
 while :; do
   ELAPSED=$(( $(date +%s) - T0 ))
   [ "$ELAPSED" -ge "$TIMEOUT" ] && break
   READY_AFTER="$(node_ready)"
-  DATASET_HIT="$(printf '%s\n' "$(dataset_conditions)" | awk '$2=="True" {print $1; exit}')"
   WARMUP_HIT="$(printf '%s\n' "$(warmup_phases)" | awk '$2=="Degraded" {print $1; exit}')"
-  if [ "$READY_AFTER" != "True" ] && [ -n "$DATASET_HIT" ] && [ -n "$WARMUP_HIT" ]; then
+  if [ "$READY_AFTER" != "True" ] && [ -n "$WARMUP_HIT" ]; then
     break
   fi
   sleep 3
@@ -169,11 +166,6 @@ if [ "$READY_AFTER" != "True" ]; then
 else
   fail "${TIMEOUT}s 内节点 $NODE 仍 Ready"
 fi
-if [ -n "$DATASET_HIT" ]; then
-  pass "DataSet $DATASET_HIT 的 NoAccessibleNodes=True"
-else
-  fail "${TIMEOUT}s 内没有 DataSet 的 NoAccessibleNodes=True"
-fi
 if [ -n "$WARMUP_HIT" ]; then
   pass "WarmupTask $WARMUP_HIT 的 phase=Degraded"
 else
@@ -183,8 +175,8 @@ fi
 [ -n "$OUT_DIR" ] && {
   printf 'node=%s\ncontainer=%s\nstate_before=%s\nready_after=%s\ndown_s=%s\n' \
     "$NODE" "$CONTAINER" "$STATE_BEFORE" "${READY_AFTER:-}" "$DOWN_S" >"$OUT_DIR/node.txt"
-  printf 'dataset_before:\n%s\nwarmup_before:\n%s\ndataset_after:\n%s\nwarmup_after:\n%s\n' \
-    "$BEFORE_DATASET" "$BEFORE_WARMUP" "$(dataset_conditions)" "$(warmup_phases)" \
+  printf 'warmup_before:\n%s\nwarmup_after:\n%s\n' \
+    "$BEFORE_WARMUP" "$(warmup_phases)" \
     >"$OUT_DIR/metrics.txt"
 }
 
@@ -196,23 +188,20 @@ fi
 # ---- 恢复 ----
 R0="$(date +%s)"
 docker start "$CONTAINER" >/dev/null
-chaos_note "已启动容器 $CONTAINER,等节点 Ready 与状态线恢复…"
+chaos_note "已启动容器 $CONTAINER,等节点 Ready 与候选集恢复…"
 READY_RECOVERED=""
-DATASET_CLEARED=0
-WARMUP_CLEARED=0
+WARMUP_STILL_DEGRADED=0
 while :; do
   ELAPSED=$(( $(date +%s) - R0 ))
   [ "$ELAPSED" -ge "$RECOVER_TIMEOUT" ] && break
   READY_RECOVERED="$(node_ready)"
   if [ "$READY_RECOVERED" = "True" ]; then
-    if [ -z "$(printf '%s\n' "$(dataset_conditions)" | awk '$2=="True"')" ]; then
-      DATASET_CLEARED=1
-    fi
-    if [ -z "$(printf '%s\n' "$(warmup_phases)" | awk '$2=="Degraded"')" ]; then
-      WARMUP_CLEARED=1
+    # 门控决策是本代终态,恢复后 phase 仍是 Degraded,这是预期。
+    if [ -n "$(printf '%s\n' "$(warmup_phases)" | awk '$2=="Degraded"')" ]; then
+      WARMUP_STILL_DEGRADED=1
     fi
   fi
-  [ "$DATASET_CLEARED" = 1 ] && [ "$WARMUP_CLEARED" = 1 ] && break
+  [ "$WARMUP_STILL_DEGRADED" = 1 ] && break
   sleep 3
 done
 R1="$(date +%s)"
@@ -223,20 +212,15 @@ if [ "$READY_RECOVERED" = "True" ]; then
 else
   fail "${RECOVER_TIMEOUT}s 内节点 $NODE 没恢复 Ready,容器 $CONTAINER 已启动但节点未就绪"
 fi
-if [ "$DATASET_CLEARED" = 1 ]; then
-  pass "DataSet 的 NoAccessibleNodes 回到非 True"
+if [ "$WARMUP_STILL_DEGRADED" = 1 ]; then
+  pass "WarmupTask 的 phase 仍是 Degraded(门控决策是本代终态,预期不退回)"
 else
-  fail "DataSet 的 NoAccessibleNodes 仍为 True"
-fi
-if [ "$WARMUP_CLEARED" = 1 ]; then
-  pass "WarmupTask 的 phase 离开 Degraded"
-else
-  fail "WarmupTask 的 phase 仍是 Degraded"
+  fail "WarmupTask 的 phase 已离开 Degraded"
 fi
 
 [ -n "$OUT_DIR" ] && {
-  printf 'recover_s=%s\nnode_ready=%s\ndataset_cleared=%s\nwarmup_cleared=%s\n' \
-    "$RECOVER_S" "${READY_RECOVERED:-}" "$DATASET_CLEARED" "$WARMUP_CLEARED" \
+  printf 'recover_s=%s\nnode_ready=%s\nwarmup_still_degraded=%s\n' \
+    "$RECOVER_S" "${READY_RECOVERED:-}" "$WARMUP_STILL_DEGRADED" \
     >"$OUT_DIR/timings.txt"
 }
 chaos_note "完成:停机 ${DOWN_S}s,恢复 ${RECOVER_S}s"

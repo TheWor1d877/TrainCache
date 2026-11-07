@@ -1245,7 +1245,7 @@ func TestNilMetricsRegistrySafe(t *testing.T) {
 // ----------------:显式预热入队(P0) ----------------
 
 // TestEnqueueP0PriorityPreemptsP1AndP2:P0 严格最高优先级——先 P0(按入参顺序)再 P1(K
-// 启动窗口)再 P2(邻域窗口);空列表返回 nil 且队列不变(白盒出队断言,不依赖调度时序)。
+// 阶段首批)再 P2(邻域窗口);空列表返回 nil 且队列不变(白盒出队断言,不依赖调度时序)。
 func TestEnqueueP0PriorityPreemptsP1AndP2(t *testing.T) {
 	ctx := context.Background()
 

@@ -32,6 +32,7 @@
 - bench 端到端族补上 checkpoint 续跑能力：`bench/scripts/load_train.py` 新增 `--checkpoint-dir`、`--interrupt-after-epoch`、`--resume`，checkpoint 存已完成 epoch 的逐步记录、每 epoch 汇总与跨段时刻；`bench/experiments/run.py` 新增 e2e 两阶段编排，三个场景是断点续跑、换数据版本后恢复、训练进程与 agentd 同时重启；`bench/experiments/collect.py` 新增回源请求错误计数 `fetch_errors_total` 与 `fetch_errors_recovery`。换版本场景要的第二份数据快照由 `make -C bench bench-data-v2` 生成。
 - bench 的 `summary.csv` 新增单块下载时间五列：`prefetch_task_count`、`prefetch_task_seconds_sum`、`prefetch_task_duration_mean_s`、`prefetch_task_duration_p50_s`、`prefetch_task_duration_p90_s`，取 agent 的 `traincache_prefetch_task_duration_seconds` 直方图。一个任务是一个块，耗时从入队到终态，含排队等待，不是纯网络传输时间。
 - bench 的 `summary.csv` 新增 `cache_peak_ratio` 列：缓存目录峰值除以声明容量。
+- CLI 支持按节点名拨号：`traincache` 新增 `--controller`（控制面地址，默认取环境变量 `TRAINCACHE_CONTROLLER_ENDPOINT`，未设置时为 `traincache-controller-manager.traincache.svc:9412`）与 `resolve` 子命令；`--endpoint` 留空时按节点名解析 Agent 地址，解析顺序是显式 `--endpoint` 优先、进程所在节点的 `NODE_NAME` 等于 `--node` 时连 `127.0.0.1:9410`、否则向控制面查候选地址并按序试连。控制面在 metrics 服务器（9412）上暴露 `GET /resolve?node=<节点名>`，返回 `host:port` 数组，Agent Pod 的 podIP 在前、节点地址在后；新增 Service `traincache-controller-manager`（9412）。契约见 `docs/CLI-INTERFACE.md` 的地址解析顺序一节、`docs/7.1-design.md`。
 
 ### Changed
 
@@ -39,6 +40,7 @@
 - bench 的 warm 臂预热口径改成「各自把缓存填满」：WarmupTask 的块数上界从分片数改成数据集块数（512），ρ=0.5 时预铺 512 块 4 GiB，ρ=8 时 64 块 0.5 GiB，每档恰好填满缓存。原上界拿块与分片比，是单位错误。
 - bench 缓存基线的配额下发改成按 MiB：Fluid 原先按整数 GiB 下发，ρ=8 的 0.5 GiB 会被进位到 1 GiB，与另两组的配额对不上；现在 `FLUID_CACHE_MB` 与 `JFS_CACHE_MB` 同口径。
 - bench 端到端族的判定改成逐场景二值：两阶段都跑完，且恢复窗口（阶段一最后一步到阶段二最后一步）内回源请求错误计数增量为 0。出图补 `e2e-recovery` 与 `e2e-fetch-errors` 两张。
+- 术语改名：Agent 侧订单里的 `prefetch_chunks` 不再叫「启动窗口 K」，改称「阶段首批」（每个阶段开头按高优先级预取的那批块）。控制器算的那套 K 仍是「启动窗口 K」（预热任务的请求块数），两套 K 不再同名。订单字段名 `prefetch_chunks` 不变。契约见 `docs/6.2-decisions.md` D68。
 
 - 出图样式调整：柱顶标数值，图例从图内移到标题下方，合格区间画成浅色带加虚线，标题改为左对齐。`bench/experiments/plot_families.py` 的 `_render` 新增数值标注、参考线、堆叠柱与分面备注四个参数。
 - Agent 每个进程的下载任务默认上限从 8 提到 16，预铺仍占一半。每块走 4 路并行时单进程到源站或网关的连接峰值为 64，与 `MaxConnsPerHost` 默认值齐平。
@@ -50,8 +52,11 @@
 
 ### Fixed
 
+- Agent 的并行 Range 下载在容器里必然失败：分片聚合的临时文件建在系统临时目录，而 Agent 容器的根文件系统是只读的，`/tmp` 不可写。临时文件改到块目录内，与 `cas.Put` 的临时文件同卷。整对象下载路径不受影响，所以现象是「关掉 `fetchRangeParallel` 就正常、打开就全块下载失败」。
 - `bench/scripts/doctor.sh` 的 agentd 缓存上限期望值两处引用失效，体检项由 FAIL 转 PASS。
 - bench 续跑时的全程时刻口径：`t_submit` 与 `t_first_step` 取阶段一的值，`t_last_step` 取阶段二的值，恢复时长与提交间隔单独记在 `run.json` 的 `resume` 段。
+- `agent/e2e/run-k8s.sh` 不再把守护集镜像改成裸名 `traincache-agentd:dev`：节点里只有 ghcr 全名镜像，改名后留在集群里的引用会让后续任何一次守护集滚动更新拉不到镜像。`bench/scripts/ctrl_up.sh` 增加一道比对：集群里的镜像引用与清单渲染结果不一致时重新应用清单纠正。
+- 混沌族节点丢失档的判据原先读 DataSet 的 `NoAccessibleNodes=True`，与 Controller 的实际口径相反（这族 condition 用 False 表示问题成立）；而该 condition 只按 `s3-access` 标签解析，不看节点 Ready，节点掉线期间根本不变化。判据改成读节点 Ready 条件与 WarmupTask 的 `status.phase`，后者按设计是本代终态，恢复后仍是 Degraded。
 
 ### Removed
 

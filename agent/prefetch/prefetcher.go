@@ -42,7 +42,7 @@ type ConsumeOrder = ordersource.ConsumeOrder
 // 队列优先级:数值小者先出队(设计《预取主循环》严格优先级 P0>P1>P2>P3)。
 const (
 	priP0         = iota // P0:显式预热任务(EnqueueP0;D27——不参与阶段降级与游标簿记)
-	priP1                // P1:阶段切换 K 启动窗口
+	priP1                // P1:阶段首批(订单 prefetch_chunks 指定的块)
 	priP2                // P2:邻域持续预取
 	priP3                // P3:旧阶段降级块
 	numPriorities = 4
@@ -108,7 +108,7 @@ type Status struct {
 	Cursor           ChunkRef // 纯消费位点:仅由 OnConsumeSideAdvance 推进
 	PrefetchFrontier ChunkRef // 预取前沿:已就绪的最远块(不要求连续)
 	QueueDepth       [4]int   // P0..P3 各队列长度
-	HitRate          float64  // 预取命中率(窗口内消费时块已就绪的比例),供自适应 K 调参
+	HitRate          float64  // 预取命中率(窗口内消费时块已就绪的比例),只作观测,不参与调度
 }
 
 // stageState 是单个阶段的预取视图与统计。阶段切换后旧对象由在途 task 继续引用,
@@ -119,7 +119,7 @@ type stageState struct {
 	refs    []ordersource.ChunkRef
 	pos     map[ordersource.ChunkRef]int // ref → 位置(重复 ref 取首次出现)
 
-	k       int // 启动窗口 K = clamp(prefetch_chunks, 0, len(refs))
+	k       int // 阶段首批块数 = clamp(prefetch_chunks, 0, len(refs))
 	kDone   int // K 窗口中已处理块数;达 k 后开放 P2 邻域窗口(§7.3"K 块就绪后剩余块转 P2")
 	cursor  int // 调度游标 = max(消费游标, 预取前沿)(-1 = 尚未推进)
 	schedTo int // 邻域窗口水位:已入队过的最高位置(-1 = 未入队;单调防重复入队)
@@ -621,7 +621,7 @@ func (p *PersistentPrefetcher) estimateETA(ctx context.Context, st *stageState, 
 }
 
 // ensureWindowLocked 补齐当前阶段的 P2 邻域窗口(设计《预取主循环》《持续预取与阶段切换》):起点 =
-// max(已入队水位, cursor)+1,终点 = min(cursor+lookahead, len-1);K 启动窗口未全部处理完
+// max(已入队水位, cursor)+1,终点 = min(cursor+lookahead, len-1);阶段首批未全部处理完
 // (kDone < k)时不开放邻域(设计《持续预取与阶段切换》"K 块就绪后剩余块转 P2")。幂等:水位单调不回退,
 // cursor 跳跃(advance 大幅前进)时途经位置视为已消费、不再入队。
 func (p *PersistentPrefetcher) ensureWindowLocked() {

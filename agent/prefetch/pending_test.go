@@ -280,7 +280,7 @@ func TestPendingDownloadOnceAcrossP2AndP0(t *testing.T) {
 }
 
 // TestPendingInFlightAndCurrentWindow:InFlight 仅运行态为 true;IsCurrentWindow 按当前
-// 阶段/游标/lookahead(启动窗口 K 未处理完时含整个 K 窗口)判定。
+// 阶段/游标/lookahead(阶段首批未处理完时含整个首批窗口)判定。
 func TestPendingInFlightAndCurrentWindow(t *testing.T) {
 	ctx := context.Background()
 	p := New(nil, nil, nil, nil, Config{Lookahead: 2})
@@ -290,7 +290,7 @@ func TestPendingInFlightAndCurrentWindow(t *testing.T) {
 	}
 
 	if !p.IsCurrentWindow(testDataset, refs[0]) || !p.IsCurrentWindow(testDataset, refs[1]) {
-		t.Error("启动窗口 K 内块应属于当前窗口")
+		t.Error("阶段首批内块应属于当前窗口")
 	}
 	if p.IsCurrentWindow(testDataset, refs[3]) {
 		t.Error("K 窗口与邻域外块不应属于当前窗口")

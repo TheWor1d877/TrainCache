@@ -291,8 +291,7 @@ func (s *Server) CancelPreheat(ctx context.Context, req *agentpb.CancelPreheatRe
 	return s.ag.Preheat.Cancel(ctx, req)
 }
 
-// ReportBlocks 未实现(decisions Q1:北向流服务端实现推迟至 Controller 里程碑;8.x
-// 不使用推送模型,D55)。
+// ReportBlocks 未实现(decisions D67:保留占位不实现,8.x 不使用推送模型,D55)。
 func (s *Server) ReportBlocks(_ agentpb.ReportService_ReportBlocksServer) error {
-	return status.Error(codes.Unimplemented, "ReportBlocks 未实现(Controller 里程碑,decisions Q1)")
+	return status.Error(codes.Unimplemented, "ReportBlocks 未实现(保留占位,decisions D67)")
 }

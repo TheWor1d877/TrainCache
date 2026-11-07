@@ -4,11 +4,22 @@ TrainCache 仓库里有三个命令行程序：`traincache` 与 Agent 通信，`
 
 ## 定位与连接模型
 
-- `traincache` 有四条子命令：`prefetch`、`node status`、`status`、`ls`，全部通过 gRPC 访问 Agent，明文传输不带 TLS。
-- `--endpoint` 决定连哪台 Agent，默认 `127.0.0.1:9410`。连接惰性建立，第一次 RPC 才拨号，每条 RPC 的 context 超时 10 秒。
-- `--node` 是请求里的校验字段，告诉服务端预期操作哪台机器，CLI 不做地址解析；填错节点名由 Agent 拒绝。
-- `--endpoint` 由各子命令自己注册，必须写在子命令之后。`traincache --endpoint X prefetch ...` 被当成未知子命令，退出码 2。
+- `traincache` 有五条子命令：`prefetch`、`node status`、`status`、`ls`、`resolve`。前四条通过 gRPC 访问 Agent，明文传输不带 TLS；`resolve` 只访问控制面的 HTTP 端点，不发 gRPC 请求。
+- `--endpoint` 决定连哪台 Agent，留空表示按节点名自动解析。连接惰性建立，第一次 RPC 才拨号，每条 RPC 的 context 超时 10 秒。
+- `--node` 是请求里的校验字段，告诉服务端预期操作哪台机器，填错节点名由 Agent 拒绝。留空 `--endpoint` 时，`--node` 还用来解析 Agent 地址。
+- `--controller` 是控制面地址，只在按节点名解析地址时用到。
+- `--endpoint` 与 `--controller` 由各子命令自己注册，必须写在子命令之后。`traincache --endpoint X prefetch ...` 被当成未知子命令，退出码 2。
 - 任务进度靠反复调用 `status` 获取。
+
+### 地址解析顺序
+
+`--endpoint` 非空时直接用它，不再解析。留空时按下面顺序取第一个可用的结果：
+
+1. 环境变量 `NODE_NAME` 等于 `--node`：用 `127.0.0.1:9410`。Agent DaemonSet 用 Downward API 把所在节点名注入 `NODE_NAME`，目标节点就是本机时走这条。
+2. `--node` 非空：向控制面发 `GET /resolve?node=<节点名>`，拿回候选地址数组，按数组顺序逐个试连，第一个连上的就用。每个候选的试连超时 2 秒；一个都连不上时报错退出 1。
+3. `--node` 为空：用 `127.0.0.1:9410`。
+
+试连判据是 gRPC 连接进入 Ready，即目标端口上有 Agent 在应答；端口能连上但没有 Agent 应答不算连上。
 
 ## traincache prefetch
 
@@ -20,7 +31,8 @@ traincache prefetch --path PATH --node NODE (--chunks PATH:CHUNK,... | --files T
 
 参数：
 
-- `--endpoint`：string，默认 `127.0.0.1:9410`，可选。Agent 的 gRPC 地址。
+- `--endpoint`：string，默认空，可选。Agent 的 gRPC 地址；留空表示按节点名自动解析，顺序见「地址解析顺序」。
+- `--controller`：string，默认取 `TRAINCACHE_CONTROLLER_ENDPOINT`，未设置时为 `traincache-controller-manager.traincache.svc:9412`，可选。控制面地址，用来按节点名解析 Agent 地址；不带 scheme 时按 `http://` 处理。
 - `--task-id`：string，必填。预热任务 ID，同时是幂等键，原样填入请求的 `task_id`；同一个 id 提交不同内容时 Agent 返回 `AlreadyExists`。
 - `--path`：string，必填。数据路径前缀，作为请求 `prefixes` 列表的唯一元素。
 - `--node`：string，必填。目标节点，原样填入请求的 `node`；CLI 只校验非空，语义校验在 Agent 侧。
@@ -46,7 +58,8 @@ traincache node status --node NODE [--item agent|catalog|space|tasks|rescan]
 
 参数：
 
-- `--endpoint`：string，默认 `127.0.0.1:9410`，可选。Agent 的 gRPC 地址。
+- `--endpoint`：string，默认空，可选。Agent 的 gRPC 地址；留空表示按节点名自动解析，顺序见「地址解析顺序」。
+- `--controller`：string，默认取 `TRAINCACHE_CONTROLLER_ENDPOINT`，未设置时为 `traincache-controller-manager.traincache.svc:9412`，可选。控制面地址，用来按节点名解析 Agent 地址；不带 scheme 时按 `http://` 处理。
 - `--node`：string，必填。目标节点，原样填入请求的 `node`；CLI 只校验非空，语义校验在 Agent 侧。
 - `--item`：string，默认空，可选。取值 `agent|catalog|space|tasks|rescan`，留空表示全量；大小写与首尾空格不敏感，不支持缩写，非法取值退出 2。
 
@@ -73,7 +86,8 @@ traincache status --node NODE --task-id ID
 
 参数：
 
-- `--endpoint`：string，默认 `127.0.0.1:9410`，可选。Agent 的 gRPC 地址。
+- `--endpoint`：string，默认空，可选。Agent 的 gRPC 地址；留空表示按节点名自动解析，顺序见「地址解析顺序」。
+- `--controller`：string，默认取 `TRAINCACHE_CONTROLLER_ENDPOINT`，未设置时为 `traincache-controller-manager.traincache.svc:9412`，可选。控制面地址，用来按节点名解析 Agent 地址；不带 scheme 时按 `http://` 处理。
 - `--node`：string，必填。目标节点，只做非空校验，请求里只带 `task_id`。
 - `--task-id`：string，必填。预热任务 ID，原样填入请求的 `task_id`。
 
@@ -100,7 +114,8 @@ traincache ls --dataset NAME [--snapshot-id ID] [--prefix P] [--chunks]
 
 参数：
 
-- `--endpoint`：string，默认 `127.0.0.1:9410`，可选。Agent 的 gRPC 地址。
+- `--endpoint`：string，默认空，可选。Agent 的 gRPC 地址；留空表示按节点名自动解析，顺序见「地址解析顺序」。
+- `--controller`：string，默认取 `TRAINCACHE_CONTROLLER_ENDPOINT`，未设置时为 `traincache-controller-manager.traincache.svc:9412`，可选。控制面地址，用来按节点名解析 Agent 地址；不带 scheme 时按 `http://` 处理。`ls` 没有 `--node`，用不到这个地址。
 - `--dataset`：string，必填。dataset 名，原样填入请求的 `dataset`；留空时 CLI 本地报 usage 错误并退出 2，不发 RPC。
 - `--snapshot-id`：string，可选。快照 ID，留空表示当前 CURRENT。
 - `--prefix`：string，可选。路径前缀过滤，原样填入请求的 `prefix`；留空表示不过滤。
@@ -129,10 +144,36 @@ traincache ls --dataset coco --prefix coco-001 --chunks
 
 `FILE` 是条目路径，当前发布物就是 tar 文件名。无匹配条目时只输出表头，退出 0。
 
+## traincache resolve
+
+用法：
+
+```
+traincache resolve --node NODE [--controller ADDR]
+```
+
+按节点名解析 Agent 地址，每个候选地址一行，按优先顺序打印。解析规则与「地址解析顺序」一致：`--node` 为空时报参数错误退出 2；环境变量 `NODE_NAME` 等于 `--node` 时打印 `127.0.0.1:9410`；其余情况向控制面发 `GET /resolve?node=<节点名>`，把返回的候选数组逐行打印。
+
+`resolve` 不发 gRPC 请求，只查控制面，也不试连候选地址；打印的顺序就是 CLI 拨号时的试连顺序。
+
+参数：
+
+- `--node`：string，必填。目标节点名，原样填进控制面查询参数。
+- `--controller`：string，默认取 `TRAINCACHE_CONTROLLER_ENDPOINT`，未设置时为 `traincache-controller-manager.traincache.svc:9412`，可选。控制面地址，不带 scheme 时按 `http://` 处理。
+
+控制面返回 404 表示该节点没有 Agent 地址，返回 500 表示查询本身失败；两种情况都打印错误并退出 1。控制面连不上时同样退出 1。
+
+```bash
+# 按节点名解析 Agent 地址，退出码 0
+traincache resolve --node worker-01
+# 10.0.0.5:9410
+# 192.168.1.10:9410
+```
+
 ## 退出码
 
 - `0`：成功。`accepted=false` 也算成功；`help`、`-h`、`--help`（含 `node` 层）返回 0。
-- `1`：建连失败；RPC 失败（超时、`Unavailable`、`InvalidArgument`、`NotFound`、`AlreadyExists`、`Unimplemented` 一律归此码）；`prefetch --files` 在快照里找不到分片。
+- `1`：建连失败；按节点名解析地址时控制面不可达、该节点没有 Agent 地址、候选地址一个都连不上；RPC 失败（超时、`Unavailable`、`InvalidArgument`、`NotFound`、`AlreadyExists`、`Unimplemented` 一律归此码）；`prefetch --files` 在快照里找不到分片。
 - `2`：无参数；未知子命令；`node` 缺子命令或未知 `node` 子命令；flag 解析失败；出现位置参数；必填项为空；`prefetch` 的 `--chunks` 与 `--files` 同时给或都没给、`--files` 缺 `--dataset`、`--chunks` 的项不是 `path:chunk`；`--priority` 或 `--item` 取值非法。
 
 ## 示例
@@ -160,6 +201,11 @@ traincache ls --dataset coco --snapshot-id snap-20261020
 # 查任务进度，退出码 0
 traincache status --node worker-01 --task-id t-1026-01
 
+# 按节点名解析 Agent 地址，退出码 0
+traincache resolve --node worker-01
+# 10.0.0.5:9410
+# 192.168.1.10:9410
+
 # --chunks 与 --files 都没给：stderr 提示 prefetch: --chunks 或 --files 至少给一个 并附用法，退出码 2
 traincache prefetch --node worker-01 --path /train-data --task-id t-1026-01
 
@@ -173,7 +219,7 @@ traincache node status --node worker-01 --endpoint 127.0.0.1:1
 
 ## gRPC 接口对应
 
-四条子命令各调一个 RPC，请求字段与来源：
+前四条子命令各调一个 RPC，请求字段与来源：
 
 | 子命令 | RPC | 请求字段 | 来源 |
 |---|---|---|---|
@@ -193,6 +239,8 @@ traincache node status --node worker-01 --endpoint 127.0.0.1:1
 | `ls` | `NodeService.ListSnapshot` | `prefix` | `--prefix`，`--chunks` 只决定输出形态 |
 
 协议里的 `UpdatePreheat`、`CancelPreheat`、`ReportBlocks` 三个 RPC 没有对应的 CLI 子命令。
+
+`resolve` 不调 gRPC，它发的是控制面的 HTTP 请求 `GET /resolve?node=<节点名>`，响应体是候选地址的 JSON 数组。
 
 ## 版本与兼容
 

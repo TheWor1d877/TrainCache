@@ -216,7 +216,9 @@ docker cp tc:/usr/local/bin/traincache ./traincache
 docker rm tc
 ```
 
-CLI 默认连 `127.0.0.1:9410`。访问集群内的 Agent 先做端口转发：
+CLI 的地址解析顺序：显式 `--endpoint` 优先；否则本机 `NODE_NAME` 等于 `--node` 时连 `127.0.0.1:9410`；否则向控制面查该节点的 Agent 候选地址并按顺序试连。集群内访问控制面用 Service `traincache-controller-manager.traincache.svc:9412`，也可以用 `--controller` 或环境变量 `TRAINCACHE_CONTROLLER_ENDPOINT` 指向别处；控制面地址不可达时退出 1。
+
+Agent 只监听 Pod IP，集群外访问要先做端口转发：
 
 ```bash
 kubectl -n traincache port-forward pod/<agentd-pod> 9410:9410

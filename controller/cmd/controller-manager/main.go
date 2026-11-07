@@ -113,6 +113,11 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 	}
 
 	resolver := agentclient.NewResolver(mgr.GetClient(), cfg.AgentPort)
+	// The node address lookup shares the metrics server, so the CLI can find
+	// an Agent by Node name (docs/7.1-design.md《地址解析端点》).
+	if err := mgr.AddMetricsServerExtraHandler(agentclient.ResolvePath, agentclient.ResolveHandler(resolver)); err != nil {
+		return fmt.Errorf("register resolve handler: %w", err)
+	}
 	agents := agentclient.NewPool(resolver, cfg.AgentTimeout)
 	defer func() {
 		if err := agents.Close(); err != nil {

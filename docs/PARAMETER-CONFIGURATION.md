@@ -231,6 +231,12 @@ manager、webhook、scheduler 三个进程的取值口径与 Agent 一致：等�
 
 `CONTROLLER_GATE_NAME` 与 `CONTROLLER_SCORE_ANNOTATION` 是 webhook、scheduler、训练 Pod 三端共用的约定键，改动要三端同步。
 
+### CLI 参数
+
+`traincache` 命令读操作者 shell 里的环境变量，这些值不写进任何工作负载清单，也不进 ConfigMap。
+
+- `TRAINCACHE_CONTROLLER_ENDPOINT`，默认 `traincache-controller-manager.traincache.svc:9412`，代码默认。CLI 按节点名解析 Agent 地址时访问的控制面地址，作用范围与 flag `--controller` 相同。集群内用默认值即可；集群外运行 CLI 时用这个环境变量或 `--controller` 指向可达地址。值等于代码默认时不写进任何 ConfigMap。
+
 ## 数据集参数
 
 ### 块大小

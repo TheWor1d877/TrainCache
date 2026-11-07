@@ -93,6 +93,22 @@ func (s *Store) blockPath(fp Fingerprint) string {
 	return filepath.Join(s.dir, hexs[:2], hexs+".blk")
 }
 
+// TempDir 返回块目录路径，供需要同卷临时文件的调用方使用（分片聚合的临时文件）。
+// 系统临时目录不可用时（容器根文件系统只读，/tmp 不可写）必须用它。
+func (s *Store) TempDir() string {
+	return s.dir
+}
+
+// CreateTempFile 在块目录内建一个临时文件，名字带块目录的临时文件前缀。
+// 分片聚合这类「先写临时文件再喂给 Put」的用法必须走它：临时文件要与 Put 的
+// 临时文件同卷，且命名要能被 List 的忽略规则识别。
+func (s *Store) CreateTempFile(pattern string) (*os.File, error) {
+	if pattern == "" {
+		pattern = tempPrefix + "*"
+	}
+	return os.CreateTemp(s.dir, pattern)
+}
+
 // quarantinePath 返回隔离块文件的最终路径 quarantine/<fp[0:2]hex>/<fp hex>.blk（与 blocks/ 同两级分片，D25）。
 func (s *Store) quarantinePath(fp Fingerprint) string {
 	hexs := fp.String()

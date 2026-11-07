@@ -34,7 +34,7 @@ M 是在启动延迟与选择质量之间的权衡。
 
 #### 缓存Agent DaemonSet
 
-Agent 以 DaemonSet 部署，每个节点一个，职责是接收 Controller 的预热指令、去源站下载数据、落到本地盘、回报进度。三类工作：启动时按启动窗口预取；训练中持续预取（按消费顺序、低优先级、可取消）；阶段切换重预取（按新顺序，降级旧阶段的在途请求）。
+Agent 以 DaemonSet 部署，每个节点一个，职责是接收 Controller 的预热指令、去源站下载数据、落到本地盘、回报进度。三类工作：启动时按阶段首批预取；训练中持续预取（按消费顺序、低优先级、可取消）；阶段切换重预取（按新顺序，降级旧阶段的在途请求）。
 
 抓取指令三条约束：有界并发（按字节与信号量限制在途字节数）；多个相同指令合并；查本地缓存，命中就不触及数据源。
 
@@ -48,7 +48,7 @@ DataLoader 钩子（已插桩）上报实际打开的块、当前 epoch、shuffl
 
 训练 Pod 里跑一个轻量的消费顺序生成器 sidecar（或 DataLoader 内的钩子），按 Job 配置（dataset、epochs、shuffle_seed、batch_size、prefetch_factor）算出当前阶段按消费顺序排列的块列表，通过共享内存或 Unix socket 传给同节点的 Agent。
 
-Agent 拿到顺序后，把启动窗口（默认前 K 块，K = batch_size × prefetch_factor）作为高优先级队列送进抓取管线，剩余块进低优先级持续预取队列。
+Agent 拿到顺序后，把阶段首批（默认前 K 块，K = batch_size × prefetch_factor）作为高优先级队列送进抓取管线，剩余块进低优先级持续预取队列。
 
 ## 层3 数据源
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -277,5 +278,42 @@ func dirIsEmpty(dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(entries) == 0, nil
+	return len(entries) == 0, nil}
+
+// TestFetchRangeParallelTempFileInBlockDir 分片聚合的临时文件必须建在块目录内。
+// Agent 的容器根文件系统只读，系统临时目录不可写；临时文件落到系统临时目录
+// 会让并行分片路径必然失败，而整对象路径不受影响。
+func TestFetchRangeParallelTempFileInBlockDir(t *testing.T) {
+	content := []byte("abcdefgh")
+	key := "ds/blocks/tempdir#0"
+
+	store := &countingStore{Mock: objectstore.NewMock()}
+	seed(t, store.Mock, key, content)
+	cs, casDir := newTestCAS(t)
+
+	oldTempDir := rangeTempDir
+	rangeTempDir = "" // 默认路径：走块目录
+	t.Cleanup(func() { rangeTempDir = oldTempDir })
+
+	// 系统临时目录指向一个不可写目录：并行路径若去那里建临时文件就会失败。
+	oldTMPDIR := os.Getenv("TMPDIR")
+	os.Setenv("TMPDIR", filepath.Join(casDir, "no-such-dir"))
+	t.Cleanup(func() { os.Setenv("TMPDIR", oldTMPDIR) })
+
+	f := New(store, cs, Options{RangeParallel: true})
+	fp, err := f.Fetch(context.Background(), key, int64(len(content)))
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if want := fpOf(content); fp != want {
+		t.Fatalf("fp = %s, want %s", fp, want)
+	}
+	// 临时文件已清理：块目录里只剩发布出来的块。
+	empty, err := dirIsEmpty(cs.TempDir())
+	if err != nil {
+		t.Fatalf("读块目录: %v", err)
+	}
+	if empty {
+		t.Fatal("块目录为空，块没落盘")
+	}
 }

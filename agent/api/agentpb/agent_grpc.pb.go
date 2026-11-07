@@ -393,7 +393,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // 北向:Agent → Controller,块级任务上报。
-// proto 随本设计冻结,服务端实现推迟至 Controller 里程碑(decisions Q1)。
+// 保留占位不实现:服务端返回 Unimplemented,控制面不用这个通道(decisions D67)。
 type ReportServiceClient interface {
 	ReportBlocks(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[BlockReport, ReportAck], error)
 }
@@ -424,7 +424,7 @@ type ReportService_ReportBlocksClient = grpc.ClientStreamingClient[BlockReport, 
 // for forward compatibility.
 //
 // 北向:Agent → Controller,块级任务上报。
-// proto 随本设计冻结,服务端实现推迟至 Controller 里程碑(decisions Q1)。
+// 保留占位不实现:服务端返回 Unimplemented,控制面不用这个通道(decisions D67)。
 type ReportServiceServer interface {
 	ReportBlocks(grpc.ClientStreamingServer[BlockReport, ReportAck]) error
 	mustEmbedUnimplementedReportServiceServer()

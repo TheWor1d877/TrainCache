@@ -12,9 +12,10 @@
 #   source-d   :宿主机本地通路(v4 train)—— 独立 nginx 源站容器(名取自 config.py 的
 #                TRAIN_SOURCE_CONTAINER,可被同名环境变量覆盖,便于用一次性容器验收)
 #                的 eth0 egress;训练进程在宿主机、经该容器端口取数,限其出站带宽。
-#   --per-conn :单条 TCP 连接的速率上限(如 32mbit)。给出时 qdisc 形态多一层:
-#                根 tbf 之下挂 fq,fq 的 maxrate 给这个上限,netem 挂在 fq 的 leaf
-#                class 上。不给出时形态是根 tbf 直接挂 netem,与改造前逐字一致。
+#   --per-conn :单条 TCP 连接的速率上限(如 32mbit)。给出时 qdisc 形态多两层:
+#                根 htb(类给聚合带宽)→ netem(时延/丢包)→ fq(maxrate 给单流
+#                上限,sch_fq 的 maxrate 按流限速)。不给出时形态是根 tbf 直接
+#                挂 netem,与改造前逐字一致。
 #   --loss     :netem 丢包率(0 到 100 的小数,1 表示 1%)。缺省 0,不出现 loss 子句。
 #   --dry-run  :只打印将执行的命令,不实际执行(不触碰集群与容器)。
 #   --self-test:自检(不碰集群、不碰容器):burst 推导 / netem 形态 / 单流上限形态 /
@@ -146,16 +147,21 @@ self_test() {
     pass "缺省时没有 fq maxrate"
   fi
   out="$(bash "$SELF" 1000mbit 20ms --per-conn 32mbit --dry-run 2>&1)" || fail "带单流上限形态执行失败"
-  expect_eq "带单流上限时形态" "tbf → fq(maxrate=32mbit) → netem" "$(shape_of "$out")"
+  expect_eq "带单流上限时形态" "htb(class rate=1000mbit) → netem → fq(maxrate=32mbit)" "$(shape_of "$out")"
   if printf '%s\n' "$out" | grep -q 'fq maxrate 32mbit'; then
     pass "带单流上限时挂 fq maxrate"
   else
     fail "带单流上限时没有 fq maxrate 命令"
   fi
-  if printf '%s\n' "$out" | grep -q 'parent 10:1 handle 20: netem'; then
-    pass "netem 挂在 fq 的 leaf class 上"
+  if printf '%s\n' "$out" | grep -q 'parent 10:1 handle 20: fq maxrate'; then
+    pass "fq 挂在 netem 的 class 下"
   else
-    fail "netem 没有挂到 fq 的 leaf class"
+    fail "fq 没有挂到 netem 的 class"
+  fi
+  if printf '%s\n' "$out" | grep -q 'root handle 1: htb default 1'; then
+    pass "带单流上限时根 qdisc 是 htb(tbf 不是 classful,挂不了子 qdisc)"
+  else
+    fail "带单流上限时根 qdisc 不是 htb"
   fi
   out="$(bash "$SELF" 1000mbit 200ms --loss 1 --dry-run 2>&1)" || fail "带丢包形态执行失败"
   expect_eq "带丢包时 netem 参数" "delay 200ms loss 1%" "$(netem_of "$out")"
@@ -311,19 +317,36 @@ done
 # ---- netem 形态:固定时延 + 可选丢包 ----
 NETEM_ARGS="$(netem_args "$DELAY" "$LOSS")"
 
-# ---- qdisc 形态:单流不限时是 根 tbf → netem;给出单流上限时是 根 tbf → fq(maxrate) → netem ----
+# ---- qdisc 形态:不给单流上限是 根 tbf → netem;给单流上限是 htb → netem → fq ----
+# tbf 不是 classful,挂不了子 qdisc(挂时报 "Parent qdisc is not classful"),
+# 所以单流上限这一档的根换成 classful 的 htb:htb 的类给聚合带宽,netem 给时延
+# 与丢包,netem 自带的 class 下挂 fq maxrate 给单流上限。sch_fq 的 maxrate 是
+# 按流限速,单流上限的实测办法见 docs/4.4-bench-runbook.md 的单流限速验不出一节。
+# 不给单流上限时形态与改造前逐字一致(根 tbf 直接挂 netem)。
 if [ -n "$PER_CONN" ]; then
-  QDISC_SHAPE="tbf → fq(maxrate=$PER_CONN) → netem"
-  FQ_LINE='[dry-run]     nsenter --net="$NETNS" tc qdisc add dev eth0 parent 1:1 handle 10: fq maxrate '"$PER_CONN"
-  NETEM_LINE='[dry-run]     nsenter --net="$NETNS" tc qdisc add dev eth0 parent 10:1 handle 20: netem '"$NETEM_ARGS"
-  FQ_LINE_SD='[dry-run]   nsenter -t $PID -n tc qdisc add dev eth0 parent 1:1 handle 10: fq maxrate '"$PER_CONN"
-  NETEM_LINE_SD='[dry-run]   nsenter -t $PID -n tc qdisc add dev eth0 parent 10:1 handle 20: netem '"$NETEM_ARGS"
+  QDISC_SHAPE="htb(class rate=$RATE) → netem → fq(maxrate=$PER_CONN)"
+  SHAPE_MINIO="$(printf '%s\n' \
+    'nsenter --net="$NETNS" tc qdisc add dev eth0 root handle 1: htb default 1' \
+    "nsenter --net=\"\$NETNS\" tc class add dev eth0 parent 1: classid 1:1 htb rate $RATE ceil $RATE burst $BURST cburst $BURST" \
+    "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS" \
+    'modprobe sch_fq 2>/dev/null || true' \
+    "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate $PER_CONN")"
+  SHAPE_SD="$(printf '%s\n' \
+    'nsenter -t $PID -n tc qdisc add dev eth0 root handle 1: htb default 1' \
+    "nsenter -t \$PID -n tc class add dev eth0 parent 1: classid 1:1 htb rate $RATE ceil $RATE burst $BURST cburst $BURST" \
+    "nsenter -t \$PID -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS" \
+    'modprobe sch_fq 2>/dev/null || true' \
+    "nsenter -t \$PID -n tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate $PER_CONN")"
+  DOCKER_FALLBACK="tc qdisc del dev eth0 root 2>/dev/null || true; tc qdisc add dev eth0 root handle 1: htb default 1 && tc class add dev eth0 parent 1: classid 1:1 htb rate $RATE ceil $RATE burst $BURST cburst $BURST && tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS && (modprobe sch_fq 2>/dev/null || true) && tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate $PER_CONN && tc qdisc show dev eth0"
 else
   QDISC_SHAPE="tbf → netem"
-  FQ_LINE=""
-  NETEM_LINE='[dry-run]     nsenter --net="$NETNS" tc qdisc add dev eth0 parent 1:1 handle 10: netem '"$NETEM_ARGS"
-  FQ_LINE_SD=""
-  NETEM_LINE_SD='[dry-run]   nsenter -t $PID -n tc qdisc add dev eth0 parent 1:1 handle 10: netem '"$NETEM_ARGS"
+  SHAPE_MINIO="$(printf '%s\n' \
+    "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms" \
+    "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS")"
+  SHAPE_SD="$(printf '%s\n' \
+    "nsenter -t \$PID -n tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms" \
+    "nsenter -t \$PID -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS")"
+  DOCKER_FALLBACK="tc qdisc del dev eth0 root 2>/dev/null || true; tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms && tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS && tc qdisc show dev eth0"
 fi
 
 case "$TARGET" in
@@ -342,9 +365,7 @@ minio)
 [dry-run]     CID=\$(crictl pods --state Ready --name "\$POD" -q | head -1)
 [dry-run]     NETNS=\$(crictl inspectp "\$CID" | grep -oE '"/var/run/netns/[^"]+"' | head -1 | tr -d '"')
 [dry-run]     nsenter --net="\$NETNS" tc qdisc del dev eth0 root 2>/dev/null || true
-[dry-run]     nsenter --net="\$NETNS" tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms
-$FQ_LINE
-$NETEM_LINE
+$(printf '%s\n' "$SHAPE_MINIO" | sed 's/^/[dry-run]     /')
 [dry-run]     nsenter --net="\$NETNS" tc qdisc show dev eth0
 [dry-run]   EOS
 EOF
@@ -366,14 +387,19 @@ NETNS=$(crictl inspectp "$CID" | grep -oE '"/var/run/netns/[^"]+"' | head -1 | t
 [ -n "$NETNS" ] || { echo "找不到 Pod sandbox netns(CID=$CID)"; exit 1; }
 echo "netns=$NETNS"
 nsenter --net="$NETNS" tc qdisc del dev eth0 root 2>/dev/null || true
-nsenter --net="$NETNS" tc qdisc add dev eth0 root handle 1: \
-  tbf rate "$RATE" burst "$BURST" latency 50ms
 if [ -n "$PER_CONN" ]; then
+  # tbf 不是 classful,挂不了子 qdisc;根换成 htb,类给聚合带宽,netem 给时延,
+  # netem 的 class 下挂 fq maxrate 给单流上限。
+  nsenter --net="$NETNS" tc qdisc add dev eth0 root handle 1: htb default 1
+  nsenter --net="$NETNS" tc class add dev eth0 parent 1: classid 1:1 \
+    htb rate "$RATE" ceil "$RATE" burst "$BURST" cburst "$BURST"
+  nsenter --net="$NETNS" tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM
   # sch_fq 可能是可加载模块,内建于内核时 modprobe 失败可忽略;下面挂 fq 失败才报错
   modprobe sch_fq 2>/dev/null || true
-  nsenter --net="$NETNS" tc qdisc add dev eth0 parent 1:1 handle 10: fq maxrate "$PER_CONN"
-  nsenter --net="$NETNS" tc qdisc add dev eth0 parent 10:1 handle 20: netem $NETEM
+  nsenter --net="$NETNS" tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate "$PER_CONN"
 else
+  nsenter --net="$NETNS" tc qdisc add dev eth0 root handle 1: \
+  tbf rate "$RATE" burst "$BURST" latency 50ms
   nsenter --net="$NETNS" tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM
 fi
 echo "--- 已挂载 ---"
@@ -394,13 +420,11 @@ source-d)
 [dry-run]   docker inspect -f '{{.State.Pid}}' $NAME   # → PID
 [dry-run]   # 首选通道 root 直跑 / sudo -n / sudo -S(.sudo-pass):
 [dry-run]   nsenter -t \$PID -n tc qdisc del dev eth0 root 2>/dev/null || true
-[dry-run]   nsenter -t \$PID -n tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms
-$FQ_LINE_SD
-$NETEM_LINE_SD
+$(printf '%s\n' "$SHAPE_SD" | sed 's/^/[dry-run]   /')
 [dry-run]   nsenter -t \$PID -n tc qdisc show dev eth0
 [dry-run]   # 回退(无 sudo 权限):特权容器共享目标 netns,镜像 $TC_IMAGE
 [dry-run]   docker run --rm --net=container:$NAME --cap-add=NET_ADMIN --entrypoint /bin/sh $TC_IMAGE -c \\
-[dry-run]     'tc qdisc del dev eth0 root 2>/dev/null || true; tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms && tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS && tc qdisc show dev eth0'
+[dry-run]     '$(printf '%s' "$DOCKER_FALLBACK")'
 EOF
     exit 0
   fi
@@ -428,35 +452,29 @@ EOF
   echo "netem=$NETEM_ARGS"
   if [ -n "$ROOT_VIA" ]; then
     run_root nsenter -t "$PID" -n tc qdisc del dev eth0 root 2>/dev/null || true
-    if run_root nsenter -t "$PID" -n tc qdisc add dev eth0 root handle 1: \
-         tbf rate "$RATE" burst "$BURST" latency 50ms; then
-      if [ -n "$PER_CONN" ]; then
-        # sch_fq 可能是可加载模块,内建于内核时 modprobe 失败可忽略;挂 fq 失败才报错
-        run_root modprobe sch_fq 2>/dev/null || true
-        run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 1:1 handle 10: fq maxrate "$PER_CONN" \
-          && run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 10:1 handle 20: netem $NETEM_ARGS
-      else
-        run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS
-      fi
-      echo "--- 已挂载(root 通道:$ROOT_VIA,nsenter 容器 netns)---"
-      run_root nsenter -t "$PID" -n tc qdisc show dev eth0
+    if [ -n "$PER_CONN" ]; then
+      # tbf 不是 classful,挂不了子 qdisc;根换成 htb,类给聚合带宽,netem 给时延,
+      # netem 的 class 下挂 fq maxrate 给单流上限。
+      run_root nsenter -t "$PID" -n tc qdisc add dev eth0 root handle 1: htb default 1 \
+        && run_root nsenter -t "$PID" -n tc class add dev eth0 parent 1: classid 1:1 \
+             htb rate "$RATE" ceil "$RATE" burst "$BURST" cburst "$BURST" \
+        && run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS
+      # sch_fq 可能是可加载模块,内建于内核时 modprobe 失败可忽略;挂 fq 失败才报错
+      run_root modprobe sch_fq 2>/dev/null || true
+      run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate "$PER_CONN"
     else
-      echo "错误:tc 挂载失败(root 通道:$ROOT_VIA)" >&2; exit 1
+      run_root nsenter -t "$PID" -n tc qdisc add dev eth0 root handle 1: \
+           tbf rate "$RATE" burst "$BURST" latency 50ms \
+        && run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS
     fi
+    echo "--- 已挂载(root 通道:$ROOT_VIA,nsenter 容器 netns)---"
+    run_root nsenter -t "$PID" -n tc qdisc show dev eth0
   else
     docker image inspect "$TC_IMAGE" >/dev/null 2>&1 \
       || { echo "错误:本机无回退镜像 $TC_IMAGE(用 TC_IMAGE= 指定本地已有镜像)" >&2; exit 1; }
     echo "未取得 root 通道 → 回退特权 docker 容器(镜像 $TC_IMAGE,共享容器 $NAME 的 netns)"
-    if [ -n "$PER_CONN" ]; then
-      LEAF_SETUP="modprobe sch_fq 2>/dev/null || true; tc qdisc add dev eth0 parent 1:1 handle 10: fq maxrate $PER_CONN && tc qdisc add dev eth0 parent 10:1 handle 20: netem $NETEM_ARGS"
-    else
-      LEAF_SETUP="tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS"
-    fi
     docker run --rm --net="container:$NAME" --cap-add=NET_ADMIN --entrypoint /bin/sh "$TC_IMAGE" -c "
-      tc qdisc del dev eth0 root 2>/dev/null || true
-      tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms &&
-      $LEAF_SETUP &&
-      echo '--- 已挂载(特权 docker 回退)---' && tc qdisc show dev eth0" \
+      $DOCKER_FALLBACK" \
       || { echo "错误:docker 回退挂载失败" >&2; exit 1; }
   fi
   echo "提示:换档位直接重跑本脚本;拆除用 tc_teardown.sh --target source-d"
