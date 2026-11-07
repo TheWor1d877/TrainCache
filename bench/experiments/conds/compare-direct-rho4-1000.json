@@ -35,8 +35,8 @@
     "compare",
     "group=direct",
     "rate=1000",
-    "rho=4.0",
+    "rho=4",
     "baseline"
   ],
-  "notes": "compare 族格子；group=direct，rho=4.0，rate=1000，baseline=rho=4 代表点；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。"
+  "notes": "compare 族格子；group=direct，rho=4.0，rate=1000，baseline=无缓存基线，rho 只取代表点；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。"
 }

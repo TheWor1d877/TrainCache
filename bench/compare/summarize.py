@@ -231,6 +231,12 @@ def _verdict(direction: str, mg: float, mb: float,
     return "可忽略"
 
 
+def _direct_cell_for(cell: str) -> str:
+    """direct 无缓存，rho 对它没有含义：同带宽取 rho=4 的代表点。"""
+    rate = cell.rsplit("-", 1)[-1]
+    return f"compare-direct-rho4-{rate}"
+
+
 def build_verdict(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
     out = []
     for cell in _cell_order({cell for cell, _g in cells}):
@@ -242,6 +248,9 @@ def build_verdict(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
                 continue
             for base in bases:
                 brows = cells.get((cell, base))
+                if not brows and base == "direct":
+                    # direct 只在 rho=4 有格子，其余 rho 的格对照这个代表点。
+                    brows = cells.get((_direct_cell_for(cell), base))
                 if not brows:
                     continue
                 for m in VERDICT_METRICS:

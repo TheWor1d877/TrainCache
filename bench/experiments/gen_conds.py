@@ -56,7 +56,8 @@ TRAINCACHE = ("traincache-cold", "traincache-warm")
 DEFAULT_GROUP = "traincache-cold"
 
 # ---- 族定义表：轴、取值、COND 前缀、格子数 ----
-# values 是各族自变量的完整取值；group 轴里基线只取 rho=4，由 builders 落实。
+# values 是各族自变量的完整取值；group 轴里 direct 只取 rho=4（无缓存），
+# 四个缓存基线在每个 rho 档都跑，由 builders 落实。
 FAMILIES = {
     "compare": {
         "prefix": "compare",
@@ -66,7 +67,9 @@ FAMILIES = {
             "rate_mbit": list(config.TC_RATE_MBITS),
             "group": list(TRAINCACHE) + list(BASELINES),
         },
-        "cells": 36,
+        # 1000/300 档：(被测 2 组 + 缓存基线 4 组) × 5 rho = 30，加 direct 一格；
+        # 100 档：traincache-cold 5 个 rho，加 direct 一格。31 + 31 + 6。
+        "cells": 68,
     },
     "gateway": {
         "prefix": "gateway",
@@ -259,27 +262,27 @@ def _note(family: str, **params) -> str:
 
 def build_compare() -> list[dict]:
     out = []
-    # 1000 / 300 mbit：被测两组 × 五个 rho；基线五组只取 rho=4。
+    # 1000 / 300 mbit：被测两组 + 四个缓存基线 × 五个 rho。基线的缓存配额
+    # 跟着 rho 走，才能与同配额的被测格对照。direct 无缓存，rho 对它没有
+    # 含义，只取 rho=4 一个代表点（五个 rho 的读数相同，不重复跑）。
     for rate in (1000, 300):
-        for group in TRAINCACHE:
+        for group in TRAINCACHE + tuple(g for g in BASELINES if g != "direct"):
             for rho in config.RHO_VALUES:
                 name = f"compare-{group}-rho{rho_label(rho)}-{rate}"
                 out.append(make_cond(
                     name=name, family="compare", group=group, rho=rho,
                     rate=rate, lookahead=16, fanout=2,
                     tags=("compare", f"group={group}", f"rate={rate}",
-                          f"rho={rho}"),
+                          f"rho={rho}")
+                         + (("baseline",) if group in BASELINES else ()),
                     notes=_note("compare", group=group, rho=rho, rate=rate)))
-        for group in BASELINES:
-            rho = 4.0
-            name = f"compare-{group}-rho{rho_label(rho)}-{rate}"
-            out.append(make_cond(
-                name=name, family="compare", group=group, rho=rho, rate=rate,
-                cache_enabled=(group != "direct"),
-                tags=("compare", f"group={group}", f"rate={rate}",
-                      f"rho={rho}", "baseline"),
-                notes=_note("compare", group=group, rho=rho, rate=rate,
-                            baseline="rho=4 代表点")))
+        out.append(make_cond(
+            name=f"compare-direct-rho4-{rate}", family="compare",
+            group="direct", rho=4.0, rate=rate, cache_enabled=False,
+            tags=("compare", "group=direct", f"rate={rate}", "rho=4",
+                  "baseline"),
+            notes=_note("compare", group="direct", rho=4.0, rate=rate,
+                        baseline="无缓存基线，rho 只取代表点")))
     # 100 mbit：只留 traincache-cold 五个 rho 与 direct 基线。
     for rho in config.RHO_VALUES:
         name = f"compare-traincache-cold-rho{rho_label(rho)}-100"

@@ -28,8 +28,13 @@ TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.
 N_TARS="${N_TARS:-$(cfg DATASET_SHARDS)}"
 SHARD_INCLUDES="$(shard_include_args "$N_TARS")"
 
-# Fluid 缓存配额(统一 1GiB,数据 ~2.1GiB > 缓存,模拟真实场景)
-FLUID_CACHE_GI="${FLUID_CACHE_GI:-1}"
+# Fluid 缓存配额。优先取 FLUID_CACHE_MB(MiB 精度,run_bench 按 ρ 下发):
+# 配额取整数 GiB 时 ρ=8 的 0.5 GiB 会被进位到 1 GiB,与另两组的配额对不上。
+# 没有 FLUID_CACHE_MB 时回退 FLUID_CACHE_GI(GiB 整数,老的调用方式)。
+FLUID_CACHE_MB="${FLUID_CACHE_MB:-}"
+if [ -z "$FLUID_CACHE_MB" ]; then
+  FLUID_CACHE_MB="$(( ${FLUID_CACHE_GI:-1} * 1024 ))"
+fi
 # 是否预热(1=DataLoad 预热 1GB,0=不预热冷启动)
 FLUID_PREHEAT="${FLUID_PREHEAT:-1}"
 
@@ -178,7 +183,7 @@ spec:
     levels:
       - mediumtype: HDD
         path: /tmp/juicefs-cache
-        quota: ${FLUID_CACHE_GI}Gi
+        quota: ${FLUID_CACHE_MB}Mi
         low: "0.1"
 EOF
 )
@@ -186,7 +191,7 @@ if resource_exists juicefsruntime jfs-demo -n "$NS"; then
   log_group "$GROUP" "juicefsruntime/jfs-demo 已存在,跳过"
 else
   echo "$RUNTIME_YAML" | kubectl apply -f -
-  log_group "$GROUP" "juicefsruntime/jfs-demo 已创建(cache=${FLUID_CACHE_GI}Gi)"
+  log_group "$GROUP" "juicefsruntime/jfs-demo 已创建(cache=${FLUID_CACHE_MB}Mi)"
 fi
 
 # ---- 6. 等待 Dataset Bound ----
@@ -300,7 +305,7 @@ EOF
 # DataLoad 每次需重新创建(同名不能重复 apply),先删旧的
 kubectl -n "$NS" delete dataload jfs-load --ignore-not-found 2>/dev/null || true
 echo "$DATALOAD_YAML" | kubectl apply -f -
-log_group "$GROUP" "dataload/jfs-load 已创建(预热整棵数据树到 ${FLUID_CACHE_GI}GiB 缓存)"
+log_group "$GROUP" "dataload/jfs-load 已创建(预热整棵数据树到 ${FLUID_CACHE_MB}Mi 缓存)"
 
 # 等待 DataLoad 完成(硬编码 15 分钟超时)
 log_group "$GROUP" "等待 dataload/jfs-load 完成(预热数据到缓存,超时 ${FLUID_WARMUP_TIMEOUT}s)"
@@ -330,7 +335,7 @@ else
   log_group "$GROUP" "FLUID_PREHEAT=0,跳过 DataLoad 预热(冷启动)"
 fi
 
-log_group "$GROUP" "up 完成:Fluid Dataset+Runtime+DataLoad 已部署,cache=${FLUID_CACHE_GI}Gi"
+log_group "$GROUP" "up 完成:Fluid Dataset+Runtime+DataLoad 已部署,cache=${FLUID_CACHE_MB}Mi"
 echo "等待 DataLoad 完成: kubectl -n $NS get dataload jfs-load -w"
 echo "查看缓存 worker: kubectl -n $NS get pods -l role=juicefs-worker"
 echo "拆除: make -C $COMPARE_ROOT compare-down GROUP=fluid"

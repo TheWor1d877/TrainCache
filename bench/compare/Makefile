@@ -22,7 +22,7 @@
 # 环境变量(可选,覆盖 config.py 缺省):
 #   TC_RATE / TC_DELAY / TC_BURST     tc 档位(五组共用)
 #   MINIO_ACCESS_KEY / MINIO_SECRET_KEY  MinIO 凭证(不硬编码)
-#   JFS_CACHE_MB / FLUID_CACHE_GI     缓存容量(与其他组对齐)
+#   JFS_CACHE_MB / FLUID_CACHE_MB      缓存容量(与其他组对齐,单位 MiB)
 # ============================================================================
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PY := $(abspath $(ROOT)/../../.venv/bin/python)

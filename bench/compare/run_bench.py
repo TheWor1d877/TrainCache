@@ -177,6 +177,9 @@ FAMILY = "compare"
 BASELINE_GROUPS = ("direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm")
 TRAINCACHE_GROUPS = ("traincache", "traincache-cold", "traincache-warm")
 BASELINE_RHO = 4.0
+# 100 mbit 档只跑这两组：低配速下主要比 TrainCache 与 Direct。
+LOW_RATE_MBIT = 100
+LOW_RATE_GROUPS = ("direct", "traincache-cold")
 
 GROUP_NS = {
     "direct": "direct",
@@ -247,20 +250,30 @@ CACHE_BYTES = int(os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES",
                                  str(RO_PRESETS[RHO])))
 # warm 组预热块数（显式写入 CRD）：默认 k = 缓存容量 / 块大小（8MiB → 128）。
 # 0 只作 bench 冷启动哨兵，不写进 CRD。
-def warmup_k_for(cache_bytes: int, chunk_count: int = 0) -> int:
-    """warm 组预热块数：缓存容量 ÷ 块大小。
+def dataset_block_count() -> int:
+    """数据集的块数（块大小 8 MiB）：分片数 × 每片块数。
 
-    chunk_count 来自 N_TARS（数据集 shard 数），warmup_k 不能超过它，
-    否则 controller 会拒绝 InvalidSpec（k > chunk_count）。
+    这是 warmup_k 的上界：k 的单位是块，不是分片。
+    """
+    blocks_per_shard = max(1, (SHARD_SIZE_MB * 1024 * 1024) // CHUNK_SIZE)
+    return max(1, N_TARS * blocks_per_shard)
+
+
+def warmup_k_for(cache_bytes: int, block_count: int = 0) -> int:
+    """warm 组预热块数：缓存容量 ÷ 块大小，上限是数据集的块数。
+
+    warm 臂的口径是「把缓存填满」：k 块 × 块大小 = 缓存容量，
+    与 JuiceFS/Fluid 预热整棵树后缓存装满的状态对齐（docs/4.2 的对照族一节）。
+    上界取数据集块数，超过就没有块可取。
     """
     raw = os.environ.get("TRAINCACHE_WARMUP_K", "").strip()
     val = int(raw) if raw else max(1, cache_bytes // CHUNK_SIZE)
-    if chunk_count > 0:
-        val = min(val, chunk_count)
+    if block_count > 0:
+        val = min(val, block_count)
     return val
 
 
-WARMUP_K = warmup_k_for(CACHE_BYTES, N_TARS)
+WARMUP_K = warmup_k_for(CACHE_BYTES, dataset_block_count())
 # 消费窗口块数：D21/任务 4.8 要求 lookahead 统一 16（8MiB 下窗口
 # 16×8MiB=128MiB≈缓存 1/8，无退化）；旧默认 8 与 D21 不符，改为 16。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
@@ -865,9 +878,10 @@ def group_up(group):
     # -chunk-size、WarmupTask k 全部以这里为唯一口径）
     env["CHUNK_BYTES"] = str(CHUNK_SIZE)
     env["TRAINCACHE_CACHE_CAPACITY_BYTES"] = str(CACHE_BYTES)
-    # 缓存容量由 rho 推出（4 GiB ÷ rho），Fluid 按 GiB 取整下发。
+    # 缓存容量由 rho 推出（4 GiB ÷ rho）。Fluid 的配额按 MiB 下发:
+    # 取整数 GiB 时 ρ=8 的 0.5 GiB 会被进位到 1 GiB,与另两组的配额对不上。
     if group.startswith("fluid"):
-        env["FLUID_CACHE_GI"] = str(max(1, CACHE_BYTES >> 30))
+        env["FLUID_CACHE_MB"] = str(CACHE_BYTES >> 20)
         env["FLUID_PREHEAT"] = "1" if group == "fluid-warm" else "0"
     if group.startswith("juicefs"):
         env["JFS_CACHE_MB"] = str(CACHE_BYTES >> 20)  # --cache-size 单位是 MiB(docs/4.1 的参数总表一节)
@@ -2198,6 +2212,76 @@ def fetch_snapshot_via_kubectl():
 _DEGRADED_LINE_RE = re.compile(
     r'^traincache_agent_degraded(?:\{[^}]*\})?\s+([0-9eE+.\-]+)')
 
+# 预取任务耗时直方图（agent 侧 traincache_prefetch_task_duration_seconds）：
+# 一次预取任务 = 一个块，耗时从入队到终态，含排队等待。
+_PREFETCH_DURATION_RE = re.compile(
+    r'^traincache_prefetch_task_duration_seconds_(bucket|sum|count)'
+    r'(?:\{[^}]*\})?\s+([0-9eE+.\-]+)')
+_LE_RE = re.compile(r'le="([^"]+)"')
+
+
+def _hist_quantile(buckets: dict[float, float], total: float, q: float):
+    """从累积桶直方图算分位数，桶内线性插值。"""
+    if not buckets or total <= 0:
+        return None
+    target = q * total
+    prev_le, prev_count = 0.0, 0.0
+    for le in sorted(buckets):
+        cum = buckets[le]
+        if cum >= target:
+            span = cum - prev_count
+            if span <= 0:
+                return le
+            return prev_le + (le - prev_le) * (target - prev_count) / span
+        prev_le, prev_count = le, cum
+    return max(buckets)
+
+
+def parse_prefetch_duration(texts) -> dict | None:
+    """从各 agentd 的 /metrics 原文算块级预取耗时的计数、均值与分位数。
+
+    一个预取任务是一个块，耗时从入队到终态，含排队等待：这一列是块级
+    任务延迟，不是纯网络传输时间。没有样本时返回 None。
+    """
+    buckets: dict[float, float] = {}
+    count = 0.0
+    total = 0.0
+    for _pod, txt in texts:
+        for line in txt.splitlines():
+            match = _PREFETCH_DURATION_RE.match(line)
+            if not match:
+                continue
+            kind = match.group(1)
+            try:
+                value = float(match.group(2))
+            except ValueError:
+                continue
+            if kind == "count":
+                count += value
+            elif kind == "sum":
+                total += value
+            else:
+                le_match = _LE_RE.search(line)
+                if not le_match:
+                    continue
+                try:
+                    le = float(le_match.group(1))
+                except ValueError:
+                    continue
+                buckets[le] = buckets.get(le, 0.0) + value
+    if count <= 0:
+        return None
+    return {"count": count, "sum": total, "mean": total / count,
+            "p50": _hist_quantile(buckets, count, 0.5),
+            "p90": _hist_quantile(buckets, count, 0.9)}
+
+
+def prefetch_duration_snapshot_via_kubectl():
+    """抓各 agentd 的预取任务耗时直方图。抓不到时返回 None。"""
+    texts = _agent_metrics_texts()
+    if texts is None:
+        return None
+    return parse_prefetch_duration(texts)
 
 def agent_degraded_snapshot():
     """所有 agentd 的 traincache_agent_degraded 最大值与 fetch 总字节。
@@ -2806,6 +2890,23 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
         metrics["cache_dir_peak_bytes"] = dir_peak
         metrics["cache_dir_peak_samples"], metrics["cache_dir_peak_period_s"] = \
             dir_peak_sampling_stats(dir_peaks, dir_peak_times, SAMPLE_INTERVAL_S)
+        # 块级下载时间：agent 侧预取任务耗时直方图。口径是入队到终态的
+        # 任务延迟（含排队等待），不是纯网络传输时间。
+        duration = prefetch_duration_snapshot_via_kubectl()
+        if duration is None:
+            metrics["prefetch_task_count"] = ""
+            metrics["prefetch_task_seconds_sum"] = ""
+            metrics["prefetch_task_duration_mean_s"] = ""
+            metrics["prefetch_task_duration_p50_s"] = ""
+            metrics["prefetch_task_duration_p90_s"] = ""
+        else:
+            metrics["prefetch_task_count"] = int(duration["count"])
+            metrics["prefetch_task_seconds_sum"] = round(duration["sum"], 3)
+            metrics["prefetch_task_duration_mean_s"] = round(duration["mean"], 4)
+            metrics["prefetch_task_duration_p50_s"] = (
+                "" if duration["p50"] is None else round(duration["p50"], 4))
+            metrics["prefetch_task_duration_p90_s"] = (
+                "" if duration["p90"] is None else round(duration["p90"], 4))
         # 判据 2：Agent 记的字节账对不上目录真实字节 → 重复记账或漏记，只告警。
         # 用最后一次目录采样，与 gauge 末值同一时刻；峰值是窗口最大值，不同刻。
         dir_last = next((v for v in reversed(dir_peaks or [])
@@ -2910,24 +3011,44 @@ def apply_rho(rho):
     # 显式给过容量环境变量时以显式值为准（冒烟场景），不被 rho 覆盖。
     if not os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES", "").strip():
         CACHE_BYTES = RO_PRESETS[RHO]
-    WARMUP_K = warmup_k_for(CACHE_BYTES, N_TARS)
-def groups_for_rho(rho):
-    """该 rho 上要跑的组态：基线只在参考点跑一次，被测组态跑满五个 rho。"""
+    WARMUP_K = warmup_k_for(CACHE_BYTES, dataset_block_count())
+def groups_for_rate(rate_mbit_value) -> list[str]:
+    """该带宽档要跑的组态。
+
+    1000 与 300 档七组态全跑：基线在每个 ρ 档都跑，才能与同配额的被测格对照。
+    100 档只留 TrainCache 与 Direct：低配速下要比的是缓存能否把回源摘掉，
+    其余组态在这一档不参与判断（docs/4.2 的对照族一节）。
+    """
+    if float(rate_mbit_value) <= LOW_RATE_MBIT:
+        return [g for g in GROUPS if g in LOW_RATE_GROUPS]
+    return list(GROUPS)
+
+
+def groups_for_rho(rho, rate_mbit_value=None):
+    """该 ρ 与带宽档上要跑的组态。ρ 不再筛组态，筛组态的是带宽档。"""
     if FIGURE_MODE:
         return list(GROUPS)
-    allowed = (set(BASELINE_GROUPS) | set(TRAINCACHE_GROUPS)
-               if float(rho) == BASELINE_RHO else set(TRAINCACHE_GROUPS))
-    return [g for g in GROUPS if g in allowed]
+    if rate_mbit_value is None:
+        rate_mbit_value = _rate_mbit_or_default()
+    return groups_for_rate(rate_mbit_value)
 
 
-def select_groups(rho, requested=None):
-    """按 rho 挑参跑组，返回 (要跑的组态, 被剔除的组态)。
+def _rate_mbit_or_default() -> int:
+    """当前生效的带宽档（mbit）。解析不出来时按 1000 档处理。"""
+    if not TC_RATE_EFF:
+        return 1000
+    mbit, _burst = tc_cell(TC_RATE_EFF)
+    return mbit if mbit else 1000
 
-    rho=4 跑全部七组态（基线只在参考点出现一次）；其余 rho 只跑被测组态。
-    显式 requested 时与允许集求交集，返回顺序按 requested。
+
+def select_groups(rho, requested=None, rate_mbit_value=None):
+    """按 ρ 与带宽档挑参跑组，返回 (要跑的组态, 被剔除的组态)。
+
+    ρ 不筛组态：基线在每个 ρ 档都跑。显式 requested 时与允许集求交集，
+    返回顺序按 requested。
     """
     ordered = list(GROUPS) if not requested else list(requested)
-    allowed = groups_for_rho(rho)
+    allowed = groups_for_rho(rho, rate_mbit_value)
     return ([g for g in ordered if g in allowed],
             [g for g in (requested or []) if g not in allowed])
 
@@ -3431,6 +3552,12 @@ CSV_FIELDNAMES = ["group", "rho", "family", "load", "gateway",
                   "evict_blocks_run", "capacity_bytes_final",
                   "cache_dir_peak_bytes",
                   "cache_dir_peak_samples", "cache_dir_peak_period_s",
+                  "cache_peak_ratio",
+                  # 块级下载时间：agent 侧预取任务耗时直方图。一个任务是一个块，
+                  # 耗时从入队到终态（含排队等待），不是纯网络传输时间
+                  "prefetch_task_count", "prefetch_task_seconds_sum",
+                  "prefetch_task_duration_mean_s", "prefetch_task_duration_p50_s",
+                  "prefetch_task_duration_p90_s",
                   # 4.4 的 summary.csv 一节：每个点可回溯到 COND 与 run ID；曲面与字节族的
                   # 自变量列必须随产物落盘，否则出图只能靠目录名猜。
                   "cond", "run_id", "epochs", "shuffle",
@@ -3515,6 +3642,13 @@ def write_csv(path, results):
             row["dataset_bytes"] = dataset_bytes
             row["cache_ratio"] = round(
                 dataset_bytes / max(1, int(row["cache_bytes"])), 4)
+            # 峰值倍率:缓存目录峰值 ÷ 声明容量。声明容量在当前实现下是软上限
+            # (淘汰候选集只含被消费过的块,预取写入的块不是候选),峰值可以
+            # 超过声明值,这一列把超了多少直接读出来,不靠推算。
+            peak_bytes = r.get("cache_dir_peak_bytes")
+            row["cache_peak_ratio"] = (
+                round(int(peak_bytes) / max(1, int(row["cache_bytes"])), 4)
+                if peak_bytes not in (None, "") else "")
             row["prefetch_lookahead"] = r.get("prefetch_lookahead") or PREFETCH_K
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
@@ -3734,18 +3868,24 @@ def selftest():
           f"reason=read_queue_timeout；快照缺片 reason=read_error")
 
     # ---- 6) rho 选组 / status / 带宽格推导 / 替补判定 ----
-    four_pick, four_drop = select_groups(4.0)
+    four_pick, four_drop = select_groups(4.0, None, 1000)
     if four_pick != GROUPS or four_drop:
-        raise AssertionError(f"自测：rho=4 应七组态全跑 picked={four_pick}")
-    eight_pick, _ = select_groups(8.0)
-    if eight_pick != list(TRAINCACHE_GROUPS):
-        raise AssertionError(f"自测：rho=8 只应跑被测组态 picked={eight_pick}")
+        raise AssertionError(f"自测：1000 档应七组态全跑 picked={four_pick}")
+    eight_pick, _ = select_groups(8.0, None, 1000)
+    if eight_pick != GROUPS:
+        raise AssertionError(f"自测：rho 不筛组态，1000 档 rho=8 应全跑 picked={eight_pick}")
+    low_pick, _ = select_groups(4.0, None, 100)
+    if low_pick != list(LOW_RATE_GROUPS):
+        raise AssertionError(f"自测：100 档只应跑 TrainCache 与 Direct picked={low_pick}")
     mix_pick, mix_drop = select_groups(8.0, ["traincache-warm", "fluid-warm",
-                                             "traincache-cold"])
-    if mix_pick != ["traincache-warm", "traincache-cold"] or \
-            mix_drop != ["fluid-warm"]:
-        raise AssertionError(f"自测：rho=8 越界组态没被剔除 "
+                                             "traincache-cold"], 1000)
+    if mix_pick != ["traincache-warm", "fluid-warm", "traincache-cold"] or mix_drop:
+        raise AssertionError(f"自测：1000 档的组态不该被剔除 "
                              f"picked={mix_pick} dropped={mix_drop}")
+    low_mix_pick, low_mix_drop = select_groups(4.0, ["traincache-cold", "fluid-warm"], 100)
+    if low_mix_pick != ["traincache-cold"] or low_mix_drop != ["fluid-warm"]:
+        raise AssertionError(f"自测：100 档越界组态没被剔除 "
+                             f"picked={low_mix_pick} dropped={low_mix_drop}")
     if row_status() != "ok" or row_status(True) != "void":
         raise AssertionError("自测：status 映射不对")
     for r in (100, 300, 1000):
@@ -3763,9 +3903,9 @@ def selftest():
     if stamped[0]["group"] != "juicefs-cold" or \
             stamped[0]["baseline_substituted"] != "fluid-cold":
         raise AssertionError("自测：替补标记没落到行上")
-    print(f"[selftest] 6) rho 选组：rho=4 跑 {four_pick}，rho=8 跑 {eight_pick}"
-          f"（越界剔除 {mix_drop}）；status ok/void、带宽 burst 推导、"
-          f"替补全废判据均自洽")
+    print(f"[selftest] 6) 选组：1000 档七组态全跑（ρ=4 {four_pick}、ρ=8 {eight_pick}），"
+          f"100 档只跑 {low_pick}（越界剔除 {low_mix_drop}）；status ok/void、"
+          f"带宽 burst 推导、替补全废判据均自洽")
 
     # ---- 7) D23 网关开关：新列、取值映射与透传 ----
     if CSV_FIELDNAMES[:5] != ["group", "rho", "family", "load", "gateway"]:
@@ -4073,6 +4213,31 @@ def selftest():
             raise AssertionError(f"自测：gateway_cache 列没随产物落盘：{rows}")
     print(f"[selftest] 13) D23 缓存开关：gateway_cache 列紧随 gate_mode，映射 1/0 正确，"
           f"GATEWAY_CACHE_ON={GATEWAY_CACHE_ON} 已透传到 up.sh，列随产物落盘")
+
+    # ---- 14) 块级下载时间列：直方图解析与分位数 ----
+    fake = [("agentd-0", "\n".join([
+        '# HELP traincache_prefetch_task_duration_seconds 预取任务耗时',
+        '# TYPE traincache_prefetch_task_duration_seconds histogram',
+        'traincache_prefetch_task_duration_seconds_bucket{dataset="d",priority="P0",le="0.1"} 2',
+        'traincache_prefetch_task_duration_seconds_bucket{dataset="d",priority="P0",le="0.5"} 8',
+        'traincache_prefetch_task_duration_seconds_bucket{dataset="d",priority="P0",le="1"} 10',
+        'traincache_prefetch_task_duration_seconds_bucket{dataset="d",priority="P0",le="+Inf"} 10',
+        'traincache_prefetch_task_duration_seconds_sum{dataset="d",priority="P0"} 4.5',
+        'traincache_prefetch_task_duration_seconds_count{dataset="d",priority="P0"} 10',
+    ]))]
+    parsed = parse_prefetch_duration(fake)
+    if parsed is None or parsed["count"] != 10 or abs(parsed["mean"] - 0.45) > 1e-9:
+        raise AssertionError(f"自测：块级耗时直方图解析不对 {parsed}")
+    # p50 落在 0.1 与 0.5 之间（8 个样本在 0.5 桶内），p90 落在 0.5 与 1 之间
+    if not (0.1 <= parsed["p50"] <= 0.5) or not (0.5 <= parsed["p90"] <= 1.0):
+        raise AssertionError(f"自测：块级耗时分位数不对 {parsed}")
+    if parse_prefetch_duration([("agentd-0", "traincache_agent_up 1")]) is not None:
+        raise AssertionError("自测：没有直方图样本时不该给出统计")
+    if "prefetch_task_duration_p90_s" not in CSV_FIELDNAMES:
+        raise AssertionError("自测：块级下载时间列没进 summary.csv 字段表")
+    print(f"[selftest] 14) 块级下载时间：直方图解析 count={parsed['count']} "
+          f"mean={parsed['mean']:.3f}s p50={parsed['p50']:.3f}s "
+          f"p90={parsed['p90']:.3f}s，五列随 summary.csv 落盘")
     print("run_bench selftest: PASS")
 
 
@@ -4120,8 +4285,8 @@ def main():
         if args.rho is None:
             args.rho = 4.0  # tier 模式默认 rho=4
         # args.rho 是 float 字符串时 apply_rho 会正确设全局 RHO
-    # warmup_k 必须 <= N_TARS（chunk_count），否则 controller InvalidSpec
-    WARMUP_K = warmup_k_for(CACHE_BYTES, N_TARS)
+    # warmup_k 的上界是数据集块数，超过就没有块可取
+    WARMUP_K = warmup_k_for(CACHE_BYTES, dataset_block_count())
 
     if args.selftest:
         selftest()
@@ -4136,7 +4301,7 @@ def main():
     apply_rho(args.rho)
     picked, dropped = select_groups(args.rho, args.groups)
     if dropped:
-        print(f"[cfg] rho={args.rho:g} 剔除不允许的组态 {dropped}")
+        print(f"[cfg] 带宽档 {TC_RATE_EFF} 剔除不在该档的组态 {dropped}")
     if not picked:
         raise SystemExit(f"[cfg] rho={args.rho:g} 没有可跑组态"
                          f"（请求 {args.groups}），退出")
