@@ -1,6 +1,6 @@
 package webhook
 
-// Log assertions for docs/7.1-design.md §9.3 (Webhook 拒绝/跳过).
+// Log assertions for docs/7.1-design.md《日志》(Webhook 拒绝/跳过).
 
 import (
 	"bytes"

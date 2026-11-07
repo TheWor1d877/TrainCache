@@ -1,4 +1,4 @@
-// Command traincache 是 TrainCache CLI:纯 gRPC 客户端(design §5.6;D20)。
+// Command traincache 是 TrainCache CLI:纯 gRPC 客户端(设计《CLI》)。
 // 不直接操作缓存目录,不重复实现索引/下载/落盘逻辑。
 //
 // 子命令:
@@ -34,9 +34,9 @@ import (
 )
 
 const (
-	// defaultEndpoint 是全局 --endpoint 默认值(D20);直连模式(Q2 结案:开发态先行)。
+	// defaultEndpoint 是全局 --endpoint 默认值;直连模式(Q2 结案:开发态先行)。
 	defaultEndpoint = "127.0.0.1:9410"
-	// rpcTimeout 是每 RPC 的 context 超时(design §5.1:默认 10s)。
+	// rpcTimeout 是每 RPC 的 context 超时(设计《gRPC 接口》:默认 10s)。
 	rpcTimeout = 10 * time.Second
 )
 
@@ -87,7 +87,7 @@ func printUsage(w io.Writer) {
 `)
 }
 
-// runPrefetch 实现 `traincache prefetch`(design §5.6)。
+// runPrefetch 实现 `traincache prefetch`(设计《CLI》)。
 func runPrefetch(args []string) int {
 	fs := flag.NewFlagSet("traincache prefetch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -176,7 +176,7 @@ func runPrefetch(args []string) int {
 	return exitOK
 }
 
-// runNode 实现 `traincache node` 子命令族(design §5.6 当前仅 status)。
+// runNode 实现 `traincache node` 子命令族(设计《CLI》当前仅 status)。
 func runNode(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "traincache: node 需要子命令(status)")
@@ -195,7 +195,7 @@ func runNode(args []string) int {
 	}
 }
 
-// runNodeStatus 实现 `traincache node status`(design §5.6)。
+// runNodeStatus 实现 `traincache node status`(设计《CLI》)。
 func runNodeStatus(args []string) int {
 	fs := flag.NewFlagSet("traincache node status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -238,7 +238,7 @@ func runNodeStatus(args []string) int {
 	return exitOK
 }
 
-// runStatus 实现 `traincache status`(design §5.6)。
+// runStatus 实现 `traincache status`(设计《CLI》)。
 func runStatus(args []string) int {
 	fs := flag.NewFlagSet("traincache status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -281,7 +281,7 @@ type snapshotLister interface {
 	ListSnapshot(ctx context.Context, in *agentpb.ListSnapshotRequest, opts ...grpc.CallOption) (*agentpb.ListSnapshotResponse, error)
 }
 
-// runLS 实现 `traincache ls`(design §5.6;只读列快照)。
+// runLS 实现 `traincache ls`(设计《CLI》;只读列快照)。
 func runLS(args []string) int {
 	return lsSnapshot(args, os.Stdout, os.Stderr, dialSnapshot)
 }
@@ -407,7 +407,7 @@ func writeListSnapshot(w io.Writer, entries []*agentpb.EntryRef, byChunk bool) e
 	return tw.Flush()
 }
 
-// printNodeStatus 输出两列表格(design §5.6;Q9 结案:默认表格);--item 只显示对应行。
+// printNodeStatus 输出两列表格(设计《CLI》;Q9 结案:默认表格);--item 只显示对应行。
 func printNodeStatus(resp *agentpb.NodeStatus, item agentpb.NodeStatusItem) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer w.Flush()
@@ -440,7 +440,7 @@ func printNodeStatus(resp *agentpb.NodeStatus, item agentpb.NodeStatusItem) {
 	}
 }
 
-// printPreheatStatus 输出任务状态表(design §5.6:任务 id、目标节点、数据路径、任务状态、
+// printPreheatStatus 输出任务状态表(设计《CLI》:任务 id、目标节点、数据路径、任务状态、
 // 总块数/已完成/失败、开始时间、最近更新时间)。
 func printPreheatStatus(st *agentpb.PreheatStatus) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)

@@ -130,7 +130,7 @@ func TestComputeFanoutCappedByFeasibleNodes(t *testing.T) {
 	}
 }
 
-// TestComputeMinUnmetFollowsFinalAssignment pins the M14 rule that MinUnmet
+// TestComputeMinUnmetFollowsFinalAssignment pins the rule that MinUnmet
 // describes the actual claims, not the planned target. Two Pods with the same
 // 11,7,3 distribution both target two nodes, but one-pod-per-node placement
 // leaves at least one of them below min=2 after conflicts and fallback.
@@ -255,7 +255,7 @@ func TestComputeFanoutFillsEveryPodAcrossSeeds(t *testing.T) {
 					// Without anti-affinity both units can share the same target
 					// set, so every Pod fills it. One-pod-per-node or anti-affinity
 					// makes the second unit retreat to a single out-of-target
-					// fallback, which M14 permits.
+					// fallback, which the contract permits.
 					if v.multi && v.anti == "" && int32(len(nodes)) != target {
 						t.Fatalf("seed %d: pod %d got %v, want %d nodes", seed, pod.Index, nodes, target)
 					}
@@ -382,7 +382,7 @@ func TestComputeFanoutZeroBehavesAsOne(t *testing.T) {
 }
 
 func TestComputeFanoutOneRegression(t *testing.T) {
-	// The M12 placement set, one node per Pod: two nodes, one Pod per node.
+	// The fanout=1 placement set, one node per Pod: two nodes, one Pod per node.
 	in := Input{
 		Pods: []PodState{
 			testPod(0, map[string]int32{"n0": 5, "n1": 1}),
@@ -436,7 +436,7 @@ func TestComputeAntiAffinitySeparatesFanoutNodes(t *testing.T) {
 		Pods: []PodState{
 			{Index: 0, K: 8, ReadyCountByNode: map[string]int32{"n0": 5, "n1": 4, "n2": 3, "n3": 2}, AntiAffinityGroup: "a"},
 			// The second Pod's cache is concentrated on the other two nodes, so
-			// the M14 target sets are disjoint and both Pods can fill them.
+			// the target sets are disjoint and both Pods can fill them.
 			{Index: 1, K: 8, ReadyCountByNode: map[string]int32{"n0": 3, "n1": 2, "n2": 5, "n3": 4}, AntiAffinityGroup: "a"},
 		},
 		Nodes:                testNodes("n0", "n1", "n2", "n3"),
@@ -571,7 +571,7 @@ func TestComputeFanoutConflictYieldsToNextNode(t *testing.T) {
 	if out.Err != nil {
 		t.Fatalf("Compute returned error: %v", out.Err)
 	}
-	// Pod 1's cache is concentrated on n0, so its M14 target is just n0.
+	// Pod 1's cache is concentrated on n0, so its target is just n0.
 	p1 := out.Assignment[1]
 	if !reflect.DeepEqual(p1, []string{"n0"}) {
 		t.Fatalf("winner pod 1 = %v, want [n0]", p1)
@@ -580,7 +580,7 @@ func TestComputeFanoutConflictYieldsToNextNode(t *testing.T) {
 		t.Fatalf("pod 1 target = %d, want 1", got)
 	}
 	// Pod 0 yields n0 and retreats to n1, the next node inside its target set.
-	// n2/n3 are outside that set, so M14 does not top up into them.
+	// n2/n3 are outside that set, so GWAA does not top up into them.
 	if !reflect.DeepEqual(out.Assignment[0], []string{"n1"}) {
 		t.Fatalf("yielding pod 0 = %v, want [n1]", out.Assignment[0])
 	}
@@ -781,7 +781,7 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// TestComputeAdaptiveTargetFanoutFromDistribution pins the M14 target-count
+// TestComputeAdaptiveTargetFanoutFromDistribution pins the target-count
 // examples from docs/7.2 D39.
 func TestComputeAdaptiveTargetFanoutFromDistribution(t *testing.T) {
 	five := []string{"n0", "n1", "n2", "n3", "n4"}
@@ -894,7 +894,7 @@ func TestComputeTargetSetOrderIsDeterministic(t *testing.T) {
 }
 
 // TestComputeFallbackOutsideTarget forces a one-node target for both Pods on
-// one-pod-per-node placement: the loser cannot claim a target node, so M14
+// one-pod-per-node placement: the loser cannot claim a target node, so GWAA
 // allows exactly one out-of-target fallback and flags it.
 func TestComputeFallbackOutsideTarget(t *testing.T) {
 	in := Input{

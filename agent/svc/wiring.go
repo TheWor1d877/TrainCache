@@ -1,4 +1,4 @@
-// Package svc wiring.go:Store 观察者注册(§14 D58 字节维度累计 + D49 自打开守卫)。
+// Package svc wiring.go:Store 观察者注册(设计《回收与磁盘淘汰》D58 字节维度累计 +D49 自打开守卫)。
 //
 // cas.Store 的两类观察者都是单槽(atomic.Pointer),后注册者覆盖前者,所以全部回调必须在
 // 一处合并注册:Open 前置槽同时供 selfOpen.Mark 与 evictor.OnStoreOpen,Put 后置槽供

@@ -12,7 +12,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// Collector 回收旧快照与分片对象（docs/5.0-cache-core-design-method.md 步骤 7、docs/5.1-design.md §7.3）。
+// Collector 回收旧快照与分片对象（docs/5.0-cache-core-design-method.md 步骤 7、design.md《回收》）。
 // 内部持有 objectstore.Store（快照对象枚举与删除）。
 //
 // 回收面按数据集划分：快照清单与分片对象挂在 dataset/<name>/ 下，逐 dataset 回收即可。
@@ -34,7 +34,7 @@ func NewCollector(store objectstore.Store, cfg Config) *Collector {
 // （CURRENT 对象绝不删）。返回删除的对象数。
 //
 // 保留窗口 = CURRENT ∪ 按 snapID 字典序最大的最近 RetainSnapshots-1 个已提交快照
-// ∪ 有效读者 claim 保护的快照（§5.11）。
+// ∪ 有效读者 claim 保护的快照。
 //
 // 安全性：ErrNoCurrent（尚无任何快照）时不删任何东西；任一保留快照的分片下载/解析
 // 失败、分片指纹不符（ErrInvalidShard）时同样不删任何东西（先完成全部读取与校验，

@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// Environment variable names. See docs/7.1-design.md §8.
+// Environment variable names. See docs/7.1-design.md《部署与配置》.
 const (
 	EnvMetricsAddr       = "CONTROLLER_METRICS_ADDR"
 	EnvHealthAddr        = "CONTROLLER_HEALTH_ADDR"

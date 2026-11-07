@@ -1,6 +1,6 @@
 // Command checkpointd 是训练 Pod 内的 checkpoint 搬运 sidecar 入口
-// （design 10.1 §6.1）。启动序：配置 → 日志 → sidecar.Run；配置非法时
-// 写一条 ERROR 并以退出码 2 结束，恢复放弃以 3 结束（§6.5、10.2 D14）。
+// （design 10.1「关键流程」）。启动序：配置 → 日志 → sidecar.Run；配置非法时
+// 写一条 ERROR 并以退出码 2 结束，恢复放弃以 3 结束（「关键流程」、10.2 D14）。
 package main
 
 import (
@@ -17,10 +17,10 @@ import (
 	"traincache/checkpoint/internal/sidecar"
 )
 
-// exitConfig 是配置非法的退出码（design 10.1 §6.1）。
+// exitConfig 是配置非法的退出码（design 10.1「关键流程」）。
 const exitConfig = 2
 
-// exitRestoreGiveUp 是恢复放弃的退出码（design 10.1 §6.5、10.2 D14）：与配置
+// exitRestoreGiveUp 是恢复放弃的退出码（design 10.1「关键流程」、10.2 D14）：与配置
 // 非法的 2 分开，restartPolicy: OnFailure 下 kubelet 在同一 Pod 内重启 init
 // 容器，每次重启计入 Job 的 backoffLimit，重拉镜像对这个失败没有任何帮助。
 const exitRestoreGiveUp = 3

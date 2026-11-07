@@ -11,7 +11,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// TestStoreCacheInvalidatesOnSecretDeletion fills the gap left by the M2
+// TestStoreCacheInvalidatesOnSecretDeletion fills a gap in the original
 // tests: a cached Store must not outlive its Secret. The factory re-reads the
 // Secret on every call, so deletion surfaces as ErrSecretNotFound instead of a
 // stale store.
@@ -49,7 +49,7 @@ func TestStoreCacheInvalidatesOnSecretDeletion(t *testing.T) {
 }
 
 // TestStoreCacheRebuildsOnBucketChange covers the invalidation key that the
-// M2 tests do not: endpoint changes are tested, bucket changes are not.
+// original tests do not: endpoint changes are tested, bucket changes are not.
 func TestStoreCacheRebuildsOnBucketChange(t *testing.T) {
 	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).

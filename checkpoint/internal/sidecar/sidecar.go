@@ -1,4 +1,4 @@
-// Package sidecar 实现 checkpointd 的保存与恢复编排（design 10.1 §6）。
+// Package sidecar 实现 checkpointd 的保存与恢复编排（design 10.1「关键流程」）。
 //
 // 本包只做编排：扫描训练侧目录、维护保存队列、调用插件子进程、回填与
 // 淘汰 NVMe 缓存、维护探针。插件协议、manifest、配置与日志分别由
@@ -21,7 +21,7 @@ import (
 	"traincache/checkpoint/internal/plugin"
 )
 
-// 默认值来自 design 10.1 §4.2、§5.4 与任务约定。
+// 默认值来自 design 10.1「准入契约」、「部署与配置」与任务约定。
 const (
 	DefaultStateDir   = "/run/checkpoint/state"
 	DefaultProbeFile  = "/run/checkpoint/ready"
@@ -269,7 +269,7 @@ func normalize(o Options) Options {
 	return o
 }
 
-// Run 按 design 10.1 §6.1 的顺序启动：校验目录、登记缓存、探针 restoring、
+// Run 按 design 10.1「关键流程」的顺序启动：校验目录、登记缓存、探针 restoring、
 // 恢复、探针 ready、进入保存监听。ctx 取消时做收尾并返回 nil。
 func (s *Sidecar) Run(ctx context.Context) error {
 	s.mu.Lock()
@@ -321,7 +321,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 }
 
 // prepare 创建并校验工作卷、NVMe 卷、状态目录、探针与 socket 的父目录。
-// NVMe 不可写时关闭缓存并记 WARN，不阻断启动（design 10.1 §6.1）。
+// NVMe 不可写时关闭缓存并记 WARN，不阻断启动（design 10.1「关键流程」）。
 func (s *Sidecar) prepare() error {
 	// 训练容器在恢复完成后才启动，<task_id> 目录必须由 sidecar 先建出来。
 	// 目录按组可写建：训练程序可能不是 65532，只有 fsGroup 组能写进去。
@@ -396,7 +396,7 @@ func ensureWritable(dir string) error {
 }
 
 // registerCache 扫描 NVMe 上本任务的 step-* 目录，把带 .complete 的登记
-// 进内存索引（design 10.1 §5.3、§6.1）。
+// 进内存索引（design 10.1「数据格式」、「关键流程」）。
 func (s *Sidecar) registerCache() error {
 	if s.nvmeTaskDir == "" {
 		return nil
@@ -433,7 +433,7 @@ func (s *Sidecar) registerCache() error {
 }
 
 // shutdown 停止接收新 step、取消在途插件调用、最多等 5 秒，然后删除
-// socket 并把探针置为 failed（design 10.1 §6.6）。
+// socket 并把探针置为 failed（design 10.1「关键流程」）。
 func (s *Sidecar) shutdown() {
 	s.mu.Lock()
 	if s.stopped {

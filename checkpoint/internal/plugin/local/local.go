@@ -1,4 +1,4 @@
-// Package local 实现本地目录后端插件（design 10.1 §4.3、§5.1）。
+// Package local 实现本地目录后端插件（design 10.1「本地目录契约」、「数据格式」）。
 //
 // 本地后端把 plugin 包定义的远端键直接映射成 root 下的路径，用于单机验证、
 // PVC 与节点本地盘。写入顺序与其它后端一致：先写全部文件对象，最后写
@@ -44,7 +44,7 @@ const (
 	// 解析 step 号；所有写入路径仍由 layout 函数生成。
 	stepDirPrefix = "step-"
 
-	// 两个标记文件由训练程序与 checkpointd 维护（design 10.1 §4.3），
+	// 两个标记文件由训练程序与 checkpointd 维护（design 10.1「本地目录契约」），
 	// 不属于训练数据，保存时必须排除。
 	doneMarker     = ".done"
 	completeMarker = ".complete"

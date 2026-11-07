@@ -4,7 +4,7 @@ import "context"
 
 // maxChunk 是单次 Wait 最多交付的字节数。环形缓冲容量 C 通常是 10MiB，
 // 若一次交付全部 avail，每个订阅者都会临时持有一份 C 大小的拷贝
-// （32 个订阅者稳态内存翻倍）。限制在 256KiB 后，瞬时拷贝上界为
+// （订阅者数取满并发准入 64 时稳态内存翻倍）。限制在 256KiB 后，瞬时拷贝上界为
 // 订阅者数 × 256KiB。
 const maxChunk = 256 << 10
 
@@ -101,7 +101,7 @@ func (s *Sub) Close() {
 	e.doRelease(buf, fn)
 }
 
-// Pos 返回订阅者当前的绝对读偏移，供踢出日志使用（design 9.1 §7.2）。
+// Pos 返回订阅者当前的绝对读偏移，供踢出日志使用（design 9.1「日志与可观测性」）。
 func (s *Sub) Pos() int64 {
 	e := s.entry
 	e.mu.Lock()

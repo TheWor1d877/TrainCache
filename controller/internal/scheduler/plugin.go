@@ -3,7 +3,7 @@
 // The plugin only reads the score annotation written by the controller on the
 // training Pod itself. It never mutates Nodes, Pods, or any other API object.
 // Every failure mode returns a score of 0 with a nil status so a malformed
-// annotation can never make a Pod unschedulable (docs/7.1-design.md §5.8/D18).
+// annotation can never make a Pod unschedulable (docs/7.1-design.md《Scheduler 评分插件》, docs/7.2 D18).
 package scheduler
 
 import (
@@ -26,14 +26,14 @@ const (
 	Name = "TrainCacheScore"
 
 	// AnnotationWarmupTask is injected by the mutating webhook and holds
-	// "<namespace>/<name>" (docs/7.1-design.md §6.3).
+	// "<namespace>/<name>" (docs/7.1-design.md《Webhook 注入》).
 	AnnotationWarmupTask = "traincache.io/warmup-task"
 
 	defaultTTL = 5 * time.Minute
 )
 
 // Options configures the plugin. Zero values fall back to the defaults that
-// match docs/7.1-design.md §8.
+// match docs/7.1-design.md《部署与配置》.
 type Options struct {
 	// Annotation is the Pod score annotation key (CONTROLLER_SCORE_ANNOTATION).
 	Annotation string
@@ -128,7 +128,7 @@ func (p *Plugin) Score(_ context.Context, _ schedframework.CycleState, pod *core
 	return p.scoreNode(pod, node, p.now()), nil
 }
 
-// scoreNode evaluates and emits the §9.1 log points: Debug for every scoring
+// scoreNode evaluates and emits the《日志》points from docs/7.1-design.md: Debug for every scoring
 // decision and Warn for malformed annotations.
 func (p *Plugin) scoreNode(pod *corev1.Pod, node *corev1.Node, now time.Time) int64 {
 	score, key, stale, result, err := p.evaluateResult(pod, node, now)
@@ -196,7 +196,7 @@ func (p *Plugin) evaluate(pod *corev1.Pod, node *corev1.Node, now time.Time) (sc
 	return score, key, stale, err
 }
 
-// evaluateResult is evaluate plus the fixed §9.5 result enum used by the
+// evaluateResult is evaluate plus the fixed result enum from docs/7.1-design.md《指标清单》 used by the
 // scheduler_score_total metric. Every return path sets exactly one branch.
 func (p *Plugin) evaluateResult(pod *corev1.Pod, node *corev1.Node, now time.Time) (score int64, key string, stale bool, result metrics.ScoreResult, err error) {
 	if pod == nil || node == nil {

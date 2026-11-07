@@ -84,7 +84,7 @@ func (s soakMemSample) String() string {
 		s.at.Round(time.Second), float64(s.heapInuse)/(1<<20), float64(s.heapAlloc)/(1<<20), s.goroutines)
 }
 
-// TestSoakSteadyState 覆盖长时间运行的内存稳态（design 9.1 §8 K2/K3/K4/K6）：
+// TestSoakSteadyState 覆盖长时间运行的内存稳态（design 9.1「环形缓冲」「准入与公平调度」）：
 //
 //   - 真实 merge.Registry / sched.Scheduler / obs.Logger + httptest 假源站；
 //   - 3 个 dataset × 每个 4 个对象，每个对象 1MiB，随机键并发 GET，重复命中触发合并；
@@ -101,8 +101,8 @@ func TestSoakSteadyState(t *testing.T) {
 	duration := soakDuration()
 	concurrency := soakConcurrency()
 
-	// 预生成对象：键沿用 D25 布局 <dataset>/blocks/<path>#<chunk>，内容按 key 确定，
-	// 便于在失败时复现；1MiB 保证整块落在默认合并窗口内（K1）。
+	// 预生成对象：键沿用 <dataset>/blocks/<path>#<chunk> 布局，内容按 key 确定，
+	// 便于在失败时复现；1MiB 保证整块落在默认合并窗口内。
 	type soakObject struct {
 		key    string
 		target string

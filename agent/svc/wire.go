@@ -2,7 +2,7 @@ package svc
 
 // wire.go:M4/M5/M6 组件与装配层的接线胶水(collector 懒绑定、钩子三型 handler、淘汰
 // HeatSource/ProtectedSource 适配、GC Sweep 闭包、rescan 指标适配、读时坏块修复)。
-// 冻结:各子模块导出签名与语义不变(6.2 D28~D37),全部语义映射集中在本文件与 assemble.go。
+// 冻结:各子模块导出签名与语义不变(6.2 ~D37),全部语义映射集中在本文件与 assemble.go。
 
 import (
 	"context"
@@ -25,13 +25,13 @@ import (
 	"traincache/core/index"
 )
 
-// defaultHookSockPath 是钩子套接字冻结路径(design §5.4:/run/traincache/agent.sock),
+// defaultHookSockPath 是钩子套接字冻结路径(设计《钩子 socket 协议》:/run/traincache/agent.sock),
 // 仅在 OrdersDir 为空(手工配置/测试骨架)时兜底。
 const defaultHookSockPath = "/run/traincache/agent.sock"
 
 // hookSockPath 返回钩子套接字路径:默认取发现目录的父目录 + agent.sock ——
-// TRAINCACHE_ORDERS_DIR=/run/traincache/orders(默认)时恰为 §5.4 冻结路径
-// /run/traincache/agent.sock;两侧 Pod 共享同一 hostPath 目录(§6.3),订单 ring 与
+// TRAINCACHE_ORDERS_DIR=/run/traincache/orders(默认)时恰为设计《钩子 socket 协议》冻结路径
+// /run/traincache/agent.sock;两侧 Pod 共享同一 hostPath 目录(设计《数据格式》),订单 ring 与
 // 钩子 socket 必须同卷,故随订单目录联动(测试/重部署可导流到临时目录)。
 func hookSockPath(cfg Config) string {
 	if strings.TrimSpace(cfg.OrdersDir) == "" {
@@ -40,7 +40,7 @@ func hookSockPath(cfg Config) string {
 	return filepath.Join(filepath.Dir(cfg.OrdersDir), "agent.sock")
 }
 
-// collectorConfig 把 svc 热度参数映射到 collector 冻结配置(§5.5/D30;字段一一对应)。
+// collectorConfig 把 svc 热度参数映射到 collector 冻结配置(设计《热度与命中率》;字段一一对应)。
 func collectorConfig(h HeatConfig) collector.CollectorConfig {
 	return collector.CollectorConfig{
 		HeatDecayAge:       h.DecayAge,
@@ -54,7 +54,7 @@ func collectorConfig(h HeatConfig) collector.CollectorConfig {
 	}
 }
 
-// —— collector 订单上下文与回调(D63/§5.5:collector 不持有 ring)——
+// —— collector 订单上下文与回调(D63/设计《热度与命中率》:collector 不持有 ring)——
 
 // collector 返回采集层(装配期构造;测试注入点)。
 func (a *Agent) collector() *collector.Collector {
@@ -71,7 +71,7 @@ func (a *Agent) orderContext(ref ordersource.ChunkRef, fp cas.Fingerprint) (data
 	return a.Prefetch.orderContext(ref, fp)
 }
 
-// onCalibratedAdvance 是 collector 交叉校准重对齐回调(§5.5):以校准打开时的 dataset
+// onCalibratedAdvance 是 collector 交叉校准重对齐回调(设计《热度与命中率》):以校准打开时的 dataset
 // 与 ref 直接转投预取器;dataset 缺失时按 ref 归属回退解析,仍失败则丢弃。
 func (a *Agent) onCalibratedAdvance(dataset string, ref ordersource.ChunkRef) {
 	if dataset == "" {
@@ -106,9 +106,9 @@ func (a *Agent) onInotifyOpen(fp cas.Fingerprint) {
 	}
 }
 
-// —— 钩子三型 handler(§5.4/D33)——
+// —— 钩子三型 handler(设计《钩子 socket 协议》)——
 
-// resolveRef 解析一个块引用所属的 dataset 与指纹(§5.4 接线口径):按已知 dataset
+// resolveRef 解析一个块引用所属的 dataset 与指纹(设计《钩子 socket 协议》接线口径):按已知 dataset
 // (bundle 集合)逐个查索引;都未命中 → ok=false(调用方丢弃或跳过)。
 // 指纹只能来自索引条目,要求命中的调用方(open/advance、本地探测)适用本口径;
 // demand 补块只需 dataset 归属,走 resolveDataset,不受索引未命中影响(D60)。
@@ -121,7 +121,7 @@ func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fin
 	return "", cas.Fingerprint{}, false
 }
 
-// resolveDataset 解析块引用的 dataset 归属,不要求路径索引命中(§5.4/D60):
+// resolveDataset 解析块引用的 dataset 归属,不要求路径索引命中(设计《钩子 socket 协议》/D60):
 // 先按引用/指纹找订单上下文,再回退已知 bundle 集合的第一个;都没有 → ok=false
 // (调用方丢弃帧)。D25 键由 (dataset, path, chunk) 直接构造,demand 补块不依赖索引。
 func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok bool) {
@@ -144,7 +144,7 @@ func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok boo
 //   - read_stall(D47):stallAttributor.Attribute + ObserveReadStall(见 stallattr.go)。
 //
 // 钩子帧不带 dataset:stage_switch 的基底取最近安装的订单,多条 dataset 并发时以
-// 最后安装者为准(已知限制,见 §7.4)。handler 只做内存/非阻塞操作;ctx 用后台 ctx
+// 最后安装者为准(已知限制,见设计《订单通道降级》)。handler 只做内存/非阻塞操作;ctx 用后台 ctx
 // (集帧自身无 ctx,预取器生命周期仍受其调度 ctx 约束)。
 func (a *Agent) hookHandlers() HookHandlers {
 	// 帧身份暂存(Meta 先于类型回调、同一读循环 goroutine 顺序执行):read_miss 的补块
@@ -190,7 +190,7 @@ func (a *Agent) hookHandlers() HookHandlers {
 	}
 }
 
-// onHookStageSwitch 处理阶段切换直报帧(D33):最近安装的订单为基底 + 帧内 stage_id/seed
+// onHookStageSwitch 处理阶段切换直报帧:最近安装的订单为基底 + 帧内 stage_id/seed
 // 覆盖 → ForOrder 转交(前缀已加载,只走 OnStageSwitch)。与当前订单完全同阶段 → 去重跳过
 // (ring 路径已转交;D11 先到者为准)。尚无任何订单时丢弃帧(无 dataset 归属)。
 func (a *Agent) onHookStageSwitch(stageID string, seed int64) {
@@ -209,10 +209,10 @@ func (a *Agent) onHookStageSwitch(stageID string, seed int64) {
 	}
 }
 
-// —— 预取器回调接线(D24/D28/D35)——
+// —— 预取器回调接线(D24)——
 
 // onOrderTouch 是新 ConsumeOrder 到达时的 t_touch 刷新(装配注入 PrefetchManager.
-// SetOrderTouchHook;§7.6 任务 4;D24 t_touch 三源之"新订单刷新"):对该订单 Chunks 全部
+// SetOrderTouchHook;设计《回收与磁盘淘汰》任务 4;D24 t_touch 三源之"新订单刷新"):对该订单 Chunks 全部
 // 块引用,经该 dataset 的 Catalog.Lookup 解析指纹后 Collector.Touch(fp, now)(同一订单
 // 取同一时刻 now);Lookup 未命中/未加载映射的块跳过,空 chunks 不进入本回调。
 // 在 ForOrder 调用链内同步执行(索引解析为纯内存查询,不阻塞);collector 未装配时
@@ -233,13 +233,13 @@ func (a *Agent) onOrderTouch(dataset string, cat *index.Catalog, refs []prefetch
 }
 
 // onBlockDone 是块完成触达(装配注入 prefetch.Config.OnDone):仅块就绪/下载成功
-// (err == nil)时按索引解析指纹并刷新 t_touch(§7.6:预取写入属热度来源;D24 失败不 Touch)。
+// (err == nil)时按索引解析指纹并刷新 t_touch(设计《回收与磁盘淘汰》:预取写入属热度来源;D24 失败不 Touch)。
 // 在预取器调度协程内同步调用,只做内存查询,不阻塞。
 func (a *Agent) onBlockDone(_ string, cat *index.Catalog, ref prefetch.ChunkRef, err error) {
 	if err != nil {
 		return
 	}
-	// D46:块就绪/本地命中 → phaseTracker 的窗口 ready 样本(M9 填写状态机)。
+	// :块就绪/本地命中 → phaseTracker 的窗口 ready 样本(M9 填写状态机)。
 	if a.phase != nil {
 		a.phase.OnBlockReady(ref)
 	}
@@ -254,7 +254,7 @@ func (a *Agent) onBlockDone(_ string, cat *index.Catalog, ref prefetch.ChunkRef,
 	c.Touch(entry.Fingerprint, time.Now())
 }
 
-// repairCorrupt 是读时坏块修复(装配注入 prefetch.Config.OnCorrupt;D35 冻结语义):
+// repairCorrupt 是读时坏块修复(装配注入 prefetch.Config.OnCorrupt;冻结语义):
 //   - dataset 未绑定(空)→ 直接返回错误走下载(无订单归属,无法构造 D25 键);
 //   - 索引未命中 → 返回错误走下载(无指纹无法隔离);
 //   - 命中 → cs.Quarantine(fp) + rescan.RepairOne(ctx, dataset, ref);nil = 重开可用。
@@ -284,15 +284,15 @@ func (a *Agent) repairCorrupt(ctx context.Context, dataset string, cat *index.Ca
 	return nil
 }
 
-// catalogFor 是 rescan 的按 dataset 取索引入口(D35):与预取管理器共用同一 bundle
-// (§7.3 同一 dataset 一个 Catalog),故重扫描顺带把对象存储可见 dataset 注册进 bundle 表。
+// catalogFor 是 rescan 的按 dataset 取索引入口:与预取管理器共用同一 bundle
+// (设计《持续预取与阶段切换》同一 dataset 一个 Catalog),故重扫描顺带把对象存储可见 dataset 注册进 bundle 表。
 func (a *Agent) catalogFor(_ context.Context, dataset string) (*index.Catalog, error) {
 	return a.Prefetch.bundleFor(dataset, nil).catalog, nil
 }
 
-// —— 淘汰循环接线(M6/§7.6)——
+// —— 淘汰循环接线(M6/设计《回收与磁盘淘汰》)——
 
-// evictHeatSource 把 collector 热度快照过桥到 evictor 的候选接口(D31 冻结形状;接线适配,
+// evictHeatSource 把 collector 热度快照过桥到 evictor 的候选接口(冻结形状;接线适配,
 // evictor 不 import collector)。collector 未绑定 → 无候选。
 type evictHeatSource struct{ ag *Agent }
 
@@ -311,14 +311,14 @@ func (h evictHeatSource) ListForEviction() []evictor.EvictionEntry {
 	return out
 }
 
-// sweepDatasets 驱动一轮 core 对象 GC(evictor.Config.Sweep 接线;D32:失败仅日志不阻塞淘汰):
+// sweepDatasets 驱动一轮 core 对象 GC(evictor.Config.Sweep 接线:失败仅日志不阻塞淘汰):
 // 遍历已知 dataset 逐个 index.Collector.Sweep 并累加回收对象数;ErrNoCurrent(该 dataset
 // 尚无快照,Sweep 口径"绝不删")视为空操作跳过,其余错误记日志并返回首个(evictor 按
 // result=error 打点)。打点 dataset 标签由 evictor.Config.Dataset 提供("" 经白名单归 other)。
 // blocks 恒为 0:Collector 只回收快照对象,不删本地块——本地 CAS 节点级全局、按单数据集
 // 算活块会误删其它数据集的副本,本地副本回收改走节点级清扫(见 localgc.go)。
 func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err error) {
-	// D48:借用淘汰周期刷新修复队列深度(数据源 = Rescan.Status)。
+	// :借用淘汰周期刷新修复队列深度(数据源 = Rescan.Status)。
 	a.reportRepairQueueDepth()
 	if a.ObjectStore == nil {
 		return 0, 0, nil
@@ -348,7 +348,7 @@ func (a *Agent) sweepDatasets(ctx context.Context) (blocks, objects int64, err e
 	return blocks, objects, firstErr
 }
 
-// onSweepSkip 是 Collector 的跳过回调(6.1 §5.11):protected 快照 manifest 缺失/
+// onSweepSkip 是 Collector 的跳过回调(设计《快照与回收》):protected 快照 manifest 缺失/
 // 损坏时计 index_sweep_skipped_total{dataset,reason} 并告警;core 继续删除其他可删
 // 快照对象,不整体停摆。
 func (a *Agent) onSweepSkip(dataset, reason string) {
@@ -447,8 +447,8 @@ func datasetsOfKeys(keys []string) []string {
 	return out
 }
 
-// rescanMetrics 把 rescan 的指标窄接口(D35;无标签)适配到 metrics.Registry:
-// SetQuarantined 是节点级计数,经 DatasetLabel("") 归一(白名单外 → "other",D36 标签纪律)。
+// rescanMetrics 把 rescan 的指标窄接口(无标签)适配到 metrics.Registry:
+// SetQuarantined 是节点级计数,经 DatasetLabel("") 归一(白名单外 → "other", 标签纪律)。
 type rescanMetrics struct{ m *metrics.Registry }
 
 // SetRescanProgress 直通(rescan_progress 无标签)。
@@ -465,7 +465,7 @@ func (r rescanMetrics) SetQuarantined(n int64) {
 	}
 }
 
-// AddFetchBytes / IncFetchRequests 实现 rescan 的可选 repair 回源打点接口(D48):
+// AddFetchBytes / IncFetchRequests 实现 rescan 的可选 repair 回源打点接口:
 // RepairOne 的真实下载以 reason=repair 计入回源线;nil Registry 时静默跳过。
 func (r rescanMetrics) AddFetchBytes(dataset string, n int64, reasons ...string) {
 	if r.m != nil {
@@ -487,7 +487,7 @@ func boolToRatio(b bool) float64 {
 	return 0
 }
 
-// 编译期断言:接线适配满足各子模块的窄接口(形状冻结于 D31/D35)。
+// 编译期断言:接线适配满足各子模块的窄接口(形状冻结于设计《回收与磁盘淘汰》)。
 var (
 	_ evictor.HeatSource      = evictHeatSource{}
 	_ evictor.ProtectedSource = (*PrefetchManager)(nil)

@@ -1,4 +1,4 @@
-# Custom TrainCache scheduler (Q2(a)). Runs beside the stock scheduler under a
+# Custom TrainCache scheduler. Runs beside the stock scheduler under a
 # distinct profile name; training Pods select it via spec.schedulerName.
 #
 # Build/load the image first (see Dockerfile):

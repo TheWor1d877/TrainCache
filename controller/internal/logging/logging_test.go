@@ -40,7 +40,7 @@ func TestNewEmitsJSONWithComponentVersion(t *testing.T) {
 	}
 }
 
-// TestNewRedactsSentinelCredentials 用哨兵凭据验证 New 的 handler 已接脱敏（8.1 §3.4）。
+// TestNewRedactsSentinelCredentials 用哨兵凭据验证 New 的 handler 已接脱敏（docs/8.1-design.md 的「脱敏红线」一节）。
 func TestNewRedactsSentinelCredentials(t *testing.T) {
 	const (
 		accessKey = "CTRL-ACCESS-KEY-SENTINEL"

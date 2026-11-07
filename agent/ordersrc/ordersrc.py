@@ -21,7 +21,7 @@ import os
 import struct
 import sys
 
-# ---- ring 布局常量(design §6.2,冻结)------------------------------------------------
+# ---- ring 布局常量(设计《数据格式》,冻结)------------------------------------------------
 MAGIC = b"TCO1"
 VERSION = 1
 HEADER_SIZE = 64          # 头固定 64B(偏移 32..64 保留)
@@ -30,7 +30,7 @@ _HEADER = struct.Struct("<4sHHQQII32s")   # magic, version, 保留, generation, 
 _SLOT_HEADER = struct.Struct("<qi")
 _ZERO32 = b"\x00" * 32
 
-# ---- 默认值(与 design §6.2 / 读端几何 sanity 上限一致)------------------------------
+# ---- 默认值(与设计《数据格式》 / 读端几何 sanity 上限一致)------------------------------
 DEFAULT_ORDERS_DIR = "/run/traincache/orders"   # 两侧 Pod 同路径挂载 hostPath /run/traincache
 DEFAULT_SLOT_SIZE = 1048576                     # 1 MiB
 DEFAULT_SLOT_COUNT = 64

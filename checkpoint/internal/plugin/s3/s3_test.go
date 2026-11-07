@@ -740,7 +740,7 @@ func TestResolveExtraRankWithoutManifest(t *testing.T) {
 }
 
 // TestResolveIgnoresNonRankPrefixes 确认 step 目录下的杂项前缀不会被当成
-// 多余份：标记文件、临时名与不认识的名字都不参与集合比对（design 10.1 §5）。
+// 多余份：标记文件、临时名与不认识的名字都不参与集合比对（design 10.1「数据格式」）。
 func TestResolveIgnoresNonRankPrefixes(t *testing.T) {
 	store := newFakeStore()
 	b := testBackend(store)

@@ -1,6 +1,6 @@
 package objectstore
 
-// gateway.go：S3 合并回源网关的错误契约与客户端支持（9.1 design §4.4）。
+// gateway.go：S3 合并回源网关的错误契约与客户端支持（design 9.1「失败判断标准」）。
 //
 // 网关与源站共用 S3 协议，但「网关这一跳坏了」必须与「源站坏了」区分开：前者
 // 503 + x-traincache-gateway: unavailable，Agent 可据同一次 Get 降级直连；后者
@@ -18,7 +18,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// 网关响应头与 XML 错误码（9.1 §4.2/§4.4；取值与 gateway 模块各写一份，D24）。
+// 网关响应头与 XML 错误码（design 9.1「错误响应」「失败判断标准」；取值与 gateway 模块各写一份，D3）。
 const (
 	// GatewayHeaderName 是网关自报「这一跳坏了」的响应头名。
 	GatewayHeaderName = "x-traincache-gateway"
@@ -80,7 +80,7 @@ type Options struct {
 	Region string
 	// MaxRetries 覆盖 SDK 的重试次数（>0 时生效；0 沿用 minio-go 全局默认）。
 	// 网关的 503 是控制信号（准入拒绝/降级触发），不允许 SDK 放大重试次数
-	// （9.1 §4.2/§6.5）。minio-go 的 Minio.Options.MaxRetries 只接受正数，
+	// （design 9.1「错误响应」「准入与公平调度」）。minio-go 的 Minio.Options.MaxRetries 只接受正数，
 	// 0 表示沿用全局默认 minio.MaxRetry；本仓库的 v7.3.0 中该值语义为
 	// 「总尝试次数」（1 = 不重试）。
 	MaxRetries int
@@ -186,7 +186,7 @@ func newS3Store(endpoint, accessKey, secretKey, bucket string, secure bool, opts
 	return &S3Store{client: client, bucket: bucket, probe: probe}, nil
 }
 
-// classifyGetError 按 9.1 §4.4 的顺序分类 Get 三类出错点（GetObject/Stat/io.Copy）
+// classifyGetError 按 design 9.1「失败判断标准」的顺序分类 Get 三类出错点（GetObject/Stat/io.Copy）
 // 返回的错误。probe 为 nil 表示源站 Store，此时只在对象不存在时改写，其余原样返回。
 func classifyGetError(ctx context.Context, probe *gatewayProbe, err error) error {
 	// 1. 响应头命中 unavailable：即使响应体不是合法 S3 XML 也成立。

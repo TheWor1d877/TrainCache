@@ -1,7 +1,7 @@
 package svc
 
 // gateway_state_test.go：降级状态机的退避、探测互斥与代际丢弃（9.1 §4.3/§6.4，
-// 9.2 D5）；用假时钟表驱动，不 sleep。
+// 9.2）；用假时钟表驱动，不 sleep。
 
 import (
 	"sync"

@@ -23,7 +23,7 @@ import (
 // 提供 32 字符小写 hex 编解码。
 type Fingerprint [16]byte
 
-// VerifyLevel 是校验等级开关（design.md §8：verify_level = xxh3 | xxh3+sha256）。
+// VerifyLevel 是校验等级开关（design.md《默认值》：verify_level = xxh3 | xxh3+sha256）。
 type VerifyLevel int
 
 const (
@@ -38,7 +38,7 @@ var (
 )
 
 const (
-	// blocksDirName 是块目录名：块文件布局 blocks/<fp[0:2]hex>/<fp hex>.blk（design.md §6.3）。
+	// blocksDirName 是块目录名：块文件布局 blocks/<fp[0:2]hex>/<fp hex>.blk（design.md《本地块存储》）。
 	blocksDirName = "blocks"
 	// quarantineDirName 是隔离目录名（D25）：坏块布局 quarantine/<fp[0:2]hex>/<fp hex>.blk，
 	// 与 blocks/ 并列在 cas 根下（同一文件系统，移动用 os.Rename 原子完成）。
@@ -297,7 +297,7 @@ func (s *Store) Quarantine(fp Fingerprint) error {
 	return nil
 }
 
-// List 枚举 blocks/ 下全部块指纹（D20）：递归扫描块目录，解析块文件名
+// List 枚举 blocks/ 下全部块指纹（design.md《本地块存储》）：递归扫描块目录，解析块文件名
 // （<32 位 hex>.blk）为指纹；忽略 .tmp-* 临时文件与无法解析为 32 位 hex 的文件名。
 // 返回按指纹字典序（字节序）升序排序的切片；无块返回空切片。
 func (s *Store) List() ([]Fingerprint, error) {

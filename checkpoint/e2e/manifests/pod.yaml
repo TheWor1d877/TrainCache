@@ -1,7 +1,7 @@
 # Training Pod that opts into checkpointing. The checkpointd sidecar is not
 # written here: the Pod is admitted through the MutatingWebhookConfiguration
 # and the webhook injects the sidecar, the volumes and the environment
-# (design 10.1 §4.2). The e2e asserts that the injection happened by reading
+# (design 10.1「准入契约」). The e2e asserts that the injection happened by reading
 # the admitted Pod back from the API server.
 #
 # The busybox trainer writes step-1/data.bin (1 MiB) and .done into the
@@ -35,7 +35,7 @@ spec:
         - |
           set -eu
           # 组可写：checkpointd 以 65532 运行，删工作卷副本要能写 step 目录
-          # （design 10.1 §4.3 权限）。
+          # （design 10.1「本地目录契约」的权限）。
           umask 0002
           # 内容固定为 1 MiB 全零：恢复后的文件要和上传前逐字节一致，
           # 断言用 sha256 比对，不能用随机数据。

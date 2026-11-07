@@ -16,7 +16,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// metricswiring_test.go:M9/D48 证据指标接线(singleflight 仅等待者、限速值、
+// metricswiring_test.go:M9 证据指标接线(singleflight 仅等待者、限速值、
 // reason/dataset 解析、命中 source/phase 判定)。
 
 // gatedGetStore 在首次 Get 时关闭 started,并阻塞到 release,用于制造同 key 并发窗口。
@@ -83,7 +83,7 @@ func gatherValue(t *testing.T, r *metrics.Registry, family string, want map[stri
 	return v
 }
 
-// TestMetricsBandwidthLimit:wireMetrics 从 core/fetch 取实际生效的限速值(D48)。
+// TestMetricsBandwidthLimit:wireMetrics 从 core/fetch 取实际生效的限速值。
 func TestMetricsBandwidthLimit(t *testing.T) {
 	dir := t.TempDir()
 	cs, err := cas.New(dir, cas.VerifyXXH3)
@@ -199,7 +199,7 @@ func TestMetricsConsumptionAdvance(t *testing.T) {
 	}
 }
 
-// TestMetricsCacheSourceAndPhase:D46 命中 source 判定(当前窗口 prefetch / 窗口外 cache /
+// TestMetricsCacheSourceAndPhase:命中 source 判定(当前窗口 prefetch / 窗口外 cache /
 // 无订单 unknown)与 phase 取值。
 func TestMetricsCacheSourceAndPhase(t *testing.T) {
 	chunks := make([]ordersource.ChunkRef, 0, prefetchLookahead+3)

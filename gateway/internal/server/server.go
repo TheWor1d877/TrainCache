@@ -1,5 +1,5 @@
 // Package server 实现网关的 HTTP 契约：探针、GET/HEAD 直通、块 GET 的合并
-// 路径、错误响应与 SIGTERM 排水（design 9.1 §4.1/§4.2/§6.1/§6.6）。
+// 路径、错误响应与 SIGTERM 排水（design 9.1「网关 HTTP 契约」「错误响应」「取数与扇出」「部署与更新」）。
 package server
 
 import (
@@ -28,7 +28,7 @@ import (
 	"traincache/gateway/internal/sched"
 )
 
-// 网关错误码与响应头（design 9.1 §4.2/§4.4 冻结；9.2 D24/K8：与
+// 网关错误码与响应头（design 9.1「错误响应」「失败判断标准」冻结；9.2 D3：与
 // core/objectstore 各写一份，修改一处必须同批修改另一处）。
 const (
 	GatewayHeaderName            = "x-traincache-gateway"
@@ -48,7 +48,7 @@ const (
 	blocksSegment = "/blocks/"
 )
 
-// 条目结束行的 from 字段取值：字节来自源站还是来自盘（design 9.1 §7.2）。
+// 条目结束行的 from 字段取值：字节来自源站还是来自盘（design 9.1「日志与可观测性」）。
 const (
 	fromOrigin = "origin"
 	fromCache  = "cache"
@@ -81,7 +81,7 @@ type Options struct {
 }
 
 // Server 持有路由、探针与排水状态。HTTP server 的 Shutdown 由 cmd 调用，
-// 本类型只负责 ready 与在途计数（design 9.1 §6.6）。
+// 本类型只负责 ready 与在途计数（design 9.1「部署与更新」）。
 type Server struct {
 	origin Origin
 	opts   Options
@@ -110,7 +110,7 @@ type Server struct {
 }
 
 // New 构造服务。ready 初始为 false，监听成功后由 cmd 调 SetReady(true)
-// （design 9.1 §6.6 的启动序）。
+// （design 9.1「部署与更新」的启动序）。
 func New(org Origin, opts Options, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
@@ -147,7 +147,7 @@ func New(org Origin, opts Options, log *slog.Logger) *Server {
 }
 
 // Handler 返回计入在途请求的 HTTP handler；每个请求 inflight.Add(1)/Done()。
-// panic 统一恢复到 503 unavailable（design 9.1 §4.2）。
+// panic 统一恢复到 503 unavailable（design 9.1「错误响应」）。
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.inflight.Add(1)
@@ -168,7 +168,7 @@ func (s *Server) SetReady(ready bool) {
 	s.ready.Store(ready)
 }
 
-// Inflight 返回当前在途请求数，供退出日志使用（design 9.1 §7.2）。
+// Inflight 返回当前在途请求数，供退出日志使用（design 9.1「日志与可观测性」）。
 func (s *Server) Inflight() int64 {
 	return s.inflightN.Load()
 }
@@ -201,7 +201,7 @@ func (s *Server) Shutdown(ctx context.Context) bool {
 	}
 }
 
-// route 按 design 9.1 §4.1 分发请求：探针、方法校验、桶校验，然后 GET/HEAD。
+// route 按 design 9.1「网关 HTTP 契约」分发请求：探针、方法校验、桶校验，然后 GET/HEAD。
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/healthz":
@@ -256,7 +256,7 @@ func (s *Server) serveProbe(w http.ResponseWriter, r *http.Request, health bool)
 	_, _ = io.WriteString(w, "ok")
 }
 
-// serveHead 直通 HEAD，不回源字节（design 9.1 §4.1；9.2 D1）。
+// serveHead 直通 HEAD，不回源字节（design 9.1「网关 HTTP 契约」；9.2 D1）。
 func (s *Server) serveHead(w http.ResponseWriter, r *http.Request, key string) {
 	s.obs.Passthrough()
 	info, err := s.origin.Stat(r.Context(), key)
@@ -268,7 +268,7 @@ func (s *Server) serveHead(w http.ResponseWriter, r *http.Request, key string) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// serveBlock 处理块键 GET 的合并路径（design 9.1 §6.1）：
+// serveBlock 处理块键 GET 的合并路径（design 9.1「取数与扇出」）：
 // 先 Attach 命中在途条目；不在途且开关打开时 Lookup 查盘；仍未命中则
 // Acquire 占准入槽（排队 2s、队列 64，超时回 SlowDown）；拿到槽后再试一次
 // Attach、再试一次 Lookup（并发请求可能已建条目或刚 rename 落盘）；两者都
@@ -322,7 +322,7 @@ func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) 
 	}
 	if s.registry.InFlight(key) {
 		// 条目在途但 written > C：不加入、也不新建同名条目，独立回源
-		// （design 9.1 §6.2；9.2 D8）。仍占一个准入槽。条目还在表里就
+		// （design 9.1「取数与扇出」；9.2 D8）。仍占一个准入槽。条目还在表里就
 		// 意味着块还没 rename 落盘，这一分支不查盘。
 		s.createMu.Unlock()
 		if probed != nil {
@@ -335,7 +335,7 @@ func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) 
 	obj := s.lookupCache(dataset, key)
 	if obj == nil {
 		// 首次探到的对象在第二次查盘时被淘汰了，但已打开的描述符仍能读到
-		// 文件尾（design 9.1 §6.2）。
+		// 文件尾（design 9.1「取数与扇出」）。
 		obj = probed
 	}
 
@@ -576,7 +576,7 @@ func (s *Server) lookupCache(dataset, key string) *cache.Object {
 }
 
 // serveCacheHit 用盘上的对象当 owner 侧读手：条目按普通扇出路径供订阅者
-// 读取，.meta 里的 ETag 与 Last-Modified 回填进 200 响应（design 9.1 §6.1
+// 读取，.meta 里的 ETag 与 Last-Modified 回填进 200 响应（design 9.1「取数与扇出」
 // 第 6 步；9.2 D32、D34）。
 func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, key, dataset string,
 	e *merge.Entry, obj *cache.Object, release func()) {
@@ -598,7 +598,7 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, key, data
 }
 
 // acquire 取一个准入槽（最长排队 2s，队列满直接拒绝）。失败时按 design
-// 9.1 §4.3/§6.1 写 503 SlowDown 并返回 false；客户端已离开时不写响应。
+// 9.1「Agent 侧后端选择」「取数与扇出」写 503 SlowDown 并返回 false；客户端已离开时不写响应。
 func (s *Server) acquire(w http.ResponseWriter, r *http.Request, dataset string) (func(), bool) {
 	actx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -626,7 +626,7 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, dataset string)
 // pumpCtx 是服务级 baseCtx 的子 ctx；单个订阅者断开不会中止共享下载，
 // 但所有订阅者都离开时 Entry 会取消它，底层源站 Read 随之返回（9.2 D10）。
 //
-// 开关打开时，同一批字节也写进 BeginPut 打开的 .tmp（design 9.1 §6.8）。
+// 开关打开时，同一批字节也写进 BeginPut 打开的 .tmp（design 9.1「盘上布局与配额淘汰」）。
 func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 	pumpCtx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
@@ -664,7 +664,7 @@ func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 	err = e.Pump(pumpCtx, reader)
 	s.logEntryEnd(e, dataset, key, start, err, fromOrigin)
 	if err != nil && !errors.Is(err, context.Canceled) && e.Written() > 0 {
-		// 写响应体后才失败：状态码已发出，只记录源站失败（§6.3）。
+		// 写响应体后才失败：状态码已发出，只记录源站失败（design 9.1「取数与扇出」）。
 		resp := minio.ToErrorResponse(err)
 		s.log.Warn("源站失败",
 			"dataset", dataset,
@@ -703,7 +703,7 @@ func (s *Server) logEntryEnd(e *merge.Entry, dataset, key string, start time.Tim
 
 // serveAttached 把 Attach 命中的条目转成订阅者。条目可能在 Attach 与
 // 订阅之间 Finish，并因订阅者为 0 立即归还缓冲，此时 TrySubscribe 返回
-// false：必须按独立回源处理，绝不能写出空 200（design 9.1 §6.3）。
+// false：必须按独立回源处理，绝不能写出空 200（design 9.1「取数与扇出」）。
 //
 // held 非 nil 表示调用方已持有准入槽，直接交给独立回源；否则重新取槽，
 // 语义与普通准入一致（2s 等待，失败回 503 SlowDown）。
@@ -732,7 +732,7 @@ func (s *Server) serveAttached(w http.ResponseWriter, r *http.Request, key, data
 }
 
 // serveWithSub 等待第一个数据块或结束，然后持续把 [pos, written) 写给客户端。
-// 踢出时 panic(http.ErrAbortHandler) 断开连接（design 9.1 §6.2；9.2 D9）。
+// 踢出时 panic(http.ErrAbortHandler) 断开连接（design 9.1「取数与扇出」；9.2 D9）。
 func (s *Server) serveWithSub(w http.ResponseWriter, r *http.Request, key, dataset string, e *merge.Entry, sub *merge.Sub) {
 	defer sub.Close()
 
@@ -742,7 +742,7 @@ func (s *Server) serveWithSub(w http.ResponseWriter, r *http.Request, key, datas
 
 		if len(data) > 0 {
 			if !wroteHeader {
-				// 不设 Content-Length，走 chunked（design 9.1 §6.1 第 6 步）。
+				// 不设 Content-Length，走 chunked（design 9.1「取数与扇出」）。
 				// 首次写字节前元数据已由拉取协程写入条目（9.2 D28）。
 				s.setEntryHeaders(w.Header(), e)
 				w.WriteHeader(http.StatusOK)
@@ -780,7 +780,7 @@ func (s *Server) serveWithSub(w http.ResponseWriter, r *http.Request, key, datas
 			return
 		default:
 			// 拉取协程失败：尚未开始响应时按源站错误渲染；
-			// 已写出字节时只能截断（§6.3）。
+			// 已写出字节时只能截断（design 9.1「取数与扇出」）。
 			if !wroteHeader {
 				s.writeOriginError(w, r, key, err)
 			}
@@ -790,12 +790,12 @@ func (s *Server) serveWithSub(w http.ResponseWriter, r *http.Request, key, datas
 }
 
 // serveIndependent 处理「条目在途但已越过合并窗口」的块 GET：直接回源，
-// 不建条目、不参与合并，结束后释放准入槽（design 9.1 §6.2）。
+// 不建条目、不参与合并，结束后释放准入槽（design 9.1「取数与扇出」）。
 //
 // minio 的 4xx/5xx 在首次 Read 才暴露，所以必须先读第一块再决定状态码：
-// 首读就失败时把源站状态码与 Code 透传给客户端（§6.3），不能先写 200。
+// 首读就失败时把源站状态码与 Code 透传给客户端（design 9.1「取数与扇出」），不能先写 200。
 //
-// 开关打开时这条分支的字节同样按 §6.8 的协议落盘。
+// 开关打开时这条分支的字节同样按「盘上布局与配额淘汰」的协议落盘。
 func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, dataset string, release func()) {
 	defer release()
 
@@ -892,7 +892,7 @@ func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, d
 	}
 }
 
-// cacheTee 把读到的同一批字节写进缓存的 .tmp（design 9.1 §6.8）：
+// cacheTee 把读到的同一批字节写进缓存的 .tmp（design 9.1「盘上布局与配额淘汰」）：
 // 读到 EOF 视为正常收尾，写 .meta 再 rename 成正式名；中途失败删掉 .tmp，
 // 盘上不留半成品。
 //
@@ -906,7 +906,7 @@ type cacheTee struct {
 	dataset string
 	key     string
 	// auto 为 true 时读到 EOF 立即收尾。回源条目路径用 true：条目的元数据
-	// 在首次读字节时就已写好，rename 早于条目摘除（design 9.1 §6.1 第 8 步）。
+	// 在首次读字节时就已写好，rename 早于条目摘除（design 9.1「取数与扇出」）。
 	// 独立回源路径用 false：元数据要等首读之后的 Stat，收尾由调用方触发。
 	auto bool
 	done bool
@@ -978,7 +978,7 @@ func (s *Server) logCacheWriteFailure(dataset, key, reason string, err error) {
 }
 
 // beginCachePut 打开写盘句柄。写盘失败不影响响应：只记一条写盘失败 Warn，
-// 字节照原路返回（design 9.1 §6.8）。ctx 已取消导致的失败属于正常中止，
+// 字节照原路返回（design 9.1「盘上布局与配额淘汰」）。ctx 已取消导致的失败属于正常中止，
 // 记 Debug，不算写盘失败。
 func (s *Server) beginCachePut(ctx context.Context, dataset, key string) *cache.Writer {
 	writer, err := s.cacheStore.BeginPut(ctx, key)
@@ -995,7 +995,7 @@ func (s *Server) beginCachePut(ctx context.Context, dataset, key string) *cache.
 }
 
 // metadataReader 在第一次读到字节时补齐条目元数据，再把这次字节交给上层。
-// 元数据来自这次 GET 的响应头，obj.Stat() 不再发请求（design 9.1 §5.2；9.2 D28）。
+// 元数据来自这次 GET 的响应头，obj.Stat() 不再发请求（design 9.1「网关 HTTP 契约」；9.2 D28）。
 type metadataReader struct {
 	r       io.Reader
 	obj     *origin.Object
@@ -1053,12 +1053,12 @@ func (s *Server) servePassthrough(w http.ResponseWriter, r *http.Request, key st
 	s.setObjectHeaders(w.Header(), info)
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, rc); err != nil {
-		// 响应已开始，无法改状态码；中途失败按 9.1 §6.3 只记日志。
+		// 响应已开始，无法改状态码；中途失败按 design 9.1「取数与扇出」只记日志。
 		s.log.Warn("源站响应中断", "dataset", datasetOf(key), "err", err, "err_class", corelog.Classify(err))
 	}
 }
 
-// setObjectHeaders 回填源站的对象头；空值不写（design 9.1 §4.1）。
+// setObjectHeaders 回填源站的对象头；空值不写（design 9.1「网关 HTTP 契约」）。
 func (s *Server) setObjectHeaders(h http.Header, info origin.ObjectInfo) {
 	if info.Size >= 0 {
 		h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
@@ -1086,7 +1086,7 @@ func setMetadataHeaders(h http.Header, etag string, lastModified time.Time) {
 	}
 }
 
-// writeOriginError 按 design 9.1 §4.2 映射源站错误：
+// writeOriginError 按 design 9.1「错误响应」映射源站错误：
 // 有状态码与 Code 的原样透传；StatusCode==0（连不上/TLS/超时）回 504。
 func (s *Server) writeOriginError(w http.ResponseWriter, r *http.Request, key string, err error) {
 	if r.Context().Err() != nil {
@@ -1147,8 +1147,8 @@ func s3ErrorBody(code, message string) []byte {
 	return b.Bytes()
 }
 
-// datasetOf 取对象键第一个 "/" 之前的部分（design 9.1 §5.1）；日志只写 dataset，
-// 不写高基数的完整 key（§7.2）。
+// datasetOf 取对象键第一个 "/" 之前的部分（design 9.1「网关 HTTP 契约」）；日志只写 dataset，
+// 不写高基数的完整 key（design 9.1「日志与可观测性」）。
 func datasetOf(key string) string {
 	if i := strings.IndexByte(key, '/'); i > 0 {
 		return key[:i]
@@ -1165,7 +1165,7 @@ func splitObjectPath(path string) (bucket, key string) {
 	return path, ""
 }
 
-// isBlockKey 判断对象键是否以 <dataset>/blocks/ 开头（design 9.1 §4.1/§5.1）。
+// isBlockKey 判断对象键是否以 <dataset>/blocks/ 开头（design 9.1「网关 HTTP 契约」）。
 func isBlockKey(key string) bool {
 	i := strings.IndexByte(key, '/')
 	if i <= 0 {
@@ -1199,7 +1199,7 @@ func (w *statusWriter) Write(p []byte) (int, error) {
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // recoverPanic 把 panic 恢复成 503 unavailable；http.ErrAbortHandler 必须
-// 原样放行，否则踢出无法断开连接（design 9.1 §6.2）。响应已开始时只记日志。
+// 原样放行，否则踢出无法断开连接（design 9.1「取数与扇出」）。响应已开始时只记日志。
 func (s *Server) recoverPanic(w *statusWriter) {
 	rec := recover()
 	if rec == nil {

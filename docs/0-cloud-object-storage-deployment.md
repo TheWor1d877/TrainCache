@@ -1,10 +1,10 @@
 # TrainCache 云对象存储部署指南
 
-## 前置：minio-go SDK 是什么
+## minio-go SDK 在对象存储客户端里的位置
 
-`core/objectstore/s3.go` 引入 `github.com/minio/minio-go/v7`。它是 MinIO 公司发布的 Go S3 客户端库，TrainCache 用它访问任意 S3 兼容后端，不依赖 MinIO Server 存在。
+`core/objectstore/s3.go` 引入 `github.com/minio/minio-go/v7`。这是 MinIO 公司发布的 Go S3 客户端库，TrainCache 用它访问任意 S3 兼容后端，不依赖 MinIO Server 存在。
 
-MinIO 公司开源三样东西，在 TrainCache 里各用在一处：
+MinIO 公司开源三样东西，TrainCache 各用在一处：
 
 | 项目 | 是什么 | 本项目用法 |
 |---|---|---|
@@ -12,12 +12,7 @@ MinIO 公司开源三样东西，在 TrainCache 里各用在一处：
 | minio-go SDK | Go 的 S3 客户端库 | `core/objectstore/s3.go` 引入 |
 | mc | 命令行 S3 客户端 | 验证连通性与条件写 |
 
-minio-go 把 S3 的 REST 接口封装成 Go 方法，负责四件事：
-
-- AWS V4 签名：按时间戳和 SecretKey 算出签名头。
-- URL 风格选择：本地 MinIO 用 `endpoint/bucket/key`，AWS 用 `bucket.endpoint/key`。
-- 错误码映射：把服务端返回的 XML 错误码转成 Go error。
-- 条件写：`SetMatchETag()` 发 `If-Match`，`SetMatchETagExcept()` 发 `If-None-Match`。
+minio-go 把 S3 的 REST 接口封装成 Go 方法，负责四件事：按时间戳和 SecretKey 算出 AWS V4 签名头；按 endpoint 形状选 URL 风格，本地 MinIO 用 `endpoint/bucket/key`，AWS 用 `bucket.endpoint/key`；把服务端返回的 XML 错误码转成 Go error；条件写用 `SetMatchETag()` 发 `If-Match`、用 `SetMatchETagExcept()` 发 `If-None-Match`。
 
 SDK 只发带签名的标准 S3 请求，endpoint 换成任何 S3 兼容后端行为一致：
 
@@ -28,11 +23,11 @@ client, err := minio.New(endpoint, &minio.Options{
 })
 ```
 
-选 minio-go 相对 AWS 官方 SDK 的两个依据：模块小、依赖少，对非 AWS 的 S3 实现兼容覆盖最全；条件写有一级封装，CAS 提交和孤儿清理要用。
+选 minio-go 相对 AWS 官方 SDK 有两个依据：模块小、依赖少，对非 AWS 的 S3 实现兼容覆盖最全；条件写有一级封装，提交快照时的原子写入（写前比对对象指纹、冲突就换手）和提交失败后清掉本次新写对象要用它。
 
-## 1. 六个环境变量
+## 对象存储的环境变量
 
-Agent 启动时读这六个值，解析在 `agent/svc/config.go` 的 `Load()`。都有默认值，缺省连本地 MinIO：`127.0.0.1:9000`、匿名、单桶 `traincache`、HTTP。
+Agent 启动时从环境变量读对象存储接入的这六个值，解析在 `agent/svc/config.go` 的 `Load()`。都有默认值，缺省连本地 MinIO：`127.0.0.1:9000`、匿名、单桶 `traincache`、HTTP。
 
 | 变量 | 含义 | 默认 |
 |---|---|---|
@@ -43,27 +38,27 @@ Agent 启动时读这六个值，解析在 `agent/svc/config.go` 的 `Load()`。
 | `TRAINCACHE_OBJSTORE_SECURE` | `1`/`true`/`yes` 走 HTTPS，其余走 HTTP | false |
 | `TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE` | 启动时探测后端是否支持条件写 | false |
 
-- 协议与地址分开：endpoint 只写域名或 `host:port`，加密与否由 `SECURE` 控制。
-- 凭证留空即匿名访问。Agent 只用六个普通客户端操作：Get、Put、Delete、GetETag、PutIfMatch、List，本地桶开匿名读就能跑。
-- v1 单桶：所有数据放一个桶，靠对象键前缀隔离 dataset（口径见 6.2 D26）。键布局：
+协议与地址分开：endpoint 只写域名或 `host:port`，加密与否由 `SECURE` 控制。
 
-```text
-dataset/<dataset>/CURRENT                            ← 当前快照指针
-dataset/<dataset>/snapshots/<id>/manifest.json       ← 索引 manifest
-dataset/<dataset>/snapshots/<id>/shard-<fp8>.idx     ← 索引分片
-dataset/<dataset>/readers/<nodeid>.json              ← 读者心跳声明
-<dataset>/blocks/<path>#<chunk>                      ← 数据块，裸数据，不在 dataset/ 下
-```
+凭证留空即匿名访问。Agent 只用六个普通客户端操作：Get、Put、Delete、GetETag、PutIfMatch、List，本地桶开匿名读就能跑。
 
-四个键函数在 `core/index/format.go`（`CurrentKey`、`SnapshotPrefix`、`ManifestKey`、`ShardKey`）与 `core/index/readers.go`（`ReaderKey`），块键在 `core/objectstore/blockkey.go`（`BlockKey`）。完整树形口径见 5.0 §对象存储层。
+v1 单桶：所有数据放一个桶，靠对象键前缀隔离 dataset。键布局：
+
+| 对象键 | 内容 | 生成函数 |
+|---|---|---|
+| `dataset/<dataset>/CURRENT` | 当前快照指针 | `core/index/format.go` 的 `CurrentKey` |
+| `dataset/<dataset>/snapshots/<id>/manifest.json` | 索引 manifest | `core/index/format.go` 的 `ManifestKey` |
+| `dataset/<dataset>/snapshots/<id>/shard-<fp8>.idx` | 索引分片 | `core/index/format.go` 的 `ShardKey` |
+| `dataset/<dataset>/readers/<nodeid>.json` | 读者心跳声明 | `core/index/readers.go` 的 `ReaderKey` |
+| `<dataset>/blocks/<path>#<chunk>` | 数据块，裸数据，不在 dataset/ 下 | `core/objectstore/blockkey.go` 的 `BlockKey` |
 
 桶根另有 `_traincache/format.json`，内容是 `{"version":1,"chunkSize":N}`，记录整个桶的块大小。发布器首次写数据时创建，之后只读；改块大小必须清空桶重灌或换桶。
 
-- 条件写探测：打开开关后，Agent 启动时写一个临时 key，再用不匹配的 ETag 调 `PutIfMatch`，期望返回 412。写成功说明后端不支持条件写，Agent 告警但不阻止启动。条件写是 CAS 提交和孤儿清理的依赖，后端不支持时走回退路径：乐观写 + 读回校验 + 冲突重试。探测结果上报指标 `traincache_objectstore_conditional_write_supported`，取值 0 或 1。上公有云建议开。
+条件写探测：打开开关后，Agent 启动时写一个临时 key，再用不匹配的 ETag 调 `PutIfMatch`，期望返回 412。写成功说明后端不支持条件写，Agent 告警但不阻止启动。条件写是提交快照原子写入与失败清理的依赖，后端不支持时走回退路径：乐观写加读回校验加冲突重试。探测结果上报指标 `traincache_objectstore_conditional_write_supported`，取值 0 或 1。上公有云建议开。
 
 云厂商生产环境必须开 HTTPS，否则请求会被云侧 WAF 拒绝。
 
-## 1.1 可选的合并回源网关路径
+## 合并回源网关的环境变量
 
 Agent 的块 GET 可以经集群内的合并回源网关，其余 S3 方法仍直连源站。网关地址与源站地址分开配置：
 
@@ -72,11 +67,13 @@ Agent 的块 GET 可以经集群内的合并回源网关，其余 S3 方法仍�
 | `TRAINCACHE_GATEWAY_ENDPOINT` | 网关地址，`host:port`，不带 scheme；空表示全部直连源站 | 空 |
 | `TRAINCACHE_GATEWAY_SECURE` | `1`/`true`/`yes` 时 Agent 用 HTTPS 连网关，其余走 HTTP | false |
 
-- 只有块 GET 走网关；`Put`、`Delete`、`GetETag`、`PutIfMatch`、`List` 直连源站。不配 `TRAINCACHE_GATEWAY_ENDPOINT` 时块 GET 也直连源站。
-- `TRAINCACHE_OBJSTORE_ENDPOINT` / `TRAINCACHE_OBJSTORE_SECURE` 始终指向源站，网关与源站的地址和加密开关各自独立，可以一侧 HTTPS 一侧明文。
-- 网关与 Agent 共用 Secret `traincache-objstore` 的 `accessKey`、`secretKey`。
+只有块 GET 走网关；`Put`、`Delete`、`GetETag`、`PutIfMatch`、`List` 直连源站。不配 `TRAINCACHE_GATEWAY_ENDPOINT` 时块 GET 也直连源站。
 
-## 2. 三大云厂商的 endpoint 与凭证
+`TRAINCACHE_OBJSTORE_ENDPOINT` 与 `TRAINCACHE_OBJSTORE_SECURE` 始终指向源站，网关与源站的地址和加密开关各自独立，可以一侧 HTTPS 一侧明文。
+
+网关与 Agent 共用 Secret `traincache-objstore` 的 `accessKey`、`secretKey`。
+
+## 三大云厂商的 endpoint 与凭证
 
 | 厂商 | endpoint 格式 | 示例 |
 |---|---|---|
@@ -86,11 +83,11 @@ Agent 的块 GET 可以经集群内的合并回源网关，其余 S3 方法仍�
 
 region 选离训练集群最近的，跨区读会吃满网络延迟。
 
-凭证：在云控制台建一个专用子用户，生成 AccessKey/SecretKey 二元组，权限只授目标桶（见第 6 节）。腾讯云与阿里云的字段名对应关系见上面 env 表。
+凭证：在云控制台建一个专用子用户，生成 AccessKey 与 SecretKey 二元组，权限只授目标桶。
 
 桶要先在控制台建好，再把桶名填进 `TRAINCACHE_OBJSTORE_BUCKET`。
 
-## 3. 凭证配置
+## 凭证配置
 
 密钥经 K8s Secret 传递，不写明文进 Pod spec：字面值对所有能 `kubectl describe pod` 的人可见，YAML 进了 Git 历史就删不掉。
 
@@ -133,9 +130,9 @@ export TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE="yes"
 go run agent/cmd/traincache-agentd/main.go
 ```
 
-## 4. 最小部署示例
+## 最小部署示例
 
-Agent 以 DaemonSet 部署，每个节点一个。下面是自建 DaemonSet 的最小可用配置。仓库自带的 `controller/deploy/agent/daemonset.yaml` 不写这些字面量：端点、桶、TLS 开关取自 ConfigMap `traincache-config` 的 `objstoreEndpoint` / `objstoreBucket` / `objstoreSecure`，接云端时改那三个配置项即可（[参数配置](PARAMETER-CONFIGURATION.md) §2.1、§2.2）。
+Agent 以 DaemonSet 部署，每个节点一个。下面是自建 DaemonSet 的最小可用配置。仓库自带的 `controller/deploy/agent/daemonset.yaml` 不写这些字面量：端点、桶、TLS 开关取自 ConfigMap `traincache-config` 的 `objstoreEndpoint`、`objstoreBucket`、`objstoreSecure` 三个键，接云端时改那三个配置项即可。
 
 ```yaml
 apiVersion: apps/v1
@@ -190,7 +187,7 @@ spec:
         volumeMounts:
         - name: cache-root                    # 预热数据落本地盘，训练 Pod 只读挂载同一路径
           mountPath: /var/cache/traincache
-        - name: run                           # agent.sock：训练侧 DataLoader 钩子→Agent，单向 datagram
+        - name: run                           # agent.sock：训练侧 DataLoader 钩子单向发给 Agent，datagram
           mountPath: /run/traincache          # orders/<pod-uid>.ring：训练 Pod 的 sidecar 写，Agent 只读
       volumes:
       - name: cache-root
@@ -203,16 +200,18 @@ spec:
           type: DirectoryOrCreate
 ```
 
-## 4.1 webhook 服务证书与 caBundle
+示例里的 Secret 名是 `traincache-objstore-credentials`，仓库自带的守护集读的是 `traincache-objstore`，Secret 名要与所用清单一致。
+
+## webhook 服务证书与 caBundle
 
 webhook 的服务证书由安装方提供：`controller/deploy/webhook/deployment.yaml` 把 Secret `traincache-webhook-tls` 挂到 `/tmp/k8s-webhook-server/serving-certs`，webhook 进程从该目录读证书与私钥。仓库清单 `controller/deploy/webhook/mutatingwebhook.yaml` 的两条规则都写 `caBundle: ""`，注释写明安装方建好 Secret 后填入签发 CA；`controller/e2e/run.sh` 与 `hack/release-smoke.sh` 用 openssl 自签证书并回填两条规则的 caBundle，属测试装置。
 
 caBundle 为空或与服务证书不匹配，API server 无法验证 webhook 的 HTTPS 调用，两条规则各按自己的 failurePolicy 处置：
 
-- `pods.traincache.io`（预热注入）`failurePolicy: Ignore`：Pod 照常创建且不带 schedulingGate，Controller 在 WarmupTask 上记 `Condition GateInjectionDegraded`（见 7.1 §7.9）。
+- `pods.traincache.io`（预热注入）`failurePolicy: Ignore`：Pod 照常创建且不带 schedulingGate，Controller 在 WarmupTask 上记 `Condition GateInjectionDegraded`。
 - `pods-checkpoint.traincache.io`（checkpoint 注入）`failurePolicy: Fail`：API server 拒绝创建该 Pod。
 
-## 5. 验证
+## 验证
 
 第一步看日志。endpoint 不通或凭证错，Agent 启动就报错退出。正常输出：
 
@@ -240,7 +239,7 @@ mc put mycos/my-train-data/test-key.txt "hello world"
 mc --etag="00000000000000000000000000000000" put mycos/my-train-data/test-key.txt "should fail"
 ```
 
-## 6. 最小权限
+## 最小权限
 
 凭证只授目标桶和必要动作。腾讯云 COS 的策略示例，在 CAM 控制台附加给那个子用户：
 

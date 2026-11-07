@@ -279,7 +279,7 @@ func TestReaderGenerationChangeRereads(t *testing.T) {
 }
 
 // TestReaderGenerationChangeSamePayloadRedelivered gen 变化但 payload 字节相同 → 重放一次
-// (design §7.4:sidecar 重启后会话要追到当前阶段,不能按字节吞掉)。
+// (设计《订单通道降级》:sidecar 重启后会话要追到当前阶段,不能按字节吞掉)。
 func TestReaderGenerationChangeSamePayloadRedelivered(t *testing.T) {
 	fastPoll(t)
 	path := newRingPath(t)
@@ -353,7 +353,7 @@ func TestReaderGeneration(t *testing.T) {
 	}
 }
 
-// ---------------- 丢单计数(design §7.4 / decisions D63) ----------------
+// ---------------- 丢单计数(设计《订单通道降级》 / decisionsD63) ----------------
 
 // TestDroppedTotalsResync 首次接入跳过的历史不计数;已接入后新代际跳读按跳过序号数计入 resync。
 func TestDroppedTotalsResync(t *testing.T) {
@@ -856,7 +856,7 @@ func TestCurrentOrderReturnsCopy(t *testing.T) {
 	assertOrderEqual(t, again, want)
 }
 
-// ---------------- LastAdvance(M5 降级判定,decisions D29) ----------------
+// ---------------- LastAdvance(M5 降级判定) ----------------
 
 // TestReaderLastAdvanceMissingFile 文件不存在 → LastAdvance 零值(从未推进);多轮 poll 后保持。
 func TestReaderLastAdvanceMissingFile(t *testing.T) {
@@ -871,7 +871,7 @@ func TestReaderLastAdvanceMissingFile(t *testing.T) {
 	}
 }
 
-// TestReaderLastAdvanceInitialSnapshot 构造时的首次有效快照即视为推进(D29);
+// TestReaderLastAdvanceInitialSnapshot 构造时的首次有效快照即视为推进;
 // 头有效但 write_seq=0 的空 ring 同样计(写端可读即可观测)。
 func TestReaderLastAdvanceInitialSnapshot(t *testing.T) {
 	fastPoll(t)
@@ -923,7 +923,7 @@ func TestReaderLastAdvanceStableWithoutAdvance(t *testing.T) {
 	}
 }
 
-// TestReaderLastAdvanceOnGenerationChange 代际变化(write_seq 不变)视为推进(D29,sidecar 重启)。
+// TestReaderLastAdvanceOnGenerationChange 代际变化(write_seq 不变)视为推进(sidecar 重启)。
 func TestReaderLastAdvanceOnGenerationChange(t *testing.T) {
 	fastPoll(t)
 	path := newRingPath(t)
@@ -981,7 +981,7 @@ func TestReaderLastAdvanceKeepsValueOnFileDisappear(t *testing.T) {
 	}
 }
 
-// TestReaderLastAdvancePreservedAfterClose Close 后保持最后观测值不变(D29)。
+// TestReaderLastAdvancePreservedAfterClose Close 后保持最后观测值不变。
 func TestReaderLastAdvancePreservedAfterClose(t *testing.T) {
 	fastPoll(t)
 	path := newRingPath(t)

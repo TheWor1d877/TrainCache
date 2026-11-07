@@ -7,7 +7,7 @@ import (
 	"traincache/agent/ordersource"
 )
 
-// phase_test.go:M9/D46 phase 状态机(四态、switch 优先、按 dataset 独立、K 块就绪)。
+// phase_test.go:M9 phase 状态机(四态、switch 优先、按 dataset 独立、K 块就绪)。
 
 func phaseRef(path string, chunk int64) ordersource.ChunkRef {
 	return ordersource.ChunkRef{Path: path, Chunk: chunk}
@@ -103,7 +103,7 @@ func TestPhaseUnknown(t *testing.T) {
 	if got := p.Current("none"); got != metrics.PhaseStartup {
 		t.Errorf("启动期无状态 dataset = %q, want startup", got)
 	}
-	// 未收到订单,块就绪不推进 startup 窗口(D46:首个 ConsumeOrder 的首 K 块)。
+	// 未收到订单,块就绪不推进 startup 窗口(首个 ConsumeOrder 的首 K 块)。
 	p.OnBlockReady(phaseRef("ds", 0))
 	if got := p.Current("ds"); got != metrics.PhaseStartup {
 		t.Errorf("订单前块就绪 phase = %q, want startup", got)

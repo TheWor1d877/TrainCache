@@ -16,7 +16,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// 降级状态机的常量（9.2 D5 / 9.1 §4.3）。
+// 降级状态机的常量（9.2 / 9.1 §4.3）。
 const (
 	// gatewayInitialBackoff 是首次降级的退避时长。
 	gatewayInitialBackoff = 10 * time.Second
@@ -96,7 +96,7 @@ func (s *backendStore) routedGet(ctx context.Context, w io.Writer, call func(obj
 		return err
 	}
 
-	// 已向调用方写过任何字节就不能重试，否则会污染已落盘内容（9.2 D6）。
+	// 已向调用方写过任何字节就不能重试，否则会污染已落盘内容（9.2）。
 	if cw.written == 0 {
 		return call(s.origin, w)
 	}

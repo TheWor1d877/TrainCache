@@ -5,7 +5,7 @@ package svc
 //   - 索引线(③):ForOrder 的 LoadPrefixes 成功/失败 → index_refresh_total{success|error}、
 //     index_refresh_duration_seconds{success} 样本、index_shards_loaded 置真实分片数;
 //   - 延迟线(⑥):四个业务 RPC 成功与错误各计一次 request_duration_seconds{endpoint,result};
-//   - 订单到达 t_touch 刷新(④;§7.6 任务 4):订单内块经索引解析指纹后被
+//   - 订单到达 t_touch 刷新(④;设计《回收与磁盘淘汰》任务 4):订单内块经索引解析指纹后被
 //     Collector.Touch 刷新(LastTouch 推进),索引未命中/空 chunks 跳过。
 
 import (
@@ -173,7 +173,7 @@ func TestRPCLatencyMetricsAllEndpoints(t *testing.T) {
 	}
 }
 
-// TestOrderTouchRefreshOnConsumeOrder(综合验收 ④;§7.6 任务 4):新 ConsumeOrder 到达 →
+// TestOrderTouchRefreshOnConsumeOrder(综合验收 ④;设计《回收与磁盘淘汰》任务 4):新 ConsumeOrder 到达 →
 // 订单内每个块经 dataset 索引解析指纹后 Collector.Touch(now)——预置旧 LastTouch 的块被
 // 推进到订单处理时刻、订单内新块建档;索引未命中的 ref 跳过;空 chunks 订单不触发任何
 // 刷新(ForOrder 守卫)。隔离手段:订单窗口块本地副本 Evict 且源站无对象(下载必失败),

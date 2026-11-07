@@ -10,9 +10,9 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 )
 
-// requiredReady is the integer gate threshold from docs/7.1 §5.6:
+// requiredReady is the integer gate threshold from docs/7.1-design.md《门控判定》:
 // floor(threshold*K) with a floor of 1 when threshold > 0, capped at K.
-// M5 persists it per Pod so M7 only compares integers.
+// The controller persists it per Pod so gate comparisons only use integers.
 func requiredReady(threshold float64, k int32) int32 {
 	if k <= 0 || threshold <= 0 {
 		return 0
@@ -47,7 +47,7 @@ func preheatState(resp *agentpb.PreheatStatus) traincachev1alpha1.PreheatState {
 }
 
 // reportTime prefers the Agent's UpdatedAt and falls back to the injected
-// local clock when the Agent omitted it (docs/7.1 §7.3 step 4).
+// local clock when the Agent omitted it (docs/7.1-design.md《进度拉取与就绪表》 step 4).
 func reportTime(resp *agentpb.PreheatStatus, now time.Time) *metav1.Time {
 	if ts := resp.GetUpdatedAt(); ts != nil && ts.CheckValid() == nil {
 		updated := metav1.NewTime(ts.AsTime().UTC())
@@ -58,7 +58,7 @@ func reportTime(resp *agentpb.PreheatStatus, now time.Time) *metav1.Time {
 }
 
 // normalizeFanout is the controller-side view of spec.preheatFanout: zero
-// means the single-node default, matching gwaa.Compute (docs/7.1 §5.5, D38).
+// means the single-node default, matching gwaa.Compute (docs/7.1-design.md《GWAA 分配》, docs/7.2 D38).
 func normalizeFanout(fanout int32) int32 {
 	if fanout <= 0 {
 		return 1
@@ -67,7 +67,7 @@ func normalizeFanout(fanout int32) int32 {
 }
 
 // normalizeFanoutMin is the controller-side view of spec.preheatFanoutMin:
-// zero or a negative value means the single-node lower bound (M14, D39).
+// zero or a negative value means the single-node lower bound (D39).
 func normalizeFanoutMin(fanoutMin int32) int32 {
 	if fanoutMin <= 0 {
 		return 1
@@ -75,7 +75,7 @@ func normalizeFanoutMin(fanoutMin int32) int32 {
 	return fanoutMin
 }
 
-// normalizeFanoutRange normalizes the M14 bounds and defensively clamps a
+// normalizeFanoutRange normalizes the fanout bounds and defensively clamps a
 // minimum above the maximum down to the maximum. The CRD rejects that case, so
 // clamped only fires for objects that bypassed admission or for direct callers.
 func normalizeFanoutRange(fanout, fanoutMin int32) (fanoutMax, min int32, clamped bool) {
@@ -88,7 +88,7 @@ func normalizeFanoutRange(fanout, fanoutMin int32) (fanoutMax, min int32, clampe
 }
 
 // readinessKey identifies one (Pod, node) readiness fact. Status stores one
-// PodNodeReadiness per (Pod, preheat node) pair (M13), so the node name is part
+// PodNodeReadiness per (Pod, preheat node) pair, so the node name is part
 // of the identity.
 type readinessKey struct {
 	podIndex int32

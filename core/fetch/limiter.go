@@ -1,4 +1,4 @@
-// Package fetch 是下载编排层：限流、指令合并、校验失败重下（design.md §5.3、§7.5）。
+// Package fetch 是下载编排层：限流、指令合并、校验失败重下（design.md《下载编排》）。
 package fetch
 
 import (
@@ -9,7 +9,7 @@ import (
 	"traincache/core/cas"
 )
 
-// Options 是 Fetcher 的限流与重试参数（默认值见 design.md §8）。
+// Options 是 Fetcher 的限流与重试参数（默认值见 design.md《默认值》）。
 type Options struct {
 	MaxInflightBytes int64 // 在途下载字节上限（信号量口径，非 goroutine 数），默认 1 GiB；预铺最多占一半
 	MaxConnsPerHost  int   // 单主机连接数上限，默认 64
@@ -23,7 +23,7 @@ type Options struct {
 	OnLocalOpen func(fp cas.Fingerprint)
 }
 
-// 默认值（design.md §8）：Options 字段 <= 0 视为未设置，取默认。
+// 默认值（design.md《默认值》）：Options 字段 <= 0 视为未设置，取默认。
 const (
 	defaultMaxInflightBytes int64 = 1 << 30 // 1 GiB
 	defaultMaxConnsPerHost        = 64
@@ -31,7 +31,7 @@ const (
 	defaultMaxRetries             = 3
 )
 
-// withDefaults 返回补齐默认值后的 Options；零值（及负值）字段取 design.md §8 默认值。
+// withDefaults 返回补齐默认值后的 Options；零值（及负值）字段取 design.md《默认值》。
 func (o Options) withDefaults() Options {
 	if o.MaxInflightBytes <= 0 {
 		o.MaxInflightBytes = defaultMaxInflightBytes
@@ -48,7 +48,7 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Admission 是下载任务在限流层的准入档位（design.md §5.3）。
+// Admission 是下载任务在限流层的准入档位（design.md《下载编排》）。
 // 在读是需求读补块与坏块修复——已经有人等在这次下载上；预铺是预取（含显式预热）。
 // 预铺额度取全场的一半（任务槽与在途字节各自折半，至少 1），且在读有下载在途时暂停接入；
 // 在读始终按全场额度准入，不与预铺共享排队。
@@ -62,7 +62,7 @@ const (
 	AdmissionSpeculative
 )
 
-// limiter 是 fetch 包内私有限流组件（不导出，design.md §5.3）：三个维度——
+// limiter 是 fetch 包内私有限流组件（不导出，design.md《下载编排》）：三个维度——
 // 并发任务数（MaxTasks）、在途下载字节数（MaxInflightBytes）、单主机连接数（MaxConnsPerHost），
 // 外加在读的让路门（readingGate）与预铺自己的半额任务/字节额度。
 type limiter struct {
@@ -173,7 +173,7 @@ func (g *readingGate) activeCount() int {
 }
 
 // hostOf 从对象键提取“主机”维度：键的首段路径（到首个 '/' 为止），无 '/' 时取整个键。
-// 对象存储键本身不含主机（design.md §6.1），此处以首段做稳定划分，mock 场景即键前缀。
+// 对象存储键本身不含主机（design.md《索引条目与对象布局》），此处以首段做稳定划分，mock 场景即键前缀。
 func hostOf(key string) string {
 	if i := strings.IndexByte(key, '/'); i >= 0 {
 		return key[:i]

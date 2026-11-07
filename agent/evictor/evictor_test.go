@@ -66,7 +66,7 @@ func (f *fakeUsage) callCount() int {
 	return f.calls
 }
 
-// fakeHeat 是注入的热度来源(D31 窄接口):返回 entries 的快照(防排序改写测试数据),
+// fakeHeat 是注入的热度来源(窄接口):返回 entries 的快照(防排序改写测试数据),
 // log 可选记录调用次序。
 type fakeHeat struct {
 	mu      sync.Mutex
@@ -313,7 +313,7 @@ func TestRunOnceDangerLineClearsFreshness(t *testing.T) {
 	fx := newEvictFixture(t)
 	// normal 序(S):C(0.3) → B(0.9) → A(1.0);danger 序(h):C(0.3) → A(0.6) → B(0.9)。
 	// 第二轮淘汰 A(而非 B)即证明 R 已清零:低 h 高 R 的纯投机块 A(预取了还没被读)
-	// 先于高 h 低 R 的 B 被牺牲——"激进"口径(D24;§7.6"按 h 升序")。
+	// 先于高 h 低 R 的 B 被牺牲——"激进"口径(D24;设计《回收与磁盘淘汰》"按 h 升序")。
 	fpA := fx.putBlock(t, "danger-a")
 	fpB := fx.putBlock(t, "danger-b")
 	fpC := fx.putBlock(t, "danger-c")

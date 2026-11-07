@@ -17,7 +17,7 @@ const (
 	EnvDataset           = "TRAINCACHE_DATASET"             // <namespace>/<dataSetName>
 	EnvHookSock          = "TRAINCACHE_HOOK_SOCK"           // agent.sock 绝对路径
 	EnvGenerationAtStart = "TRAINCACHE_GENERATION_AT_START" // 准入时看到的 WarmupTask generation
-	// DefaultHookSockPath 是 Agent 钩子套接字的冻结路径（docs/6.1-design.md §5.4）。
+	// DefaultHookSockPath 是 Agent 钩子套接字的冻结路径（docs/6.1-design.md《钩子 socket 协议》）。
 	DefaultHookSockPath = "/run/traincache/agent.sock"
 )
 

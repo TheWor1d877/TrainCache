@@ -8,7 +8,7 @@ import (
 )
 
 // poll_bitmap_recovery_test.go pins the malformed-bitmap behaviour from
-// docs/7.3 §3 的 internal/controller/warmup 包: the entry keeps its previous
+// docs/7.3-test.md《internal/controller/warmup：WarmupTask 调节与轮询》: the entry keeps its previous
 // state (never Failed), the table is untouched, and the next poll round with a
 // valid bitmap updates readiness.
 func TestPollBitmapMismatchKeepsPollingAndRecovers(t *testing.T) {

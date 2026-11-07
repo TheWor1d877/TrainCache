@@ -17,7 +17,7 @@ var (
 	_ io.Writer     = (*Writer)(nil)
 )
 
-// Store 是网关的磁盘块缓存（design 9.1 §5.5、§6.8；9.2 D32、D33）。
+// Store 是网关的磁盘块缓存（design 9.1「盘上布局与配额淘汰」；9.2 D32、D33）。
 //
 // 锁：所有内部状态由 mu 保护。mu 之外的锁顺序只有一种：先 mu 后文件 I/O，
 // 不存在反向获取，因此不会死锁。
@@ -134,7 +134,7 @@ func (w *Writer) Close(m Metadata) error {
 	}
 	size := w.written
 
-	// 写盘之前算一次三步淘汰（design 9.1 §6.8）。
+	// 写盘之前算一次三步淘汰（design 9.1「盘上布局与配额淘汰」）。
 	if err := w.store.makeRoom(context.Background(), w.lay.dataset, size); err != nil {
 		os.Remove(w.tmp)
 		return err

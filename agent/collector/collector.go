@@ -22,7 +22,7 @@
 //   - NewCollector 只接收 blockDir / metrics / 参数；订单上下文经
 //     SetOrderContextProvider 注入，多 Pod（多 ring）的聚合在装配层完成。
 //
-// 设计见 design §5.5/§6.4/§7.4，决策见 D14/D15/D24/D31/D63。
+// 设计见设计《热度与命中率》《数据格式》《订单通道降级》，决策见D24/D63。
 
 package collector
 
@@ -42,7 +42,7 @@ import (
 	"traincache/core/cas"
 )
 
-// 热度模型默认值(design §5.5 表;D14/D24)。CollectorConfig 中 ≤0 的字段一律取默认。
+// 热度模型默认值(设计《热度与命中率》表;D24)。CollectorConfig 中 ≤0 的字段一律取默认。
 const (
 	defaultHeatDecayAge       = 24 * time.Hour   // N:超龄未 touch 直接衰减
 	defaultHeatDumpInterval   = 30 * time.Minute // DumpInterval:heatmap.json 周期
@@ -54,16 +54,16 @@ const (
 	defaultCalibrateThreshold = 0.8              // 匹配率低于该值触发重对齐
 )
 
-// 目录与文件名常量(design §6.4、core cas 块布局)。
+// 目录与文件名常量(设计《数据格式》、core cas 块布局)。
 const (
 	// blocksDirName 是 cas 块目录名:blockDir/blocks/<fp[0:2]hex>/<fp hex>.blk。
 	blocksDirName = "blocks"
 	// heatmapFileName 是热力图文件名:blockDir/heatmap.json,默认即
-	// /var/cache/traincache/heatmap.json(blockDir 为 cas 根目录,§6.4)。
+	// /var/cache/traincache/heatmap.json(blockDir 为 cas 根目录,设计《数据格式》)。
 	heatmapFileName = "heatmap.json"
 )
 
-// CollectorConfig 是采集层参数(design §5.5 冻结;≤0 取默认值)。
+// CollectorConfig 是采集层参数(设计《热度与命中率》冻结;≤0 取默认值)。
 type CollectorConfig struct {
 	HeatDecayAge       time.Duration // 超过 N 的记录直接衰减热度,默认 24h
 	HeatDumpInterval   time.Duration // 每 DumpInterval dump 一次,默认 30min
@@ -75,7 +75,7 @@ type CollectorConfig struct {
 	CalibrateThreshold float64       // 匹配率低于该值重对齐,默认 0.8
 }
 
-// EvictionEntry 是淘汰候选快照条目(D31 冻结签名;M6 淘汰循环按同签名窄接口消费,不 import 本包)。
+// EvictionEntry 是淘汰候选快照条目(冻结签名;M6 淘汰循环按同签名窄接口消费,不 import 本包)。
 // M4 增 Accesses 字段供 LFU 档策略消费。
 type EvictionEntry struct {
 	FP        cas.Fingerprint
@@ -133,7 +133,7 @@ type Collector struct {
 	started atomic.Bool // Start 幂等守卫
 }
 
-// CacheLabeler 是命中打点的 source/phase 标签适配(D46):collector 负责事件与计数,
+// CacheLabeler 是命中打点的 source/phase 标签适配:collector 负责事件与计数,
 // svc 装配期注入判定器(命中来源依赖预取窗口与 phaseTracker,不属于采集层)。
 type CacheLabeler struct {
 	// Source 返回 metrics.SourcePrefetch / SourceCache / SourceUnknown。
@@ -155,7 +155,7 @@ func SetCacheLabeler(l *CacheLabeler) {
 	cacheLabeler.Store(l)
 }
 
-// cacheLabels 取本次命中/未命中的 source 与 phase(D46;缺省 unknown)。
+// cacheLabels 取本次命中/未命中的 source 与 phase(缺省 unknown)。
 func (c *Collector) cacheLabels(dataset string, fp cas.Fingerprint, ref ordersource.ChunkRef) (source, phase string) {
 	source, phase = metrics.SourceUnknown, metrics.PhaseUnknown
 	if l := cacheLabeler.Load(); l != nil {
@@ -198,7 +198,7 @@ func (c *Collector) orderInfo(ref ordersource.ChunkRef, fp cas.Fingerprint) (dat
 	return dataset, stage, order, true
 }
 
-// NewCollector 构造采集层(design §5.5 冻结签名):blockDir = cas 根目录
+// NewCollector 构造采集层(设计《热度与命中率》冻结签名):blockDir = cas 根目录
 // (blocks/ 与 heatmap.json 的父目录,即 svc.Config.CacheRoot);m 允许为 nil(无指标场景)。
 // 订单上下文不在此注入,装配层随后调用 SetOrderContextProvider。
 func NewCollector(blockDir string, m *metrics.Registry, cfg CollectorConfig) *Collector {
@@ -218,7 +218,7 @@ func NewCollector(blockDir string, m *metrics.Registry, cfg CollectorConfig) *Co
 	}
 }
 
-// withDefaults 补齐 ≤0 字段的默认值(§5.5:≤0 取默认)。
+// withDefaults 补齐 ≤0 字段的默认值(设计《热度与命中率》:≤0 取默认)。
 func (cfg CollectorConfig) withDefaults() CollectorConfig {
 	if cfg.HeatDecayAge <= 0 {
 		cfg.HeatDecayAge = defaultHeatDecayAge
@@ -308,7 +308,7 @@ func (c *Collector) dumpLoop(ctx context.Context) {
 
 // Open 记录一次打开事件(钩子 open_report 主源):fp 为接线层经索引解析出的块指纹,
 // ref 为钩子帧原始 (path, chunk)(用于交叉校准;空 Path 表示无引用,inotify 兜底源走此形)。
-// 见 D33 HookHandlers.Open 与 §5.4。
+// 见 HookHandlers.Open 与设计《钩子 socket 协议》。
 func (c *Collector) Open(fp cas.Fingerprint, ref ordersource.ChunkRef) {
 	now := c.clock()
 	c.markHookOpen(now)
@@ -331,7 +331,7 @@ func (c *Collector) Touch(fp cas.Fingerprint, t time.Time) {
 	}
 }
 
-// ListForEviction 返回热度表全量快照(D31 冻结:调用方按得分排序,本方法不排序)。
+// ListForEviction 返回热度表全量快照(冻结:调用方按得分排序,本方法不排序)。
 // M4:填充 Accesses = e.accessCount,供 LFU 档策略消费。
 func (c *Collector) ListForEviction() []EvictionEntry {
 	c.mu.Lock()
@@ -346,10 +346,10 @@ func (c *Collector) ListForEviction() []EvictionEntry {
 // HitRate 返回滚动窗口命中率(最近 hitRateWindow 内的 命中/(命中+未命中);无样本 → 0)。
 func (c *Collector) HitRate() float64 { return c.hr.rate() }
 
-// HitRateForStage 返回某训练阶段(StageID)的进程内命中率(§5.5 按阶段聚合;无样本 → 0)。
+// HitRateForStage 返回某训练阶段(StageID)的进程内命中率(设计《热度与命中率》按阶段聚合;无样本 → 0)。
 func (c *Collector) HitRateForStage(stage string) float64 { return c.hr.stageRate(stage) }
 
-// Score 返回指纹的淘汰得分 S = max(h, R)(§5.5/D24):R = 0.5^(Δt/T_R),
+// Score 返回指纹的淘汰得分 S = max(h, R)(设计《热度与命中率》/D24):R = 0.5^(Δt/T_R),
 // Δt = now − t_touch,T_R = HeatTouchHalfLife;未知指纹 → 0。
 func (c *Collector) Score(fp cas.Fingerprint) float64 {
 	c.mu.Lock()
@@ -474,9 +474,9 @@ func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now t
 			if hit {
 				m.ObserveCacheHit(dataset, source, phase)
 			} else {
-				// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按 D36 二元口径记
+				// 采集层只观测"块不在本地"这一事实,不掌握回源结果:按二元口径记
 				// result=success(正常未命中,消费侧将自行回源);error/refetched 由 fetch/
-				// 修复路径分别计数(接线阶段)。D46:带上 phase。
+				// 修复路径分别计数(接线阶段)。:带上 phase。
 				m.ObserveCacheMiss(dataset, metrics.ResultSuccess, phase)
 			}
 		}
@@ -490,7 +490,7 @@ func (c *Collector) noteOpen(fp cas.Fingerprint, ref ordersource.ChunkRef, now t
 	}
 	c.hr.observe(now, stage, hit)
 
-	// ③ 交叉校准(D15):仅带订单引用的钩子源参与(实际顺序 vs 订单期望顺序)。
+	// ③ 交叉校准:仅带订单引用的钩子源参与(实际顺序 vs 订单期望顺序)。
 	if hasOrder && ref.Path != "" {
 		if trigger, _ := c.cal.observe(order, ref); trigger {
 			slog.Warn("collector: 交叉校准匹配率低于阈值,cursor 重对齐到实际位点",
@@ -508,7 +508,7 @@ func (c *Collector) localBlock(fp cas.Fingerprint) bool {
 	return err == nil
 }
 
-// markHookOpen 记录钩子主源活跃时间(§5.4"钩子为主";inotify 兜底判定用)。
+// markHookOpen 记录钩子主源活跃时间(设计《钩子 socket 协议》"钩子为主";inotify 兜底判定用)。
 func (c *Collector) markHookOpen(now time.Time) {
 	c.mu.Lock()
 	c.lastHookOp = now

@@ -808,7 +808,7 @@ else
 fi
 
 # ---- 可选：磁盘缓存往返（TC_E2E_CACHE=1） ----
-# 规格来源：docs/9.3-test.md 4.3 节、docs/9.2-decisions.md D29 / D35。
+# 规格来源：docs/9.3-test.md「测试文件」、docs/9.2-decisions.md D29 / D35。
 # 断言链：gatewayCache=true → 同键两轮 GET（第一轮 from=origin、第二轮 from=cache，
 # 两轮 sha256 一致）→ 删网关 Pod → 重建后第一轮 cache_hit=0、第二轮起命中。
 cache_step() {

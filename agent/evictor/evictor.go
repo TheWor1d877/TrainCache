@@ -1,4 +1,4 @@
-// Package evictor 实现磁盘淘汰循环(design §7.6;decisions D24/D31/D32)。
+// Package evictor 实现磁盘淘汰循环(设计《回收与磁盘淘汰》;decisionsD24)。
 //
 // 分层(D24/Q5):淘汰与 GC 是两件事——core Sweep 只做引用回收(语义不变),本包经
 // core cas.Evict(core D28)删除仍是 CURRENT 活块的本地副本:索引条目与引用关系不动,
@@ -11,12 +11,12 @@
 //   - util > M:危险线——先 Sweep,R 清零只按 h 升序激进淘汰(「激进」= 牺牲纯投机块,
 //     即预取了还没被读的)至 k-2Δ,ERROR 日志告警;打点 result=danger 与触发线区分。
 //
-// 每块 Evict 后重新查利用率(直至 ≤ 目标线);硬保护(cursor + lookahead 16 块,§7.6)经
+// 每块 Evict 后重新查利用率(直至 ≤ 目标线);硬保护(cursor + lookahead 16 块,设计《回收与磁盘淘汰》)经
 // ProtectedSource 注入,任何情况跳过;pin > 0 的块 cas.Evict 返回 ErrInUse 同样跳过;
-// 两类跳过都计 traincache_evict_protected_skipped(D32:告警不新增 family)。
+// 两类跳过都计 traincache_evict_protected_skipped(告警不新增 family)。
 //
-// 热度只做淘汰的决策输入,簿记在 collector(§5.5);本包以窄接口 HeatSource/
-// ProtectedSource 消费热度数据(D31),不 import collector,接线侧负责适配。
+// 热度只做淘汰的决策输入,簿记在 collector(设计《热度与命中率》);本包以窄接口 HeatSource/
+// ProtectedSource 消费热度数据,不 import collector,接线侧负责适配。
 package evictor
 
 import (
@@ -49,7 +49,7 @@ const (
 // heatHalfLife 是新鲜度 R 的半衰期 T_R(D24:6h;R = 0.5^(Δt/T_R),Δt = now − LastTouch)。
 const heatHalfLife = 6 * time.Hour
 
-// EvictionEntry 是淘汰候选(热度侧全量快照的一条;形状冻结于 D31)。
+// EvictionEntry 是淘汰候选(热度侧全量快照的一条;形状冻结于设计《回收与磁盘淘汰》)。
 // M4 增 Accesses 字段供 LFU 档策略消费。
 type EvictionEntry struct {
 	FP        cas.Fingerprint // 块指纹(cas.Evict 的入参)
@@ -58,13 +58,13 @@ type EvictionEntry struct {
 	Accesses  int64           // 累计打开次数(collector.accessCount;LFU 档用)
 }
 
-// HeatSource 是淘汰循环消费热度的窄接口(D31:与 collector 同签名,独立声明不 import,
+// HeatSource 是淘汰循环消费热度的窄接口(与 collector 同签名,独立声明不 import,
 // 接线侧适配)。ListForEviction 返回全量快照,所有权归调用方(可原地排序)。
 type HeatSource interface {
 	ListForEviction() []EvictionEntry
 }
 
-// ProtectedSource 是硬保护集合接口(§7.6:cursor + lookahead 16 块,任何情况不淘汰)。
+// ProtectedSource 是硬保护集合接口(设计《回收与磁盘淘汰》:cursor + lookahead 16 块,任何情况不淘汰)。
 // ProtectedFPs 返回本次快照的保护集合(16 块为接线侧的约定值,本包不感知具体条数)。
 type ProtectedSource interface {
 	ProtectedFPs() []cas.Fingerprint
@@ -83,9 +83,9 @@ type Config struct {
 	// Usage 返回磁盘 (已用, 总量) 字节数;nil = statfs(BlockDir) 默认实现(evictor/disk.go)。
 	Usage func() (used, total uint64, err error)
 	// Sweep 驱动一轮 core GC(接线注入:遍历已知 dataset 跑 core Sweep);失败仅日志,
-	// 不阻塞淘汰(D32)。nil = 不驱动 GC。
+	// 不阻塞淘汰。nil = 不驱动 GC。
 	Sweep func(ctx context.Context) (blocks, objects int64, err error)
-	// CacheCapacityBytes 是字节维度缓存上限(§14;>0 启用双维度淘汰,默认 0=关闭只走磁盘水位)。
+	// CacheCapacityBytes 是字节维度缓存上限(设计《回收与磁盘淘汰》;>0 启用双维度淘汰,默认 0=关闭只走磁盘水位)。
 	CacheCapacityBytes int64
 }
 
@@ -125,7 +125,7 @@ type Evictor struct {
 	// 两者都没有时为 nil,RunOnce 记 ERROR 日志并空转。
 	usage func() (used, total uint64, err error)
 
-	// cacheCapacityBytes 是字节维度上限(§14;0 = 关闭字节维度)。
+	// cacheCapacityBytes 是字节维度上限(设计《回收与磁盘淘汰》;0 = 关闭字节维度)。
 	cacheCapacityBytes int64
 	// blocksDir 是 <BlockDir>/blocks/ 目录路径(初始值来自 BlockDir;字节维度启用时用于 stat)。
 	blocksDir string
@@ -137,7 +137,7 @@ type Evictor struct {
 }
 
 // New 构造淘汰循环。cs 必填(只经 cas.Evict 删本地副本);heat/protected 可为 nil
-// (无候选/无保护);m 可为 nil(不打点);policy 为 nil 时回退 HeatPolicy(M4 D8:
+// (无候选/无保护);m 可为 nil(不打点);policy 为 nil 时回退 HeatPolicy(M4:
 // heat 档行为逐字不变);cfg 零值字段取默认(D24)。
 func New(cs *cas.Store, heat HeatSource, protected ProtectedSource, m *metrics.Registry, policy Policy, cfg Config) *Evictor {
 	cfg = cfg.withDefaults()
@@ -198,7 +198,7 @@ func (e *Evictor) Start(ctx context.Context) {
 	}()
 }
 
-// RunOnce 执行一轮检查(D32 语义;Start 的 ticker 与接线探针共用):
+// RunOnce 执行一轮检查(语义;Start 的 ticker 与接线探针共用):
 //
 //  1. util = Usage()/总量(除零防御;查询失败仅日志并结束本轮),打点 SetDiskUsageRatio;
 //     若 CacheCapacityBytes > 0,同时读取字节累计 bytesAccum,打点 SetCapacityBytes{bytes};
@@ -293,7 +293,7 @@ func (e *Evictor) RunOnce(ctx context.Context) {
 			break
 		}
 		if isProtected(protected, ent.FP) {
-			// 硬保护(cursor + lookahead):任何情况跳过并计数(D32)。
+			// 硬保护(cursor + lookahead):任何情况跳过并计数。
 			skipped++
 			e.incProtectedSkipped(result, 1)
 		} else {
@@ -313,11 +313,11 @@ func (e *Evictor) RunOnce(ctx context.Context) {
 					e.seenFPs.Delete(ent.FP) // 允许后续同 fp 再次 Open 时重新累计(罕见)
 				}
 			case errors.Is(err, cas.ErrInUse):
-				// pin > 0(正被读):跳过并同样计 protected_skipped(D32 口径)。
+				// pin > 0(正被读):跳过并同样计 protected_skipped(口径)。
 				skipped++
 				e.incProtectedSkipped(result, 1)
 			case errors.Is(err, cas.ErrNotFound):
-				// 已被并发删除/Sweep 回收:跳过不计(D32 口径)。但如果我们之前 stat 到了 size,
+				// 已被并发删除/Sweep 回收:跳过不计(口径)。但如果我们之前 stat 到了 size,
 				// 说明文件其实是存在的——这种情况极罕见(并发竞态),不调整累计。
 			default:
 				slog.Warn("evictor: 块淘汰失败", "fp", ent.FP, "err", err)
@@ -347,7 +347,7 @@ func (e *Evictor) RunOnce(ctx context.Context) {
 
 // sweep 驱动一轮 GC(Config.Sweep 为 nil 视为未接线,跳过且不打点)。成功打点
 // gc_sweeps{result=success} + gc_blocks_removed/gc_objects_removed;失败打点
-// gc_sweeps{result=error} 并仅日志(D32:失败继续淘汰)。
+// gc_sweeps{result=error} 并仅日志(失败继续淘汰)。
 func (e *Evictor) sweep(ctx context.Context) {
 	if e.cfg.Sweep == nil {
 		return
@@ -367,8 +367,8 @@ func (e *Evictor) sweep(ctx context.Context) {
 	}
 }
 
-// candidates 取本轮候选的全量快照并排序(所有权归本次调用,D31 允许原地排序)。
-// M4:排序委托给注入的 Policy.Rank(heat 档行为与原内联逻辑逐字一致,D8)。
+// candidates 取本轮候选的全量快照并排序(所有权归本次调用, 允许原地排序)。
+// M4:排序委托给注入的 Policy.Rank(heat 档行为与原内联逻辑逐字一致)。
 // entries → Block 切片,经 policy.Rank 返回淘汰优先级序,再映射回 EvictionEntry。
 func (e *Evictor) candidates(danger bool) []EvictionEntry {
 	if e.heat == nil {
@@ -487,7 +487,7 @@ func isProtected(set map[cas.Fingerprint]struct{}, fp cas.Fingerprint) bool {
 	return ok
 }
 
-// —— 字节维度辅助(§14)——
+// —— 字节维度辅助(设计《回收与磁盘淘汰》)——
 
 // idleResult / triggerResult / dangerResult 是内部触发级别常量(用于 classifyDisk/classifyBytes 返回值与 moreSevere 合并)。
 const (
@@ -635,7 +635,7 @@ func (e *Evictor) OnStorePut(fp cas.Fingerprint, size int64) {
 	e.AddBytes(size + cas.HeaderSize)
 }
 
-// AddBytes 增量加字节累计(§14 D58:外部 hook 注册;cas.Open 成功后调用)。
+// AddBytes 增量加字节累计(设计《回收与磁盘淘汰》D58:外部 hook 注册;cas.Open 成功后调用)。
 // n < 0 忽略(避免负增量异常)。
 func (e *Evictor) AddBytes(n int64) {
 	if n > 0 {

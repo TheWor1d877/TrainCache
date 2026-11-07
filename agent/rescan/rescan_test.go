@@ -1,6 +1,6 @@
 package rescan
 
-// 本文件是 rescan 的白盒/集成测试(6.2 D13 重扫描流程与 D35 rescan 包接口的
+// 本文件是 rescan 的白盒/集成测试(6.2D13 重扫描流程与 rescan 包接口的
 // 场景):契约路径用真实 core 组合
 // (objectstore.Mock + cas.Store + fetch.Fetcher + index.Catalog)验证;坏块注入 = 写块后
 // 翻转块文件数据区字节(cas.Open 报 ErrCorrupt);抽样与"全量阶段中间态"经非导出钩子
@@ -351,7 +351,7 @@ func assertRepairClosedLoop(t *testing.T, env *env, id blockID, wantContent stri
 
 // ---------------- 抽样选择与计数 ----------------
 
-// TestSampleSizeRule:1% 四舍五入、非空至少 1 块、空列表 0(D35/§7.1.3)。
+// TestSampleSizeRule:1% 四舍五入、非空至少 1 块、空列表 0(设计《启动与重启重扫描》)。
 func TestSampleSizeRule(t *testing.T) {
 	cases := []struct{ n, want int }{
 		{0, 0}, {1, 1}, {49, 1}, {50, 1}, {100, 1}, {150, 2}, {1000, 10}, {10000, 100},

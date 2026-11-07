@@ -92,7 +92,7 @@ func (c *cli) flagGiven(name string) bool {
 // executeGC 处理 gc <ds> [--orphan-blocks] [--orphan-grace d] [--dry-run] [--yes]，只触发一次 Collector.Sweep。
 //
 // gc 只回收对象存储里的快照对象与孤儿块对象，不碰任何节点的本地 CAS：本地副本归
-// 各节点 Agent 的 LocalGC（design 5.1 §11.5）。
+// 各节点 Agent 的 LocalGC（design.md《回收》）。
 //
 // dry-run 用 dryRunStore 吞掉 Delete 并记录键：同一套回收规则走完，只是不落盘，
 // 计数照常返回，所以预览结果与真正执行一致。

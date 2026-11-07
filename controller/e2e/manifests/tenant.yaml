@@ -2,7 +2,7 @@
 # grant in this namespace.
 #
 # Two Secrets are needed because the controller reads the DataSet credential
-# from the workload namespace (Q9 namespaced RBAC) while the Agent DaemonSet
+# from the workload namespace (namespaced RBAC) while the Agent DaemonSet
 # reads its own copy from the traincache namespace.
 apiVersion: v1
 kind: Namespace
@@ -32,7 +32,7 @@ stringData:
   secretKey: traincache-probe
 ---
 # The manager reads the DataSet credential Secret from the DataSet's own
-# namespace (docs/7.2 Q9), so this tenant namespace needs its own get grant.
+# namespace, so this tenant namespace needs its own get grant.
 # The shipped Role in controller/deploy/manager/rbac.yaml covers traincache only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

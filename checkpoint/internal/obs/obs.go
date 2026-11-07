@@ -1,5 +1,5 @@
 // Package obs 统一 checkpointd 的日志字段名、状态取值与错误字段对
-// （design 10.1 §5.5；docs/8.1 §3.1）。
+// （design 10.1「可观测出口」；docs/8.1 §3.1）。
 package obs
 
 import (
@@ -8,7 +8,7 @@ import (
 	corelog "traincache/core/logging"
 )
 
-// 字段名（design 10.1 §5.5）。
+// 字段名（design 10.1「可观测出口」）。
 const (
 	FieldTaskID     = "task_id"
 	FieldStep       = "step"
@@ -24,7 +24,7 @@ const (
 	FieldErrClass   = "err_class"
 )
 
-// State 是 step 与探针的状态取值（design 10.1 §4.2、§5.5）。
+// State 是 step 与探针的状态取值（design 10.1「准入契约」、「可观测出口」）。
 type State string
 
 const (
@@ -52,7 +52,7 @@ func Retry(n int) slog.Attr        { return slog.Int(FieldRetry, n) }
 func StateAttr(s State) slog.Attr  { return slog.String(FieldState, string(s)) }
 
 // InvalidSpec 用于配置或参数校验失败：err_class 固定为 invalid_spec
-// （design 10.1 §7.1）。err 为 nil 时不产生字段。
+// （design 10.1「可观测出口」）。err 为 nil 时不产生字段。
 func InvalidSpec(err error) []any {
 	if err == nil {
 		return nil

@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// ring 布局常量(design §6.2,冻结;小端)。
+// ring 布局常量(设计《数据格式》,冻结;小端)。
 const (
 	ringMagic      = "TCO1" // 偏移 0,4B
 	ringVersion    = 1      // 偏移 4,2B
@@ -73,7 +73,7 @@ type subscription struct {
 	ch chan ConsumeOrder
 }
 
-// Reader 是 OrderSource 的共享内存读端(design §5.3;由 svc 装配)。所有可变状态在 mu 下访问;
+// Reader 是 OrderSource 的共享内存读端(设计《订单源与共享内存》;由 svc 装配)。所有可变状态在 mu 下访问;
 // poll goroutine 由 NewReader 启动、Close 停止。
 type Reader struct {
 	ringPath string
@@ -168,7 +168,7 @@ func (r *Reader) Missing() bool {
 // Generation 返回最近观察到的 writer_generation(锁下读取):取自最近一次有效头,
 // 代际变化后随新头更新。未接入有效头(文件缺失 / 头非法)或 Reader 已关闭时返回 0。
 // 0 表示尚无可用代际,写端代际恰为 0 时无法区分。供 svc 按 (generation, payload)
-// 去重与每源状态机使用(design §7.4 / decisions D63)。
+// 去重与每源状态机使用(设计《订单通道降级》 / decisionsD63)。
 func (r *Reader) Generation() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -178,7 +178,7 @@ func (r *Reader) Generation() int64 {
 	return r.lastGen
 }
 
-// LastAdvance 返回最近一次观察到 write_seq 推进的本地时间(decisions D29:锁下读取;
+// LastAdvance 返回最近一次观察到 write_seq 推进的本地时间(锁下读取;
 // 零值 = 从未推进)。语义:
 //   - 构造时的首次有效快照视为推进(文件不存在 / 头非法 → 保持零值);
 //   - writer_generation 变化(新代际)视为推进,即使 write_seq 未变;
@@ -263,7 +263,7 @@ func (r *Reader) pollOnceLocked(suppress bool) {
 
 	fresh := !r.attached || h.generation != r.lastGen
 	// 已接入且代际变化 = sidecar 重启:清当前订单与去重基线,新代际同载荷订单也重放一次
-	// (design §7.4)。首次接入(suppress=true)不走这里,初始快照仍不投递。
+	// (设计《订单通道降级》)。首次接入(suppress=true)不走这里,初始快照仍不投递。
 	genChanged := r.attached && h.generation != r.lastGen
 	if !fresh && h.writeSeq < r.lastReadSeq {
 		// 防御(约定 13):同一代际 write_seq 回退 = 写端 bug → 重置状态跳最新。
@@ -295,7 +295,7 @@ func (r *Reader) resyncLocked(h ringHeader, suppress bool) {
 	r.attached = true
 	r.lastGen = h.generation
 	r.lastReadSeq = h.writeSeq // 跳过历史:阶段切换只关心最新顺序
-	// D29:首次快照 / 新代际 / 写端回退后重同步均视为"观察到推进"(写端在此刻可读)。
+	// :首次快照 / 新代际 / 写端回退后重同步均视为"观察到推进"(写端在此刻可读)。
 	r.lastAdvance = time.Now()
 	if h.writeSeq <= 0 {
 		return
@@ -319,7 +319,7 @@ func (r *Reader) followLocked(h ringHeader) {
 	if target <= r.lastReadSeq {
 		return
 	}
-	// D29:头 write_seq 前进(含跳读最新)即视为推进;槽载荷是否可读不影响。
+	// :头 write_seq 前进(含跳读最新)即视为推进;槽载荷是否可读不影响。
 	r.lastAdvance = time.Now()
 	if target > r.lastReadSeq+int64(h.slotCount) {
 		order, raw, out := r.readSlotLocked(h, target)
@@ -391,7 +391,7 @@ func (r *Reader) readSlotLocked(h ringHeader, seq int64) (ConsumeOrder, []byte, 
 
 // acceptLocked 接受一份已解析订单:更新当前订单;suppress(初始快照)只置去重基线不推送;
 // 其余按载荷字节去重(相同不推,约定 7)。chunks 为空的订单行为不变(仍更新 cur),只计入
-// 包级 invalid 丢单计数(design §7.4)。
+// 包级 invalid 丢单计数(设计《订单通道降级》)。
 func (r *Reader) acceptLocked(order ConsumeOrder, raw []byte, suppress bool) {
 	r.cur = order
 	r.hasCur = true
@@ -543,7 +543,7 @@ func (r *Reader) markMissingLocked() {
 }
 
 // parseHeaderLocked 读取并校验当前文件头;返回 (h, true) 表示头有效。
-// 格式非法:忽略该文件并按 kind 计一次错误(D23:同一坏头状态只计一次)。
+// 格式非法:忽略该文件并按 kind 计一次错误(同一坏头状态只计一次)。
 func (r *Reader) parseHeaderLocked() (ringHeader, bool) {
 	var hb []byte
 	if r.data != nil {
@@ -568,7 +568,7 @@ func (r *Reader) parseHeaderLocked() (ringHeader, bool) {
 	return h, true
 }
 
-// countBadHeaderLocked 记录坏头(D23):同一文件同一坏头状态只计一次。
+// countBadHeaderLocked 记录坏头:同一文件同一坏头状态只计一次。
 func (r *Reader) countBadHeaderLocked(kind string) {
 	if r.badKind == kind {
 		return

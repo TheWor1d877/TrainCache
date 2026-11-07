@@ -1,6 +1,6 @@
-// Package index 是路径索引层：快照、分片、提交、刷新、回收（design.md §5.4、§6）。
+// Package index 是路径索引层：快照、分片、提交、刷新、回收（design.md《索引条目与对象布局》）。
 //
-// 对象存储键布局（design.md §6.1、decisions.md D8）：
+// 对象存储键布局（design.md《索引条目与对象布局》、decisions.md D8）：
 //
 //	<bucket>/
 //	└── dataset/<name>/
@@ -29,7 +29,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// Config 是 index 包的全局配置（默认值见 DefaultConfig；design.md §8 配置项表）。
+// Config 是 index 包的全局配置（默认值见 DefaultConfig；design.md《默认值》）。
 type Config struct {
 	ChunkSize          int64         // 块切分粒度，默认 64 MiB（decisions D4）
 	MaxEntriesPerShard int           // 分片条目上限，默认 100_000（doc/5.0 硬约束）
@@ -37,7 +37,7 @@ type Config struct {
 	RetainSnapshots    int           // GC 保留窗口，默认 3（CURRENT + 2，decisions D14）
 	RefreshInterval    time.Duration // Catalog 后台刷新周期，默认 5 s
 	// ReaderGrace 是读者 claim 的有效期：UpdatedAt 超过该时长的 claim 整体忽略
-	// （视为读者已死）。零值/负值回退为 2*RefreshInterval（默认 10 s，6.1 §5.11）。
+	// （视为读者已死）。零值/负值回退为 2*RefreshInterval（默认 10 s，6.1《快照与回收》）。
 	ReaderGrace time.Duration
 	// OnSnapshotChange 在每次成功原子切换后、锁外调用；参数为数据集名与新 snapID。
 	// nil 表示不回调；实现不得阻塞，回调 panic 不得向调用方传播。
@@ -46,11 +46,11 @@ type Config struct {
 	// nil 表示不回调；实现不得阻塞，回调 panic 不得向调用方传播。
 	OnSnapshotError func(dataset string, err error)
 	// OnSweepSkip 在 GC 因需要保护的快照 manifest 不可用而跳过本轮块删除时调用，
-	// 参数为数据集名与原因（如 "manifest_unavailable"）。nil 表示不回调（6.1 §5.11）。
+	// 参数为数据集名与原因（如 "manifest_unavailable"）。nil 表示不回调（6.1《快照与回收》）。
 	OnSweepSkip func(dataset, reason string)
 }
 
-// 默认值（design.md §8）。
+// 默认值（design.md《默认值》）。
 const (
 	defaultChunkSize          int64 = 64 << 20 // 64 MiB
 	defaultMaxEntriesPerShard       = 100_000  // doc/5.0 硬约束
@@ -59,7 +59,7 @@ const (
 	defaultRefreshInterval          = 5 * time.Second
 )
 
-// DefaultConfig 返回 design.md §8 的默认配置。
+// DefaultConfig 返回 design.md《默认值》的配置。
 func DefaultConfig() Config {
 	return Config{
 		ChunkSize:          defaultChunkSize,
@@ -107,7 +107,7 @@ type Entry struct {
 	Node        string          `json:"node,omitempty"` // 块实际落盘的节点名
 }
 
-// entryWire 是 Entry 的 JSON 中间结构：Fingerprint 编码为 32 字符小写 hex（design.md §6.2）。
+// entryWire 是 Entry 的 JSON 中间结构：Fingerprint 编码为 32 字符小写 hex（design.md《索引条目与对象布局》）。
 type entryWire struct {
 	Path  string `json:"path"`
 	Chunk int64  `json:"chunk"`
@@ -157,7 +157,7 @@ type Manifest struct {
 	Shards     []ShardRef `json:"shards"`
 }
 
-// 对象存储键函数（布局见 design.md §6.1）：
+// 对象存储键函数（布局见 design.md《索引条目与对象布局》）：
 
 // SnapshotPrefix 返回 dataset/<name>/snapshots/<id>/。
 func SnapshotPrefix(dataset string, snapID string) string {
@@ -191,7 +191,7 @@ type entryKey struct {
 	chunk int64
 }
 
-// contentFingerprint 返回内容的 xxh3-128 完整指纹（32 字符小写 hex，design.md §6.2）。
+// contentFingerprint 返回内容的 xxh3-128 完整指纹（32 字符小写 hex，design.md《索引条目与对象布局》）。
 func contentFingerprint(b []byte) string {
 	sum := digest.XXH3_128(b)
 	return hex.EncodeToString(sum[:])
@@ -213,7 +213,7 @@ type shardSlice struct {
 }
 
 // buildShards 将条目按 (path, chunk) 字典序排序后按条目数切分（range-based）并编码为
-// JSON 数组分片，每片条目数 ≤ maxEntries（design.md §6.2）；每片的路径范围
+// JSON 数组分片，每片条目数 ≤ maxEntries（design.md《索引条目与对象布局》）；每片的路径范围
 // （首末条 Path）随分片一并返回（D22）。
 func buildShards(entries []Entry, maxEntries int) ([]shardSlice, error) {
 	sorted := append([]Entry(nil), entries...)

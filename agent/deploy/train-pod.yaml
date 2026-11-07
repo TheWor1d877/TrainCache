@@ -1,4 +1,4 @@
-# train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 6.1 §8)。
+# train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 设计《部署与配置》)。
 #
 # 用法(kind 本机演练;命名空间由 controller/deploy/namespace.yaml 创建,先 apply 它与 agent 清单):
 #   docker build -f agent/deploy/ordersrc.Dockerfile -t traincache-ordersrc:dev .
@@ -6,12 +6,12 @@
 #   kind load docker-image busybox:latest --name traincache
 #   kubectl apply -f agent/deploy/train-pod.yaml
 #
-# 布局(§8 训练 Pod 侧):
+# 布局(设计《部署与配置》训练 Pod 侧):
 #   - trainer:hostPath 只读挂载 /var/cache/traincache/blocks/(验收 3:直接读取本地 CAS
 #     数据块,不经 Agent gRPC 读接口);此处为占位训练进程,循环枚举可见块文件证直读通路;
 #   - ordersrc sidecar:挂 /run/traincache(rw),ring 写 /run/traincache/orders/<pod-uid>.ring
-#     (§6.2;sidecar 参数 pod-uid/dataset/chunk 清单);循环重写保持 ring 持续推进
-#     (<30s 周期,避免 Agent 按 §7.4 判停滞进入降级);POD_UID 走 Downward API。
+#     (设计《数据格式》;sidecar 参数 pod-uid/dataset/chunk 清单);循环重写保持 ring 持续推进
+#     (<30s 周期,避免 Agent 按设计《订单通道降级》判停滞进入降级);POD_UID 走 Downward API。
 #   - 同 Pod 两容器与所在节点的 agentd 共享 hostPath,天然同节点。
 apiVersion: v1
 kind: Pod

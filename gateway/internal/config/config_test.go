@@ -30,7 +30,7 @@ func clearEnv(t *testing.T) {
 	}
 }
 
-// defaultConfig 是 design 9.1 §5.3 的全部默认值。
+// defaultConfig 是 design 9.1「配置」的全部默认值。
 func defaultConfig() Config {
 	return Config{
 		ObjstoreEndpoint:  "127.0.0.1:9000",

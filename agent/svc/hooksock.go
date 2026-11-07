@@ -19,10 +19,10 @@ import (
 	corelog "traincache/core/logging"
 )
 
-// hooksock.go:钩子 Unix datagram 收端(design §5.4;decisions D33)。
+// hooksock.go:钩子 Unix datagram 收端(设计《钩子 socket 协议》)。
 //
 // DataLoader 钩子(Python,训练 Pod 内)→ Agent:Unix datagram socket
-// (默认 /run/traincache/agent.sock),行分隔 JSON、单向(Agent 不回帧)。帧类型(§5.4
+// (默认 /run/traincache/agent.sock),行分隔 JSON、单向(Agent 不回帧)。帧类型(设计《钩子 socket 协议》
 // 冻结三型,字段名即 JSON 标签):
 //
 //	{"type":"advance","path":"...","chunk":3}                            → Advance(ChunkRef)
@@ -36,13 +36,13 @@ import (
 //
 // 处理语义:
 //   - 非法 JSON / 未知帧类型 / 超限帧丢弃并计数(metrics.IncHookFormatErrors,
-//     reason∈{parse,size};D33/D36;集合外取值不新增基数);
+//     reason∈{parse,size};集合外取值不新增基数);
 //   - handler 为 nil 的帧丢弃(合法帧,仅无消费者,不计数);
-//   - 分发经注入的 HookHandlers(D33:接线阶段不改本文件);读循环单 goroutine 顺序
+//   - 分发经注入的 HookHandlers(接线阶段不改本文件);读循环单 goroutine 顺序
 //     分发(handler 不并发调用);
-//   - 套接字文件权限放宽为 0666:钩子进程与 Agent 可能跨容器/跨用户(§6.3 部署口径)。
+//   - 套接字文件权限放宽为 0666:钩子进程与 Agent 可能跨容器/跨用户(设计《数据格式》部署口径)。
 
-// hookMaxFrame 是单帧字节上限(§5.4:单帧 ≤ 4 KiB;超限丢弃计 reason=size)。
+// hookMaxFrame 是单帧字节上限(设计《钩子 socket 协议》:单帧 ≤ 4 KiB;超限丢弃计 reason=size)。
 const hookMaxFrame = 4 << 10
 
 // hookReadBuf 是收包缓冲:上限 +1 字节,恰好用于检出超限数据报。
@@ -61,7 +61,7 @@ type HookMeta struct {
 	Generation uint64
 }
 
-// HookHandlers 是钩子帧分发目标(D33 冻结):nil 字段 = 丢弃该类帧。
+// HookHandlers 是钩子帧分发目标(冻结):nil 字段 = 丢弃该类帧。
 type HookHandlers struct {
 	// Meta 接收每帧可选的任务身份(kind = 线上帧类型名),在类型回调之前、同一
 	// 读循环 goroutine 内调用;nil = 不关心身份。旧帧(无身份字段)以零值回调。
@@ -69,7 +69,7 @@ type HookHandlers struct {
 	// Advance 接收消费侧推进帧(advance):实际消费到的块引用。
 	Advance func(ref ordersource.ChunkRef)
 	// StageSwitch 接收阶段切换直报帧(stage_switch):仅作信号,接线层结合
-	// ring CurrentOrder 构造新订单(D33),故只传 stageID 与 shuffle_seed。
+	// ring CurrentOrder 构造新订单,故只传 stageID 与 shuffle_seed。
 	StageSwitch func(stageID string, seed int64)
 	// Open 接收打开上报帧(open_report):接线层经索引解析为指纹后进入 collector。
 	Open func(ref ordersource.ChunkRef)
@@ -100,7 +100,7 @@ type hookFrame struct {
 	Generation uint64 `json:"generation"`
 }
 
-// HookSock 是钩子 socket 收端(D33 冻结构造签名):New 后 Start 一次,
+// HookSock 是钩子 socket 收端(冻结构造签名):New 后 Start 一次,
 // ctx 取消或 Close 后停止并清理套接字文件。
 type HookSock struct {
 	path string

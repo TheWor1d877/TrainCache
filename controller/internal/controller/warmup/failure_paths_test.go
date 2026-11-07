@@ -66,7 +66,7 @@ func (c *podPatchCounter) count(name string) int {
 }
 
 // TestReconcile_ScoreAnnotationWriteFails_KeepsGate pins the failure promise of
-// docs/7.1-design.md §7.5: when the Pod patch that carries the score
+// docs/7.1-design.md《门控与放行》: when the Pod patch that carries the score
 // annotation fails, the Pod keeps its scheduling gate, its annotations stay
 // untouched, the reconcile reports the error instead of silently succeeding,
 // and a Pod that was already released is not rolled back.

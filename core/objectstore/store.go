@@ -1,4 +1,4 @@
-// Package objectstore 提供对 S3 兼容对象存储的最小抽象（design.md §5.1）。
+// Package objectstore 提供对 S3 兼容对象存储的最小抽象（design.md《对象存储抽象》）。
 //
 // 实现：
 //   - s3.go：minio-go SDK 后端（条件写入使用 SDK 的 If-Match / If-None-Match 支持；
@@ -36,7 +36,7 @@ type Store interface {
 	// PutIfMatch 条件写入：expectedETag 为空串时要求 key 不存在（If-None-Match: *），
 	// 否则要求当前 ETag == expectedETag（If-Match）。冲突返回 ErrConflict，不写入。
 	PutIfMatch(ctx context.Context, key string, r io.Reader, size int64, expectedETag string) (newETag string, err error)
-	// List 返回匹配 prefix 的全部对象键（字典序升序）；无匹配返回空切片（D19）。
+	// List 返回匹配 prefix 的全部对象键（字典序升序）；无匹配返回空切片（design.md《对象存储抽象》）。
 	// 供 index.Collector.Sweep 枚举快照对象用。
 	List(ctx context.Context, prefix string) ([]string, error)
 }

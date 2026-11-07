@@ -1,4 +1,4 @@
-# controller-manager Deployment (single replica by default, docs/7.2 Q10).
+# controller-manager Deployment (single replica by default).
 #
 # Watches all namespaces: DataSet/WarmupTask and the Pods selected by
 # traincache.io/warmup=enabled (DegradedReconciler). The Agent is discovered

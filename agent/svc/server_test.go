@@ -407,7 +407,7 @@ func TestSubmitPreheatRPC(t *testing.T) {
 	}
 }
 
-// TestSubmitPreheatRPCInvalidNode:node 不符 → InvalidArgument(design §5.1)。
+// TestSubmitPreheatRPCInvalidNode:node 不符 → InvalidArgument(设计《gRPC 接口》)。
 func TestSubmitPreheatRPCInvalidNode(t *testing.T) {
 	conn := startServer(t)
 	req := validSubmitReq()

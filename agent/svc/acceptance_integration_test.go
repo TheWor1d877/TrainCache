@@ -47,7 +47,7 @@ const (
 	m3OrderDataset  = "m3-order"  // 验收 8/9:订单驱动预取
 )
 
-// ring 布局常量(design §6.2,与 ordersource 读端一致;测试内独立字面量防冻结布局漂移)。
+// ring 布局常量(设计《数据格式》,与 ordersource 读端一致;测试内独立字面量防冻结布局漂移)。
 const (
 	m3RingHeaderSize = 64 // 头固定 64B
 	m3SlotHeaderSize = 12 // 槽头:seq int64 + len int32
@@ -580,7 +580,7 @@ func TestOrderStartsPrefetcher(t *testing.T) {
 // 观察手段(确定性,不用裸 sleep):新阶段三块本地均无副本(仅源站可达)且装载下载门闩,
 // 于是"没有任何块完成(新阶段游标仍为 -1)"的状态由测试完全控制,可以断言:
 //  1. 前 K=2 块(按新订单顺序)已被拉起下载 —— 启动窗口在切换时刻入队,不依赖完成推进;
-//  2. 第 3 块零触碰 —— P2 邻域须待 K 块就绪后才开放(§7.3),即 K 块优先于其余块;
+//  2. 第 3 块零触碰 —— P2 邻域须待 K 块就绪后才开放(设计《持续预取与阶段切换》),即 K 块优先于其余块;
 //  3. 放行后 K 块完成 → 邻域开放 → 第 3 块下载并完成,游标推进到新阶段末块。
 //
 // (P1 队列深度的字面量断言由 prefetch 单测 TestStageSwitchEnqueuesKWindowAsP1 覆盖;

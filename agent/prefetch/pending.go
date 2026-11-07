@@ -158,7 +158,7 @@ func (p *PersistentPrefetcher) InFlight(dataset string, ref ordersource.ChunkRef
 	return !p.taskQueuedLocked(t)
 }
 
-// IsCurrentWindow 报告该块是否属于当前消费窗口(D46 source=prefetch 判据;D47
+// IsCurrentWindow 报告该块是否属于当前消费窗口(source=prefetch 判据;D47
 // local_slow 判据):当前阶段、位置在 [cursor, cursor+lookahead] 内,且启动窗口 K 尚未
 // 处理完时包含整个 K 窗口。无法判定(无阶段/块不在订单/非本 dataset)返回 false。
 func (p *PersistentPrefetcher) IsCurrentWindow(dataset string, ref ordersource.ChunkRef) bool {

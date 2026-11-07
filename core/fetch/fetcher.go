@@ -16,7 +16,7 @@ import (
 // ErrTooManyRetries 表示校验失败重下达到 MaxRetries 仍未成功。
 var ErrTooManyRetries = errors.New("fetch: verification failed after max retries")
 
-// backoffBase 是重试退避基数（decisions.md Q6：指数退避 100ms 起、无抖动）。
+// backoffBase 是重试退避基数（指数退避 100ms 起、无抖动）。
 const backoffBase = 100 * time.Millisecond
 
 // Range 并行下载：打开 Options.RangeParallel 时把对象拆成 rangeParts 个连续区间
@@ -74,7 +74,7 @@ type Fetcher struct {
 	inflight map[string]*inflightCall
 }
 
-// New 创建 Fetcher；opts 缺省字段按 design.md §8 默认值补齐。
+// New 创建 Fetcher；opts 缺省字段按 design.md《默认值》补齐。
 func New(store objectstore.Store, cs *cas.Store, opts Options) *Fetcher {
 	opts = opts.withDefaults()
 	return &Fetcher{
@@ -215,7 +215,7 @@ func (f *Fetcher) download(ctx context.Context, key string, expectSize int64, ad
 
 // tryOnce 执行一次完整下载尝试：单主机连接额度 → 取数并流经 cas.Put 落盘
 // （ctx 取消/流错误均不残留）→ cas.Open 读回校验；校验失败则 cas.Remove 后
-// 返回 ErrCorrupt（此时块无引用无 pin，Remove 不会 ErrInUse，design.md §7.5）。
+// 返回 ErrCorrupt（此时块无引用无 pin，Remove 不会 ErrInUse，design.md《下载编排》）。
 //
 // Options.RangeParallel 打开时走四分片并行取数与临时文件聚合，否则走原整对象 Get
 // 经 io.Pipe 直连 cas.Put 的路径。两条路径最终都交给同一个 cas.Put 做流式顺序写入

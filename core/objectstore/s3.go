@@ -23,7 +23,7 @@ var _ Store = (*S3Store)(nil)
 
 // NewS3Store 构造任意 S3 兼容后端的 Store。endpoint 形如
 // "127.0.0.1:9000" 或 "cos.ap-guangzhou.myqcloud.com"，secure 为 true 时使用 HTTPS。
-// bucket 为对象存储桶名（v1 约定单桶，见 decisions.md Q5）。
+// bucket 为对象存储桶名（v1 约定单桶）。
 //
 // 本函数不安装网关响应头探针，错误语义与既有调用方保持一致。需要覆盖传输层
 // 行为（如压缩开关）时用 NewSourceS3Store；需要走网关时用

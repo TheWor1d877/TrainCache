@@ -1123,7 +1123,7 @@ func internalf(format string, args ...any) error {
 	return &plugin.Error{Code: plugin.CodeInternal, Message: fmt.Sprintf(format, args...)}
 }
 
-// toPluginError 把 minio 与网络错误收敛到 10.1 §4.1 的错误码。已是插件
+// toPluginError 把 minio 与网络错误收敛到 10.1「插件进程契约」的错误码。已是插件
 // 错误时原样返回，避免二次分类改变调用方看到的语义。
 func toPluginError(err error) error {
 	if err == nil {

@@ -19,7 +19,7 @@ import (
 // output; production always writes to stderr like agentd.
 var output io.Writer = os.Stderr
 
-// logSchemaVersion is the public log field schema version (docs/8.1 §3.1).
+// logSchemaVersion is the public log field schema version (docs/8.1-design.md, "公共字段契约").
 // It only increases; never change the meaning of an existing value.
 const logSchemaVersion = 1
 
@@ -44,7 +44,7 @@ func New(component, version, level string) *slog.Logger {
 	// /debug/loglevel 修改，所有已构造的 handler 立即跟随。
 	lvl, _ := corelog.ParseLevel(level)
 	corelog.Level().Set(lvl)
-	// 采样限流包在脱敏外层:先判断是否值得写,再格式化与脱敏(8.1 §3.3)。
+	// 采样限流包在脱敏外层:先判断是否值得写,再格式化与脱敏(docs/8.1-design.md 的「级别与采样」一节)。
 	sampler := corelog.NewControlSampler(component)
 	processSampler.Store(sampler)
 	// 脱敏包在 JSON handler 外层：消息、字符串与 error 属性写出前统一处理，

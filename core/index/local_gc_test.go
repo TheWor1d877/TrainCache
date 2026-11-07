@@ -14,11 +14,11 @@ import (
 
 // local_gc_test.go 覆盖 LocalGC（节点级本地副本回收）的口径：
 // 活块集合 = 各数据集当前快照（CURRENT）引用的块 ∪ 有效读者 claim 保护的快照引用的
-// 块；删除 = 新快照不含（§11.4）落在集合差上；任一数据集索引读不到（确定不存在除外）
+// 块；删除 = 新快照不含（design.md《提交》）落在集合差上；任一数据集索引读不到（确定不存在除外）
 // 或损坏时整轮不删任何块（fail-safe）；删除动作走 cas.Evict。
 
 // TestLocalGCReclaimsLocalCopyOfDeletedEntry：数据集里某条目被删（提交一个不含它的
-// 新快照，§11.4 删除 = 新快照不含）后，它的本地副本被 LocalGC 回收；仍在快照里的
+// 新快照，design.md《提交》删除 = 新快照不含）后，它的本地副本被 LocalGC 回收；仍在快照里的
 // 条目引用的块保留。
 func TestLocalGCReclaimsLocalCopyOfDeletedEntry(t *testing.T) {
 	ctx := context.Background()

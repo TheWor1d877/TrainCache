@@ -1,6 +1,6 @@
 package merge
 
-// ring 是单条目的定长环形缓冲（design 9.1 §5.2）。
+// ring 是单条目的定长环形缓冲（design 9.1「环形缓冲」）。
 //
 // 约定：written 是相对对象起点的绝对偏移；偏移 i 的字节存放在
 // buf[i % len(buf)]。可读区间由调用方用「pos 与 written 之差不超过容量」

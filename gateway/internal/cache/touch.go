@@ -2,7 +2,7 @@ package cache
 
 import "time"
 
-// last-touch 表记在进程内存里：dataset → 最后出现时间（design 9.1 §6.8；
+// last-touch 表记在进程内存里：dataset → 最后出现时间（design 9.1「盘上布局与配额淘汰」；
 // 9.2 D33）。
 //
 // 读命中与写盘成功都刷新这张表；启动时由 Scan 按 dataset 目录 mtime 填。

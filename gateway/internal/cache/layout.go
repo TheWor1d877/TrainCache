@@ -1,4 +1,4 @@
-// Package cache 是网关的磁盘块缓存层（design 9.1 §5.5、§6.8；9.2 D32、D33）。
+// Package cache 是网关的磁盘块缓存层（design 9.1「盘上布局与配额淘汰」；9.2 D32、D33）。
 //
 // 包只依赖标准库：它不认识 minio-go，也不知道 merge、server、origin 的存在。
 // 落盘布局、原子写、读盘扇出、配额与三步淘汰、last-touch 表都在这里闭环。
@@ -28,7 +28,7 @@ const RootDir = "/var/lib/traincache-gateway/cache"
 // ErrNotFound 表示盘上没有这一块。Lookup 未命中时返回它。
 var ErrNotFound = errors.New("cache: object not found")
 
-// ErrQuota 表示三步淘汰做完后这块仍放不下，本次不写盘（design 9.1 §6.8 第 3 步）。
+// ErrQuota 表示三步淘汰做完后这块仍放不下，本次不写盘（design 9.1「盘上布局与配额淘汰」第 3 步）。
 var ErrQuota = errors.New("cache: quota exceeded")
 
 const (
@@ -37,7 +37,7 @@ const (
 	// tmpSuffix 是写入中的临时文件后缀，rename 之前对 Lookup 不可见。
 	tmpSuffix = ".tmp"
 	// maxSegmentBytes 是单个路径分段的字节上限，即 ext4 单个目录名的上限。
-	// 键里任一分隔段超过它就跳过写盘（design 9.1 §5.1；9.2 D32）。
+	// 键里任一分隔段超过它就跳过写盘（design 9.1「网关 HTTP 契约」；9.2 D32）。
 	maxSegmentBytes = 255
 )
 

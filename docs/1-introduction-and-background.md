@@ -21,7 +21,7 @@ TrainCache 把启动预取扩展到训练全程，分两段：
 
 - Fluid 的缓存亲和度是粗粒度二进制加事后注入：Pod 引用了 Dataset A，节点装了 A 的 Runtime 就加分，没装不加分；Pod 创建后才由 webhook 往 spec 里加 nodeAffinity，Pod 自带 affinity/nodeSelector 时跳过注入。判定只看「节点上有没有这个 Dataset 的 runtime/缓存」，缓存了多少比例、哪些块不参与加分。
 - 预热与调度互盲：DataLoad 得不到调度信息，拿不到「哪个 Job 需要哪些分片」，只能手动拉全量；webhook 注入亲和时只检查节点上有没有 Runtime，不检查数据拉了多少、拉了哪几块，可能把 Job 派到「Runtime 开着但数据只拉了 10%」的节点。工业方案的预热针对整个 Dataset 或某个 prefix，不针对具体 Job 要读的分片；预热是独立、手动创建的 CRD，调度不按 DataLoad 的块级进度门控。
-- JuiceFS 社区版只有单机本地缓存，分布式缓存组（一致性哈希环、peer 间共享块）、IORPC、RDMA 都是企业版能力，实测边界见 3 现勘报告 §4。
+- JuiceFS 社区版只有单机本地缓存，分布式缓存组（一致性哈希环、peer 间共享块）、IORPC、RDMA 都是企业版能力，实测边界见现勘报告的能力边界四方对比一节。
 - 2026 年训练数据加载的主流形态：数据打包成百 MB 级分片（webdataset tar 或 Mosaic MDS），确定性 shuffle（用种子控制）下顺序流式读取，不再是百万小文件的元数据压力场景。训练主负载是「百 MB 分片 + 真实 DataLoader」。
 - 数据并行下的分片对应：整份数据被所有 Pod 合起来跑一遍，每个 Pod 只跑自己的分片，Pod 之间不重复。预热要按 Pod 分片对应到候选节点，每个候选节点只预热它要承接的那部分。
 

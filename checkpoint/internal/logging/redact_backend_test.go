@@ -10,9 +10,9 @@ import (
 	"traincache/checkpoint/internal/obs"
 )
 
-// 本文件补 10.3 §6「凭证脱敏」的缺口：已有用例只断言敏感键被替换，这里注入
+// 本文件覆盖 10.3 覆盖矩阵里的「日志字段与脱敏」一行：已有用例只断言敏感键被替换，这里注入
 // 后端返回体——一条把两把凭证与预签名 URL 原样回显给 checkpointd 的 S3 错误。
-// 脱敏仍按 10.1 §7.1 交给 core/logging 的处理器，业务代码不逐处调用 Redact，
+// 脱敏仍按 10.1「可观测出口」交给 core/logging 的处理器，业务代码不逐处调用 Redact，
 // 所以用例从 logger 出发，断言的是「写出去的那一行里查不到凭证」。
 
 // 哨兵取值是对象存储文档里的示例键，不是可用凭证。
@@ -32,7 +32,7 @@ var presignedURL = fmt.Sprintf(
 	sentinelUserinfo, sensitiveObjectKey, sentinelAccessKey, sentinelSignature)
 
 // backendBody 模拟后端错误返回体：键名走 JSON，凭证与预签名 URL 混在同一个
-// 字符串里。checkpointd 只能整条记进 err 字段，逐字段清洗不在契约里（10.1 §7.1）。
+// 字符串里。checkpointd 只能整条记进 err 字段，逐字段清洗不在契约里（10.1「可观测出口」）。
 var backendBody = fmt.Sprintf(
 	`plugin: UNAVAILABLE: s3 请求失败 403 {"code":"AccessDenied","message":"The security token included in the request is expired",`+
 		`"accessKey":"%s","secret_key":"%s","request_url":"%s"}`,
@@ -41,7 +41,7 @@ var backendBody = fmt.Sprintf(
 // leakedCredentials 是任何一条日志行都不该出现的取值。
 var leakedCredentials = []string{sentinelAccessKey, sentinelSecretKey, sentinelSignature, "SuperSecretPass"}
 
-// saveFailAttrs 按 10.1 §7.1 的写法拼出「保存或恢复失败」这条 ERROR 的字段：
+// saveFailAttrs 按 10.1「可观测出口」的写法拼出「保存或恢复失败」这条 ERROR 的字段：
 // task_id、step、retry 加成对的 err 与 err_class。
 func saveFailAttrs(err error, extra ...slog.Attr) []any {
 	attrs := make([]any, 0, len(extra)+4)
@@ -132,7 +132,7 @@ func TestBackendBodyCredentialsRedactedInEveryLane(t *testing.T) {
 }
 
 // TestBackendBodyRedactionKeepsStepFields 确认脱敏后逐步事件的可统计字段仍在：
-// step、task_id、retry 是 10.1 §7.2 里替代指标的三个查询维度。
+// step、task_id、retry 是 10.1「可观测出口」里替代指标的三个查询维度。
 func TestBackendBodyRedactionKeepsStepFields(t *testing.T) {
 	buf := captureOutput(t)
 	oldDefault := slog.Default()

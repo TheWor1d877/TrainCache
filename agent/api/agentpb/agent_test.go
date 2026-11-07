@@ -101,7 +101,7 @@ func TestBlockReportRoundTrip(t *testing.T) {
 	roundTrip(t, in, &agentpb.BlockReport{})
 }
 
-// TestEnumZeroValues 断言各枚举零值与 §5.1 冻结内容一致(零值语义被 readiness 等依赖)。
+// TestEnumZeroValues 断言各枚举零值与设计《gRPC 接口》冻结内容一致(零值语义被 readiness 等依赖)。
 func TestEnumZeroValues(t *testing.T) {
 	if got := agentpb.PreheatPriority(0); got != agentpb.PreheatPriority_P0 {
 		t.Errorf("PreheatPriority 零值 = %v, want P0(默认 P0)", got)
@@ -120,7 +120,7 @@ func TestEnumZeroValues(t *testing.T) {
 	}
 }
 
-// TestEnumOrder 断言枚举值编号与 §5.1 冻结顺序逐一对应。
+// TestEnumOrder 断言枚举值编号与设计《gRPC 接口》冻结顺序逐一对应。
 func TestEnumOrder(t *testing.T) {
 	priorities := []agentpb.PreheatPriority{
 		agentpb.PreheatPriority_P0, agentpb.PreheatPriority_P1,
@@ -172,7 +172,7 @@ func TestEnumOrder(t *testing.T) {
 	}
 }
 
-// TestServiceDescNames 断言服务全限定名与 §5.1 冻结内容一致。
+// TestServiceDescNames 断言服务全限定名与设计《gRPC 接口》冻结内容一致。
 func TestServiceDescNames(t *testing.T) {
 	tests := []struct {
 		got  string

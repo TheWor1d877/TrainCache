@@ -15,7 +15,7 @@ import (
 	"traincache/agent/ordersource"
 )
 
-// ringSuffix 是 sidecar ring 文件名后缀:文件 <pod-uid>.ring(design §6.2;
+// ringSuffix 是 sidecar ring 文件名后缀:文件 <pod-uid>.ring(设计《数据格式》;
 // 发现口径 = svc 目录轮询,decisions D22)。
 const ringSuffix = ".ring"
 
@@ -23,24 +23,24 @@ const ringSuffix = ".ring"
 // 包内变量,白盒测试可改小。
 var scanInterval = time.Second
 
-// degradeTickInterval 是订单通道状态聚合周期(§7.4:1s)。
+// degradeTickInterval 是订单通道状态聚合周期(设计《订单通道降级》:1s)。
 // 包内变量,白盒测试可改小。
 var degradeTickInterval = time.Second
 
-// orderStallThreshold 是订单源停滞阈值(§7.4:30s,严格大于才算停滞)。
+// orderStallThreshold 是订单源停滞阈值(设计《订单通道降级》:30s,严格大于才算停滞)。
 // 包内变量,白盒测试可改小。
 var orderStallThreshold = 30 * time.Second
 
-// orderStartupGrace 是发现后的启动宽限(§7.4:5s 内不判 stalled)。
+// orderStartupGrace 是发现后的启动宽限(设计《订单通道降级》:5s 内不判 stalled)。
 var orderStartupGrace = 5 * time.Second
 
-// orderEndedTTL 是文件消失后回收 Reader 的等待时间(§7.4:5min)。
+// orderEndedTTL 是文件消失后回收 Reader 的等待时间(设计《订单通道降级》:5min)。
 var orderEndedTTL = 5 * time.Minute
 
-// orderStaleMtime 是发现时判定陈旧 ring 的 mtime 阈值(§7.4:超过 5min 不建 Reader)。
+// orderStaleMtime 是发现时判定陈旧 ring 的 mtime 阈值(设计《订单通道降级》:超过 5min 不建 Reader)。
 var orderStaleMtime = 5 * time.Minute
 
-// 订单通道聚合模式(§7.4;不进标签)。
+// 订单通道聚合模式(设计《订单通道降级》;不进标签)。
 const (
 	modeNone       = "none"
 	modeHealthy    = "healthy"
@@ -61,7 +61,7 @@ type sourceEntry struct {
 
 // OrderDiscovery 是 ordersource 读端的装配层(D22):轮询 dir 发现 <pod-uid>.ring,
 // 为每个新文件构造 Reader 并把阶段切换转发给 onOrder;同时是订单通道状态的单写者
-// (design §7.4):每拍按源算 discovered/healthy/stalled,end 满 5min 回收。
+// (设计《订单通道降级》):每拍按源算 discovered/healthy/stalled,end 满 5min 回收。
 // Run 阻塞,由 agentd 起 goroutine 运行。
 type OrderDiscovery struct {
 	dir     string
@@ -91,7 +91,7 @@ func (d *OrderDiscovery) readerCount() int {
 	return len(d.readers)
 }
 
-// NewOrderDiscovery 构造发现器:dir = TRAINCACHE_ORDERS_DIR;m 收集指标(D23/D63);
+// NewOrderDiscovery 构造发现器:dir = TRAINCACHE_ORDERS_DIR;m 收集指标(D63);
 // onOrder 默认由 Assemble 接 HandleOrder(日志行 + 预取接线);在转发 goroutine 内串行调用,
 // ctx = 发现循环 ctx(M3:预取 LoadPrefixes/OnStageSwitch 随发现循环取消)。
 func NewOrderDiscovery(dir string, m *metrics.Registry, onOrder func(ctx context.Context, podUID string, o ordersource.ConsumeOrder)) *OrderDiscovery {
@@ -106,8 +106,8 @@ func NewOrderDiscovery(dir string, m *metrics.Registry, onOrder func(ctx context
 }
 
 // Run 阻塞运行发现循环(D22):MkdirAll(失败只 warn,不致命)→ 立即 scan 一次 →
-// 每 scanInterval tick:scan + 以绝对值同步格式错误计数(D23)与丢单计数(D63);
-// 每 degradeTickInterval tick:聚合订单通道状态(§7.4);ctx 取消 → 回收全部 Reader、
+// 每 scanInterval tick:scan + 以绝对值同步格式错误计数与丢单计数(D63);
+// 每 degradeTickInterval tick:聚合订单通道状态(设计《订单通道降级》);ctx 取消 → 回收全部 Reader、
 // 等转发 goroutine 退出 → 返回 ctx.Err()(agentd 视 context.Canceled 为正常停止)。
 func (d *OrderDiscovery) Run(ctx context.Context) error {
 	d.mu.Lock()
@@ -144,7 +144,7 @@ func (d *OrderDiscovery) Run(ctx context.Context) error {
 	}
 }
 
-// aggregate 执行一拍订单通道状态聚合(D63/§7.4;单写者,仅 Run goroutine 调用):
+// aggregate 执行一拍订单通道状态聚合(D63/设计《订单通道降级》;单写者,仅 Run goroutine 调用):
 // 按源算 discovered/healthy/stalled,消失满 orderEndedTTL 的源回收;写每源计数、
 // ended counter 与 agent_degraded(只在 all_stalled 为 1)。
 func (d *OrderDiscovery) aggregate() {
@@ -218,7 +218,7 @@ func (d *OrderDiscovery) aggregate() {
 //   - 未读到有效头 / 从未推进 → 启动宽限内 discovered,否则 stalled;
 //   - 最近一次推进在 orderStallThreshold 内 → healthy,否则 stalled。
 //
-// 启动宽限 = Run 启动 5s 内或该源发现 5s 内(§7.4:避免 Agent 重启瞬间闪降级)。
+// 启动宽限 = Run 启动 5s 内或该源发现 5s 内(设计《订单通道降级》:避免 Agent 重启瞬间闪降级)。
 func (d *OrderDiscovery) stateOfEntryLocked(e *sourceEntry, now time.Time) string {
 	grace := now.Sub(d.startedAt) < orderStartupGrace || now.Sub(e.createdAt) < orderStartupGrace
 	if e.r.Missing() {
@@ -243,7 +243,7 @@ func (d *OrderDiscovery) stateOfEntryLocked(e *sourceEntry, now time.Time) strin
 	return metrics.OrderSourceHealthy
 }
 
-// aggregateMode 由各状态计数派生聚合模式(§7.4;不进标签):
+// aggregateMode 由各状态计数派生聚合模式(设计《订单通道降级》;不进标签):
 //   - none:没有 healthy/stalled 的源;
 //   - healthy:有活源、没有 stalled;
 //   - partial:同时有 stalled 和非 stalled 的活源;

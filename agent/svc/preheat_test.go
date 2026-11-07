@@ -1,6 +1,6 @@
 package svc
 
-// 本文件是 svc 侧的测试装置与预热任务状态机用例(§7.2):真实 core 组合(objectstore.Mock +
+// 本文件是 svc 侧的测试装置与预热任务状态机用例(设计《预热任务生命周期》):真实 core 组合(objectstore.Mock +
 // 临时 CAS + fetch.Fetcher + index.Writer/NewCatalog)装配 PrefetchManager 与 PreheatTasks,
 // 不依赖 env 与外部服务;等待一律带 deadline 轮询,不用裸 sleep 断言。
 

@@ -1,6 +1,6 @@
 package svc
 
-// wiring_test.go:M4/M5/M6 接线集成测试(接线工程验收,§7.1 九项裁决的端到端验证)。
+// wiring_test.go:M4/M5/M6 接线集成测试(接线工程验收,设计《启动与重启重扫描》九项裁决的端到端验证)。
 // 全部装置经 assembleWith(objectstore.Mock, 临时目录)构造,不依赖网络与外部服务;
 // 断言覆盖:
 //   - 字段完整性(Agent 导出字段齐全 + collector 懒绑定前为 nil);
@@ -146,7 +146,7 @@ func startWiringBackground(t *testing.T, ag *Agent) {
 func TestWiringFieldsRescanRepairAndStatus(t *testing.T) {
 	ag, cfg := newWiringAgent(t)
 
-	// 字段完整性(D34):导出字段齐全;collector 装配期构造(D63,不绑 ring)。
+	// 字段完整性:导出字段齐全;collector 装配期构造(D63,不绑 ring)。
 	if ag.CS == nil || ag.Fetcher == nil || ag.ObjectStore == nil || ag.Metrics == nil ||
 		ag.Orders == nil || ag.Prefetch == nil || ag.Preheat == nil || ag.Rescan == nil ||
 		ag.Evictor == nil || ag.HookSock == nil || ag.Collector == nil {
@@ -166,7 +166,7 @@ func TestWiringFieldsRescanRepairAndStatus(t *testing.T) {
 	conn := startServerCfg(t, cfg, ag)
 	client := agentpb.NewNodeServiceClient(conn)
 
-	// Start 前:SAMPLING(readiness = phase != SAMPLING;design §8)。
+	// Start 前:SAMPLING(readiness = phase != SAMPLING;设计《部署与配置》)。
 	st, err := client.GetNodeStatus(context.Background(),
 		&agentpb.GetNodeStatusRequest{Node: "worker-01", Item: agentpb.NodeStatusItem_RESCAN})
 	if err != nil {
@@ -291,7 +291,7 @@ func TestWiringCollectorHooksAndEvictor(t *testing.T) {
 	b := ag.Prefetch.bundleFor(wiringDataset, nil)
 	waitFor(t, "订单阶段安装 epoch-1", func() bool { return b.prefetcher.Status().Stage == "epoch-1" })
 
-	// 钩子三型帧(§5.4 冻结 JSON 标签)。
+	// 钩子三型帧(设计《钩子 socket 协议》冻结 JSON 标签)。
 	c := dialHook(t, hookSockPath(cfg))
 
 	// ① open_report:经索引解析指纹 → collector 热度表(本地存在的块)。
@@ -366,7 +366,7 @@ func setDegradeTickInterval(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { degradeTickInterval = old })
 }
 
-// TestWiringDegradeAggregation:订单通道状态聚合(§7.4/D63;注入时钟造停滞)——
+// TestWiringDegradeAggregation:订单通道状态聚合(设计《订单通道降级》/D63;注入时钟造停滞)——
 //   - 无 reader:none、gauge=0、各状态计数为 0;
 //   - reader 出现且推进正常:healthy、gauge=0,订单正常推送;
 //   - 时钟错位(> 停滞阈值):stalled/all_stalled、gauge=1,但订单投递不受影响;
@@ -421,7 +421,7 @@ func TestWiringDegradeAggregation(t *testing.T) {
 		return state(metrics.OrderSourceStalled) == 1 && gauge() == 1
 	})
 
-	// ④ 降级期间订单照常投递(订单是提示不是命令;§7.4 投递与降级解耦)。
+	// ④ 降级期间订单照常投递(订单是提示不是命令;设计《订单通道降级》投递与降级解耦)。
 	writeTestRing(t, ring, 2, 2, 256, 2,
 		wiringOrder(wiringDataset, "epoch-2", ordersource.ChunkRef{Path: "p-000.tar"}))
 	waitFor(t, "stalled 期间订单仍安装 epoch-2", func() bool { return stage() == "epoch-2" })

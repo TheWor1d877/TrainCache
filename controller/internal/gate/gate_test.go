@@ -28,7 +28,7 @@ func pod(index int32, k, ready int32, nodes ...string) PodGateState {
 }
 
 // multiPod builds a multi-node PodGateState with per-node readiness. Rate is
-// the maximum ReadyByNode[node]/K, matching §7.5.
+// the maximum ReadyByNode[node]/K, matching docs/7.1-design.md《门控与放行》.
 func multiPod(index, k int32, readyByNode map[string]int32, nodes []string) PodGateState {
 	best := int32(0)
 	for _, node := range nodes {

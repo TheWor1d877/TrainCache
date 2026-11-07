@@ -1,6 +1,6 @@
 // Command scheduler is the TrainCache custom kube-scheduler. It embeds the
 // upstream kube-scheduler command and registers the TrainCacheScore plugin on
-// the score/normalizeScore extension points (docs/7.0, docs/7.1 §5.8, Q2(a)).
+// the score/normalizeScore extension points (docs/7.0 Scheduler, docs/7.1-design.md《Scheduler 评分插件》).
 //
 // The controller plane settings (annotation prefix, score TTL) come from the
 // same environment variables as the controller so both sides agree on the
@@ -63,7 +63,7 @@ func run(ctx context.Context) error {
 	startDebugServer(ctx, cfg, log)
 
 	// The scheduler is a separate process: it owns an independent registry and
-	// never touches the controller-manager families (docs/7.1 §9.5).
+	// never touches the controller-manager families (docs/7.1-design.md《指标清单》).
 	registry := metrics.NewScheduler()
 	log.Info("metrics registry initialized",
 		"addr", cfg.MetricsAddr,

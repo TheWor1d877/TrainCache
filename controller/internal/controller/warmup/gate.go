@@ -56,8 +56,8 @@ func isTerminal(task *traincachev1alpha1.WarmupTask) bool {
 // computePlacement runs GWAA over the current readiness table. Submitted
 // failures are treated as stopped nodes so a Pod is not assigned to a node
 // whose initial Submit already failed. previous is this round's ledger: pairs
-// still running at the current generation are the hysteresis input (docs/7.1
-// §5.5, D45) that keeps an incumbent from being replaced just because another
+// still running at the current generation are the hysteresis input (docs/7.1-design.md
+//《GWAA 分配》, docs/7.2 D45) that keeps an incumbent from being replaced just because another
 // node landed one block first.
 func (r *Reconciler) computePlacement(
 	task *traincachev1alpha1.WarmupTask,
@@ -137,7 +137,7 @@ func readinessAt(task *traincachev1alpha1.WarmupTask, pod int32, column int) int
 	return row[column]
 }
 
-// nodeStopped implements the "已停止节点集合" input from docs/7.1 §7.4. A node
+// nodeStopped implements the "已停止节点集合" input from docs/7.1-design.md《分配与下发差异》. A node
 // is stopped when its initial Submit failed, every Pod's poll on it crossed the
 // consecutive-failure threshold, or every readiness fact collected on it
 // reports Failed. The in-memory counter covers the pre-assignment fan-out (the
@@ -178,7 +178,7 @@ func assignedNodes(task *traincachev1alpha1.WarmupTask, pod int32) []string {
 }
 
 // readinessFor returns the readiness fact for (pod,node), or nil. Status keeps
-// one entry per (Pod, preheat node) pair (M13), so NodeName is the identity.
+// one entry per (Pod, preheat node) pair, so NodeName is the identity.
 func readinessFor(task *traincachev1alpha1.WarmupTask, pod int32, node string) *traincachev1alpha1.PodNodeReadiness {
 	for i := range task.Status.PodNodeReadiness {
 		entry := &task.Status.PodNodeReadiness[i]
@@ -384,9 +384,9 @@ func rateSample(history []RateSample, now time.Time) (float64, time.Time, bool) 
 	return 0, time.Time{}, false
 }
 
-// logGateDecision records the mandatory M7/M13 fields on every evaluation:
+// logGateDecision records the mandatory fanout fields on every evaluation:
 // fanout, per-Pod warm-node counts, the preheat nodes that met the integer
-// threshold and the status entry count (docs/7.1 §6.5).
+// threshold and the status entry count (docs/7.1-design.md《日志》).
 func logGateDecision(log *slog.Logger, taskKey string, evaluation gateEvaluation) {
 	n := len(evaluation.Decision.Rates)
 	required := make([]int32, n)
@@ -456,7 +456,7 @@ func gateHitNodes(evaluation gateEvaluation) string {
 	return strings.Join(hits, ",")
 }
 
-// releaseGate performs the frozen release order from docs/7.1 §7.5:
+// releaseGate performs the frozen release order from docs/7.1-design.md《门控与放行》:
 // scores+gates in one Pod patch, then status. A failed Pod patch leaves that
 // Pod gated and annotation-free; already released Pods are not rolled back.
 func (r *Reconciler) releaseGate(

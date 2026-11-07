@@ -9,7 +9,7 @@ import (
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 )
 
-// FilterInput is the frozen candidate-filter contract from docs/7.1 §5.4.
+// FilterInput is the frozen candidate-filter contract from docs/7.1-design.md《候选节点筛选》.
 //
 // Accessible is DataSet.status.accessibleNodes: the resolved
 // traincache.io/s3-access=true set, optionally narrowed by
@@ -75,7 +75,7 @@ func hasBlockingTaint(node *corev1.Node, ignoreNoSchedule bool) bool {
 }
 
 // fitsResources checks that allocatable resources cover the largest PodDetail
-// request. v1 estimates one Pod per Node (Q6) and does not bin-pack.
+// request. v1 estimates one Pod per Node and does not bin-pack.
 func fitsResources(node *corev1.Node, pods []traincachev1alpha1.PodDetail) bool {
 	largest := corev1.ResourceList{}
 	for i := range pods {

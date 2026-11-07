@@ -1,5 +1,5 @@
 // Package svc 是服务化装配层:读配置、起 gRPC 服务、持有子模块实例、接探针
-// (design §4:cmd → svc → 子模块 → core 单向无环)。
+// (设计《架构与依赖方向》:cmd → svc → 子模块 → core 单向无环)。
 package svc
 
 import (
@@ -13,27 +13,27 @@ import (
 	"traincache/agent/nodeid"
 )
 
-// 校验等级取值(design §8:TRAINCACHE_VERIFY 透传 core verify_level)。
+// 校验等级取值(设计《部署与配置》:TRAINCACHE_VERIFY 透传 core verify_level)。
 const (
 	VerifyXXH3       = "xxh3"        // 默认:只验 xxh3
 	VerifyXXH3SHA256 = "xxh3+sha256" // 新写块时同时算 sha256,读时双重校验
 )
 
-// 默认值(design §8;D5:gRPC 9410 / metrics 9411 非特权端口)。
+// 默认值(设计《部署与配置》:gRPC 9410 / metrics 9411 非特权端口)。
 const (
 	defaultGRPCAddr    = ":9410"
 	defaultMetricsAddr = ":9411"
-	// defaultCacheRoot 是 CAS 根目录默认值。DaemonSet 部署仍用默认值(design §8 部署要点:
-	// hostPath /var/cache/traincache 固定);TRAINCACHE_CACHE_ROOT env(6.2 D38)仅覆盖本机
+	// defaultCacheRoot 是 CAS 根目录默认值。DaemonSet 部署仍用默认值(设计《部署与配置》部署要点:
+	// hostPath /var/cache/traincache 固定);TRAINCACHE_CACHE_ROOT env(6.2)仅覆盖本机
 	// 进程级演练与非标准缓存根场景,未设置时回退此默认。
 	defaultCacheRoot = "/var/cache/traincache"
-	// defaultOrdersDir 是 ordersource ring 发现目录默认值(design §6.2 路径;
+	// defaultOrdersDir 是 ordersource ring 发现目录默认值(设计《数据格式》路径;
 	// 两侧 Pod 同路径挂载 hostPath /run/traincache,decisions D22)。
 	defaultOrdersDir = "/run/traincache/orders"
-	// defaultObjstoreEndpoint 是对象存储端点默认值(D26:开发演练默认连本地 MinIO 边车,
+	// defaultObjstoreEndpoint 是对象存储端点默认值(开发演练默认连本地 MinIO 边车,
 	// 真实环境通过 TRAINCACHE_OBJSTORE_ENDPOINT 环境变量覆盖为 COS/OSS/S3 endpoint)。
 	defaultObjstoreEndpoint = "127.0.0.1:9000"
-	// defaultObjstoreBucket 是对象存储桶默认值(D26;v1 单桶)。
+	// defaultObjstoreBucket 是对象存储桶默认值(v1 单桶)。
 	defaultObjstoreBucket = "traincache"
 
 	// envReadStallMinWaitMS 是 read_stall 入直方图最小等待的配置项(D47/Q15;毫秒)。
@@ -44,16 +44,16 @@ const (
 	// 以帧 ts 为中心前后各半个窗口)。
 	envReadStallWindowMS = "TRAINCACHE_READ_STALL_WINDOW_MS"
 
-	// defaultIndexRefreshInterval 是前缀感知快照跟随的默认刷新周期(6.1 §5.9)。
+	// defaultIndexRefreshInterval 是前缀感知快照跟随的默认刷新周期(设计《快照与回收》)。
 	defaultIndexRefreshInterval = 5 * time.Second
 	// envIndexRefreshInterval 覆盖快照跟随刷新周期(time.ParseDuration)。
 	envIndexRefreshInterval = "TRAINCACHE_INDEX_REFRESH_INTERVAL"
-	// defaultLocalGCInterval 是节点级本地孤儿副本清扫的默认周期(design §11.5)。
+	// defaultLocalGCInterval 是节点级本地孤儿副本清扫的默认周期(docs/5.1-design.md《回收》)。
 	// 周期取 10m:回收只损失一次回源、无需紧实时,但数据集删除后的残留窗口要有界。
 	defaultLocalGCInterval = 10 * time.Minute
 	// envLocalGCInterval 覆盖本地副本清扫周期(time.ParseDuration)。
 	envLocalGCInterval = "TRAINCACHE_LOCAL_GC_INTERVAL"
-	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;6.1 §5.12)。
+	// envObjstoreProbeConditionalWrite 控制装配期条件写探测(默认关闭;设计《快照与回收》)。
 	envObjstoreProbeConditionalWrite = "TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE"
 	// envObjstoreCompression 控制 S3 客户端是否声明 gzip(默认关闭;9.0「其他决策」)。
 	envObjstoreCompression = "TRAINCACHE_OBJSTORE_COMPRESSION"
@@ -67,13 +67,13 @@ const (
 	// defaultDebugAddr 与三个控制平面进程一致,便于同一套 port-forward 操作。
 	defaultDebugAddr = "127.0.0.1:6060"
 
-	// envCacheCapacityBytes 是字节维度缓存上限(M-debug-1/§14;默认 0=关闭字节淘汰,
+	// envCacheCapacityBytes 是字节维度缓存上限(M-debug-1/设计《回收与磁盘淘汰》;默认 0=关闭字节淘汰,
 	// 只走磁盘水位)。
 	envCacheCapacityBytes = "TRAINCACHE_CACHE_CAPACITY_BYTES"
 )
 
-// HeatConfig 是热度与磁盘触发线参数(D14:N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%;
-// D30 增 β=0.15、T_R=6h、校准窗口 100/阈值 0.8,并冻结 11 个 TRAINCACHE_HEAT_* env)。
+// HeatConfig 是热度与磁盘触发线参数(N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%;
+// 增 β=0.15、T_R=6h、校准窗口 100/阈值 0.8,并冻结 11 个 TRAINCACHE_HEAT_* env)。
 type HeatConfig struct {
 	DecayAge            time.Duration // N:超过该年龄的记录直接衰减热度,默认 24h
 	DumpInterval        time.Duration // M:每该间隔 dump 一次 heatmap.json,默认 30min
@@ -88,7 +88,7 @@ type HeatConfig struct {
 	DiskCriticalPercent float64       // M:激进 Sweep + 告警触发线(%),默认 90(0..100)
 }
 
-// TRAINCACHE_HEAT_* env 名(D30 冻结 11 个;duration 走 time.ParseDuration,百分比 0..100)。
+// TRAINCACHE_HEAT_* env 名(冻结 11 个;duration 走 time.ParseDuration,百分比 0..100)。
 const (
 	envHeatDecayAge            = "TRAINCACHE_HEAT_DECAY_AGE"
 	envHeatDumpInterval        = "TRAINCACHE_HEAT_DUMP_INTERVAL"
@@ -103,16 +103,16 @@ const (
 	envHeatDiskCriticalPercent = "TRAINCACHE_HEAT_DISK_CRITICAL_PERCENT"
 )
 
-// Config 是 Agent 运行配置(design §8;D5/D8/D14/D26)。
+// Config 是 Agent 运行配置(设计《部署与配置》)。
 type Config struct {
 	NodeName         nodeid.ID // NODE_NAME(D8:必填、权威节点标识)
 	GRPCAddr         string    // TRAINCACHE_GRPC_ADDR,默认 :9410(D5)
 	MetricsAddr      string    // TRAINCACHE_METRICS_ADDR,默认 :9411(D5;M1 未起服务,M6 落地)
 	Verify           string    // TRAINCACHE_VERIFY:xxh3 | xxh3+sha256,默认 xxh3
 	DatasetWhitelist []string  // TRAINCACHE_DATASET_WHITELIST,逗号分隔(§5.8 基数控制)
-	CacheRoot        string    // TRAINCACHE_CACHE_ROOT,默认 /var/cache/traincache(6.2 D38:本机演练/非标准根)
+	CacheRoot        string    // TRAINCACHE_CACHE_ROOT,默认 /var/cache/traincache(本机演练与非标准根场景用)
 	OrdersDir        string    // TRAINCACHE_ORDERS_DIR,默认 /run/traincache/orders(§6.2 ring 发现目录)
-	// 对象存储接入(D26;经 core objectstore.NewS3Store 构造,通吃 COS/OSS/S3/本地 MinIO)。
+	// 对象存储接入(经 core objectstore.NewS3Store 构造,通吃 COS/OSS/S3/本地 MinIO)。
 	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT,默认 127.0.0.1:9000
 	ObjstoreAccessKey string // TRAINCACHE_OBJSTORE_ACCESS_KEY,默认空(匿名/无鉴权)
 	ObjstoreSecretKey string // TRAINCACHE_OBJSTORE_SECRET_KEY,默认空
@@ -132,24 +132,24 @@ type Config struct {
 	// ReadStallWindowMS 是 read_stall 归因关联窗口毫秒(C3;默认 5000,
 	// TRAINCACHE_READ_STALL_WINDOW_MS 覆盖,非法取值回退默认且不阻断启动)。
 	ReadStallWindowMS int64
-	// IndexRefreshInterval 是快照跟随刷新周期(6.1 §5.9;默认 5s,
+	// IndexRefreshInterval 是快照跟随刷新周期(设计《快照与回收》;默认 5s,
 	// TRAINCACHE_INDEX_REFRESH_INTERVAL 覆盖)。
 	IndexRefreshInterval time.Duration
-	// LocalGCInterval 是节点级本地孤儿副本清扫周期(design §11.5;默认 10m,
+	// LocalGCInterval 是节点级本地孤儿副本清扫周期(docs/5.1-design.md《回收》;默认 10m,
 	// TRAINCACHE_LOCAL_GC_INTERVAL 覆盖)。
 	LocalGCInterval time.Duration
-	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(6.1 §5.12;默认 false,
+	// ObjstoreProbeConditionalWrite 开启装配期条件写探测(设计《快照与回收》;默认 false,
 	// TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE 覆盖,口径同 envBool)。
 	ObjstoreProbeConditionalWrite bool
 	// GatewayEndpoint 是 Agent 到 S3 合并回源网关的地址(9.1 §5.3;默认空=全部直连,
-	// TRAINCACHE_GATEWAY_ENDPOINT 覆盖)。非空即启用,不做 scheme 校验(9.2 D15)。
+	// TRAINCACHE_GATEWAY_ENDPOINT 覆盖)。非空即启用,不做 scheme 校验(9.2)。
 	GatewayEndpoint string
 	// GatewaySecure 控制 Agent 到网关是否 TLS(9.1 §5.3;默认 false,
-	// TRAINCACHE_GATEWAY_SECURE 覆盖,口径同 envBool;与 ObjstoreSecure 无关,D16)。
+	// TRAINCACHE_GATEWAY_SECURE 覆盖,口径同 envBool;与 ObjstoreSecure 无关)。
 	GatewaySecure bool
 	// DebugAddr 是 /debug/loglevel 的监听地址(默认 127.0.0.1:6060,空字符串关闭)。
 	DebugAddr string
-	// CacheCapacityBytes 是字节维度缓存上限(§14;默认 0=关闭,只走磁盘水位)。
+	// CacheCapacityBytes 是字节维度缓存上限(设计《回收与磁盘淘汰》;默认 0=关闭,只走磁盘水位)。
 	// TRAINCACHE_CACHE_CAPACITY_BYTES 覆盖;>0 时 evictor 启用双维度淘汰判定。
 	CacheCapacityBytes int64
 }
@@ -172,9 +172,9 @@ func (c Config) localGCInterval() time.Duration {
 	return defaultLocalGCInterval
 }
 
-// Load 从环境变量加载配置并校验(design §8):
-// NODE_NAME 必填非空(D8);TRAINCACHE_VERIFY 仅接受 xxh3 / xxh3+sha256;
-// TRAINCACHE_HEAT_* 非法取值报错(D30:duration 走 time.ParseDuration,百分比 0..100);
+// Load 从环境变量加载配置并校验(设计《部署与配置》):
+// NODE_NAME 必填非空;TRAINCACHE_VERIFY 仅接受 xxh3 / xxh3+sha256;
+// TRAINCACHE_HEAT_* 非法取值报错(duration 走 time.ParseDuration,百分比 0..100);
 // TRAINCACHE_FETCH_RANGE_PARALLEL 只接受 1/true/yes 与 0/false/no,其余取值报错。
 func Load() (*Config, error) {
 	node, err := nodeid.FromEnv()
@@ -273,7 +273,7 @@ func loadDebugAddr() (string, error) {
 	return v, nil
 }
 
-// defaultHeatConfig 返回 D14/D30 默认十一值。
+// defaultHeatConfig 返回 默认十一值。
 func defaultHeatConfig() HeatConfig {
 	return HeatConfig{
 		DecayAge:            24 * time.Hour,
@@ -290,7 +290,7 @@ func defaultHeatConfig() HeatConfig {
 	}
 }
 
-// loadHeatConfig 以默认十一值为基底逐项读取 TRAINCACHE_HEAT_* env(D30):
+// loadHeatConfig 以默认十一值为基底逐项读取 TRAINCACHE_HEAT_* env:
 // 未设置/全空白 → 默认;非法取值 → 错误(与 TRAINCACHE_VERIFY 同风格,启动即拦)。
 func loadHeatConfig() (HeatConfig, error) {
 	cfg := defaultHeatConfig()
@@ -334,7 +334,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-// envBool 解析布尔 env(D26 口径:TrimSpace 后 "1"/"true"/"yes",大小写不敏感,为真;
+// envBool 解析布尔 env(口径:TrimSpace 后 "1"/"true"/"yes",大小写不敏感,为真;
 // 未设置或其余取值一律为假,不报错——布尔 env 的错误容忍度高于端口/等级类)。
 func envBool(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
@@ -406,7 +406,7 @@ func envRatio(key string, def float64) (float64, error) {
 	return f, nil
 }
 
-// envPercent 解析百分比 env(0..100,含端点;D30:k/Δ/M 三个触发线)。
+// envPercent 解析百分比 env(0..100,含端点:/Δ/M 三个触发线)。
 // 未设置或全空白 → 默认值;非法取值(含 NaN / 区间外)→ 错误。
 func envPercent(key string, def float64) (float64, error) {
 	v := strings.TrimSpace(os.Getenv(key))

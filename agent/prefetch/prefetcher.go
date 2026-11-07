@@ -1,13 +1,13 @@
-// Package prefetch 实现持久预取器 PersistentPrefetcher(design §5.2、§7.3;decisions D16/D25)。
+// Package prefetch 实现持久预取器 PersistentPrefetcher(设计《预取主循环》 §5.2、设计《持续预取与阶段切换》;D25)。
 //
 // 结构:四个严格优先级队列(P0>P1>P2>P3)+ 单调度协程串行出队,每块一个抓取 goroutine
 // (并发受 core fetch 字节信号量统一约束);Start 后维持 cursor+lookahead(默认 16)的 P2
 // 邻域窗口,每完成一块推进 cursor 并上报 /metrics;阶段切换时旧阶段未出队块降级 P3、
 // 新阶段开头 K 块以 P1 入队,返回"新窗口就绪"ETA(剩余未就绪字节 ÷ EMA 吞吐,α=0.3)。
-// P0 为显式预热入队(EnqueueP0;D27):不参与阶段簿记,每块完成经 Config.OnP0Done 回调
+// P0 为显式预热入队(EnqueueP0):不参与阶段簿记,每块完成经 Config.OnP0Done 回调
 // (在调度协程内同步调用,仅做记账,不得阻塞)。
 //
-// 完成回调与坏块回源(M4;D28):Config.OnDone 覆盖所有优先级队列的块完成(与 OnP0Done
+// 完成回调与坏块回源(M4):Config.OnDone 覆盖所有优先级队列的块完成(与 OnP0Done
 // 同触发点);Config.OnCorrupt 在本地命中判定遇 cas.Open 返回 ErrCorrupt 时回源修复
 // (Quarantine+RepairOne 的包装由接线阶段注入;修复成功且重新 Open 成功 → 就绪跳过下载,
 // 否则按未命中走下载路径——下载会覆盖坏块)。
@@ -33,13 +33,13 @@ import (
 	"traincache/core/index"
 )
 
-// ChunkRef 是块引用(ordersource 冻结类型别名;design §5.1/§5.3)。
+// ChunkRef 是块引用(ordersource 冻结类型别名;设计《gRPC 接口》《订单源与共享内存》)。
 type ChunkRef = ordersource.ChunkRef
 
-// ConsumeOrder 是本阶段的消费顺序(ordersource 冻结类型别名;design §5.3/§6.1)。
+// ConsumeOrder 是本阶段的消费顺序(ordersource 冻结类型别名;设计《订单源与共享内存》《数据格式》)。
 type ConsumeOrder = ordersource.ConsumeOrder
 
-// 队列优先级:数值小者先出队(design §5.2 严格优先级 P0>P1>P2>P3)。
+// 队列优先级:数值小者先出队(设计《预取主循环》严格优先级 P0>P1>P2>P3)。
 const (
 	priP0         = iota // P0:显式预热任务(EnqueueP0;D27——不参与阶段降级与游标簿记)
 	priP1                // P1:阶段切换 K 启动窗口
@@ -49,37 +49,37 @@ const (
 )
 
 const (
-	// defaultLookahead 是邻域预取提前量默认值(D16)。
+	// defaultLookahead 是邻域预取提前量默认值。
 	defaultLookahead = 16
-	// throughputAlpha 是吞吐 EMA 平滑系数(D16:α=0.3)。
+	// throughputAlpha 是吞吐 EMA 平滑系数(α=0.3)。
 	throughputAlpha = 0.3
-	// throughputWindow 是"最近 30s"吞吐窗口(design §5.2)的落地口径:相邻完成的间隔
+	// throughputWindow 是"最近 30s"吞吐窗口(设计《预取主循环》)的落地口径:相邻完成的间隔
 	// 超过它视为空窗,历史 EMA 失效,从本次完成重新积累。
 	throughputWindow = 30 * time.Second
-	// hitWindowSize 是 Status.HitRate 的消费样本滑动窗口大小(design §5.2 未定死,取 100)。
+	// hitWindowSize 是 Status.HitRate 的消费样本滑动窗口大小(设计《预取主循环》未定死,取 100)。
 	hitWindowSize = 100
 	// resultBufSize 是抓取结果回投通道(调度协程)的缓冲:借以平滑"出队速率 ≫ 完成
 	// 速率"时的投递,抓取协程在满时等待调度协程排空(不丢结果、不改优先级语义)。
 	resultBufSize = 64
 )
 
-// Config 是预取器配置(design §5.2 冻结;D27 增 OnP0Done,D28 增 OnDone/OnCorrupt)。
+// Config 是预取器配置(设计《预取主循环》冻结;增 OnP0Done, 增 OnDone/OnCorrupt)。
 type Config struct {
 	Lookahead int // 邻域预取提前量,默认 16(≤0 取默认;D16)
 	// SelfOpenGuard 记录 Agent 自身打开本地块的动作(D49 self-open guard):本地命中、
 	// 下载后读回校验、ETA 探测等打开点在 Open 前 Mark,collector 的 inotify 兜底据此
 	// 跳过对应 OPEN(避免把 Agent 自身读取误判为训练消费)。nil = 不记录。
 	SelfOpenGuard *SelfOpenGuard
-	// OnP0Done 是 P0 块完成回调(仅 P0 触发;D27):每块完成(本地就绪或下载成功 = nil,
+	// OnP0Done 是 P0 块完成回调(仅 P0 触发):每块完成(本地就绪或下载成功 = nil,
 	// 抓取失败 = 具体原因)调用一次,在调度协程内同步调用——实现只做轻量记账,不得阻塞;
 	// nil 表示无回调。
 	OnP0Done func(ref ChunkRef, err error)
-	// OnDone 是所有优先级队列块完成回调(D28):每块完成(本地就绪/下载成功 = nil,下载
+	// OnDone 是所有优先级队列块完成回调:每块完成(本地就绪/下载成功 = nil,下载
 	// 失败 = 具体原因)触发一次,与 OnP0Done 同触发点(同一调度协程内同步调用,不得阻塞;
 	// P0 块两回调并存,先 OnP0Done 后 OnDone);nil 表示无回调。collector 的 t_touch
 	// "预取写入"来源。
 	OnDone func(ref ChunkRef, err error)
-	// OnCorrupt 是本地坏块回源回调(追加冻结,并入 D28 语义):本地命中判定遇
+	// OnCorrupt 是本地坏块回源回调(追加冻结,并入 语义):本地命中判定遇
 	// cas.Open 返回 ErrCorrupt 时调用(在工作协程内,可阻塞;内部应为 Quarantine+RepairOne
 	// 组合,接线阶段注入 rescan 包装)。返回 nil 且随后按索引指纹重新 Open 成功 → 视为就绪
 	// (跳过下载);nil 回调 / 返回错误 / 重开失败 → 按未命中走下载路径(下载覆盖坏块)。
@@ -88,7 +88,7 @@ type Config struct {
 	// LogAgg 是 60s 汇总日志聚合器(8.1 §3.3/§4.2):逐块完成计数只累加、不逐块写 Info,
 	// 窗口到期由聚合器统一输出一条汇总;nil 表示不记汇总(测试/无日志场景)。
 	LogAgg *logagg.Aggregator
-	// OnStageSwitch 是阶段切换通知回调(M9/D46 接线钩子):OnStageSwitch 安装新阶段后
+	// OnStageSwitch 是阶段切换通知回调(M9 接线钩子):OnStageSwitch 安装新阶段后
 	// 调用一次(stageID = 新 ConsumeOrder.StageID);供 svc phaseTracker 迁移到 switch。
 	// 在调度/调用方 goroutine 内同步调用,不得阻塞;nil 表示无回调。
 	OnStageSwitch func(stageID string)
@@ -102,7 +102,7 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Status 是预取器状态快照(design §5.2 冻结)。
+// Status 是预取器状态快照(设计《预取主循环》冻结)。
 type Status struct {
 	Stage            string   // 当前阶段标识
 	Cursor           ChunkRef // 纯消费位点:仅由 OnConsumeSideAdvance 推进
@@ -112,7 +112,7 @@ type Status struct {
 }
 
 // stageState 是单个阶段的预取视图与统计。阶段切换后旧对象由在途 task 继续引用,
-// 完成时按块归属记账(不回写当前阶段游标与指标;design §5.2"在途不取消")。
+// 完成时按块归属记账(不回写当前阶段游标与指标;设计《预取主循环》"在途不取消")。
 type stageState struct {
 	dataset string
 	stageID string
@@ -124,7 +124,7 @@ type stageState struct {
 	cursor  int // 调度游标 = max(消费游标, 预取前沿)(-1 = 尚未推进)
 	schedTo int // 邻域窗口水位:已入队过的最高位置(-1 = 未入队;单调防重复入队)
 
-	// D48 双游标口径(design §5.2):consume 仅由 advance 钩子推进;front 为已完成就绪
+	// 双游标口径(设计《预取主循环》):consume 仅由 advance 钩子推进;front 为已完成就绪
 	// 的最远块。lead_blocks = front − consume(负值 = 消费领先预取)。
 	consume int
 	front   int
@@ -187,7 +187,7 @@ func (st *stageState) hitRate() float64 {
 	return float64(n) / float64(st.hitFilled)
 }
 
-// leadLocked 返回 D48 预取领先块数 = 预取前沿 − 消费游标(调用方持 p.mu)。
+// leadLocked 返回 预取领先块数 = 预取前沿 − 消费游标(调用方持 p.mu)。
 // consume/front 均以位置表示,-1 = 尚无；两者都未推进时为 0。
 func (st *stageState) leadLocked() int64 {
 	return int64(st.front - st.consume)
@@ -202,14 +202,14 @@ type task struct {
 	// 时刻最近一次 ConsumeOrder 的 dataset 快照(见 EnqueueP0)。
 	dataset string
 	p0      bool // P0 显式预热块:完成经 Config.OnP0Done 回调
-	// reason 是回源打点 reason(D48):prefetch|demand|repair|other;空值按 prefetch
+	// reason 是回源打点 reason:prefetch|demand|repair|other;空值按 prefetch
 	// (P0–P3 常规预取)。Backfill 的 demand 入口显式置 FetchReasonDemand。
 	reason string
 	// taskID 是块归属的预热任务 ID(仅显式预热 P0 由 EnqueueP0ScopedTask 带入;
 	// 其余优先级为空),只用于 60s 下载汇总的 task_id 字段。
 	taskID string
 
-	// pri/start 是 M9/D48 任务耗时打点口径:pri = 最终生效优先级(去重提升不重置
+	// pri/start 是 M9 任务耗时打点口径:pri = 最终生效优先级(去重提升不重置
 	// start;骨架阶段由 enqueueLocked 记录)。
 	pri   int
 	start time.Time
@@ -221,7 +221,7 @@ type task struct {
 }
 
 // taskResult 是一次抓取结果,回投调度协程:簿记(finishTask)与 P0 完成回调统一在调度
-// 协程内串行执行(D27 回调"在调度协程内同步调用")。
+// 协程内串行执行(回调"在调度协程内同步调用")。
 type taskResult struct {
 	t     *task
 	size  int64
@@ -230,7 +230,7 @@ type taskResult struct {
 	dur   time.Duration // 单块抓取/校验耗时(60s 汇总的 P50/P99 样本)
 }
 
-// PersistentPrefetcher 是持久预取器(design §5.2)。
+// PersistentPrefetcher 是持久预取器(设计《预取主循环》)。
 type PersistentPrefetcher struct {
 	cat *index.Catalog
 	f   *fetch.Fetcher
@@ -271,7 +271,7 @@ type PersistentPrefetcher struct {
 	warmupDone atomic.Bool
 }
 
-// New 构造持久预取器(design §5.2 冻结签名)。cat/f/cs/m 分别提供索引查找、下载编排、
+// New 构造持久预取器(设计《预取主循环》冻结签名)。cat/f/cs/m 分别提供索引查找、下载编排、
 // 本地块存取与指标注册(m 允许为 nil,用于无指标场景);cfg 零值字段回退默认。
 // 构造后经 OnStageSwitch 注入消费顺序、Start 启动调度;Start 前入队的任务只在 Start 后出队。
 func New(cat *index.Catalog, f *fetch.Fetcher, cs *cas.Store,
@@ -293,7 +293,7 @@ func New(cat *index.Catalog, f *fetch.Fetcher, cs *cas.Store,
 // 并上报 /metrics。可被显式启动预取(P0)与阶段切换重预取(P1)打断:在途请求不取消,
 // 新请求按更高优先级入队。
 //
-// 实现口径(design §5.2 未明文处):Start 启动后台调度协程后立即返回,ctx 取消即退出;
+// 实现口径(设计《预取主循环》未明文处):Start 启动后台调度协程后立即返回,ctx 取消即退出;
 // 重复调用无副作用(幂等,首个 ctx 有效)。尚无订单时先启动调度,订单到达后自然生效。
 func (p *PersistentPrefetcher) Start(ctx context.Context) {
 	p.mu.Lock()
@@ -346,7 +346,7 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 		p.mu.Unlock()
 		return false
 	}
-	// D48:消费游标只由 advance 钩子推进(与调度游标解耦)。
+	// :消费游标只由 advance 钩子推进(与调度游标解耦)。
 	st.consume = idx
 	st.addHit(st.ready[idx])
 	dataset, hitRate = st.dataset, st.hitRate()
@@ -378,7 +378,7 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 // traincache_stage_switch_eta_seconds。
 //
 // 实现口径:降级作用于"已入队未出队"的旧阶段非 P0 任务(P0 = 显式预热,不参与降级);
-// 剩余块在 K 块全部处理完后进入 P2 邻域窗口(§7.3);ETA = 新窗口 K 块中 Lookup+Open
+// 剩余块在 K 块全部处理完后进入 P2 邻域窗口(设计《持续预取与阶段切换》);ETA = 新窗口 K 块中 Lookup+Open
 // 未命中的块 Size 之和 ÷ 吞吐 EMA(α=0.3,"最近 30s"口径见 observeThroughputLocked),
 // 无吞吐历史时返回 0;每次切换都以 eta.Seconds() 上报 traincache_stage_switch_eta_seconds。
 func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOrder) (eta time.Duration, err error) {
@@ -411,7 +411,7 @@ func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOr
 	lead := st.leadLocked() // 新阶段双游标均为 -1 → 0
 	p.mu.Unlock()
 
-	// M9/D46:阶段切换通知(phaseTracker 迁移;在锁外调用,回调可安全读 Status)。
+	// M9:阶段切换通知(phaseTracker 迁移;在锁外调用,回调可安全读 Status)。
 	if p.cfg.OnStageSwitch != nil {
 		p.cfg.OnStageSwitch(next.StageID)
 	}
@@ -423,7 +423,7 @@ func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOr
 	return eta, nil
 }
 
-// EnqueueP0 显式预热入队(D27):refs 按入参顺序以 P0 严格最高优先级入队,在途请求不
+// EnqueueP0 显式预热入队:refs 按入参顺序以 P0 严格最高优先级入队,在途请求不
 // 取消;每块完成(本地就绪或下载成败)经 Config.OnP0Done 回调一次(若有)。空列表
 // 返回 nil;ctx 已取消返回 ctx.Err() 且不入队。
 //
@@ -473,7 +473,7 @@ func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, r
 	return nil
 }
 
-// fetchReason 返回本 task 的回源 reason(D48;空值 = 常规预取)。
+// fetchReason 返回本 task 的回源 reason(空值 = 常规预取)。
 func (t *task) fetchReason() string {
 	if t.reason == "" {
 		return metrics.FetchReasonPrefetch
@@ -481,7 +481,7 @@ func (t *task) fetchReason() string {
 	return t.reason
 }
 
-// Status 返回当前状态快照(design §5.2 冻结):阶段标识、纯消费位点(consume 所在块)、
+// Status 返回当前状态快照(设计《预取主循环》冻结):阶段标识、纯消费位点(consume 所在块)、
 // 预取前沿(front 所在块)、四队列深度与 HitRate(最近窗口内消费时块已就绪的比例;无样本为 0)。
 // 不暴露调度游标(cursor)。纯读、并发安全。
 func (p *PersistentPrefetcher) Status() Status {
@@ -506,7 +506,7 @@ func (p *PersistentPrefetcher) Status() Status {
 	return s
 }
 
-// reportCursor 上报游标与四队列深度(M3 打点;design §5.8 family)。
+// reportCursor 上报游标与四队列深度(M3 打点;设计《指标清单》 family)。
 func (p *PersistentPrefetcher) reportCursor(chunk int64, depths [numPriorities]int) {
 	if p.m == nil {
 		return
@@ -525,7 +525,7 @@ func (p *PersistentPrefetcher) reportQueueDepth(depths [numPriorities]int) {
 	}
 }
 
-// reportStageSwitchStall 上报一次阶段切换停滞(ETA 秒数;D46 起带当前 dataset 标签)。
+// reportStageSwitchStall 上报一次阶段切换停滞(ETA 秒数;起带当前 dataset 标签)。
 func (p *PersistentPrefetcher) reportStageSwitchStall(dataset string, eta time.Duration) {
 	if p.m == nil {
 		return
@@ -592,7 +592,7 @@ func (p *PersistentPrefetcher) reportFetchError(dataset, reason string) {
 	p.m.IncFetchRequests(dataset, metrics.ResultError, reason)
 }
 
-// estimateETA 计算新窗口(K 块)就绪 ETA(D16):剩余未就绪字节 ÷ 吞吐 EMA(ema 为切换
+// estimateETA 计算新窗口(K 块)就绪 ETA:剩余未就绪字节 ÷ 吞吐 EMA(ema 为切换
 // 时刻快照)。就绪判定与抓取一致:Catalog.Lookup 命中且 cas.Open 成功;Lookup 未命中
 // (或索引尚无快照)的块既无 Size 也不产生下载,不计入字节。无吞吐历史(ema<=0)或全部
 // 就绪时返回 0(口径:不上报无依据的估计)。
@@ -620,9 +620,9 @@ func (p *PersistentPrefetcher) estimateETA(ctx context.Context, st *stageState, 
 	return time.Duration(float64(remaining) / ema * float64(time.Second))
 }
 
-// ensureWindowLocked 补齐当前阶段的 P2 邻域窗口(design §5.2/§7.3):起点 =
+// ensureWindowLocked 补齐当前阶段的 P2 邻域窗口(设计《预取主循环》《持续预取与阶段切换》):起点 =
 // max(已入队水位, cursor)+1,终点 = min(cursor+lookahead, len-1);K 启动窗口未全部处理完
-// (kDone < k)时不开放邻域(§7.3"K 块就绪后剩余块转 P2")。幂等:水位单调不回退,
+// (kDone < k)时不开放邻域(设计《持续预取与阶段切换》"K 块就绪后剩余块转 P2")。幂等:水位单调不回退,
 // cursor 跳跃(advance 大幅前进)时途经位置视为已消费、不再入队。
 func (p *PersistentPrefetcher) ensureWindowLocked() {
 	st := p.stage
@@ -649,7 +649,7 @@ func (p *PersistentPrefetcher) ensureWindowLocked() {
 // 时不再投递)。action 语义:"enqueue" = 新任务已追加;"promote"/"ignore" = 去重表已
 // 处理(骨架阶段 enqueueDedupLocked 恒返回 "enqueue",保持既有行为)。
 func (p *PersistentPrefetcher) enqueueLocked(t *task, pri int) {
-	// 去重提升不重置起点(D48);骨架阶段这里只记录首次入队参数。
+	// 去重提升不重置起点;骨架阶段这里只记录首次入队参数。
 	if t.start.IsZero() {
 		t.start = p.now()
 	}
@@ -665,7 +665,7 @@ func (p *PersistentPrefetcher) enqueueLocked(t *task, pri int) {
 }
 
 // popTaskLocked 按严格优先级(P0>P1>P2>P3)出队,同级 FIFO;全空返回 (nil, 0)。
-// 调度协程串行调用(design §5.2"调度协程串行出队")。
+// 调度协程串行调用(设计《预取主循环》"调度协程串行出队")。
 func (p *PersistentPrefetcher) popTaskLocked() (*task, int) {
 	for pri := priP0; pri < numPriorities; pri++ {
 		if q := p.queues[pri]; len(q) > 0 {
@@ -677,8 +677,8 @@ func (p *PersistentPrefetcher) popTaskLocked() (*task, int) {
 }
 
 // run 是调度协程:串行出队,每块一个抓取 goroutine 并发执行(并发受 core fetch 的
-// 字节/任务/主机信号量统一约束,design §5.2 内部约定);抓取结果经 results 回投,
-// 记账(finishTask)与 P0 完成回调在调度协程内串行执行(D27)。ctx 取消即退出。
+// 字节/任务/主机信号量统一约束,设计《预取主循环》内部约定);抓取结果经 results 回投,
+// 记账(finishTask)与 P0 完成回调在调度协程内串行执行。ctx 取消即退出。
 func (p *PersistentPrefetcher) run(ctx context.Context) {
 	defer close(p.runDone)
 	for {
@@ -749,12 +749,12 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 	}
 }
 
-// grabBlock 是默认抓取路径(design §5.2 内部约定;D25 对象键):Catalog.Lookup 命中 →
+// grabBlock 是默认抓取路径(设计《预取主循环》内部约定;D25 对象键):Catalog.Lookup 命中 →
 // cas.Open 成功 = 本地命中(不产生下载,直接视为就绪,计入吞吐);Open 返回 ErrNotFound →
 // fetch.Fetch 下载(key = blockKey,expectSize = Entry.Size)。下载后不调 Acquire/Pin
 // (簿记契约:引用是写快照方的职责,Agent 只拉副本)。失败原因作完成回调的 err。
 //
-// 坏块(M4;D28):Open 返回 ErrCorrupt 时,若 Config.OnCorrupt 非 nil 则调用它(内部为
+// 坏块(M4):Open 返回 ErrCorrupt 时,若 Config.OnCorrupt 非 nil 则调用它(内部为
 // Quarantine+RepairOne 包装,在工作协程内执行,可阻塞);返回 nil 且按索引指纹重新 Open
 // 成功 → 视为就绪(跳过下载);nil 回调 / 修复失败 / 重开失败 → 按未命中走下载路径
 // (下载会覆盖坏块)。其他 Open 错误(IO 等)维持原口径:仅返回错误、不下载。
@@ -768,7 +768,7 @@ func (p *PersistentPrefetcher) process(ctx context.Context, t *task) {
 // reportFetchStart(在途 +1)、下载后 reportFetchEnd(在途 -1),成功计
 // fetch_bytes+fetch_requests{success,reason},失败计 fetch_requests{error,reason}
 // (reason 取 task:常规预取 prefetch、按需补块 demand;见 reportFetch* 注释)。
-// reason 同时决定 fetch 准入档位:demand 走在读,其余(含显式预热)走预铺(design 6.1 §5.2)。
+// reason 同时决定 fetch 准入档位:demand 走在读,其余(含显式预热)走预铺(design 设计《预取主循环》)。
 func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int64, ready bool, err error) {
 	ref := t.ref
 	var entrySize int64
@@ -789,7 +789,7 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 		}
 		switch {
 		case errors.Is(oerr, cas.ErrCorrupt):
-			// 坏块回源(D28):修复成功且重开成功 → 就绪;否则落到下载路径(覆盖坏块)。
+			// 坏块回源:修复成功且重开成功 → 就绪;否则落到下载路径(覆盖坏块)。
 			if p.cfg.OnCorrupt != nil {
 				if cerr := p.cfg.OnCorrupt(ctx, t.dataset, ref); cerr == nil {
 					p.markSelfOpen(entry.Fingerprint) // D49:修复后重开
@@ -834,13 +834,13 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 // finishTask 处理一次抓取结果并推进簿记(调度协程内串行调用):t.st 为块归属阶段(阶段
 // 切换后在途完成仍记旧阶段,不干扰新阶段游标);仅当前阶段的完成触发邻域窗口补齐与
 // /metrics 上报(SetPrefetchCursor + 四队列 SetPrefetchQueueDepth,冻结口径:每块完成推进
-// cursor 时上报)。完成回调(D27/D28):P0 块经 Config.OnP0Done(仅 P0),所有块经
+// cursor 时上报)。完成回调:P0 块经 Config.OnP0Done(仅 P0),所有块经
 // Config.OnDone(与 OnP0Done 同触发点,先 OnP0Done 后 OnDone),err = 抓取失败原因
 // (就绪为 nil);回调在调度协程内同步调用且不持内部锁(回调内可安全调 Status 等只读
 // 方法),实现不得阻塞。
 func (p *PersistentPrefetcher) finishTask(res taskResult) {
 	t := res.t
-	// D48 任务耗时:进入终态时 observe 一次(优先取 task 最终生效优先级;骨架阶段
+	// 任务耗时:进入终态时 observe 一次(优先取 task 最终生效优先级;骨架阶段
 	// 计时源已接通,时长取真实起点)。
 	if p.m != nil && !t.start.IsZero() {
 		p.m.ObservePrefetchTaskDuration(t.dataset, priorityLabel(t.pri), p.now().Sub(t.start).Seconds())
@@ -874,7 +874,7 @@ func (p *PersistentPrefetcher) finishTask(res taskResult) {
 				t.st.front = t.idx // D48:预取前沿 = 已完成就绪的最远块
 			}
 		}
-		// 吞吐口径含本地命中与回源下载:每完成一块按其 Size 计入(design §5.2 ETA)。
+		// 吞吐口径含本地命中与回源下载:每完成一块按其 Size 计入(设计《预取主循环》 ETA)。
 		p.observeThroughputLocked(res.size, p.now())
 	}
 	if t.p0 {
@@ -903,7 +903,7 @@ func (p *PersistentPrefetcher) finishTask(res taskResult) {
 		for i := range p.queues {
 			depths[i] = len(p.queues[i])
 		}
-		// D48 预取领先块数:仅当前阶段的就绪完成推进前沿(旧阶段在途完成不回写)。
+		// 预取领先块数:仅当前阶段的就绪完成推进前沿(旧阶段在途完成不回写)。
 		if res.ready {
 			lead = true
 			leads = st.leadLocked()
@@ -920,7 +920,7 @@ func (p *PersistentPrefetcher) finishTask(res taskResult) {
 	p.notifyDone(t.ref, res.err)
 }
 
-// priorityLabel 把内部优先级 0..3 映射为指标标签 P0..P3(D48;越界回退 P0)。
+// priorityLabel 把内部优先级 0..3 映射为指标标签 P0..P3(越界回退 P0)。
 func priorityLabel(pri int) string {
 	if pri < 0 || pri >= numPriorities {
 		return "P0"
@@ -928,7 +928,7 @@ func priorityLabel(pri int) string {
 	return [...]string{"P0", "P1", "P2", "P3"}[pri]
 }
 
-// reportLeadBlocks 上报预取前沿与消费游标的块数差(D48)。
+// reportLeadBlocks 上报预取前沿与消费游标的块数差。
 func (p *PersistentPrefetcher) reportLeadBlocks(dataset string, n int64) {
 	if p.m == nil {
 		return
@@ -936,14 +936,14 @@ func (p *PersistentPrefetcher) reportLeadBlocks(dataset string, n int64) {
 	p.m.SetPrefetchLeadBlocks(dataset, n)
 }
 
-// notifyDone 触发通用完成回调(D28;调度协程内同步调用,不持内部锁,不得阻塞)。
+// notifyDone 触发通用完成回调(调度协程内同步调用,不持内部锁,不得阻塞)。
 func (p *PersistentPrefetcher) notifyDone(ref ChunkRef, err error) {
 	if p.cfg.OnDone != nil {
 		p.cfg.OnDone(ref, err)
 	}
 }
 
-// observeThroughputLocked 以"块完成"为样本更新吞吐 EMA(bytes/s;α=0.3,D16)。速率样本 =
+// observeThroughputLocked 以"块完成"为样本更新吞吐 EMA(bytes/s;α=0.3)。速率样本 =
 // 本次块字节 ÷ 距上次完成的间隔;首个完成只记时刻(尚无速率可言,等待下一次完成);间隔
 // 超过 throughputWindow 视为空窗,丢弃历史重新积累。EMA 保持 0 = 无历史(ETA 返回 0)。
 func (p *PersistentPrefetcher) observeThroughputLocked(size int64, at time.Time) {

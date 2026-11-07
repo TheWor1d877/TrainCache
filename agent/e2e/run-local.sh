@@ -101,7 +101,7 @@ say "-- [1/7] 构建 agentd 与 traincache CLI"
 ok "agentd / traincache 构建完成"
 
 TC=("$BIN_DIR/traincache")
-# --endpoint 是各子命令的局部旗标(§5.6),须置于子命令之后;故统一在调用尾追加。
+# --endpoint 是各子命令的局部旗标(设计《CLI》),须置于子命令之后;故统一在调用尾追加。
 tcall() { "${TC[@]}" "$@" --endpoint "127.0.0.1:$GRPC_PORT"; }
 
 # ---- 2. 准备对象存储(复用 kind 集群里已有的 MinIO) ----
@@ -203,7 +203,7 @@ PHASE="$(awk -F'[[:space:]]+' '/^RESCAN_PHASE/{print $2}' <<<"$NODE_OUT")"
 FREE="$(awk -F'[[:space:]]+' '/^FREE_BYTES/{print $2}' <<<"$NODE_OUT")"
 [[ -n "$FREE" && "$FREE" =~ ^[0-9]+$ && "$FREE" -gt 0 ]] && ok "FREE_BYTES=$FREE(Statfs 动态值非零)" || fail "FREE_BYTES=$FREE 非法"
 
-# 4.2 prefetch(硬断言:rc=0 且 accepted=true;task_id 幂等键经 --task-id 传入,§5.1)
+# 4.2 prefetch(硬断言:rc=0 且 accepted=true;task_id 幂等键经 --task-id 传入,设计《gRPC 接口》)
 #     svc 会同步读 CURRENT 并按 --path 前缀与 --chunks 精确块求交;种子快照已在步骤 2
 #     发布,故这里的块必须真实命中(而不是空任务也返回 accepted)。
 say "  命令: traincache prefetch --task-id $TASK_ID --path $SEED_PREFIX --node $NODE_NAME --chunks $SEED_NAME:0 --dataset train-data"

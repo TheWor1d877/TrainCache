@@ -1,6 +1,6 @@
 package svc
 
-// localgc.go:节点级本地 CAS 孤儿块副本的周期回收入口(docs/5.1-design.md §11.5)。
+// localgc.go:节点级本地 CAS 孤儿块副本的周期回收入口(docs/5.1-design.md《回收》)。
 // 回收面按节点划分:活块集合 = 全部数据集(远端枚举 ∪ 本地已知 bundle)当前快照与
 // 有效读者 claim 引用块的并集,由 core LocalGC 计算;svc 侧只负责完整枚举与整轮放弃。
 

@@ -25,7 +25,7 @@ const (
 	defaultPollInterval = 2 * time.Second
 	maxPollInterval     = 5 * time.Minute
 
-	// unavailableFailureThreshold is the D24/§7.3 consecutive
+	// unavailableFailureThreshold is the consecutive
 	// ErrAgentUnavailable count after which the (pod,node) pair is Failed.
 	unavailableFailureThreshold = 3
 
@@ -70,7 +70,7 @@ type pollTracker struct {
 }
 
 // check reports whether a response is fresh. A repeated seq is treated as
-// "no change" (plan M5 criterion ④). The mark is only recorded after the
+// "no change" (criterion ④). The mark is only recorded after the
 // payload decodes, so a malformed response does not poison the high-water mark.
 func (t *pollTracker) check(generation, seq uint64, key progressKey) (bool, string) {
 	t.mu.Lock()
@@ -99,7 +99,7 @@ func (t *pollTracker) record(key progressKey, generation, seq uint64) {
 // whatever its seq. Placement calls it after it (re)created a task on the
 // Agent: the Agent treats a resubmitted cancelled task as a new task and
 // restarts seq at 1, and keeping the old mark would discard every later report
-// as stale (docs/7.1 §7.4, D46).
+// as stale (docs/7.1-design.md《分配与下发差异》, docs/7.2 D46).
 func (t *pollTracker) forget(taskUID string, podIndex int32, node string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -124,7 +124,7 @@ func (t *pollTracker) clearFailures(key failureKey) {
 
 // nodeFailed reports whether every Pod crossed the consecutive
 // ErrAgentUnavailable threshold on node in the current generation. It restores
-// the pre-M12 "stopped node" signal that no longer has a persisted per-pair
+// the pre-fanout "stopped node" signal that no longer has a persisted per-pair
 // State.
 func (t *pollTracker) nodeFailed(taskUID, node string, generation uint64, pods int) bool {
 	if pods <= 0 {
@@ -226,7 +226,7 @@ type AgentTaskObservation struct {
 }
 
 // readinessFact is one poll round's observation for a (Pod, candidate node).
-// It is never persisted: M12/S15 keeps only the assigned node's fact per Pod
+// It is never persisted: status keeps only the assigned node's fact per Pod
 // in status, while candidate-node counts live in ReadinessTable.
 type readinessFact struct {
 	ready          int32
@@ -240,7 +240,7 @@ type readinessFact struct {
 // pollReadiness polls every submitted (pod,node) pair, updates the P×N
 // readiness table, the per-Pod assigned-node facts and rateHistory. It never
 // returns an error: RPC failures degrade individual pairs and must not stop
-// the other polls (docs/7.1 §7.3). The returned facts are this round's
+// the other polls (docs/7.1-design.md《进度拉取与就绪表》). The returned facts are this round's
 // in-memory observations; applyAssignment uses them to refresh the per-Pod
 // details after GWAA has (re)assigned nodes.
 func (r *Reconciler) pollReadiness(
@@ -410,7 +410,7 @@ func (r *Reconciler) pollReadiness(
 		}
 	}
 
-	// Sample one rate per Pod. After GWAA (M6/M13) has recorded the Pod's
+	// Sample one rate per Pod. After GWAA has recorded the Pod's
 	// preheat node set the sample is the maximum over that set (D14); before
 	// assignment it follows the best reported candidate. Samples stay in
 	// memory only.
@@ -469,7 +469,7 @@ func (r *Reconciler) pollReadiness(
 
 // remapReadinessTable starts from the published table and remaps its columns
 // by node name. Keeping the last known counts for candidate columns that were
-// not observed this round preserves the pre-M12 table semantics without
+// not observed this round preserves the pre-fanout table semantics without
 // persisting P×N per-node details.
 func remapReadinessTable(task *traincachev1alpha1.WarmupTask, pods int, candidates []string) [][]int32 {
 	oldColumns := make(map[string]int, len(task.Status.CandidateNodes))
@@ -521,8 +521,8 @@ func pollPending(task *traincachev1alpha1.WarmupTask, facts map[readinessKey]rea
 	return false
 }
 
-// buildPodDetails writes one PodNodeReadiness per (Pod, preheat node) pair
-// (M13). assignment == nil keeps the node set currently recorded in status.
+// buildPodDetails writes one PodNodeReadiness per (Pod, preheat node) pair.
+// assignment == nil keeps the node set currently recorded in status.
 // minUnmet is a per-Pod map produced by GWAA; when non-nil, every entry of
 // the same Pod carries the same MinUnmet flag (D40). nil keeps the previous
 // value via carryReadinessFact.
@@ -677,7 +677,7 @@ func aggregatePodState(facts map[readinessKey]readinessFact, pod int32, candidat
 }
 
 // readinessByPod returns the first PodNodeReadiness entry whose PodIndex
-// matches pod. After M13 a Pod normally has one entry per preheat node, so this
+// matches pod. A Pod normally has one entry per preheat node, so this
 // helper does not identify a specific node; it is currently only used by tests
 // that expect a single-entry Pod. Production code uses readinessFor to select
 // a (Pod, node) pair.

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestRequiredReadyMatrix pins the K x threshold matrix from S19 and
+// TestRequiredReadyMatrix pins the K x threshold matrix and
 // asserts the invariant required <= K for every cell.
 func TestRequiredReadyMatrix(t *testing.T) {
 	cases := []struct {

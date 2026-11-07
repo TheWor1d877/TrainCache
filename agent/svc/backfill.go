@@ -103,7 +103,7 @@ func (a *Agent) backfill(ref ordersource.ChunkRef, m HookMeta) {
 	}
 }
 
-// repairBackfillCorrupt 执行 repair 坏块修复(D44/D35):Quarantine + Rescan.RepairOne。
+// repairBackfillCorrupt 执行 repair 坏块修复(D44):Quarantine + Rescan.RepairOne。
 func (a *Agent) repairBackfillCorrupt(ctx context.Context, dataset string, fp cas.Fingerprint, ref ordersource.ChunkRef, m HookMeta) {
 	if err := a.CS.Quarantine(fp); err != nil {
 		slog.Warn("backfill: 隔离坏块失败",

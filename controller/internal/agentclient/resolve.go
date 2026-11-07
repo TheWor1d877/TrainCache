@@ -1,5 +1,5 @@
 // Package agentclient resolves per-Node Agent addresses and exposes the gRPC
-// client pool used by the WarmupTask controller (docs/7.1-design.md §5.9).
+// client pool used by the WarmupTask controller (docs/7.1-design.md《Agent gRPC 客户端》).
 package agentclient
 
 import (
@@ -31,7 +31,7 @@ const (
 	// it; the configured value also acts as the DaemonSet hostPort.
 	DefaultAgentPort = 9410
 
-	// DefaultResolveCacheTTL is the address-cache lifetime from §5.9.
+	// DefaultResolveCacheTTL is the address-cache lifetime from《Agent gRPC 客户端》.
 	DefaultResolveCacheTTL = 30 * time.Second
 )
 
@@ -61,7 +61,7 @@ type resolvedAddress struct {
 
 // Resolver discovers the Agent endpoint for a Node.
 //
-// Resolution order (docs/7.1 §5.9 and plan M4):
+// Resolution order (docs/7.1-design.md《Agent gRPC 客户端》):
 //  1. an explicit override, which takes priority over discovery;
 //  2. the Ready Agent Pod scheduled on the Node, using podIP:Port;
 //  3. the Node's InternalIP (falling back to ExternalIP) with Port, which is
@@ -235,7 +235,7 @@ func IsAgentPod(pod *corev1.Pod) bool {
 }
 
 // ListAgentPods lists Agent DaemonSet Pods. The shipped manifest uses
-// app.kubernetes.io/name while docs/7.1 §5.9 names app; the first selector is
+// app.kubernetes.io/name while docs/7.1-design.md《Agent gRPC 客户端》names app; the first selector is
 // tried first and the standard label is used as a fallback, so a normal
 // deployment costs one List. The controller never mutates these Pods.
 func ListAgentPods(ctx context.Context, reader client.Reader) ([]corev1.Pod, error) {
@@ -256,7 +256,7 @@ func ListAgentPods(ctx context.Context, reader client.Reader) ([]corev1.Pod, err
 }
 
 // ReadyAgentNodes returns the set of Nodes that host a Ready Agent Pod. Nodes
-// without one are excluded from the candidate list (plan M4 acceptance ①).
+// without one are excluded from the candidate list (docs/7.1-design.md《候选节点筛选》).
 func ReadyAgentNodes(pods []corev1.Pod) sets.Set[string] {
 	out := sets.New[string]()
 	for i := range pods {

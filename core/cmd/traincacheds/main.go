@@ -1,4 +1,4 @@
-// Command traincacheds 是数据集管理 CLI（design.md §11）。
+// Command traincacheds 是数据集管理 CLI（design.md《命令行入口》）。
 //
 // 查询面（ls datasets / ls snapshots / ls entries / stat）只读索引侧对象
 // （CURRENT、manifest.json、索引分片），不发任何写请求。写面两个命令：
@@ -42,7 +42,7 @@ const (
 	exitRuntimeError = 1
 	exitUsageError   = 2
 
-	// 索引侧对象键字面量（design.md §6.1 布局）：CURRENT 键走 index.CurrentKey，
+	// 索引侧对象键字面量（design.md《索引条目与对象布局》）：CURRENT 键走 index.CurrentKey，
 	// manifest 键走 index.ManifestKey，只有目录级枚举前缀需要自己拼。
 	datasetKeyPrefix = "dataset/"
 	currentKeySuffix = "/CURRENT"
@@ -396,7 +396,7 @@ func (c *cli) lsSnapshots(store objectstore.Store, dataset string) error {
 	return nil
 }
 
-// lsEntries 经 index.Catalog.List 枚举条目（D29）：List 自己读 CURRENT、按 D22
+// lsEntries 经 index.Catalog.List 枚举条目（design.md《读侧加载》）：List 自己读 CURRENT、按 D22
 // 相关性判定只下载必要的索引分片，所以无需先 Refresh。输出每行
 // "<path> <chunk> <size> <fp>"；--limit n（n>0）只保留已排序结果的前 n 条。
 func (c *cli) lsEntries(store objectstore.Store, dataset string) error {
@@ -415,7 +415,7 @@ func (c *cli) lsEntries(store objectstore.Store, dataset string) error {
 
 // statDataset 按 manifest 口径报告当前快照总量：读 CURRENT → GET 并解析该快照的
 // manifest.json，分片数 = Shards 长度、条目数 = Σ ShardRef.Entries。全程零分片下载。
-// paths/bytes 是条目级总量，manifest 里没有（design.md §6.4：清单只存引用与路径范围，
+// paths/bytes 是条目级总量，manifest 里没有（design.md《索引条目与对象布局》：清单只存引用与路径范围，
 // 条目在分片里），要取它们必须下载全量索引分片，正是按需加载要避免的开销，所以本形态
 // 不报这两项；需要条目级总量用 stat --path（只下相关分片）或 ls entries。
 func (c *cli) statDataset(store objectstore.Store, dataset string) error {

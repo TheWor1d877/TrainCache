@@ -15,7 +15,7 @@ import (
 	"traincache/agent/ordersource"
 )
 
-// hooksock_test.go:HookSock 收端(§5.4/D33)——三型帧分发、行分隔、非法帧丢弃计数、
+// hooksock_test.go:HookSock 收端(设计《钩子 socket 协议》)——三型帧分发、行分隔、非法帧丢弃计数、
 // 超 4 KiB 丢弃、nil handler 丢弃、生命周期(Start/Close/ctx 取消)。
 
 const (
@@ -104,7 +104,7 @@ func expectNoHook(t *testing.T, ch <-chan hookRec) {
 	}
 }
 
-// TestHookSockDispatchThreeFrameTypes:三型帧(§5.4)分发到对应 handler,字段逐字一致。
+// TestHookSockDispatchThreeFrameTypes:三型帧(设计《钩子 socket 协议》)分发到对应 handler,字段逐字一致。
 func TestHookSockDispatchThreeFrameTypes(t *testing.T) {
 	m := newHookMetrics()
 	path := hookPath(t)
@@ -168,7 +168,7 @@ func TestHookSockInvalidJSONCounted(t *testing.T) {
 	}
 }
 
-// TestHookSockUnknownTypeCounted:未知帧类型丢弃并计 parse(D33:集合外不新增基数)。
+// TestHookSockUnknownTypeCounted:未知帧类型丢弃并计 parse(集合外不新增基数)。
 func TestHookSockUnknownTypeCounted(t *testing.T) {
 	m := newHookMetrics()
 	path := hookPath(t)
@@ -235,7 +235,7 @@ func TestHookSockNilHandlerDropped(t *testing.T) {
 }
 
 // TestHookSockLifecycle:Start 建父目录与套接字;Close 幂等并删除套接字;
-// Close 后/重复 Start 报错(§5.4 收端生命周期)。
+// Close 后/重复 Start 报错(设计《钩子 socket 协议》收端生命周期)。
 func TestHookSockLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "dir", "agent.sock") // 父目录不存在
 	s := New(path, nil, HookHandlers{})

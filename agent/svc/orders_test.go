@@ -19,9 +19,9 @@ import (
 )
 
 // 本文件是 OrderDiscovery 的集成测试:测试内自带小写端 helper 落 ring 文件
-// (布局与写序按 design §6.2 / decisions D22 冻结,只读测试自建内容)。
+// (布局与写序按设计《数据格式》 / decisionsD22 冻结,只读测试自建内容)。
 
-// ring 布局常量(design §6.2;与 ordersource 读端一致,测试内独立字面量)。
+// ring 布局常量(设计《数据格式》;与 ordersource 读端一致,测试内独立字面量)。
 const (
 	testRingHeaderSize = 64
 	testSlotHeaderSize = 12
@@ -260,7 +260,7 @@ func TestOrderDiscoveryIgnoresNonRingFiles(t *testing.T) {
 func TestOrderDiscoverySyncsFormatErrors(t *testing.T) {
 	setScanInterval(t, 10*time.Millisecond)
 	dir := t.TempDir()
-	// 坏 magic:≥64B 且首 4B 非 "TCO1"(读端按 magic 类计一次;D23)。
+	// 坏 magic:≥64B 且首 4B 非 "TCO1"(读端按 magic 类计一次)。
 	writeTestRingRaw(t, filepath.Join(dir, "pod-bad.ring"), bytes.Repeat([]byte("X"), 64))
 
 	m := metrics.New(metrics.Config{})
@@ -355,7 +355,7 @@ func TestOrderDiscoveryMkdirFailureNotFatal(t *testing.T) {
 	}
 }
 
-// TestHandleOrderWiresPrefetch:HandleOrder = M2 判据日志行 + ForOrder 接线(§7.2/§7.3):
+// TestHandleOrderWiresPrefetch:HandleOrder = M2 判据日志行 + ForOrder 接线(设计《预热任务生命周期》《持续预取与阶段切换》):
 // 订单到达 → 只加载涉及前缀的分片(LoadPrefixes)→ 首个订单启动预取调度并安装阶段
 // (Status.Stage = stage_id)→ 预取推进游标。
 func TestHandleOrderWiresPrefetch(t *testing.T) {

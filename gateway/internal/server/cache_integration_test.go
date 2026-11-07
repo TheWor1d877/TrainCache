@@ -1,7 +1,7 @@
 package server
 
 // cache_integration_test.go：真实 minio-go 客户端 → 网关 HTTP → 假 S3 源站 的
-// 缓存端到端用例（docs/9.3-test.md §4.3）。同一 key 先后两轮，两轮之间无并发：
+// 缓存端到端用例（docs/9.3-test.md「测试文件」）。同一 key 先后两轮，两轮之间无并发：
 // 第一轮源站 GET=1；第二轮源站 GET 不增加、条目结束行的 from=cache；两轮
 // ReadAll 字节一致且 ETag 相同。
 

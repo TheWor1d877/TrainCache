@@ -25,9 +25,9 @@ import (
 	"traincache/checkpoint/internal/plugin"
 )
 
-// 本文件补 10.3 §6「续传跨进程」的缺口：续传不只要在同一个进程内生效，
+// 本文件覆盖 10.3 覆盖矩阵里的「续传跨进程」一行：续传不只要在同一个进程内生效，
 // 还要能跨进程。上一次运行的插件进程被 SIGKILL 之后，已确认分片的状态
-// 仍然在磁盘上，下一次运行读到它、跳过这些分片（design 10.1 §5.2、
+// 仍然在磁盘上，下一次运行读到它、跳过这些分片（design 10.1「数据格式」、
 // 10.2 D16）。
 //
 // 这里用磁盘版 objectAPI 替身：它的上传记录放在目录里，因此父子两个
@@ -75,7 +75,7 @@ func TestResumeAcrossProcessKillSkipsConfirmedParts(t *testing.T) {
 	storeDir := t.TempDir()
 	stateDir := t.TempDir()
 
-	// 状态文件按源文件的 sha256 命名（design 10.1 §5.2）。
+	// 状态文件按源文件的 sha256 命名（design 10.1「数据格式」）。
 	sum := sha256.Sum256(data)
 	statePath := filepath.Join(stateDir, hex.EncodeToString(sum[:])+".jsonl")
 
@@ -165,7 +165,7 @@ func TestResumeAcrossProcessKillSkipsConfirmedParts(t *testing.T) {
 		t.Fatalf("最终对象长度 = %d，期望 %d", len(body), len(data))
 	}
 
-	// 保存成功后状态目录被清空（design 10.1 §5.2）。
+	// 保存成功后状态目录被清空（design 10.1「数据格式」）。
 	leftover, _ := filepath.Glob(filepath.Join(stateDir, "*.jsonl"))
 	if len(leftover) != 0 {
 		t.Fatalf("成功后仍残留续传状态文件: %v", leftover)

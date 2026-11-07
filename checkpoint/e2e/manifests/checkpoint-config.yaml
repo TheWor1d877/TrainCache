@@ -1,5 +1,5 @@
 # Per-task checkpoint configuration and object-store credentials
-# (design 10.1 §4.2, §5.4). Keys mirror the webhook's ConfigMap contract so the
+# (design 10.1「准入契约」、「部署与配置」). Keys mirror the webhook's ConfigMap contract so the
 # same values would be read by the CheckpointMutator.
 apiVersion: v1
 kind: Secret

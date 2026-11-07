@@ -1,7 +1,7 @@
-// Package config 读取并校验网关的运行配置（design 9.1 §5.3/§6.7）。
+// Package config 读取并校验网关的运行配置（design 9.1「配置」）。
 //
 // env 解析 helper 从 agent/svc/config.go 复制而来（envOr/envBool/正整数），
-// 不导出、不抽到 core：网关与 Agent 是两个独立模块，按 9.2 D24 的依赖方向
+// 不导出、不抽到 core：网关与 Agent 是两个独立模块，按各自的依赖方向
 // 保持各自一份，避免为几个字符串引入跨模块依赖。
 //
 // 配置一次性读取，不做热加载；非法值返回错误，进程退出码 1。
@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-// 默认值逐字来自 design 9.1 §5.3。
+// 默认值逐字来自 design 9.1「配置」。
 const (
 	defaultObjstoreEndpoint  = "127.0.0.1:9000"
 	defaultObjstoreBucket    = "traincache"
@@ -27,7 +27,7 @@ const (
 	defaultCacheTotalBytes   = 68719476736 // 64GiB
 )
 
-// env 名（design 9.1 §5.3 冻结；沿用的是全仓同名键）。
+// env 名（design 9.1「配置」冻结；沿用的是全仓同名键）。
 const (
 	envObjstoreEndpoint    = "TRAINCACHE_OBJSTORE_ENDPOINT"
 	envObjstoreAccessKey   = "TRAINCACHE_OBJSTORE_ACCESS_KEY"
@@ -44,17 +44,17 @@ const (
 	envCacheTotalBytes     = "TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES"
 )
 
-// Config 是网关进程的完整配置（design 9.1 §5.3）。
+// Config 是网关进程的完整配置（design 9.1「配置」）。
 type Config struct {
 	ObjstoreEndpoint  string // TRAINCACHE_OBJSTORE_ENDPOINT，默认 127.0.0.1:9000（不带 scheme）
 	ObjstoreAccessKey string // TRAINCACHE_OBJSTORE_ACCESS_KEY，默认空
 	ObjstoreSecretKey string // TRAINCACHE_OBJSTORE_SECRET_KEY，默认空
-	Bucket            string // TRAINCACHE_OBJSTORE_BUCKET，默认 traincache（v1 单桶，D18）
+	Bucket            string // TRAINCACHE_OBJSTORE_BUCKET，默认 traincache（v1 单桶）
 	ObjstoreSecure    bool   // TRAINCACHE_OBJSTORE_SECURE，默认 false（"1"/"true"/"yes" 为真）
 	// ObjstoreCompression 允许网关向源站声明 gzip，默认 false（压缩默认关闭）。
 	// 网关解压后按原始字节扇出，指纹与内容校验不受影响；带 Range 的请求不参与协商。
 	ObjstoreCompression bool
-	Listen              string // TRAINCACHE_GATEWAY_LISTEN，默认 :9413（S3 与探针共用，D25）
+	Listen              string // TRAINCACHE_GATEWAY_LISTEN，默认 :9413（S3 与探针共用）
 	BucketConcurrency   int    // TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY，默认 64（正整数）
 	BlockBufferBytes    int    // TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES，默认 10485760（正整数）
 	LogLevel            string // TRAINCACHE_LOG_LEVEL，默认 info（未知值退化为 info）
@@ -65,7 +65,7 @@ type Config struct {
 	CacheTotalBytes   int64 // TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES，默认 68719476736（64GiB，正整数，且不小于单 dataset 上限）
 }
 
-// Load 从环境变量加载配置并校验（design 9.1 §6.7）：
+// Load 从环境变量加载配置并校验（design 9.1「配置」）：
 // 整数必须 >0，端口必须 1..65535，枚举外的日志级别退化为 info 而不报错。
 // 缓存开关取宽松口径：未设置即开，只有 "1"/"true"/"yes" 为真，其余取值一律当作关（D29）。
 func Load() (*Config, error) {
@@ -169,7 +169,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-// envBool 解析布尔 env（D26 口径：TrimSpace 后 "1"/"true"/"yes"，大小写不敏感，为真；
+// envBool 解析布尔 env（design 9.1「配置」口径：TrimSpace 后 "1"/"true"/"yes"，大小写不敏感，为真；
 // 未设置或其余取值一律为假，不报错）。
 func envBool(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {

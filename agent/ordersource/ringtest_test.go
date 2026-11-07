@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// 本文件是测试专用 ring 写端(模拟 sidecar,design §6.2 / decisions D22 写序):
+// 本文件是测试专用 ring 写端(模拟 sidecar,设计《数据格式》 / decisionsD22 写序):
 // 写头 / 写槽 / 推 commit(先整槽后头 write_seq)。生产代码不引用本文件。
 
 // buildRingHeader 构造 64B 头(默认 magic/version/几何合法;坏头用例再逐字段破坏)。

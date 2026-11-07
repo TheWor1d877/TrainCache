@@ -1,4 +1,4 @@
-# Restore give-up scenario (design 10.1 §6.4/§8, 10.2 D14): the local backend
+# Restore give-up scenario (design 10.1「关键流程」, 10.2 D14): the local backend
 # holds a committed step whose data file does not match the sha256 recorded in
 # manifest.json, so every restore attempt fails with CORRUPT. The manifest is
 # seeded after the mismatched data, and the manifest is the commit marker, so

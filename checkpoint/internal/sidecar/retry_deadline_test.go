@@ -13,7 +13,7 @@ import (
 	"traincache/checkpoint/internal/plugin"
 )
 
-// 本文件补 10.3 §6「重试与总时限」的缺口：已有用例注入的是快速失败的
+// 本文件覆盖 10.3 覆盖矩阵里的「保存重试与总时限」一行：已有用例注入的是快速失败的
 // CodeUnavailable，只锁住了重试次数；这里注入每次都慢的后端——一次尝试
 // 吃掉预算里很大一段，而不是立刻返回错误。对应 10.2 D12：保存与恢复
 // 都加总时限，到点停止重试并快速失败。
@@ -24,7 +24,7 @@ import (
 
 // slowBackend 是每次都慢的插件替身。一次尝试要么跑满 each 再以 UNAVAILABLE
 // 失败，要么在总时限到点时被 saveCtx 掐断；两条路径都返回可重试错误，
-// 因此只有总时限能终止循环（10.1 §6.3）。
+// 因此只有总时限能终止循环（10.1「关键流程」）。
 type slowBackend struct {
 	each time.Duration
 
@@ -88,7 +88,7 @@ func TestSlowBackendStopsRetryingAtDeadline(t *testing.T) {
 			wantSlack:   80 * time.Millisecond,
 		},
 		{
-			// 形状二：30 秒间隔按比例缩到 30ms（10.1 §6.3 的外层 5 次），
+			// 形状二：30 秒间隔按比例缩到 30ms（10.1「关键流程」的 5 段间隔），
 			// 间隔本身吃掉预算；不封顶则 6 次尝试加 5 段间隔约 168ms。
 			name:        "30秒节奏的间隔叠加慢尝试",
 			deadline:    100 * time.Millisecond,
@@ -157,7 +157,7 @@ func TestSlowBackendStopsRetryingAtDeadline(t *testing.T) {
 				t.Fatalf("插件启动次数 = %d, want %d", f.count(), calls)
 			}
 
-			// 10.1 §6.3：失败后保留数据、停止接收新 step，写一条 ERROR。
+			// 10.1「关键流程」：失败后保留数据、停止接收新 step，写一条 ERROR。
 			if !pathExists(dir) {
 				t.Fatal("失败后应保留工作目录")
 			}
@@ -184,7 +184,7 @@ func TestSlowBackendStopsRetryingAtDeadline(t *testing.T) {
 }
 
 // TestSlowBackendKeepsSingleTerminalError 确认时限到点后终态 ERROR 只有一条，
-// 而不是每轮重试各写一条终态；逐次失败仍按 §7.1 单独记「保存失败」。
+// 而不是每轮重试各写一条终态；逐次失败仍按 10.1「可观测出口」单独记「保存失败」。
 func TestSlowBackendKeepsSingleTerminalError(t *testing.T) {
 	opts := testOptions(t)
 	log, buf := newTestLogger()
@@ -206,12 +206,12 @@ func TestSlowBackendKeepsSingleTerminalError(t *testing.T) {
 		t.Fatalf("终态失败应是 ERROR:\n%s", line)
 	}
 	calls, _ := backend.snapshot()
-	// 10.1 §7.1：保存失败是 ERROR 级并带 err 与 err_class；逐次一条，
+	// 10.1「可观测出口」：保存失败是 ERROR 级并带 err 与 err_class；逐次一条，
 	// 级别降到 Debug 就不再是「保存或恢复失败」这一日志点。
 	if got := countErrorLines(t, logs, "msg=保存失败"); got != calls {
 		t.Fatalf("逐次失败的 ERROR 条数 = %d, want 尝试次数 %d\n%s", got, calls, logs)
 	}
-	// 队列在终态后不再接收新 step（10.1 §6.3）。
+	// 队列在终态后不再接收新 step（10.1「关键流程」）。
 	if s.enqueue(43, dir) {
 		t.Fatal("保存失败后不应再接收新 step")
 	}

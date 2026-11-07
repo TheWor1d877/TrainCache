@@ -415,7 +415,7 @@ func TestAdvanceCountsOnly(t *testing.T) {
 // ---------------- inotify 兜底:钩子为主的双源口径 ----------------
 
 // TestInotifyFallbackGatedByHookSilence:钩子窗口内报告过打开事件时,inotify 打开事件不计入;
-// 钩子沉默超过窗口后兜底生效(§5.4"钩子为主,inotify 兜底")。
+// 钩子沉默超过窗口后兜底生效(设计《钩子 socket 协议》"钩子为主,inotify 兜底")。
 func TestInotifyFallbackGatedByHookSilence(t *testing.T) {
 	env := newTestEnv(t, CollectorConfig{})
 	hookFP, watchFP := testFP(0x71), testFP(0x72)

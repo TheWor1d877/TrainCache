@@ -1,6 +1,6 @@
 package prefetch
 
-// 本文件是 prefetch 的白盒/集成测试(6.2 D16 预取参数、D28 prefetch 通用完成回调
+// 本文件是 prefetch 的白盒/集成测试(6.2 预取参数、 prefetch 通用完成回调
 // 与 D45 跨队列去重的场景):契约路径用真实 core 组合
 // (objectstore.Mock + cas.Store + fetch.Fetcher + index.Catalog)验证,时序敏感场景经
 // 非导出钩子(grab/now)注入逐块放行闸与假时钟,断言不依赖 goroutine 调度顺序;
@@ -254,7 +254,7 @@ func (env *testEnv) readBlock(ref ChunkRef) (string, error) {
 	return string(b), nil
 }
 
-// orderOf 组装测试消费顺序(字段语义见 design §6.1)。
+// orderOf 组装测试消费顺序(字段语义见设计《数据格式》)。
 func orderOf(stageID string, refs []ChunkRef, k int) ConsumeOrder {
 	return ConsumeOrder{
 		Dataset:        testDataset,
@@ -438,7 +438,7 @@ func TestQueuePriorityPreemption(t *testing.T) {
 	}
 }
 
-// TestConfigLookaheadDefault:Lookahead ≤ 0 取默认 16(D16)。
+// TestConfigLookaheadDefault:Lookahead ≤ 0 取默认 16。
 func TestConfigLookaheadDefault(t *testing.T) {
 	if got := New(nil, nil, nil, nil, Config{}).cfg.Lookahead; got != 16 {
 		t.Errorf("零值 Lookahead = %d, want 16", got)
@@ -671,7 +671,7 @@ func TestOnConsumeSideAdvanceMonotonicAndJump(t *testing.T) {
 }
 
 // TestHitRateCountsReadyOnConsume:消费时块已就绪计命中、未就绪计未命中;
-// K 块全部处理完后剩余块按 cursor 起转 P2 邻域窗口(§7.3)。
+// K 块全部处理完后剩余块按 cursor 起转 P2 邻域窗口(设计《持续预取与阶段切换》)。
 func TestHitRateCountsReadyOnConsume(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	env := newTestEnv(t, nil)
@@ -885,7 +885,7 @@ func gatherGauge(r *metrics.Registry, family, dataset string) (float64, bool) {
 	return 0, false
 }
 
-// TestPrefetchLeadBlocks:lead = 预取前沿 − 消费游标(D48):前沿先推进为正值,
+// TestPrefetchLeadBlocks:lead = 预取前沿 − 消费游标:前沿先推进为正值,
 // 消费追平归零,消费越过前沿为负值(消费领先)。
 func TestPrefetchLeadBlocks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1051,7 +1051,7 @@ func TestDownloadOnLocalMissUsesD25Key(t *testing.T) {
 
 // ---------------- 回源线打点(综合验收 ①) ----------------
 
-// fetchLineSnapshot 读回源线三打点(dataset 经白名单归并为 "other";D48 起
+// fetchLineSnapshot 读回源线三打点(dataset 经白名单归并为 "other";起
 // fetch_bytes/fetch_requests 带 reason 标签,预取路径固定 prefetch):成功交付字节、
 // 在途计数、请求数{success,error}。
 func fetchLineSnapshot(t *testing.T, r *metrics.Registry) (bytes, inflight, success, failed float64) {
@@ -1242,7 +1242,7 @@ func TestNilMetricsRegistrySafe(t *testing.T) {
 	waitFor(t, "块完成推进预取前沿", func() bool { return p.Status().PrefetchFrontier == order.Chunks[0] })
 }
 
-// ---------------- D27:显式预热入队(P0) ----------------
+// ----------------:显式预热入队(P0) ----------------
 
 // TestEnqueueP0PriorityPreemptsP1AndP2:P0 严格最高优先级——先 P0(按入参顺序)再 P1(K
 // 启动窗口)再 P2(邻域窗口);空列表返回 nil 且队列不变(白盒出队断言,不依赖调度时序)。
@@ -1319,7 +1319,7 @@ func TestEnqueueP0PriorityPreemptsP1AndP2(t *testing.T) {
 }
 
 // TestEnqueueP0EmptyAndCanceled:空列表返回 nil 且不入队;ctx 已取消返回 context.Canceled
-// 且不入队(D27 冻结语义)。
+// 且不入队(冻结语义)。
 func TestEnqueueP0EmptyAndCanceled(t *testing.T) {
 	env := newTestEnv(t, nil)
 	p := env.newPrefetcher(Config{})
@@ -1518,9 +1518,9 @@ func TestEnqueueP0FetchesWithoutMapping(t *testing.T) {
 	}
 }
 
-// ---------------- M4:OnDone 通用完成回调(D28) ----------------
+// ---------------- M4:OnDone 通用完成回调 ----------------
 
-// TestOnDoneFiresOncePerBlockWithOnP0Done:D28——OnDone 覆盖所有优先级队列,每块恰好一次
+// TestOnDoneFiresOncePerBlockWithOnP0Done:——OnDone 覆盖所有优先级队列,每块恰好一次
 // (本地就绪/下载成功 = nil,下载失败 = 原因);与 OnP0Done 并存:P0 块两回调都触发且先
 // OnP0Done 后 OnDone,非 P0 块只有 OnDone;两者均在调度协程内串行同步调用(最大并发 1)。
 func TestOnDoneFiresOncePerBlockWithOnP0Done(t *testing.T) {
@@ -1673,7 +1673,7 @@ func countKey(keys []string, key string) int {
 	return n
 }
 
-// ---------------- M4:OnCorrupt 本地坏块回源(D28) ----------------
+// ---------------- M4:OnCorrupt 本地坏块回源 ----------------
 
 // repairWrapper 构造与接线阶段一致的 OnCorrupt 注入实现:Quarantine + 按 D25 键重下
 // (fetch,内部 Put 落块并校验)+ RemoveQuarantined(同指纹;内容同源)。

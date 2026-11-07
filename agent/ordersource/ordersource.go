@@ -1,8 +1,8 @@
 // Package ordersource 是 OrderSource 的读端:以 mmap 只读方式追读 sidecar 写入的
-// 共享内存 ring(design §5.3 类型与接口、§6.2 ring 布局;decisions D22 写端协议、
-// D23 格式错误指标)。
+// 共享内存 ring(设计《订单源与共享内存》 §5.3 类型与接口、设计《数据格式》 ring 布局;decisionsD22 写端协议、
+// 格式错误指标)。
 //
-// 纯读端、仅标准库:不依赖 core、不依赖 metrics(decisions D4:子模块互不依赖);
+// 纯读端、仅标准库:不依赖 core、不依赖 metrics(子模块互不依赖);
 // 写端由 sidecar 承担(ordersrc/,M2 阶段 B)。ring 单写(sidecar)单读(Agent):
 //
 //   - commit 标记 = 头 write_seq 最后写:reader 只读 seq ≤ 头 write_seq 的槽,半写槽天然不可见;
@@ -10,8 +10,8 @@
 //   - reader 落后不阻塞 writer:落后超过 slot_count 时直接跳至最新(阶段切换只关心最新顺序);
 //   - writer_generation 变化 → reader 清当前订单、丢弃追读位置重读最新,新代际订单即使载荷
 //     字节相同也重放一次;writer 重启由代际计数检测;跳读 / 损坏槽 / 空订单计入包级丢单计数
-//     (design §7.4);
-//   - 格式不符(magic / version / 几何非法)→ 忽略该文件并计入包级错误计数(D23)。
+//     (设计《订单通道降级》);
+//   - 格式不符(magic / version / 几何非法)→ 忽略该文件并计入包级错误计数。
 //
 // Reader 由 svc 装配(发现 = svc 目录轮询 watchDir,见 D22);平台锁定 linux
 // (syscall.Mmap 直接可用,项目 k8s-only,不写 build tag、不引 x/sys)。
@@ -22,13 +22,13 @@ import (
 	"errors"
 )
 
-// ChunkRef 是块引用(core Entry 寻址,design §5.1/§5.3;字段与 JSON 标签冻结)。
+// ChunkRef 是块引用(core Entry 寻址,设计《gRPC 接口》《订单源与共享内存》;字段与 JSON 标签冻结)。
 type ChunkRef struct {
 	Path  string `json:"path"`
 	Chunk int64  `json:"chunk"`
 }
 
-// ConsumeOrder 是本阶段的消费顺序(共享内存载荷,design §5.3/§6.1;字段与 JSON 标签冻结)。
+// ConsumeOrder 是本阶段的消费顺序(共享内存载荷,设计《订单源与共享内存》《数据格式》;字段与 JSON 标签冻结)。
 type ConsumeOrder struct {
 	Dataset        string     `json:"dataset"`
 	SnapshotID     string     `json:"snapshot_id"`
@@ -39,7 +39,7 @@ type ConsumeOrder struct {
 	Chunks         []ChunkRef `json:"chunks"`          // 本阶段消费顺序(有序块引用列表)
 }
 
-// OrderSource 是消费顺序来源(design §5.3):读端实现为共享内存 mmap Reader,
+// OrderSource 是消费顺序来源(设计《订单源与共享内存》):读端实现为共享内存 mmap Reader,
 // 由 svc 装配。
 type OrderSource interface {
 	// CurrentOrder 返回当前阶段的消费顺序;尚无任何推送时返回 false。

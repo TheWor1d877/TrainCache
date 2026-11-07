@@ -67,7 +67,7 @@ func unsetEnv(t *testing.T, key string) {
 	})
 }
 
-// wantDefaultHeat 是 D14/D30 默认十一值:N=24h、M=30min、T=24h(因子 0.5)、β=0.15、
+// wantDefaultHeat 是 默认十一值:N=24h、M=30min、T=24h(因子 0.5)、β=0.15、
 // T_R=6h、校准窗口 100/阈值 0.8、k=80、Δ=5、M=90。
 func wantDefaultHeat() HeatConfig {
 	return HeatConfig{
@@ -137,13 +137,13 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("ReadStallWindowMS = %d, want %d(C3 默认)", cfg.ReadStallWindowMS, defaultReadStallWindowMS)
 	}
 	if cfg.IndexRefreshInterval != defaultIndexRefreshInterval {
-		t.Errorf("IndexRefreshInterval = %v, want %v(6.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
+		t.Errorf("IndexRefreshInterval = %v, want %v(6.1《快照与回收》默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
 	}
 	if cfg.LocalGCInterval != defaultLocalGCInterval {
 		t.Errorf("LocalGCInterval = %v, want %v(§11.5 默认)", cfg.LocalGCInterval, defaultLocalGCInterval)
 	}
 	if cfg.ObjstoreProbeConditionalWrite {
-		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
+		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1《快照与回收》)")
 	}
 	if cfg.ObjstoreCompression {
 		t.Error("ObjstoreCompression 默认值 = true, want false(压缩默认关闭)")
@@ -201,7 +201,7 @@ func TestLoadDebugAddr(t *testing.T) {
 	}
 }
 
-// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(6.1 §5.9/§5.12)。
+// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(设计《快照与回收》)。
 func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
 	setBaseEnv(t)
 	t.Setenv("NODE_NAME", "worker-01")
@@ -220,7 +220,7 @@ func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
 	}
 }
 
-// TestLoadLocalGCInterval:TRAINCACHE_LOCAL_GC_INTERVAL 解析(§11.5)——未设置取默认
+// TestLoadLocalGCInterval:TRAINCACHE_LOCAL_GC_INTERVAL 解析(docs/5.1-design.md《回收》)——未设置取默认
 // 10m;合法值覆盖;非法取值与其余 duration 参数同口径判启动错误。
 func TestLoadLocalGCInterval(t *testing.T) {
 	cases := []struct {
@@ -398,7 +398,7 @@ func TestLoadReadStallWindowMS(t *testing.T) {
 	}
 }
 
-// TestLoadObjstoreSecureBool:TRAINCACHE_OBJSTORE_SECURE 真值口径(D26:"1"/"true"/"yes",
+// TestLoadObjstoreSecureBool:TRAINCACHE_OBJSTORE_SECURE 真值口径("1"/"true"/"yes",
 // 大小写不敏感);其余取值(含未设置、垃圾值)一律 false。
 func TestLoadObjstoreSecureBool(t *testing.T) {
 	truthy := []string{"1", "true", "TRUE", "Yes", " yes "}
@@ -474,7 +474,7 @@ func TestLoadFetchRangeParallel(t *testing.T) {
 	}
 }
 
-// TestLoadGatewayEnv:网关入口与独立 TLS 开关(9.1 §5.3 / 9.2 D15/D16)。
+// TestLoadGatewayEnv:网关入口与独立 TLS 开关(9.1 §5.3 / 9.2)。
 // 缺省为空/false;TRAINCACHE_GATEWAY_SECURE 按 envBool 口径(1/true/yes);
 // 两个 secure 互相独立;地址不做 scheme 校验(非法值不阻断启动)。
 func TestLoadGatewayEnv(t *testing.T) {
@@ -551,7 +551,7 @@ func TestLoadGatewayEnv(t *testing.T) {
 	})
 }
 
-// TestLoadOrdersDirDefault:未设 TRAINCACHE_ORDERS_DIR → §6.2 默认发现目录。
+// TestLoadOrdersDirDefault:未设 TRAINCACHE_ORDERS_DIR → 设计《数据格式》默认发现目录。
 func TestLoadOrdersDirDefault(t *testing.T) {
 	setBaseEnv(t)
 	os.Unsetenv("TRAINCACHE_ORDERS_DIR") // t.Setenv 的 cleanup 会恢复原值
@@ -567,7 +567,7 @@ func TestLoadOrdersDirDefault(t *testing.T) {
 }
 
 // TestLoadCacheRootBlankFallsBack：TRAINCACHE_CACHE_ROOT 全空白 → 回退默认
-// /var/cache/traincache(与 OrdersDir 等字符串 env 同一 envOr 解析口径;D38)。
+// /var/cache/traincache(与 OrdersDir 等字符串 env 同一 envOr 解析口径)。
 func TestLoadCacheRootBlankFallsBack(t *testing.T) {
 	setBaseEnv(t)
 	t.Setenv("NODE_NAME", "worker-01")
@@ -627,7 +627,7 @@ func TestLoadVerifyInvalid(t *testing.T) {
 	}
 }
 
-// TestLoadHeatEnvInvalid:TRAINCACHE_HEAT_* 非法取值启动即报错(D30:duration 走
+// TestLoadHeatEnvInvalid:TRAINCACHE_HEAT_* 非法取值启动即报错(duration 走
 // time.ParseDuration,percent 0..100;比值类按 (0,1]、窗口 >0 校验),错误信息指明 env 名。
 func TestLoadHeatEnvInvalid(t *testing.T) {
 	cases := []struct{ key, val string }{

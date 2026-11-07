@@ -23,8 +23,8 @@ import (
 	"traincache/core/objectstore"
 )
 
-// prefetchLookahead 是邻域预取提前量与淘汰硬保护窗口的默认值(D16:16;
-// §7.6"cursor 起 lookahead 块")。保留为 const 供测试引用。
+// prefetchLookahead 是邻域预取提前量与淘汰硬保护窗口的默认值(16;
+// 设计《回收与磁盘淘汰》"cursor 起 lookahead 块")。保留为 const 供测试引用。
 // lookahead 是运行时值,由 TRAINCACHE_PREFETCH_LOOKAHEAD 环境变量覆盖
 // (装配期一次性设置,无并发写);生产代码统一使用 lookahead。
 const prefetchLookahead = 16
@@ -37,13 +37,13 @@ const (
 	envPrefetchLookahead = "TRAINCACHE_PREFETCH_LOOKAHEAD"
 )
 
-// defaultEvictPolicy 是默认淘汰策略名(M4:D8 heat 档行为不变)。
+// defaultEvictPolicy 是默认淘汰策略名(M4:heat 档行为不变)。
 const defaultEvictPolicy = "heat"
 
 // selfOpenGuardTTL 是 Agent 自打开守卫的有效期(D49;覆盖 inotify 轮询与处理延迟)。
 const selfOpenGuardTTL = 3 * time.Second
 
-// Agent 是 svc 装配产物:持有配置与各子模块实例(design §3:svc 是装配层;D34 导出字段
+// Agent 是 svc 装配产物:持有配置与各子模块实例(设计《架构与依赖方向》:svc 是装配层;导出字段
 // 供接线测试与探针注入)。collector 装配期构造,订单上下文由 provider 注入(D63),
 // 不再绑 ring。
 type Agent struct {
@@ -62,7 +62,7 @@ type Agent struct {
 	// LogAgg 是 60s 汇总日志聚合器(8.1 §3.3/§4.2):下载与缓存两类汇总共用一条
 	// ticker,由 StartBackground 启动;nil 表示不记汇总(仅测试装配)。
 	LogAgg *logagg.Aggregator
-	// ReaderRegistry 是 R2 读者登记器(6.1 §5.10):声明本节点跟随的 snapID,
+	// ReaderRegistry 是 R2 读者登记器(设计《快照与回收》):声明本节点跟随的 snapID,
 	// 供 GC 按读者确认删除。装配期构造,StartBackground 起心跳。
 	ReaderRegistry *index.ReaderRegistry
 
@@ -74,7 +74,7 @@ type Agent struct {
 	// 循环生命周期取首次注入的 signal ctx)。
 	localGCOnce sync.Once
 
-	// M9 阶段/归因骨架(D46/D47;装配期构造,业务逻辑由 M9 填写)。
+	// M9 阶段/归因骨架(D47;装配期构造,业务逻辑由 M9 填写)。
 	phase *phaseTracker
 	stall *stallAttributor
 
@@ -83,7 +83,7 @@ type Agent struct {
 	sourceState *sourceState
 }
 
-// gatewayRegion 是网关客户端的固定 SigV4 区域(D17):非空可避免 minio-go 先发
+// gatewayRegion 是网关客户端的固定 SigV4 区域:非空可避免 minio-go 先发
 // GET /<bucket>?location=,网关对外只需处理 GET 与 HEAD 对象请求。
 const gatewayRegion = "us-east-1"
 
@@ -94,8 +94,8 @@ const gatewayRegion = "us-east-1"
 // 远低于「最多 2 次」的上限。
 const gatewayMaxRetries = 1
 
-// Assemble 构造并持有子模块实例(依赖方向 cmd → svc → 子模块 → core 单向无环,design §4):
-// cas → objectstore(D26 S3 兼容客户端)→ fetch → …(装配序见 assembleWith)。
+// Assemble 构造并持有子模块实例(依赖方向 cmd → svc → 子模块 → core 单向无环,设计《架构与依赖方向》):
+// cas → objectstore(S3 兼容客户端)→ fetch → …(装配序见 assembleWith)。
 //
 // 网关接线(9.1 §4.3/§4.4):GatewayEndpoint 为空时与改动前完全一致,只构造源站 store;
 // 非空时再构造网关 store 并包成 backendStore(Get 走选择器,其余方法直连源站)。
@@ -110,7 +110,7 @@ func Assemble(cfg Config) (*Agent, error) {
 		return assembleWith(store, cfg)
 	}
 
-	// 网关与 Agent 共用源站凭证/桶(9.1 §1.4);到网关的 TLS 由 GatewaySecure 独立控制(D16)。
+	// 网关与 Agent 共用源站凭证/桶(9.1 §1.4);到网关的 TLS 由 GatewaySecure 独立控制。
 	gateway, err := objectstore.NewS3StoreWithOptions(cfg.GatewayEndpoint, cfg.ObjstoreAccessKey,
 		cfg.ObjstoreSecretKey, cfg.ObjstoreBucket, cfg.GatewaySecure,
 		objectstore.Options{
@@ -172,7 +172,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		RangeParallel: cfg.FetchRangeParallel, // 默认打开:每个块拆成 4 条 Range GET 并行取
 	})
 
-	// 指标层带 node 标签(traincache_agent_up / agent_degraded;§5.8 node 为第二正交维度)。
+	// 指标层带 node 标签(traincache_agent_up / agent_degraded;设计《指标清单》 node 为第二正交维度)。
 	ag.Metrics = metrics.New(metrics.Config{
 		DatasetWhitelist: cfg.DatasetWhitelist,
 		Node:             cfg.NodeName.String(),
@@ -181,17 +181,17 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// 逐块明细走 Debug 采样,Info 只留窗口汇总。
 	ag.LogAgg = logagg.New(logagg.Options{Verify: cfg.Verify})
 
-	// M9/D46 阶段跟踪器(窗口 K 取 lookahead)。
+	// M9 阶段跟踪器(窗口 K 取 lookahead)。
 	ag.phase = newPhaseTracker(lookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
 	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
 	ag.Prefetch.SetLogAggregator(ag.LogAgg)   // 8.1 §4.2:逐块下载计入 60s 汇总
-	// R1/R2(6.1 §5.9/§5.10):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
+	// R1/R2(设计《快照与回收》):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
 	// 与 core ReaderGrace 默认口径一致)。Follow/心跳由 StartBackground 注入 ctx 后启动。
 	interval := cfg.indexRefreshInterval()
 	ag.ReaderRegistry = index.NewReaderRegistry(obj, cfg.NodeName.String(), 2*interval)
 	ag.Prefetch.SetIndexFollow(interval, ag.ReaderRegistry)
-	// R4(6.1 §5.12):条件写探测(默认关闭;不支持/失败只告警,不阻止启动)。
+	// R4(设计《快照与回收》):条件写探测(默认关闭;不支持/失败只告警,不阻止启动)。
 	if cfg.ObjstoreProbeConditionalWrite {
 		probeCtx, cancel := context.WithTimeout(context.Background(), conditionalWriteProbeTimeout)
 		probeErr := objectstore.ProbeConditionalWrite(probeCtx, obj)
@@ -213,13 +213,13 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		ag.stallCurrentWindow, cfg.ReadStallMinWaitMS, cfg.ReadStallWindowMS)
 	ag.Preheat = NewPreheatTasks(cfg, ag.Prefetch)
 	ag.Preheat.SetLogAggregator(ag.LogAgg) // 任务结束提前输出下载汇总
-	// 读时坏块修复(D35)与块完成触达(D24/D28)接线(实现见 wire.go)。
+	// 读时坏块修复与块完成触达(D24)接线(实现见 wire.go)。
 	ag.Prefetch.SetBlockDoneHook(ag.onBlockDone)
 	ag.Prefetch.SetCorruptRepairHook(ag.repairCorrupt)
-	// 新订单到达 → 刷新订单内块 t_touch(§7.6 任务 4;实现见 instrument.go/wire.go)。
+	// 新订单到达 → 刷新订单内块 t_touch(设计《回收与磁盘淘汰》任务 4;实现见 instrument.go/wire.go)。
 	ag.Prefetch.SetOrderTouchHook(ag.onOrderTouch)
 
-	// 采集层(D63/§5.5):装配期构造,订单上下文经 provider 注入,不再绑 ring;
+	// 采集层(D63/设计《热度与命中率》):装配期构造,订单上下文经 provider 注入,不再绑 ring;
 	// Start 由 StartBackground 在 signal ctx 下调用(无 ring 也照常统计)。
 	ag.Collector = collector.NewCollector(cfg.CacheRoot, ag.Metrics, collectorConfig(cfg.Heat))
 	ag.Collector.SetOrderContextProvider(ag.orderContext)
@@ -228,18 +228,18 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	ag.Collector.SetOpenFilter(ag.selfOpen.SelfOpened)
 	ag.Collector.SetLogAggregator(ag.LogAgg) // 8.1 §4.2:命中/未命中计入 60s 汇总
 
-	// 重扫描(M4/D35):catalogFor 与预取管理器共用同一 bundle(同一 dataset 一个 Catalog)。
+	// 重扫描(M4):catalogFor 与预取管理器共用同一 bundle(同一 dataset 一个 Catalog)。
 	ag.Rescan = rescan.New(cs, ag.Fetcher, obj, ag.catalogFor, rescanMetrics{ag.Metrics})
 	ag.Rescan.SetSelfOpenMarker(ag.selfOpen.Mark) // D49:扫描校验/修复读回
 	// M8/M9 指标接线(singleflight 合并钩子、限速上限、修复队列初始深度;见 metricswiring.go)。
 	ag.wireMetrics()
 
-	// 钩子收端(M5/§5.4;路径见 hookSockPath)+ 三型 handler(见 wire.go)。
+	// 钩子收端(M5/设计《钩子 socket 协议》;路径见 hookSockPath)+ 三型 handler(见 wire.go)。
 	ag.HookSock = New(hookSockPath(cfg), ag.Metrics, ag.hookHandlers())
 
-	// 淘汰循环(M6/§7.6):HeatSource = collector 快照(懒绑定适配),ProtectedSource =
+	// 淘汰循环(M6/设计《回收与磁盘淘汰》):HeatSource = collector 快照(懒绑定适配),ProtectedSource =
 	// 预取管理器(cursor 起 lookahead 块 + P0 在途),Sweep = 已知 dataset 逐个 core GC。
-	// M4:注入 Policy(heat/lru/lfu,由 TRAINCACHE_EVICT_POLICY 选择;D9 撤 W-TinyLFU 档)。
+	// M4:注入 Policy(heat/lru/lfu,由 TRAINCACHE_EVICT_POLICY 选择;撤 W-TinyLFU 档)。
 	ag.Evictor = evictor.New(cs, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, policy, evictor.Config{
 		BlockDir:           cfg.CacheRoot,
 		TriggerPercent:     cfg.Heat.DiskTriggerPercent,
@@ -249,7 +249,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 		CacheCapacityBytes: cfg.CacheCapacityBytes,
 	})
 
-	// Store.Open/Put 观察者注册(D49 自打开守卫 + §14 D58 字节维度累计;实现见 wiring.go,
+	// Store.Open/Put 观察者注册(D49 自打开守卫 + 设计《回收与磁盘淘汰》D58 字节维度累计;实现见 wiring.go,
 	// 抽成方法是为了让装配级测试覆盖同一处注册)。
 	ag.installStoreObservers(cs)
 
@@ -261,7 +261,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 
 // newEvictPolicyFromEnv 从 TRAINCACHE_EVICT_POLICY 环境变量创建淘汰策略(M4)。
 // 可选值:heat/lru/lfu,默认 heat;未知策略名返回错误(拒绝启动并打印合法清单;
-// D9 撤 W-TinyLFU 档后合法清单收缩为三档)。
+// 撤 W-TinyLFU 档后合法清单收缩为三档)。
 func newEvictPolicyFromEnv() (evictor.Policy, error) {
 	name := envOr(envEvictPolicy, defaultEvictPolicy)
 	switch name {
@@ -283,7 +283,7 @@ func (a *Agent) markSelfOpen(fp cas.Fingerprint) {
 	}
 }
 
-// verifyLevel 把 svc 校验等级映射到 core cas 枚举(design §8:TRAINCACHE_VERIFY 透传)。
+// verifyLevel 把 svc 校验等级映射到 core cas 枚举(设计《部署与配置》:TRAINCACHE_VERIFY 透传)。
 func verifyLevel(verify string) cas.VerifyLevel {
 	if verify == VerifyXXH3SHA256 {
 		return cas.VerifyXXH3SHA256
@@ -291,7 +291,7 @@ func verifyLevel(verify string) cas.VerifyLevel {
 	return cas.VerifyXXH3
 }
 
-// PrefetchManager 是 svc 的 per-dataset 预取资源管理器(design §3 装配层;§7.3):每个
+// PrefetchManager 是 svc 的 per-dataset 预取资源管理器(设计《架构与依赖方向》 §3 装配层;设计《持续预取与阶段切换》):每个
 // dataset 一个 Catalog 与 PersistentPrefetcher(共享 store/cas/fetcher/metrics,按
 // 10.15 口径不再按 dataset 副本),mutex 串行化 bundle 表增改。三个入口:
 // ForOrder(订单驱动)/ ForPreheat(预热 P0 入队)/ ForListSnapshot(条目枚举)。
@@ -318,11 +318,11 @@ type PrefetchManager struct {
 	blockDone atomic.Pointer[blockDoneHook]
 	repair    atomic.Pointer[corruptRepairHook]
 
-	// orderTouch 是新 ConsumeOrder 到达时的 t_touch 刷新钩子(§7.6 任务 4;装配期经
+	// orderTouch 是新 ConsumeOrder 到达时的 t_touch 刷新钩子(设计《回收与磁盘淘汰》任务 4;装配期经
 	// SetOrderTouchHook 注入,ForOrder 调用链内原子读;见 instrument.go)。
 	orderTouch atomic.Pointer[orderTouchHook]
 
-	// p0Mu/p0Pending 记录 P0 在途块(ForPreheat 入队成功登记、完成回调移出;§7.6 硬保护)。
+	// p0Mu/p0Pending 记录 P0 在途块(ForPreheat 入队成功登记、完成回调移出;设计《回收与磁盘淘汰》硬保护)。
 	p0Mu      sync.Mutex
 	p0Pending map[p0Ref]int
 
@@ -333,10 +333,10 @@ type PrefetchManager struct {
 	lastOrder  ordersource.ConsumeOrder
 	hasLast    bool
 
-	// phase 是 M9/D46 阶段跟踪器(装配期注入;各 dataset 的 OnStageSwitch 回调共用)。
+	// phase 是 M9 阶段跟踪器(装配期注入;各 dataset 的 OnStageSwitch 回调共用)。
 	phase *phaseTracker
 
-	// refreshInterval 是 Catalog.Follow 的刷新周期与心跳周期基数(6.1 §5.9;
+	// refreshInterval 是 Catalog.Follow 的刷新周期与心跳周期基数(设计《快照与回收》;
 	// 装配期注入,零值由 Catalog 自身回退默认 5s)。
 	refreshInterval time.Duration
 	// registry 是 R2 读者登记器(原子指针:装配期注入后仅供 OnSnapshotChange 回调读)。
@@ -351,10 +351,10 @@ type PrefetchManager struct {
 
 // blockDoneHook 是块完成触达的 svc 侧签名(含 dataset 归属与该 dataset 的 Catalog,
 // 供回调内解析指纹):err == nil = 块就绪/下载成功。在预取器调度协程内同步调用,
-// 实现不得阻塞(见 D24/D28)。
+// 实现不得阻塞(见D24)。
 type blockDoneHook func(dataset string, cat *index.Catalog, ref prefetch.ChunkRef, err error)
 
-// corruptRepairHook 是读时坏块修复的 svc 侧签名(D35 冻结语义:Quarantine + RepairOne;
+// corruptRepairHook 是读时坏块修复的 svc 侧签名(冻结语义:Quarantine + RepairOne;
 // 在工作协程内调用,可阻塞)。返回 nil 且重开成功 → 预取器按就绪继续。
 type corruptRepairHook func(ctx context.Context, dataset string, cat *index.Catalog, ref prefetch.ChunkRef) error
 
@@ -446,7 +446,7 @@ func (m *PrefetchManager) dispatchRepair(ctx context.Context, dataset string, ca
 	return errors.New("svc: 未装配坏块修复钩子")
 }
 
-// addP0Refs 登记 P0 在途块(§7.6 硬保护;ForPreheat 入队成功后调用)。
+// addP0Refs 登记 P0 在途块(设计《回收与磁盘淘汰》硬保护;ForPreheat 入队成功后调用)。
 func (m *PrefetchManager) addP0Refs(dataset string, refs []prefetch.ChunkRef) {
 	m.p0Mu.Lock()
 	defer m.p0Mu.Unlock()
@@ -489,7 +489,7 @@ func (m *PrefetchManager) dispatchP0(dataset string, ref prefetch.ChunkRef, err 
 	}
 }
 
-// datasetBundle 是单个 dataset 的预取资源(§7.3):Catalog(前缀分片加载/只读查询)与
+// datasetBundle 是单个 dataset 的预取资源(设计《持续预取与阶段切换》):Catalog(前缀分片加载/只读查询)与
 // PersistentPrefetcher;started/stageSeen 记录调度启动与 dataset 绑定状态(bundle 锁保护;
 // 阶段安装与 P0 入队在此锁内串行,保证 P0 抓取键的 dataset 绑定不早于首个订单交错)。
 type datasetBundle struct {
@@ -501,10 +501,10 @@ type datasetBundle struct {
 	started   bool // 预取器调度已启动(首个 ForOrder/ForPreheat)
 	stageSeen bool // 已有 ConsumeOrder 绑定 dataset(否则 ForPreheat 以最小订单播种)
 	// followStarted 表示该 dataset 的 Catalog.Follow 后台循环已启动(m.mu 保护;
-	// 同一 dataset 只启动一次,6.1 §5.9)。
+	// 同一 dataset 只启动一次,设计《快照与回收》)。
 	followStarted bool
 
-	// lastOrder 是最近一次成功安装的 ConsumeOrder(§7.6 硬保护窗口按它取 cursor 起
+	// lastOrder 是最近一次成功安装的 ConsumeOrder(设计《回收与磁盘淘汰》硬保护窗口按它取 cursor 起
 	// lookahead 块;protectedFPs 在 bundle 锁下读)。
 	lastOrder ordersource.ConsumeOrder
 	hasOrder  bool
@@ -571,7 +571,7 @@ func (m *PrefetchManager) bundleFor(dataset string, initialPrefixes []string) *d
 			}
 			return m.dispatchRepair(ctx, ds, cat, ref)
 		},
-		// M9/D46:每次 OnStageSwitch 通知 svc phaseTracker 迁移到 switch。
+		// M9:每次 OnStageSwitch 通知 svc phaseTracker 迁移到 switch。
 		OnStageSwitch: func(stageID string) {
 			if m.phase != nil {
 				m.phase.OnStageSwitchFor(dataset, stageID)
@@ -583,7 +583,7 @@ func (m *PrefetchManager) bundleFor(dataset string, initialPrefixes []string) *d
 		b.followPrefixes = initialPrefixes // 发布前装入,无并发读者
 	}
 	m.bundles[dataset] = b
-	// R1(6.1 §5.9/D60):hint 在 b 发布前装入(创建与 m.mu 同段持有,Follow 的
+	// R1(设计《快照与回收》/D60):hint 在 b 发布前装入(创建与 m.mu 同段持有,Follow 的
 	// prefixesFn 用 b.mu,无并发窗口);生命周期 ctx 未注入时 startFollowLocked
 	// 空转,由 StartBackground 对既有 bundle 补启动。
 	m.startFollowLocked(b)
@@ -727,13 +727,13 @@ func (b *datasetBundle) lookupFingerprint(ctx context.Context, fp cas.Fingerprin
 }
 
 // OnConsumeSideAdvance 把消费侧推进(钩子 advance 帧 / collector 校准重对齐回调 /
-// inotify 兜底反查)转给对应 dataset 的预取器(§5.2),直接透传底层"是否真正推进"
+// inotify 兜底反查)转给对应 dataset 的预取器(设计《预取主循环》),直接透传底层"是否真正推进"
 // (重复/落后事件返回 false 且无副作用;ref 不在当前订单内或尚无阶段同样 false)。
 func (m *PrefetchManager) OnConsumeSideAdvance(ctx context.Context, dataset string, ref prefetch.ChunkRef) bool {
 	return m.bundleFor(dataset, nil).prefetcher.OnConsumeSideAdvance(ctx, ref)
 }
 
-// ProtectedFPs 返回硬保护集合快照(§7.6;evictor.ProtectedSource,任何情况不淘汰):
+// ProtectedFPs 返回硬保护集合快照(设计《回收与磁盘淘汰》;evictor.ProtectedSource,任何情况不淘汰):
 //   - 各 dataset:当前订单 cursor 起 lookahead 16 个块(经索引解析指纹);
 //   - 各 dataset:P0 在途块(ForPreheat 入队成功、完成回调移出)。
 //
@@ -765,7 +765,7 @@ func (m *PrefetchManager) ProtectedFPs() []cas.Fingerprint {
 	return out
 }
 
-// refWindowState 判断 ref 是否属于该 dataset 最近订单的当前消费窗口(D46 命中 source
+// refWindowState 判断 ref 是否属于该 dataset 最近订单的当前消费窗口(命中 source
 // 判据):known=false 表示无订单可归属;inWindow=true 表示位点落在 cursor 起 lookahead
 // 范围内。bundle 锁下读;Status() 内部锁与 bundle 锁同序(b.mu → p.mu),无反向持有。
 func (b *datasetBundle) refWindowState(ref ordersource.ChunkRef) (known, inWindow bool) {
@@ -794,7 +794,7 @@ func (b *datasetBundle) refWindowState(ref ordersource.ChunkRef) (known, inWindo
 	return true, false
 }
 
-// protectedFPs 返回该 dataset 的保护窗口指纹(§7.6 硬保护;bundle 锁下读预取器状态与
+// protectedFPs 返回该 dataset 的保护窗口指纹(设计《回收与磁盘淘汰》硬保护;bundle 锁下读预取器状态与
 // 最近订单,索引查询为内存操作)。窗口基准 = max(消费游标 Cursor, 预取前沿
 // PrefetchFrontier)在订单中的位置:保证已预取块不因消费尚未推进而提前解锁;任一字段
 // 找不到时回退到能找到的那个,都找不到则从订单头起算。
@@ -844,7 +844,7 @@ func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 // (订单前缀 hint 随构造装入,先于 Follow 首轮检查,D60)→ 只加载订单 chunks 涉及的前缀
 // 分片(LoadPrefixes,不整包下载;经 measureLoadPrefixes 打索引线指标)→ 首个订单启动
 // 调度(Start;之后订单只走 OnStageSwitch)→ OnStageSwitch 安装新阶段(旧阶段降级/在途/
-// ETA 均在预取器内部处理,svc 只记日志)→ 新订单 t_touch 刷新(§7.6 任务 4;仅订单成功
+// ETA 均在预取器内部处理,svc 只记日志)→ 新订单 t_touch 刷新(设计《回收与磁盘淘汰》任务 4;仅订单成功
 // 安装后)。返回索引加载或阶段切换错误(调用方记日志、不中断发现循环)。
 func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o ordersource.ConsumeOrder) error {
 	if err := ctx.Err(); err != nil {
@@ -859,7 +859,7 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 		return err
 	}
 
-	// M9/D46:启动/切换窗口 K 取本订单的 ConsumeOrder.PrefetchChunks(与预取器同口径
+	// M9:启动/切换窗口 K 取本订单的 ConsumeOrder.PrefetchChunks(与预取器同口径
 	// 截断到订单块数),按 dataset 记录;未注入 K 的 dataset 回退缺省 lookahead。
 	// 必须在 OnStageSwitch 前写入:预取器的 OnStageSwitch 回调会同步迁移 phase 状态。
 	if m.phase != nil {
@@ -893,7 +893,7 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 		m.lastPodUID, m.lastOrder, m.hasLast = podUID, o, true
 		m.orderMu.Unlock()
 	}
-	// ④ 新 ConsumeOrder 到达:刷新订单内块 t_touch(§7.6 任务 4;消费窗口保护——订单
+	// ④ 新 ConsumeOrder 到达:刷新订单内块 t_touch(设计《回收与磁盘淘汰》任务 4;消费窗口保护——订单
 	// 安装成功后刷新,空 chunks 跳过;Lookup 未命中/collector 未绑定由钩子内跳过)。
 	if len(o.Chunks) > 0 {
 		m.dispatchOrderTouch(o.Dataset, b.catalog, o.Chunks)
@@ -950,13 +950,13 @@ func (m *PrefetchManager) ForPreheatTask(ctx, work context.Context, taskID, data
 	if err := b.prefetcher.EnqueueP0ScopedTask(ctx, work, taskID, refs); err != nil {
 		return err
 	}
-	// 入队成功即登记 P0 在途硬保护(§7.6;完成回调移出)。
+	// 入队成功即登记 P0 在途硬保护(设计《回收与磁盘淘汰》;完成回调移出)。
 	m.addP0Refs(dataset, refs)
 	return nil
 }
 
 // ForListSnapshot 返回 dataset 当前快照的条目(ListSnapshot 查询入口):取/建 bundle
-// (不加载前缀映射、不启动预取);Catalog.List 自身只下载相关分片(D29)。
+// (不加载前缀映射、不启动预取);Catalog.List 自身只下载相关分片。
 func (m *PrefetchManager) ForListSnapshot(ctx context.Context, dataset, prefix string) ([]index.Entry, error) {
 	return m.bundleFor(dataset, nil).catalog.List(ctx, prefix)
 }

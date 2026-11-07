@@ -36,7 +36,7 @@ type progressResponse struct {
 	err    error
 }
 
-// fakeProgressPool reuses the M4 fake for Submit; Progress serves a scripted
+// fakeProgressPool reuses the controller fake for Submit; Progress serves a scripted
 // response per (task_id, node) and repeats the last entry once exhausted.
 type fakeProgressPool struct {
 	*fakeAgentPool
@@ -316,7 +316,7 @@ func TestPollThreeUnavailableFailures(t *testing.T) {
 	if entry == nil || entry.State != traincachev1alpha1.PreheatStateFailed {
 		t.Fatalf("state = %#v, want Failed after 3 failures", entry)
 	}
-	// M7 keeps an independent gate cycle alive after a terminal poll: the task
+	// The gate keeps its own cycle alive after a terminal poll: the task
 	// has not been released and TMax has not elapsed.
 	if result.RequeueAfter != time.Second {
 		t.Fatalf("gate cycle RequeueAfter = %v, want 1s", result.RequeueAfter)
@@ -327,7 +327,7 @@ func TestPollThreeUnavailableFailures(t *testing.T) {
 }
 
 func TestPollThreeUnavailableWithSubmitFailure(t *testing.T) {
-	// M4 still returns the submit error, but polling must count the failures
+	// Reconcile still returns the submit error, but polling must count the failures
 	// independently and mark the pair Failed after three consecutive rounds.
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})

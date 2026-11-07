@@ -134,7 +134,7 @@ func (NodeStatusItem) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{1}
 }
 
-// 任务状态机(D7)
+// 任务状态机
 type PreheatStatus_State int32
 
 const (
@@ -187,7 +187,7 @@ func (PreheatStatus_State) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{4, 0}
 }
 
-// 重扫描阶段(§7.1;readiness = phase != SAMPLING,§8)
+// 重扫描阶段(设计《启动与重启重扫描》;readiness = phase != SAMPLING,设计《部署与配置》)
 type RescanStatus_Phase int32
 
 const (

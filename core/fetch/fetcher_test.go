@@ -217,7 +217,7 @@ func waitNoLeak(t *testing.T, before int) {
 }
 
 // TestInflightByteLimit：并发下载多个大对象，实测（store 侧独立观测 + limiter 仪表）
-// 峰值在途字节不超过 MaxInflightBytes（design.md §5.3）。
+// 峰值在途字节不超过 MaxInflightBytes（design.md《下载编排》）。
 func TestInflightByteLimit(t *testing.T) {
 	const (
 		objSize = 16 << 10 // 每个对象 16 KiB
@@ -295,7 +295,7 @@ func TestInflightByteLimit(t *testing.T) {
 }
 
 // TestMergeSameKey：并发 Fetch 同一 key 合并为一次实际下载——mock 计数 Get 恰好 1 次，
-// 所有调用者拿到同一指纹与 nil 错误（design.md §5.3）。
+// 所有调用者拿到同一指纹与 nil 错误（design.md《下载编排》）。
 func TestMergeSameKey(t *testing.T) {
 	const nCallers = 8
 	key := "dataset/ds/snapshots/1/shard-abcd.idx"
@@ -320,7 +320,7 @@ func TestMergeSameKey(t *testing.T) {
 	})
 
 	cs, _ := newTestCAS(t)
-	f := New(store, cs, Options{}) // 全零值 -> design.md §8 默认值
+	f := New(store, cs, Options{}) // 全零值取 design.md《默认值》
 
 	ownerDone := make(chan fetchResult, 1)
 	go func() {
@@ -454,7 +454,7 @@ func TestRetryAfterCorrupt(t *testing.T) {
 }
 
 // TestRetryExhausted：每次下载落的块都被破坏 -> 重试耗尽的尝试全部经 Open 校验失败，
-// 返回 ErrTooManyRetries，且不残留块文件与临时文件（design.md §7.5）。
+// 返回 ErrTooManyRetries，且不残留块文件与临时文件（design.md《下载编排》）。
 func TestRetryExhausted(t *testing.T) {
 	const maxRetries = 2
 	key := "dataset/ds/snapshots/1/chunk-1"
@@ -494,7 +494,7 @@ func TestRetryExhausted(t *testing.T) {
 }
 
 // TestFetcherMaxTasksLimit：从 Fetcher.Fetch 入口验证 MaxTasks 任务数上限语义
-// （docs/5.1 §5.3 的 MaxTasks 任务数上限）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
+// （design.md《下载编排》的 MaxTasks 任务数上限）——MaxTasks=2 并发 Fetch 5 个不同 key：mock Store.Get 里加门控
 // （每个在途任务上报进入/离开并记录峰值并发），断言峰值恰为 2（既不超过 MaxTasks，
 // 也确实制造了并发）；放行后 5 个 key 全部落盘成功、任务额度全部归还、无死锁。
 // ctx 取消路径已由 TestCtxCancel 与 TestLimiterTaskSemaphore 覆盖，本用例不重复。

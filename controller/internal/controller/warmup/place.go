@@ -17,8 +17,8 @@ import (
 )
 
 // PreheatPair identifies one (Pod, node) preheat task. task_id is derived from
-// the Pod, so a Pod may legitimately have tasks on several nodes (M4 submits
-// every candidate; M6 narrows that to the assigned node).
+// the Pod, so a Pod may legitimately have tasks on several nodes (the initial
+// wide preheat submits every candidate; later rounds narrow that to the assigned node).
 type PreheatPair struct {
 	PodIndex int32
 	Node     string
@@ -35,7 +35,7 @@ type ExistingPreheat struct {
 }
 
 // PlacementApplyInput feeds one GWAA result into the diff/RPC orchestration.
-// Previous is keyed by pair because M4 may have left tasks on several nodes.
+// Previous is keyed by pair because the initial wide preheat may have left tasks on several nodes.
 type PlacementApplyInput struct {
 	Task      *traincachev1alpha1.WarmupTask
 	DataSet   *traincachev1alpha1.DataSet
@@ -291,7 +291,7 @@ func ApplyPlacement(ctx context.Context, rpc PreheatRPC, log *slog.Logger, in Pl
 // round (re)created or resized a task on, as long as the RPC reached the Agent.
 // A resubmit makes the Agent restart the task with seq 1; without the reset the
 // mark keeps discarding that node's reports as stale and the gate stops seeing
-// progress it is really making (docs/7.1 §7.4, D46).
+// progress it is really making (docs/7.1-design.md《分配与下发差异》, docs/7.2 D46).
 func (r *Reconciler) dropResubmittedMarks(task *traincachev1alpha1.WarmupTask, applied PlacementApplyResult) {
 	for _, action := range applied.Actions {
 		if action.Kind != ActionSubmit && action.Kind != ActionUpdate {
@@ -337,9 +337,9 @@ func placementWindow(windows [][]*agentpb.ChunkRef, index int32) ([]*agentpb.Chu
 	return windows[index], nil
 }
 
-// logPlacementChange records the M6/M13/M14 log points: top-K assignment
+// logPlacementChange records the fanout log points: top-K assignment
 // changes, rounds, per-Pod warm-node counts, the adaptive fanout decisions and
-// the non-convergence fallback reason (docs/7.1 §6.5, §9.3, D39).
+// the non-convergence fallback reason (docs/7.1-design.md《日志》, docs/7.2 D39).
 func logPlacementChange(log *slog.Logger, taskKey string, placement gwaa.Output, fanoutMax, fanoutMin int32, actions []PlacementAction) {
 	assign := assignmentView(placement.Assignment)
 	warmCounts := formatWarmNodeCounts(placement.Assignment)

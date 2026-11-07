@@ -16,14 +16,14 @@ import (
 )
 
 // snapshotState 是一次刷新构建出的内存映射（全量代或前缀代）；构建完成后不再修改，
-// 经 atomic.Pointer 一次性切换发布（design.md §7.2）。
+// 经 atomic.Pointer 一次性切换发布（design.md《读侧加载》）。
 type snapshotState struct {
 	// raw 是 CURRENT 原始内容（"CURRENT 未变则跳过"的判据）。LoadPrefixes 构建的局部
 	// 映射置空：它不代表 CURRENT 的完整快照，混用模式下后续 Refresh 将全量重建。
 	raw     string
 	snapID  string
 	entries map[entryKey]Entry
-	// shards 是构建该快照所用 Manifest 的分片数（Shards 长度；D30：ShardsLoaded 的数据源）。
+	// shards 是构建该快照所用 Manifest 的分片数（Shards 长度，ShardsLoaded 的数据源）。
 	shards int
 }
 
@@ -33,7 +33,7 @@ type Catalog struct {
 	dataset string // 数据集名（CURRENT/manifest/分片对象键均以此为前缀）
 	refresh time.Duration
 
-	// 可选回调在锁外调用；nil 表示不回调（6.1 §5.9）。
+	// 可选回调在锁外调用；nil 表示不回调（6.1《快照与回收》）。
 	onSnapshotChange func(dataset, snapID string)
 	onSnapshotError  func(dataset string, err error)
 
@@ -173,13 +173,13 @@ func (c *Catalog) loadPrefixesLocked(ctx context.Context, prefixes []string) (st
 	}
 
 	// 全部相关分片加载/验证通过后才一次性切换（失败路径绝不修改旧映射）；raw 置空见
-	// snapshotState 注释；shards 记 Manifest 分片数（D30 口径为全量 Shards 长度，
+	// snapshotState 注释；shards 记 Manifest 分片数（口径为全量 Shards 长度，
 	// 非本次前缀匹配到的分片数——manifest 本身已全量读取）。
 	c.state.Store(&snapshotState{snapID: m.SnapshotID, entries: entries, shards: len(m.Shards)})
 	return m.SnapshotID, nil
 }
 
-// List 按前缀枚举条目（D29）：读 CURRENT → 下载 manifest → 复用 D22 分片相关性判定只
+// List 按前缀枚举条目（design.md《读侧加载》）：读 CURRENT → 下载 manifest → 复用 design.md《读侧加载》的分片相关性判定只
 // 下载、校验、加载相关分片（无关分片零下载）→ 收集 path 以 prefix 开头的条目 → 按
 // (path, chunk) 字典序排序返回；无匹配返回空切片。prefix 为空串 = 全量。无 CURRENT
 // 返回 ErrNoCurrent。只读方法：不触碰内存映射（Lookup 所见的既有映射不受影响，"失败
@@ -224,7 +224,7 @@ func (c *Catalog) List(ctx context.Context, prefix string) ([]Entry, error) {
 }
 
 // readCurrent 读取并解析 CURRENT（不存在 → ErrNoCurrent），返回原始内容、快照 ID 与
-// manifest 指纹。Refresh 在解析后、下载 manifest 前做"CURRENT 未变则跳过"判定（design.md §7.2）。
+// manifest 指纹。Refresh 在解析后、下载 manifest 前做"CURRENT 未变则跳过"判定（design.md《读侧加载》）。
 func (c *Catalog) readCurrent(ctx context.Context) (content string, snapID string, manifestFP8 string, err error) {
 	raw, err := getObject(ctx, c.store, CurrentKey(c.dataset))
 	if err != nil {
@@ -317,7 +317,7 @@ func (c *Catalog) Lookup(ctx context.Context, path string, chunk int64) (Entry, 
 	return e, true, nil
 }
 
-// ShardsLoaded 返回当前生效索引快照的 Manifest 分片数（Manifest.Shards 长度；D30）。
+// ShardsLoaded 返回当前生效索引快照的 Manifest 分片数（Manifest.Shards 长度；design.md《读侧加载》）。
 // 尚无快照（未 Start/Refresh/LoadPrefixes 成功）返回 0。纯读：与 Lookup 同口径的
 // atomic.Pointer 快照读取，不取 mu、不长持锁，与 Refresh/LoadPrefixes 并发安全。
 func (c *Catalog) ShardsLoaded() int {
@@ -339,7 +339,7 @@ func (c *Catalog) SnapID() string {
 	return st.snapID
 }
 
-// RefreshManifest 是无活跃前缀时的轻量跟随（6.1 §5.9）：读 CURRENT 并下载、校验
+// RefreshManifest 是无活跃前缀时的轻量跟随（6.1《快照与回收》）：读 CURRENT 并下载、校验
 // manifest（校验链同 Refresh：manifest 指纹与 snapshot_id 必须与 CURRENT 一致），
 // 不下载任何分片；成功后原子切换 snapID 与空 entries（旧映射整体作废）。
 // 防线（D60）：CURRENT 的 snapID 与现有快照一致且现有 entries 非空时为空操作——
@@ -388,7 +388,7 @@ func (c *Catalog) refreshManifestLocked(ctx context.Context) (string, bool, erro
 	return m.SnapshotID, true, nil
 }
 
-// Follow 是阻塞式快照跟随循环（6.1 §5.9）：每 Config.RefreshInterval 检查一次
+// Follow 是阻塞式快照跟随循环（6.1《快照与回收》）：每 Config.RefreshInterval 检查一次
 // CURRENT；未变则跳过本轮，变更后按 prefixes() 的返回值选择加载方式——非空调用
 // LoadPrefixes，空调用 RefreshManifest。prefixes 每轮调用，nil 按空处理。
 //
@@ -404,7 +404,7 @@ func (c *Catalog) Follow(ctx context.Context, prefixes func() []string) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// 失败保持旧映射并继续下一轮（6.1 §5.9）。
+			// 失败保持旧映射并继续下一轮（6.1《快照与回收》）。
 			c.notifySnapshotError(err)
 		}
 		select {

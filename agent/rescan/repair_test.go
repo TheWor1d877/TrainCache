@@ -1,6 +1,6 @@
 package rescan
 
-// RepairOne 单元/并发测试(D35;验收场景 ① 的 RepairOne 独立闭环与 ② 同块并发仅一次下载)。
+// RepairOne 单元/并发测试(验收场景 ① 的 RepairOne 独立闭环与 ② 同块并发仅一次下载)。
 
 import (
 	"context"
