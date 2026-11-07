@@ -19,6 +19,8 @@ CFG = $(shell $(PY_FALLBACK) $(ROOT)/config.py --sh $(1))
 DATASET_DIR := $(call CFG,DATASET_DIR)
 TILT_DIR    := $(call CFG,TILT_DIR)
 TRAIN_DIR   := $(call CFG,TRAIN_DIR)
+TRAIN_DIR_V2 := $(call CFG,TRAIN_DIR_V2)
+TRAIN_SEED_V2 := $(call CFG,TRAIN_SEED_V2)
 
 # py_compile 清单:装置侧全部 python 入口与执行体。
 PY_FILES = $(ROOT)/run.py $(ROOT)/config.py \
@@ -27,7 +29,7 @@ PY_FILES = $(ROOT)/run.py $(ROOT)/config.py \
            $(ROOT)/compare/summarize.py $(ROOT)/compare/trace.py \
            $(wildcard $(ROOT)/scripts/*.py)
 
-.PHONY: bench-up bench-doctor bench-down
+.PHONY: bench-up bench-doctor bench-down bench-data-v2
 
 bench-up:
 	@if kind get clusters 2>/dev/null | grep -qx traincache; then \
@@ -62,6 +64,15 @@ bench-doctor:
 	@echo "== 本地语法检查 =="
 	@$(PY_FALLBACK) -m py_compile $(PY_FILES)
 	@bash $(ROOT)/scripts/doctor.sh
+
+# e2e 换数据版本场景要的第二份快照:形状与规模同版本 1,种子不同 → 字节不同
+# → 块指纹不同,用来验缓存失效判定。落在版本 1 目录下的 v2/ 子目录,源站容器
+# 按原路径挂载,不用改容器。
+bench-data-v2:
+	@if [ -z "$$(ls $(TRAIN_DIR_V2)/shard-*.tar 2>/dev/null)" ]; then \
+		echo "== 生成训练数据版本 2(16×128 MiB,种子 $(TRAIN_SEED_V2))=="; \
+		$(PY) $(ROOT)/scripts/synth_train.py --out-dir $(TRAIN_DIR_V2) --seed $(TRAIN_SEED_V2); \
+	else echo "== 数据版本 2 已存在,跳过 =="; fi
 
 bench-down:
 	@bash $(ROOT)/scripts/tc_teardown.sh

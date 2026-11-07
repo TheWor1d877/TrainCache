@@ -95,6 +95,11 @@ TRAIN_SOURCE_PORT = 9100
 TRAIN_SOURCE_MOUNT = TRAIN_DIR                 # docker -v 挂载源(需绝对路径)
 TRAIN_SOURCE_HTML = "track-d"                  # 容器内挂到 /usr/share/nginx/html/track-d
 TRAIN_URL = "http://127.0.0.1:9100/track-d/shard-%06d.tar"   # %06d 取 0..15
+# 数据版本 2(e2e 换版本场景用):同形状、同规模,种子不同 → 字节不同 → 块指纹不同。
+# 落在版本 1 目录下的 v2/ 子目录,源站容器按原路径挂载,无需改容器。
+TRAIN_DIR_V2 = TRAIN_DIR / "v2"
+TRAIN_URL_V2 = "http://127.0.0.1:9100/track-d/v2/shard-%06d.tar"
+TRAIN_SEED_V2 = 20261016
 TRAIN_RESULTS_DIR = RESULTS_DIR / "train"
 TRAIN_TC_RATE = "100mbit"
 TRAIN_TC_DELAY = "20ms"

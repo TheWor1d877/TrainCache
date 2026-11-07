@@ -1,8 +1,4 @@
-(thewor1d877)： [A] compare 族的组态矩阵要补齐：juicefs 与 fluid 只锁 1 GiB 一个缓存配额点，TrainCache 的 ρ 轴没有同配额的对照档；要在不新开集群的前提下定出补齐的规模
-
 (thewor1d877)： [B] JuiceFS 与 Fluid 的实际回源连接数未实测，跨组比较并行能力前需在集群上测 mount 进程到 MinIO 的连接数，命令 `nsenter --net=<minio-netns> ss -tn state established '( dport = :9000 )'`
-
-(thewor1d877)： [C] e2e 族缺 checkpoint 续跑能力：`bench/scripts/load_train.py` 无 `--checkpoint-dir` 与 `--resume`，`bench/experiments/run.py` 无 e2e 分支，需先定存什么状态、在哪一步中断
 
 (thewor1d877)： [C] `bench/chaos/inject/node_loss.sh` 只过了 `bash -n`，未在集群实跑，需在 chaos 族正式跑之前验证一轮
 
@@ -16,14 +12,10 @@
 
 (thewor1d877)： [C] 根 `Makefile` 的 `e2e-k8s` 与 `e2e-local` 转给 `bench/Makefile`，那边没有同名目标，`make -n e2e-k8s` 直接报「没有规则可制作目标」；要么在 bench 侧补目标，要么删掉这两个转入口并让脚本自己当入口（改构建｜根 Makefile:75、bench/Makefile）
 
-(thewor1d877)： [A] compare 族 warm 组的预热量不等量：juicefs 与 fluid 预热整棵 4 GiB 数据树、1 GiB 配额下各留 1 GiB 数据，traincache 的 WarmupTask 显式写 k、ρ=4 时是 16 块即 128 MiB；要裁决是否把 traincache 的 k 提到与基线等量，否则 warm 组读数按现口径读（bench/compare/run_bench.py 的 warmup_k_for、docs/4.2 的对照族一节）
-
-(thewor1d877)： [B] juicefs 与 fluid 的缓存配额要随 COND 变才有 8 GiB 档：`JFS_CACHE_MB` 与 `FLUID_CACHE_GI` 已是 env 可覆盖，缺的是 run_bench 按 COND 下发（bench/compare/juicefs/up.sh:33、bench/compare/fluid/up.sh:32）
-
-(thewor1d877)： [B] 缓存目录峰值超声明配额 2.26 倍（历史那一跑 2.57 GiB 对 1 GiB），4.3 全体判据的 1.39 倍上界在代码里没有强制点；候选成因是预取写的块没进淘汰候选集（collector.ListForEviction 只含被 Touch 或 Open 过的指纹）或 30 s 淘汰节拍跟不上写入，要先定位再定判据
-
 (thewor1d877)： [C] rangepar 族的 tc 形态要先在 kind 上验一次：tbf 之下挂 fq maxrate、netem 挂 fq 的 leaf class、`sch_fq` 模块能加载、单流限速可测（一条连接与四条连接的速率差要能测出来），形态没挂对就跑 24 跑是白跑
 
-(thewor1d877)： [C] `summary.csv` 缺单块下载时间这一列，agent 侧的 `traincache_prefetch_task_duration_seconds` 没被采集进产物；并行下载族要判「4 路并行本身生效」就得先加这一列的采集与落盘（改采集｜bench/compare/run_bench.py 的指标快照与 summary 行、bench/experiments/run.py 的 SUMMARY_FIELDS）
+(thewor1d877)： [C] 集群 ConfigMap `traincache-config` 缺 `fetchRangeParallel`、`gateNetworkBandwidthBytes`、`objstoreCompression` 三个键，仓库清单里三个键都有，集群上是更早的版本，发镜像与下发 ConfigMap 时要一并对齐
 
-(thewor1d877)： [C] 探点行（`summary.csv` 的 `exploratory` 列）在 4.x 文档里没有落点：汇总把这类行标成 exploratory 且不参与组间判定，文档重写后没有对应段落，要定是补一段还是删掉这个分支
+(thewor1d877)： [C] `bench/.sudo-pass` 不存在，`cold_reset.sh` 的 drop_caches 要 sudo 密码，跑分前要先放好这个文件
+
+(thewor1d877)： [B] 缓存峰值的 `cache_peak_ratio` 列要在当前代码上重测：旧产物没有这一列，且旧产物的 agent 镜像早于本轮改动，峰值超配额的成因（淘汰候选集只含被消费过的块）没在当前代码上验证过

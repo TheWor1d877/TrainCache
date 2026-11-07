@@ -643,13 +643,25 @@ def plot_e2e(rows):
             series_order=["all"], colors={"all": "#2f6db5"}, show_legend=False,
             x_fmt=lambda v: (E2E_SCENARIO_CN.get(v, v) if LANG == "zh" else v),
             value_labels=True)
-    data = _collect(rows, "read_errors", lambda r: "", _e2e_scenario,
+    data = _collect(rows, "e2e_recovery_time_s", lambda r: "", _e2e_scenario,
                     lambda r: "all")
     if data:
-        _render(data, "e2e-read-errors",
-                t("端到端族：各场景的读错误数",
-                  "e2e: read errors per recovery scenario"),
-                t("读错误数", "read errors"),
+        _render(data, "e2e-recovery",
+                t("端到端族：各场景从中断到恢复出步的时长",
+                  "e2e: time from interruption to first step after resume"),
+                t("恢复时长 (s)", "recovery time (s)"),
+                t("恢复场景", "recovery scenario"), facet_order=[""],
+                x_order=scenarios, series_order=["all"],
+                colors={"all": "#8a5a2b"}, show_legend=False,
+                x_fmt=lambda v: (E2E_SCENARIO_CN.get(v, v) if LANG == "zh" else v),
+                value_labels=True)
+    data = _collect(rows, "e2e_fetch_errors_recovery", lambda r: "", _e2e_scenario,
+                    lambda r: "all")
+    if data:
+        _render(data, "e2e-fetch-errors",
+                t("端到端族：各场景恢复窗口内的回源请求错误数",
+                  "e2e: origin fetch errors in the recovery window"),
+                t("错误数", "fetch errors"),
                 t("恢复场景", "recovery scenario"), facet_order=[""],
                 x_order=scenarios, series_order=["all"],
                 colors={"all": "#c0392b"}, show_legend=False,

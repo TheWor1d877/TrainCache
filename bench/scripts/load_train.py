@@ -371,6 +371,66 @@ def args_dict(args):
     return {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
 
 
+CHECKPOINT_NAME = "checkpoint.json"
+CHECKPOINT_SCHEMA = "1"
+
+
+def write_checkpoint(ckpt_dir: Path, state: dict) -> Path:
+    """写中断点：epoch 进度、逐步记录、每 epoch 汇总。"""
+    ckpt_dir = Path(ckpt_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    path = ckpt_dir / CHECKPOINT_NAME
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def read_checkpoint(ckpt_dir: Path) -> dict:
+    """读中断点。文件不在或坏了就抛错，不静默从头跑。"""
+    path = Path(ckpt_dir) / CHECKPOINT_NAME
+    if not path.is_file():
+        raise FileNotFoundError(f"checkpoint 不存在: {path}")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if state.get("schema_version") != CHECKPOINT_SCHEMA:
+        raise ValueError(f"checkpoint schema 不认识: {state.get('schema_version')!r}")
+    return state
+
+
+def checkpoint_state(records: list, per_epoch: list, next_epoch: int,
+                     run: dict, args, warmup_total: int) -> dict:
+    """组装中断点内容。
+
+    存的是「训练进度」不是「模型权重」：已完成 epoch 的逐步记录、每 epoch
+    汇总、下一个要跑的 epoch 序号，以及跨段要用的时刻（提交、首步、末步）。
+    """
+    return {
+        "schema_version": CHECKPOINT_SCHEMA,
+        "next_epoch": next_epoch,
+        "records": records,
+        "per_epoch": per_epoch,
+        "switch_events": list(run.get("switch_events") or []),
+        "t_submit": run.get("t_submit"),
+        "t_first_step": run.get("t_first_step"),
+        "t_last_step": run.get("t_last_step"),
+        "interrupt_at": utc_now(),
+        "args": args_dict(args),
+        "warmup_total": warmup_total,
+    }
+
+
+def ts_delta_s(later: str | None, earlier: str | None) -> float | None:
+    """两个 RFC3339 时刻的差（秒）。任一为空或不可解析返回 None。"""
+    if not later or not earlier:
+        return None
+    try:
+        dt_later = parse_rfc3339(str(later))
+        dt_earlier = parse_rfc3339(str(earlier))
+    except (ValueError, TypeError):
+        return None
+    return round((dt_later - dt_earlier).total_seconds(), 6)
+
+
 def write_run_json(path, run):
     """run 级产物:先写初稿(t_first/t_last 为空),结束时覆盖为终稿。"""
     path.write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n")
@@ -456,7 +516,18 @@ def main():
                     help="单个 tar 的目标字节,用于 K 块→分片数换算")
     ap.add_argument("--out-dir", type=Path, default=config.TRAIN_RESULTS_DIR,
                     help="输出目录(缺省 config.TRAIN_RESULTS_DIR)")
+    ap.add_argument("--checkpoint-dir", type=Path, default=None,
+                    help="checkpoint 目录：写中断点、读续跑状态（e2e 族用）")
+    ap.add_argument("--interrupt-after-epoch", type=int, default=-1,
+                    help="跑完第 N 个 epoch 后写 checkpoint 并退出（-1 不中断）")
+    ap.add_argument("--resume", action="store_true",
+                    help="从 --checkpoint-dir 的 checkpoint 续跑")
     args = ap.parse_args()
+
+    if args.resume and args.checkpoint_dir is None:
+        ap.error("--resume 必须给 --checkpoint-dir")
+    if args.interrupt_after_epoch >= args.epochs:
+        ap.error("--interrupt-after-epoch 必须小于 --epochs")
 
     if args.n_tars < 1 or args.epochs < 1 or args.batch < 1 \
             or args.steps_per_epoch < 1 or args.workers < 0:
@@ -558,13 +629,54 @@ def main():
 
     records = []
     per_epoch = []
+    start_epoch = 0
+    t_submit_run = t_submit
+    if args.resume:
+        state = read_checkpoint(args.checkpoint_dir)
+        records = list(state.get("records") or [])
+        per_epoch = list(state.get("per_epoch") or [])
+        start_epoch = int(state.get("next_epoch") or 0)
+        # 全程口径跨两段：t_submit 与 t_first_step 取第一段的值，
+        # 中断到续跑跑出第一步的时长单独记在 run["resume"] 里。
+        t_submit_run = state.get("t_submit") or t_submit
+        run["t_submit"] = t_submit_run
+        run["t_submit_source"] = "checkpoint-phase1"
+        run["resumed"] = True
+        run["switch_events"] = list(state.get("switch_events") or [])
+        run["resume"] = {
+            "checkpoint_next_epoch": start_epoch,
+            "phase1_t_submit": state.get("t_submit"),
+            "phase1_t_first_step": state.get("t_first_step"),
+            "phase1_t_last_step": state.get("t_last_step"),
+            "phase1_interrupt_at": state.get("interrupt_at"),
+            "phase2_t_submit": t_submit,
+            "phase2_t_first_step": None,
+            "resume_submit_lag_s": None,
+            "recovery_time_s": None,
+        }
+        print(f"[resume] 从 checkpoint 续跑：已完成 {len(records)} 步，"
+              f"从 epoch {start_epoch} 接着跑", flush=True)
+    if args.interrupt_after_epoch == 0:
+        # 一个 epoch 都不跑就中断：写空 checkpoint 后退出（续跑段承担全部 epoch）
+        state = checkpoint_state(records, per_epoch, 0, run, args, warmup_total)
+        ckpt_path = write_checkpoint(args.checkpoint_dir, state)
+        run["interrupted"] = True
+        run["interrupt_reason"] = "interrupt-after-epoch-0"
+        run["finished_at"] = utc_now()
+        run["checkpoint_path"] = str(ckpt_path)
+        write_run_json(run_path, run)
+        print(f"[interrupt] 0 epoch 后中断，checkpoint → {ckpt_path}", flush=True)
+        return
     t2 = None
     t_first_step = None
+    t_first_step_run = (run["resume"]["phase1_t_first_step"]
+                        if args.resume else None)
     t_last_step = None
     data_exhausted = False
     prev_stage = None
-    with per_step_path.open("w") as fout:
-        for epoch in range(args.epochs):
+    interrupted = False
+    with per_step_path.open("a" if args.resume else "w") as fout:
+        for epoch in range(start_epoch, args.epochs):
             t_switch_wall = utc_now()  # 切换事件时刻 = 上一 epoch 结束/本 epoch 开始
             t_build = time.perf_counter()
             loader, urls, perm, stage, repeats = make_loader(
@@ -625,6 +737,8 @@ def main():
                 if t_first_step is None:
                     # 4.3 启动与全程 makespan:batch 就绪后、forward 前
                     t_first_step = batch_wall
+                    if t_first_step_run is None:
+                        t_first_step_run = t_first_step
                 for _ in range(COMPUTE_ITERS):
                     _ = A @ B             # 极小 compute 替身(量级校准见探针 config)
                 t2 = time.perf_counter()
@@ -656,7 +770,7 @@ def main():
                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 fout.flush()
                 run["n_steps_total"] = len(records)
-                run["t_first_step"] = t_first_step
+                run["t_first_step"] = t_first_step_run
                 run["t_last_step"] = t_last_step
                 if not warmup:
                     measured += 1
@@ -718,8 +832,35 @@ def main():
             if data_exhausted:
                 break
 
+            if 0 <= args.interrupt_after_epoch <= epoch + 1:
+                # 跑够 --interrupt-after-epoch 个 epoch 就写 checkpoint 退出。
+                # checkpoint 落在 --checkpoint-dir，续跑段用 --resume 接上。
+                state = checkpoint_state(records, per_epoch, epoch + 1, run,
+                                         args, warmup_total)
+                ckpt_path = write_checkpoint(args.checkpoint_dir, state)
+                run["interrupted"] = True
+                run["interrupt_reason"] = f"interrupt-after-epoch-{args.interrupt_after_epoch}"
+                run["finished_at"] = utc_now()
+                run["checkpoint_path"] = str(ckpt_path)
+                run["n_steps_total"] = len(records)
+                run["complete"] = False
+                write_run_json(run_path, run)
+                print(f"[interrupt] 跑完 {epoch + 1} 个 epoch 后中断，"
+                      f"checkpoint → {ckpt_path}", flush=True)
+                return
+
     run["finished_at"] = utc_now()
-    run["t_first_step"] = t_first_step
+    if args.resume:
+        # 全程口径：首步取第一段的，末步取本段的；续跑段的首步另记在 run["resume"]。
+        run["t_first_step_phase2"] = t_first_step
+        run["t_first_step"] = t_first_step_run or t_first_step
+        run["resume"]["phase2_t_first_step"] = t_first_step
+        run["resume"]["resume_submit_lag_s"] = ts_delta_s(
+            run["resume"]["phase2_t_submit"], run["resume"]["phase1_t_last_step"])
+        run["resume"]["recovery_time_s"] = ts_delta_s(
+            t_first_step, run["resume"]["phase1_t_last_step"])
+    else:
+        run["t_first_step"] = t_first_step
     run["t_last_step"] = t_last_step
     run["n_steps_total"] = len(records)
     run["complete"] = (len(records) == args.epochs * args.steps_per_epoch

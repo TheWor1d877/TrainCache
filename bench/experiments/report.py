@@ -60,7 +60,7 @@ FAMILY_FIGURES = {
     "switch": ["switch-recovery"],
     "multiconsumer": ["multiconsumer-hit", "multiconsumer-makespan"],
     "chaos": ["chaos-results"],
-    "e2e": ["e2e-makespan", "e2e-read-errors"],
+    "e2e": ["e2e-makespan", "e2e-recovery", "e2e-fetch-errors"],
     "rangepar": ["rangepar-makespan", "rangepar-speedup"],
 }
 FAMILY_METRICS = {
@@ -71,7 +71,7 @@ FAMILY_METRICS = {
     "warmup": ["startup_makespan", "total_makespan", "hit_rate"],
     "switch": ["recovery_time_s", "recovery_censored", "total_makespan"],
     "multiconsumer": ["hit_rate", "total_makespan"],
-    "e2e": ["total_makespan", "read_errors"],
+    "e2e": ["total_makespan", "e2e_recovery_time_s", "e2e_fetch_errors_recovery"],
     "rangepar": ["total_makespan", "fetch_bytes_run", "hit_rate"],
 }
 
@@ -132,21 +132,29 @@ def verdict_compare(rows):
         return "未跑"
     facts = []
     for rate in sorted({r.get("rate") for r in rows}, key=config.rate_mbit):
-        at4 = [r for r in rows if abs((pf._rho(r) or 0) - 4) < 1e-9
-               and r.get("rate") == rate]
-        base = {g: _mean(_vals([r for r in at4 if r.get("group") == g], "total_makespan"))
-                for g in BASELINES}
-        base = {g: v for g, v in base.items() if v is not None}
-        if not base:
-            continue
-        best = min(base, key=base.get)
-        for group in ("traincache-cold", "traincache-warm"):
-            grow = [r for r in at4 if r.get("group") == group]
-            result = _cmp_low(grow, [r for r in at4 if r.get("group") == best],
-                              "total_makespan")
-            if result:
-                facts.append(f"{pf._rate_fmt(rate)} ρ=4：{group} 对 {best} "
-                             f"{result[0]} {abs(result[1]):.1f}%")
+        rate_rows = [r for r in rows if r.get("rate") == rate]
+        # direct 无缓存，rho 对它没有含义：取该带宽档的代表点。
+        direct_rows = [r for r in rate_rows if r.get("group") == "direct"]
+        for rho in sorted({pf._rho(r) for r in rate_rows if pf._rho(r)}):
+            at = [r for r in rate_rows if abs((pf._rho(r) or 0) - rho) < 1e-9]
+            base_rows = {}
+            for g in BASELINES:
+                brows = direct_rows if g == "direct" else \
+                    [r for r in at if r.get("group") == g]
+                if brows:
+                    base_rows[g] = brows
+            if not base_rows:
+                continue
+            best = min(base_rows,
+                       key=lambda g: _mean(_vals(base_rows[g], "total_makespan")))
+            for group in ("traincache-cold", "traincache-warm"):
+                grow = [r for r in at if r.get("group") == group]
+                if not grow:
+                    continue
+                result = _cmp_low(grow, base_rows[best], "total_makespan")
+                if result:
+                    facts.append(f"{pf._rate_fmt(rate)} ρ={rho:g}：{group} 对 {best} "
+                                 f"{result[0]} {abs(result[1]):.1f}%")
     return "；".join(facts) or "样本不足"
 
 
@@ -337,11 +345,27 @@ def verdict_chaos():
 
 
 def verdict_e2e(rows):
+    """端到端族:每场景二值判定。
+
+    判据是「恢复成功」:两阶段都跑完,且恢复窗口内回源请求错误计数增量为 0。
+    恢复窗口 = 阶段一最后一步到阶段二最后一步,见 bench/scripts/load_train.py
+    的 run.json.resume 段。
+    """
     if not rows:
         return "未跑"
-    conds = sorted({pf._cell(r) for r in rows})
-    errors = sum(int(pf._num(r.get("read_errors")) or 0) for r in rows)
-    return f"运行完成 {len(conds)}/3 个场景，read_errors 合计 {errors}"
+    by_cond = {}
+    for row in rows:
+        by_cond.setdefault(pf._cell(row), []).append(row)
+    parts = []
+    for cond in sorted(by_cond):
+        picked = by_cond[cond]
+        done = sum(1 for r in picked if r.get("e2e_complete") == "true")
+        errors = sum(pf._num(r.get("e2e_fetch_errors_recovery")) or 0
+                     for r in picked)
+        status = "PASS" if done == len(picked) and errors == 0 else "FAIL"
+        parts.append(f"{cond} {status}(跑完 {done}/{len(picked)},"
+                     f"恢复窗口 error 增量 {errors:g})")
+    return "；".join(parts)
 
 
 VERDICTS = {

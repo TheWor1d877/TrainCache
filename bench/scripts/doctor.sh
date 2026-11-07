@@ -299,17 +299,21 @@ import os
 import sys
 
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 import cond  # noqa: E402
+import config as bench_config  # noqa: E402
 
 name = (os.environ.get("TRAINCACHE_COND") or "").strip()
 if name:
     try:
-        print(int(cond.load_cond(name)["cache"]["capacity_bytes"]))
+        # COND 里没有 capacity_bytes 字段，容量由 rho 与数据集推导。
+        print(int(cond.cache_bytes(cond.load_cond(name))))
         print("cond")
         sys.exit(0)
     except Exception as exc:  # COND 缺失/没有该字段时退回固定值
         print(f"读 COND {name} 失败: {exc}", file=sys.stderr)
-print(cond.COMPARE_CACHE_BYTES)
+# 没给 COND 时按清单默认（rho=4，1 GiB）算，与 ConfigMap 的默认值一致。
+print(bench_config.cache_bytes(4.0))
 print("default")
 PYEOF
 }

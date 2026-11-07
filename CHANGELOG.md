@@ -25,12 +25,20 @@
 
 ### Added
 
-- Agent 把每个块拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。开关进 ConfigMap `traincache-config`，键 `fetchRangeParallel`，默认 `"true"`，环境变量 `TRAINCACHE_FETCH_RANGE_PARALLEL`；关掉后每个块走一条整对象 GET。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
+- Agent 把每个块拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。开关进 ConfigMap `traincache-config`，键 `fetchRangeParallel`，默认 `"true"`，环境变量 `TRAINCACHE_FETCH_RANGE_PARALLEL`；关掉后每个块走一条整对象 GET。契约见 `docs/5.1-design.md`《下载编排》、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
 - 新增传输压缩开关 `objstoreCompression`（默认 `"false"`），Agent 与网关共同读取，环境变量 `TRAINCACHE_OBJSTORE_COMPRESSION`。打开后 S3 客户端向源站声明 gzip，传输层解压后交给上层的是原始字节；带 Range 的请求不参与协商。训练数据多为已压缩格式，默认关闭。契约见 `docs/9.1-design.md` §5.3。
 - bench 新增并行下载族 `rangepar`：轴是链路条件档位，档内两臂只切 Range 并行开关。四档是单流不限、单流 32 mbit、单流 16 mbit、高时延加丢包，单流上限由 qdisc 的 fq maxrate 给出。8 个 COND、24 跑。装置侧 `bench/scripts/tc_apply.sh` 增加 fq maxrate 与 netem 丢包两种形态，`bench/scripts/ctrl_up.sh` 增加 `fetchRangeParallel` 的下发。族定义见 `docs/4.2-bench-families.md` 的并行下载族一节，判据见 `docs/4.3-bench-metrics-and-decisions.md` 的按族的判据一节。
 - 出图补上混沌族、端到端族与并行下载族三族：`bench/experiments/plot_families.py` 新增 `chaos-results`、`e2e-makespan`、`e2e-read-errors`、`rangepar-makespan`、`rangepar-speedup` 五张图，中英各一套。混沌族读各轮目录下的 `summary.txt` 取 PASS/FAIL 计数，不读 `summary.csv`。图名与口径见 `docs/4.4-bench-runbook.md` 的出图一节。
+- bench 端到端族补上 checkpoint 续跑能力：`bench/scripts/load_train.py` 新增 `--checkpoint-dir`、`--interrupt-after-epoch`、`--resume`，checkpoint 存已完成 epoch 的逐步记录、每 epoch 汇总与跨段时刻；`bench/experiments/run.py` 新增 e2e 两阶段编排，三个场景是断点续跑、换数据版本后恢复、训练进程与 agentd 同时重启；`bench/experiments/collect.py` 新增回源请求错误计数 `fetch_errors_total` 与 `fetch_errors_recovery`。换版本场景要的第二份数据快照由 `make -C bench bench-data-v2` 生成。
+- bench 的 `summary.csv` 新增单块下载时间五列：`prefetch_task_count`、`prefetch_task_seconds_sum`、`prefetch_task_duration_mean_s`、`prefetch_task_duration_p50_s`、`prefetch_task_duration_p90_s`，取 agent 的 `traincache_prefetch_task_duration_seconds` 直方图。一个任务是一个块，耗时从入队到终态，含排队等待，不是纯网络传输时间。
+- bench 的 `summary.csv` 新增 `cache_peak_ratio` 列：缓存目录峰值除以声明容量。
 
 ### Changed
+
+- bench 对照族的组态矩阵改成按带宽档定：ρ 不再筛组态，1000 与 300 档跑满七个组态，100 档只留 TrainCache 与 Direct；缓存基线在所有 ρ 档补格子，配额随 ρ 变；`direct` 只保留 ρ=4 一个代表点，逐 ρ 判定时回退对照同带宽的 ρ=4 格。COND 36 → 68，跑数 204。
+- bench 的 warm 臂预热口径改成「各自把缓存填满」：WarmupTask 的块数上界从分片数改成数据集块数（512），ρ=0.5 时预铺 512 块 4 GiB，ρ=8 时 64 块 0.5 GiB，每档恰好填满缓存。原上界拿块与分片比，是单位错误。
+- bench 缓存基线的配额下发改成按 MiB：Fluid 原先按整数 GiB 下发，ρ=8 的 0.5 GiB 会被进位到 1 GiB，与另两组的配额对不上；现在 `FLUID_CACHE_MB` 与 `JFS_CACHE_MB` 同口径。
+- bench 端到端族的判定改成逐场景二值：两阶段都跑完，且恢复窗口（阶段一最后一步到阶段二最后一步）内回源请求错误计数增量为 0。出图补 `e2e-recovery` 与 `e2e-fetch-errors` 两张。
 
 - 出图样式调整：柱顶标数值，图例从图内移到标题下方，合格区间画成浅色带加虚线，标题改为左对齐。`bench/experiments/plot_families.py` 的 `_render` 新增数值标注、参考线、堆叠柱与分面备注四个参数。
 - Agent 每个进程的下载任务默认上限从 8 提到 16，预铺仍占一半。每块走 4 路并行时单进程到源站或网关的连接峰值为 64，与 `MaxConnsPerHost` 默认值齐平。
@@ -39,6 +47,11 @@
 - Agent 在 warmup 阶段让 P0 预热块走读准入（占满 `MaxTasks`），训练进程开始消费块后退回预铺档位。warmup 阶段没有在读请求在途，半额保护没有保护对象。契约见 `docs/6.2-decisions.md` D66、`docs/6.1-design.md`。
 - `docs/PARAMETER-CONFIGURATION.md` 按配置层重排为集群运行时、数据集、训练任务三节，每节按落位对象分小节，补术语表、每个键的影响面与作用范围。
 - 报告页补上并行下载族：`bench/experiments/report.py` 的族名、族问题、判据引用、指标表与判定函数都加了 rangepar。族进了 `BENCH_FAMILIES` 而报告页缺表项时，出报告页会直接 KeyError。
+
+### Fixed
+
+- `bench/scripts/doctor.sh` 的 agentd 缓存上限期望值两处引用失效，体检项由 FAIL 转 PASS。
+- bench 续跑时的全程时刻口径：`t_submit` 与 `t_first_step` 取阶段一的值，`t_last_step` 取阶段二的值，恢复时长与提交间隔单独记在 `run.json` 的 `resume` 段。
 
 ### Removed
 
@@ -66,7 +79,7 @@
 
 ### Added
 
-- Agent 每 10 分钟清扫一次本节点的本地孤儿块副本，环境变量 `TRAINCACHE_LOCAL_GC_INTERVAL` 调周期，循环启动即跑首轮。数据集删除或条目移除后，节点上那份不再被任何快照引用的副本由它回收，代价是一次回源重拉。机制见 `docs/5.1-design.md` §11.5、`docs/6.1-design.md`《回收与磁盘淘汰》。
+- Agent 每 10 分钟清扫一次本节点的本地孤儿块副本，环境变量 `TRAINCACHE_LOCAL_GC_INTERVAL` 调周期，循环启动即跑首轮。数据集删除或条目移除后，节点上那份不再被任何快照引用的副本由它回收，代价是一次回源重拉。机制见 `docs/5.1-design.md`《回收》、`docs/6.1-design.md`《回收与磁盘淘汰》。
 - 发布产物新增第 6 个 digest：`traincache-checkpointd`。它的镜像引用写进新的 ConfigMap `traincache-checkpoint-image`（键 `checkpointImage`，namespace `traincache`），webhook 以 `CHECKPOINT_IMAGE` 读作注入 sidecar 的默认值，发布清单里渲染成本次发布的 digest。Pod 注解 `traincache.io/checkpoint-image` 与接入方自己的 ConfigMap 键仍优先。
 - checkpoint 恢复新增放弃出口：`TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER`（默认 60m）到点后写一条 `reason=restore_give_up` 的 ERROR，checkpointd 以退出码 3 结束，`restartPolicy: OnFailure` 下计入 Job 的 `status.failed` 与 `backoffLimit`，不再无限占着 Pod。决策见 `docs/10.2-decisions.md` D14。
 - checkpointd 每条日志带 `job` 字段，值来自准入从 owner Job 注入的 `JOB` 环境变量；裸 Pod 为空串。它是 checkpoint 链路与 Job 的对账键，决策见 `docs/10.2-decisions.md` D26。
@@ -197,7 +210,7 @@
 
 ### Changed
 
-- 下载准入档位改名：`fetch.Priority` → `fetch.Admission`、`FetchWithPriority` → `FetchWithAdmission`、`PriorityForeground`/`PriorityBackground` → `AdmissionReading`（在读：需求读补块与坏块修复）/`AdmissionSpeculative`（预铺：预取含显式预热）。只影响 `traincache/core/fetch` 的导入方；半额额度、让路门、同 key 合并与回源指标口径不变。契约见 `docs/5.1-design.md` §5.3 与 `docs/6.3 decisions.md` D61。
+- 下载准入档位改名：`fetch.Priority` → `fetch.Admission`、`FetchWithPriority` → `FetchWithAdmission`、`PriorityForeground`/`PriorityBackground` → `AdmissionReading`（在读：需求读补块与坏块修复）/`AdmissionSpeculative`（预铺：预取含显式预热）。只影响 `traincache/core/fetch` 的导入方；半额额度、让路门、同 key 合并与回源指标口径不变。契约见 `docs/5.1-design.md`《下载编排》与 `docs/6.3 decisions.md` D61。
 
 ## [v0.3.1] - 2026-10-30
 

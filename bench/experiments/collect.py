@@ -304,6 +304,11 @@ def collect(args):
     fetch_err = None
     fetch_recon = None
     fetch_assumed_zero = False
+    # 回源请求错误数:全程窗口与恢复窗口(e2e 族的判据读恢复窗口)
+    resume = run.get("resume") or {}
+    recovery_start = parse_ts(resume.get("phase1_t_last_step"))
+    fetch_errors_total = None
+    fetch_errors_recovery = None
     hit = {}
     gauge = {}
     boundary_error = None
@@ -383,6 +388,23 @@ def collect(args):
         except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
             notes.append(f"Prometheus 命中率查询失败: {exc}")
 
+        # 回源错误计数:traincache_fetch_requests_total{result="error"}
+        err_q = (f'sum (traincache_fetch_requests_total'
+                 f'{{dataset="{dataset}",result="error"}})')
+        try:
+            err_res = prom_query_range(base, err_q, t_submit - timedelta(seconds=60),
+                                       t_last + timedelta(seconds=60), args.step_s)
+            fetch_errors_total, e, _, _, _ = counter_delta(err_res, t_submit, t_last)
+            if e:
+                notes.append(f"回源错误计数的边界误差 {e}s")
+            if recovery_start and t_last and recovery_start < t_last:
+                fetch_errors_recovery, e2, _, _, _ = counter_delta(
+                    err_res, recovery_start, t_last)
+                if e2:
+                    notes.append(f"恢复窗口错误计数的边界误差 {e2}s")
+        except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+            notes.append(f"Prometheus 回源错误计数查询失败: {exc}")
+
     row = {
         "run_id": run.get("run_id"),
         "cond": run.get("cond"),
@@ -409,6 +431,8 @@ def collect(args):
         "total_fetch_bytes": fetch["total"],
         "fetch_recon_diff_pct": fetch_recon,
         "fetch_boundary_error_s": boundary_error,
+        "fetch_errors_total": fetch_errors_total,
+        "fetch_errors_recovery": fetch_errors_recovery,
         "fanout_actual": wt_info.get("fanout_actual"),
         "fanout_max": wt_info.get("fanout_max"),
         "startup_bytes_status_est": wt_info.get("startup_bytes_status_est"),
@@ -440,6 +464,7 @@ CSV_FIELDS = [
     "startup_makespan_s", "full_makespan_s", "post_pod_s", "gate_hold_s",
     "startup_fetch_bytes", "sustained_fetch_bytes", "switch_fetch_bytes",
     "total_fetch_bytes", "fetch_recon_diff_pct", "fetch_boundary_error_s",
+    "fetch_errors_total", "fetch_errors_recovery",
     "fanout_actual", "fanout_max", "startup_bytes_status_est",
     "hit_hits_startup", "hit_misses_startup", "hit_ratio_startup",
     "hit_hits_steady", "hit_misses_steady", "hit_ratio_steady",
