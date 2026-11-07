@@ -168,13 +168,14 @@ import trace as trace_mod  # noqa: E402  (bench/compare/trace.py，遮蔽 stdlib
 sys.path.insert(0, str(BENCH_ROOT))
 import config as bench_config  # noqa: E402
 
-GROUPS = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm", "traincache-cold", "traincache-warm"]
+GROUPS = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm",
+          "traincache", "traincache-cold", "traincache-warm"]
 # summary.csv 的 family 列。对照族固定 compare；multiconsumer 借用本入口时由
 # 调用方用 --family 覆盖（产物根也要给 --out-root 指到该族）。
 FAMILY = "compare"
 # 五个基线只在参考点 rho=4 跑一次（契约 §5），被测组态跑满五个 rho。
 BASELINE_GROUPS = ("direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm")
-TRAINCACHE_GROUPS = ("traincache-cold", "traincache-warm")
+TRAINCACHE_GROUPS = ("traincache", "traincache-cold", "traincache-warm")
 BASELINE_RHO = 4.0
 
 GROUP_NS = {
@@ -852,6 +853,10 @@ def group_up(group):
     env["RHO"] = str(RHO)
     env["TC_RATE"] = TC_RATE_EFF
     env["TC_DELAY"] = TC_DELAY_EFF
+    # 单流上限与丢包率:0 表示不限单流、不丢包,up.sh 按这两个值决定
+    # tc_apply.sh 走哪种 qdisc 形态(4.2 §13)。
+    env["TC_PER_CONN_MBIT"] = os.environ.get("TC_PER_CONN_MBIT", "0")
+    env["TC_LOSS_PERCENT"] = os.environ.get("TC_LOSS_PERCENT", "0")
     env["TRAIN_IMAGE"] = TRAIN_IMAGE
     env["MINIO_ACCESS_KEY"] = MINIO_ACCESS_KEY
     env["MINIO_SECRET_KEY"] = MINIO_SECRET_KEY
@@ -1193,7 +1198,7 @@ def _hook_read_miss(name, chunk_idx):
 
 # Heartbeat:每 10s 同代际续写当前 epoch 的订单。推进 write_seq 避免 collector 因 ring
 # 停滞 30s 降级到 inotify 兜底(D57);续写必须带 --same-generation——载荷字节相同本不会
-# 推送,但代际一变读端就按 design §7.4 重放订单,等于每 10s 一次虚假 sidecar 重启。
+# 推送,但代际一变读端就按 6.1《订单通道降级》重放订单,等于每 10s 一次虚假 sidecar 重启。
 _hb_stop = threading.Event()
 _hb_epoch = [0]
 _hb_lock = threading.Lock()

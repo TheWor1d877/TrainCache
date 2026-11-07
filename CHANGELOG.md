@@ -27,6 +27,7 @@
 
 - Agent 把每个块拆成 4 条 Range GET 并行取，拼成完整块后再算指纹落盘；网关收到带 Range 的块 GET 直接透传源站，不进在途合并表、不查磁盘缓存。开关进 ConfigMap `traincache-config`，键 `fetchRangeParallel`，默认 `"true"`，环境变量 `TRAINCACHE_FETCH_RANGE_PARALLEL`；关掉后每个块走一条整对象 GET。契约见 `docs/5.1-design.md` §5.3、`docs/9.0-s3-merge-gateway.md` 的 singleflight 合并一节。
 - 新增传输压缩开关 `objstoreCompression`（默认 `"false"`），Agent 与网关共同读取，环境变量 `TRAINCACHE_OBJSTORE_COMPRESSION`。打开后 S3 客户端向源站声明 gzip，传输层解压后交给上层的是原始字节；带 Range 的请求不参与协商。训练数据多为已压缩格式，默认关闭。契约见 `docs/9.1-design.md` §5.3。
+- bench 新增并行下载族 `rangepar`：轴是链路条件档位，档内两臂只切 Range 并行开关。四档是单流不限、单流 32 mbit、单流 16 mbit、高时延加丢包，单流上限由 qdisc 的 fq maxrate 给出。8 个 COND、24 跑。装置侧 `bench/scripts/tc_apply.sh` 增加 fq maxrate 与 netem 丢包两种形态，`bench/scripts/ctrl_up.sh` 增加 `fetchRangeParallel` 的下发。族定义见 `docs/4.2-bench-families.md` §13，判据见 `docs/4.3-bench-metrics-and-decisions.md` §3.2。
 
 ### Changed
 
@@ -35,6 +36,7 @@
 
 - Agent 在 warmup 阶段让 P0 预热块走读准入（占满 `MaxTasks`），训练进程开始消费块后退回预铺档位。warmup 阶段没有在读请求在途，半额保护没有保护对象。契约见 `docs/6.2-decisions.md` D66、`docs/6.1-design.md`。
 - `docs/PARAMETER-CONFIGURATION.md` 按配置层重排为集群运行时、数据集、训练任务三节，每节按落位对象分小节，补术语表、每个键的影响面与作用范围。
+- 报告页补上并行下载族：`bench/experiments/report.py` 的族名、族问题、判据引用、指标表与判定函数都加了 rangepar。族进了 `BENCH_FAMILIES` 而报告页缺表项时，出报告页会直接 KeyError。
 
 ### Removed
 
@@ -61,7 +63,7 @@
 
 ### Added
 
-- Agent 每 10 分钟清扫一次本节点的本地孤儿块副本，环境变量 `TRAINCACHE_LOCAL_GC_INTERVAL` 调周期，循环启动即跑首轮。数据集删除或条目移除后，节点上那份不再被任何快照引用的副本由它回收，代价是一次回源重拉。机制见 `docs/5.1-design.md` §11.5、`docs/6.1-design.md` §7.6。
+- Agent 每 10 分钟清扫一次本节点的本地孤儿块副本，环境变量 `TRAINCACHE_LOCAL_GC_INTERVAL` 调周期，循环启动即跑首轮。数据集删除或条目移除后，节点上那份不再被任何快照引用的副本由它回收，代价是一次回源重拉。机制见 `docs/5.1-design.md` §11.5、`docs/6.1-design.md`《回收与磁盘淘汰》。
 - 发布产物新增第 6 个 digest：`traincache-checkpointd`。它的镜像引用写进新的 ConfigMap `traincache-checkpoint-image`（键 `checkpointImage`，namespace `traincache`），webhook 以 `CHECKPOINT_IMAGE` 读作注入 sidecar 的默认值，发布清单里渲染成本次发布的 digest。Pod 注解 `traincache.io/checkpoint-image` 与接入方自己的 ConfigMap 键仍优先。
 - checkpoint 恢复新增放弃出口：`TRAINCACHE_CHECKPOINT_RESTORE_GIVE_UP_AFTER`（默认 60m）到点后写一条 `reason=restore_give_up` 的 ERROR，checkpointd 以退出码 3 结束，`restartPolicy: OnFailure` 下计入 Job 的 `status.failed` 与 `backoffLimit`，不再无限占着 Pod。决策见 `docs/10.2-decisions.md` D14。
 - checkpointd 每条日志带 `job` 字段，值来自准入从 owner Job 注入的 `JOB` 环境变量；裸 Pod 为空串。它是 checkpoint 链路与 Job 的对账键，决策见 `docs/10.2-decisions.md` D26。
@@ -186,7 +188,7 @@
 - scheduler 的 `configMapKeyRef` 指到了 `traincache` 的 `traincache-config`，而它在 kube-system，取不到对象，Pod 停在 `CreateContainerConfigError`；两个 Scheduler 配置项改到 kube-system 的 `traincache-scheduler-config`。热集群一直复用旧 ReplicaSet、清单哈希不变就不 `apply -k`，这条直到 M5 前置探针第一次全量 apply 才露头；`hack/verify-config-placement.sh` 现按 namespace 校验每条引用，改回跨 namespace 引用即失败。
 - 字节维度缓存上限（`TRAINCACHE_CACHE_CAPACITY_BYTES`）的记账错在两处，导致设了上限也不会按字节淘汰。其一，口径不一致：`cas.Put` 只加数据长度，启动预扫与淘汰扣减按块文件 size（数据 + 128B 块头），删空目录后累计仍停在 −128B/块；现三个来源统一到文件 size。其二，进程重启后启动预扫只播种累计、没播种去重表，目录里的块被本进程首次打开时再加一次（8GiB 缓存读成 16GiB），淘汰每块只减一次，累计永远回不到真值并停在危险线上反复空转；预扫现同时把已有块指纹写入去重表。契约见 `docs/6.2-decisions.md` D58，判据用例 `agent/svc/capacity_wiring_test.go`。
 - 字节累计的漏记还有一处：`Open` 前置观察者对**缺失块**也触发，而字节累计拿它当「这个块记过了」用——预取窗口先用 `cas.Open` 探就绪（ETA、回填、rescan 同形态），未命中就把块指纹写进 `seenFPs`，随后本进程 `Put` 同一块被当成已累计跳过。冷缓存下几乎每个块都先被探测一遍，写入字节全程漏记，`traincache_cache_capacity_bytes_total{source="bytes"}` 停在启动预扫值、淘汰增量为 0（M5 前置探针现场）。现在缺失块探测不占用去重槽，累计只在块文件确实存在或 `Put` 落地时计入；判据用例 `TestCapacitySurvivesMissOpenProbe`。
-- ring 写端的 10s 保活心跳每跳一次就把订单重铺一遍。代际的语义是「写端会话换了」，可 `ordersrc.py` 每次调用都按新会话算（`writer_generation` +1），而读端遇到代际变化会按 design §7.4 把同载荷订单也重放一次，于是每 10s 一次虚假的 sidecar 重启 → 一次 `OnStageSwitch` → 预取队列整段重铺（M5 前置探针现场：1024 块/次，字节上限生效后演变成无界回源）。新增 `--same-generation`：同一会话内的续写只推进 `write_seq`、代际不变；`agent/deploy/train-pod.yaml` 的 sidecar 循环与 bench reader 的心跳线程改用它，epoch 首写仍按新代际。契约见 `docs/6.2-decisions.md` D22/D41/D57，判据用例 `agent/ordersrc/ordersrc_test.py`。
+- ring 写端的 10s 保活心跳每跳一次就把订单重铺一遍。代际的语义是「写端会话换了」，可 `ordersrc.py` 每次调用都按新会话算（`writer_generation` +1），而读端遇到代际变化会按 6.1《订单通道降级》把同载荷订单也重放一次，于是每 10s 一次虚假的 sidecar 重启 → 一次 `OnStageSwitch` → 预取队列整段重铺（M5 前置探针现场：1024 块/次，字节上限生效后演变成无界回源）。新增 `--same-generation`：同一会话内的续写只推进 `write_seq`、代际不变；`agent/deploy/train-pod.yaml` 的 sidecar 循环与 bench reader 的心跳线程改用它，epoch 首写仍按新代际。契约见 `docs/6.2-decisions.md` D22/D41/D57，判据用例 `agent/ordersrc/ordersrc_test.py`。
 
 ## [v0.3.2] - 2026-10-31
 
@@ -199,7 +201,7 @@
 ### Added
 
 - 控制面到 Agent 的四个 RPC 新增 gRPC metadata 三键 `x-traincache-request-id`/`x-traincache-task`/`x-traincache-generation`：Controller 客户端注入，Agent 拦截器把三者写进 context logger，两端日志可按同一次请求串联。契约见 `docs/8.1-design.md` §5。
-- 钩子帧可携带任务身份 `warmup_task`/`pod`/`pod_index`/`dataset`/`generation`，缺省时行为与旧帧一致；`read_miss` 的补块日志带上这组字段。webhook 相应补注入 `TRAINCACHE_POD`。契约见 `docs/8.0-logging-and-monitoring.md` 与 `docs/6.1-design.md` §5.4。
+- 钩子帧可携带任务身份 `warmup_task`/`pod`/`pod_index`/`dataset`/`generation`，缺省时行为与旧帧一致；`read_miss` 的补块日志带上这组字段。webhook 相应补注入 `TRAINCACHE_POD`。契约见 `docs/8.0-logging-and-monitoring.md` 与 `docs/6.1-design.md`《钩子 socket 协议》。
 - 日志采样与限流：`TRAINCACHE_LOG_SAMPLE_RATE`（Info，默认 1.0）与 `TRAINCACHE_LOG_DEBUG_SAMPLE_RATE`（Debug，默认 0.01）控制级别采样，配进程内令牌桶（控制面 100 行/秒、Agent 200 行/秒）与 60s 去重窗口；Warn/Error 不采样、不被丢弃。丢弃条数由新增的 `traincache_log_dropped_total{component,level}` 暴露。契约见 `docs/8.1-design.md` §3.3。
 - 日志固定带 `sampled`/`sample_rate` 两个字段；带 `err` 的 Warn/Error 固定成对带 `err_class`（`invalid_spec`/`not_found`/`unavailable`/`permanent`/`corrupt`/`io`/`timeout`）。契约见 `docs/8.1-design.md` §3.1。
 - Agent 高频路径改为 60s 汇总：逐块下载/校验每窗口一条 Info（块数、字节、失败数、P50/P99），缓存命中/未命中/read_miss 每窗口一条 Info（按 dataset 与 reason）。逐块明细降为 Debug 1/100 采样。契约见 `docs/8.1-design.md` §3.3 与 §4.2。
@@ -240,7 +242,7 @@
 ### Changed
 
 - 控制面日志的 `assign` 字段由 `"p0=n0"` 字符串改为结构化对象（Pod → 节点数组），可按节点聚合；Agent RPC 的进程内重试循环去掉，失败日志不再带恒为 1 的 `attempt`，退避交给 controller-runtime。
-- `CancelPreheat` 撤回该任务还没下完的块：受理预热任务时结一个下载作用域，取消即取消它，块在下一个 ctx 边界（准入排队、源站读、写盘）退出并按失败回调，任务落 `ERROR`、`completed` 保留取消前已落盘的块数。作用域只在任务出表时释放，`DONE` 不释放——DONE 后仍可能收到 `UpdatePreheat` 续窗。再次提交同一 `task_id` 仍视为新任务。契约见 `docs/6.1-design.md` 的 `CancelPreheat` 条目，决策记 `docs/6.3 decisions.md` D62。
+- `CancelPreheat` 撤回该任务还没下完的块：受理预热任务时结一个下载作用域，取消即取消它，块在下一个 ctx 边界（准入排队、源站读、写盘）退出并按失败回调，任务落 `ERROR`、`completed` 保留取消前已落盘的块数。作用域只在任务出表时释放，`DONE` 不释放——DONE 后仍可能收到 `UpdatePreheat` 续窗。再次提交同一 `task_id` 仍视为新任务。契约见 `docs/6.1-design.md` 的 `CancelPreheat` 条目，决策记 `docs/6.2-decisions.md` D62。
 - bench 与现勘清单的 MinIO 镜像从 `latest` 钉到固定 release tag（`pgsty/minio:RELEASE.2026-08-04T00-00-00Z`，manifest digest 已 `docker pull` 验证），滚动升级不再带来行为漂移。
 
 ### Fixed

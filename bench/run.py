@@ -84,6 +84,14 @@ def _hot_pct(cond):
     return int(match.group(1)) if match else None
 
 
+def _arm_tag(cond):
+    """并行下载族的臂：tags 里的 arm=par-on / arm=par-off。"""
+    for tag in cond.get("tags") or []:
+        if isinstance(tag, str) and tag.startswith("arm="):
+            return tag.split("=", 1)[1]
+    return None
+
+
 # 族专用选项。chaos 的故障名在文档里带下划线，COND 名里是 kebab，两边都收。
 FAMILY_OPTIONS = {
     "compare": ("group",),
@@ -95,6 +103,7 @@ FAMILY_OPTIONS = {
     "chaos": ("fault",),
     "multiconsumer": ("hot_ratio",),
     "e2e": ("scenario",),
+    "rangepar": ("arm",),
 }
 
 OPTION_GETTERS = {
@@ -109,12 +118,13 @@ OPTION_GETTERS = {
                            else _name_tail("e2e-")(c)),
     "fault": _name_tail("chaos-"),
     "hot_ratio": _hot_pct,
+    "arm": _arm_tag,
 }
 
 OPTION_TYPES = {
     "group": str, "gateway": str, "evict_policy": str,
     "lookahead": int, "fanout": int, "gate": str, "window": int,
-    "scenario": str, "fault": str, "hot_ratio": float,
+    "scenario": str, "fault": str, "hot_ratio": float, "arm": str,
 }
 
 
@@ -124,6 +134,7 @@ OPTION_QUERY = {
     "fault": lambda v: str(v).replace("_", "-"),
     "gateway": lambda v: str(v).strip().lower(),
     "hot_ratio": lambda v: int(round(float(v) * 100)),
+    "arm": lambda v: str(v).strip().lower(),
 }
 
 
@@ -349,7 +360,7 @@ def _add_family_options(parser: argparse.ArgumentParser, family: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="run.py", description="bench 唯一实验入口：九个族 + status")
+        prog="run.py", description="bench 唯一实验入口：十个族 + status")
     sub = ap.add_subparsers(dest="command", required=True)
     for family in FAMILIES:
         parser = sub.add_parser(family, help=f"{family} 族")

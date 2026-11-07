@@ -1,0 +1,51 @@
+{
+  "schema_version": "4",
+  "name": "rangepar-l0-par-on",
+  "family": "rangepar",
+  "group": "traincache",
+  "load": "dataset",
+  "dataset": {
+    "name": "dataset-4gib",
+    "shards": 16,
+    "shard_size_bytes": 268435456,
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "shuffle": "per-epoch",
+    "readers": 1,
+    "access_pattern": "single"
+  },
+  "network": {
+    "rate_mbit": 1000,
+    "per_conn_mbit": 0,
+    "delay_ms": 20,
+    "loss_percent": 0
+  },
+  "cache": {
+    "enabled": true,
+    "rho": 4.0,
+    "evict_policy": "heat",
+    "warmup_seconds": 0
+  },
+  "prefetch": {
+    "lookahead": 16,
+    "fanout": 2
+  },
+  "sampling": {
+    "reps": 3
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "gateway_cache": false,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7",
+    "fetch_range_parallel": true
+  },
+  "tags": [
+    "rangepar",
+    "tier=l0",
+    "arm=par-on"
+  ],
+  "notes": "并行下载族格子；链路条件档 l0：单流上限 0 mbit、时延 20 ms、丢包 0%；Range 并行打开。档内两臂只差这一个开关。"
+}

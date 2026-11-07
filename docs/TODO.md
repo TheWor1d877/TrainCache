@@ -1,11 +1,31 @@
-(thewor1d877)： [A] compare 族的组态矩阵要重做：四个组态的取数路径结构不同，direct 每个 shard 一条连接、READ_WORKERS=2 封顶 2 条并发，juicefs 与 fluid 由 JuiceFS 客户端内部参数决定回源连接数且仓库未固定该数，traincache 由代码里 4 路 Range 决定，当前矩阵没有可比基数；要在不新开集群的前提下定出 TrainCache 与 Fluid/JuiceFS 同台比较的口径
+(thewor1d877)： [A] compare 族的组态矩阵要补齐：100 mbit 档缺 juicefs 与 fluid 的 cold+warm 四个组态和 traincache-warm；juicefs 与 fluid 只锁 1 GiB 一个缓存配额点，TrainCache 的 ρ 轴没有同配额的对照档；要在不新开集群的前提下定出补齐的规模
 
 (thewor1d877)： [B] JuiceFS 与 Fluid 的实际回源连接数未实测，跨组比较并行能力前需在集群上测 mount 进程到 MinIO 的连接数，命令 `nsenter --net=<minio-netns> ss -tn state established '( dport = :9000 )'`
 
 (thewor1d877)： [C] e2e 族缺 checkpoint 续跑能力：`bench/scripts/load_train.py` 无 `--checkpoint-dir` 与 `--resume`，`bench/experiments/run.py` 无 e2e 分支，需先定存什么状态、在哪一步中断
 
-(thewor1d877)： [C] `bench/experiments/report.py` 的版本字段按目录 mtime 推断，混跑新旧 COND 时会显示较旧的版本号，需改为读 COND 目录里的 version 文件
+(thewor1d877)： [C] 版本字段的落盘链没接上：报告页读各 COND 目录里的 version 文件，写它的是 `bench/experiments/row_gate.py`，`run_bench.py` 这条跑分路径不写，产物目录里没有 version 文件时报告页显示「无版本文件」；旧 COND 命名时代的 gateway 目录里有 version 文件，会让报告显示一个不属于当前跑数的版本号
+
+(thewor1d877)： [C] 出图脚本缺三个族的绘图函数：`bench/experiments/plot_families.py` 的 FAMILY_PLOTS 只有 compare、gateway、evict、prefetch、warmup、switch、multiconsumer 七族，chaos、e2e、rangepar 没有图；报告页已能出这三族的小节，图表要单独补
 
 (thewor1d877)： [C] `bench/chaos/inject/node_loss.sh` 只过了 `bash -n`，未在集群实跑，需在 chaos 族正式跑之前验证一轮
 
 (thewor1d877)： [D] `~/tcd/bench/results/cold-verify.txt` 与 `~/tcd/bench/results/gateway/gw-100-r1-on-cache/` 是旧 COND 命名时代的残留，出图与报告都不读，但 report.py 的版本字段会被它影响；清理需用户确认
+
+(thewor1d877)： [C] 块级上报通道 `ReportBlocks` 两端都空：Agent 侧返回 Unimplemented，Controller 现设计改用轮询 `GetPreheatStatus` 拿进度、明确不使用该通道；要先裁决是保留（补 Agent 服务端与 Controller 接收端）还是从 proto 里删掉
+
+(thewor1d877)： [C] 启动窗口块数仍是订单里的固定 `prefetch_chunks`：命中率输入 `Status.HitRate` 已就位，调整动作未实现，缺命中率目标区间与步长的数字，需先用稳态轮 bench 定口径
+
+(thewor1d877)： [C] CLI 拨号仍要手工给 `--endpoint`：`--node` 只作请求校验字段，节点到 Agent 地址的映射随 Controller 就绪，现在无法只凭节点名连上指定节点
+
+(thewor1d877)： [C] 根 `Makefile` 的 `e2e-k8s` 与 `e2e-local` 转给 `bench/Makefile`，那边没有同名目标，`make -n e2e-k8s` 直接报「没有规则可制作目标」；要么在 bench 侧补目标，要么删掉这两个转入口并让脚本自己当入口（改构建｜根 Makefile:75、bench/Makefile）
+
+(thewor1d877)： [A] compare 族 warm 组的预热量不等量：juicefs 与 fluid 预热整棵 4 GiB 数据树、1 GiB 配额下各留 1 GiB 数据，traincache 的 WarmupTask 显式写 k、ρ=4 时是 16 块即 128 MiB；要裁决是否把 traincache 的 k 提到与基线等量，否则 warm 组读数按现口径读（bench/compare/run_bench.py 的 warmup_k_for、docs/4.2 §2）
+
+(thewor1d877)： [B] juicefs 与 fluid 的缓存配额要随 COND 变才有 8 GiB 档：`JFS_CACHE_MB` 与 `FLUID_CACHE_GI` 已是 env 可覆盖，缺的是 run_bench 按 COND 下发（bench/compare/juicefs/up.sh:33、bench/compare/fluid/up.sh:32）
+
+(thewor1d877)： [B] 缓存目录峰值超声明配额 2.26 倍（历史那一跑 2.57 GiB 对 1 GiB），4.3 §3.1 的 1.39 倍上界在代码里没有强制点；候选成因是预取写的块没进淘汰候选集（collector.ListForEviction 只含被 Touch 或 Open 过的指纹）或 30 s 淘汰节拍跟不上写入，要先定位再定判据
+
+(thewor1d877)： [C] rangepar 族的 tc 形态要先在 kind 上验一次：tbf 之下挂 fq maxrate、netem 挂 fq 的 leaf class、`sch_fq` 模块能加载、单流限速可测（一条连接与四条连接的速率差要能测出来），形态没挂对就跑 24 跑是白跑
+
+(thewor1d877)： [C] `summary.csv` 缺单块下载时间这一列，agent 侧的 `traincache_prefetch_task_duration_seconds` 没被采集进产物；并行下载族要判「4 路并行本身生效」就得先加这一列的采集与落盘（改采集｜bench/compare/run_bench.py 的指标快照与 summary 行、bench/experiments/run.py 的 SUMMARY_FIELDS）

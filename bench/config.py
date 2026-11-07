@@ -22,7 +22,7 @@ RESULTS_DIR = DATA_ROOT / "bench" / "results"
 # 产物根下按族 ID 分片:results/<族>/<格子>/。族名与 COND 的 family 字段同源,
 # 一个族一个目录,汇总与出图按族各自读自己的目录。
 BENCH_FAMILIES = ("compare", "gateway", "evict", "prefetch", "warmup",
-                  "switch", "chaos", "multiconsumer", "e2e")
+                  "switch", "chaos", "multiconsumer", "e2e", "rangepar")
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
 COMPARE_LOGS_DIR = DATA_ROOT / "bench" / "compare" / "logs"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"

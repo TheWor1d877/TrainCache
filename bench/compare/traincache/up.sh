@@ -259,7 +259,15 @@ done
 # 预热与测量都从 MinIO egress 取数,与 juicefs/fluid 两组同口径:预热在档位带宽之内
 # 进行。之前这里先拆 tc 让预热跑满速,会让 traincache-warm 的启动收益虚高。
 log_group "$GROUP" "应用 tc 档位: rate=$TC_RATE delay=$TC_DELAY burst=$TC_BURST(netem 固定 delay)"
-bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY"
+# 单流上限与丢包率:并行下载族按格下发,其余族两个值都是 0,形态与改造前一致。
+TC_EXTRA_ARGS=()
+if [ -n "${TC_PER_CONN_MBIT:-}" ] && [ "${TC_PER_CONN_MBIT}" != "0" ]; then
+  TC_EXTRA_ARGS+=(--per-conn "${TC_PER_CONN_MBIT}mbit")
+fi
+if [ -n "${TC_LOSS_PERCENT:-}" ] && [ "${TC_LOSS_PERCENT}" != "0" ]; then
+  TC_EXTRA_ARGS+=(--loss "${TC_LOSS_PERCENT}")
+fi
+bash "$BENCH_ROOT/scripts/tc_apply.sh" "$TC_RATE" "$TC_DELAY" ${TC_EXTRA_ARGS[@]+"${TC_EXTRA_ARGS[@]}"}
 
 # ---- 6. WarmupTask CR(先删后建,不可原地更新)----
 TRAINCACHE_WARMUP_TIMEOUT=900  # 硬编码 15 分钟,不可配置

@@ -23,13 +23,13 @@ SCHEMA_VERSION = "4"
 # 族 ID 与产物目录同名；multiconsumer 族的 COND 名前缀用 multi-，与族 ID 不同。
 VALID_FAMILIES = {
     "compare", "gateway", "evict", "prefetch", "warmup",
-    "switch", "chaos", "multiconsumer", "e2e",
+    "switch", "chaos", "multiconsumer", "e2e", "rangepar",
 }
 VALID_GROUPS = {
     "direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm",
-    "traincache-cold", "traincache-warm",
+    "traincache", "traincache-cold", "traincache-warm",
 }
-TRAINCACHE_GROUPS = {"traincache-cold", "traincache-warm"}
+TRAINCACHE_GROUPS = {"traincache", "traincache-cold", "traincache-warm"}
 # 负载形态取代 v3 的 track：dataset 主数据集、tilt 倾斜访问、train 真实训练循环。
 VALID_LOADS = {"dataset", "tilt", "train"}
 VALID_SHUFFLES = {"fixed", "per-epoch", "curriculum"}
@@ -76,12 +76,13 @@ ALLOWED_DATASET = {"name", "shards", "shard_size_bytes", "seed"}
 ALLOWED_TRACE = {"file", "sha256", "seed"}
 ALLOWED_WORKLOAD = {"epochs", "shuffle", "curriculum", "readers", "access_pattern"}
 ALLOWED_CURRICULUM = {"stages", "shard_fractions", "boundary_rule"}
-ALLOWED_NETWORK = {"rate_mbit"}
+ALLOWED_NETWORK = {"rate_mbit", "per_conn_mbit", "delay_ms", "loss_percent"}
 ALLOWED_CACHE = {"enabled", "rho", "evict_policy", "warmup_seconds"}
 ALLOWED_PREFETCH = {"lookahead", "fanout", "gate"}
 ALLOWED_GATE = {"mode"}
 ALLOWED_SAMPLING = {"reps"}
-ALLOWED_ENVIRONMENT = {"gateway", "gateway_image", "image_set", "gateway_cache"}
+ALLOWED_ENVIRONMENT = {"gateway", "gateway_image", "image_set", "gateway_cache",
+                       "fetch_range_parallel"}
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -263,6 +264,18 @@ def validate_cond(cond: dict) -> list[str]:
         rate = _require(net, "rate_mbit", "$.network", errors)
         if rate is not None and rate not in VALID_RATES:
             errors.append(f"$.network.rate_mbit 非法: {rate!r}")
+        # 单流上限(逐连接限速):0 表示不限单流,qdisc 形态是 根 tbf → netem;
+        # 正值时形态多一层 fq(maxrate)。见 4.2 §13。
+        per_conn = net.get("per_conn_mbit", 0)
+        if not isinstance(per_conn, int) or isinstance(per_conn, bool) or per_conn < 0:
+            errors.append("$.network.per_conn_mbit 必须是 ≥0 的整数(0 表示不限单流)")
+        delay_ms = net.get("delay_ms", 20)
+        if not isinstance(delay_ms, int) or isinstance(delay_ms, bool) or delay_ms < 0:
+            errors.append("$.network.delay_ms 必须是 ≥0 的整数")
+        loss = net.get("loss_percent", 0)
+        if (not isinstance(loss, (int, float)) or isinstance(loss, bool)
+                or not 0 <= loss <= 100):
+            errors.append("$.network.loss_percent 必须在 0 到 100 之间")
 
     # ---- cache ----
     cache = _require(cond, "cache", "$", errors)
@@ -343,6 +356,13 @@ def validate_cond(cond: dict) -> list[str]:
                 errors.append(f"image_set 对应的文件不存在: {path.name}")
             elif hashlib.sha256(path.read_bytes()).hexdigest() != hexpart:
                 errors.append(f"image_set 与 {path.name} 的内容哈希不一致")
+        # Range 并行开关:只在 traincache 组出现,其他组态写它没有落点。
+        if "fetch_range_parallel" in env:
+            frp = env["fetch_range_parallel"]
+            if not isinstance(frp, bool):
+                errors.append("$.environment.fetch_range_parallel 必须是 bool")
+            elif group not in TRAINCACHE_GROUPS:
+                errors.append("$.environment.fetch_range_parallel 只在 traincache 组出现")
 
     # ---- tags / notes ----
     tags = cond.get("tags")
@@ -382,11 +402,21 @@ def cond_to_env(cond: dict) -> dict[str, str]:
         mode = (pf.get("gate") or {}).get("mode")
         if mode:
             env["TRAINCACHE_GATE_MODE"] = str(mode)
+        # Range 并行开关:并行下载族按格切开关,其余族不注入,停在清单默认。
+        frp = cond["environment"].get("fetch_range_parallel")
+        if frp is not None:
+            env["TRAINCACHE_FETCH_RANGE_PARALLEL"] = "true" if frp else "false"
         # 预热族的窗口轴：门控允许等待的最长时间，写进 WarmupTask 的 gate.tMax。
         # 0 是「没设窗口」，不注入，让 up.sh 用缺省值。
         window = cache.get("warmup_seconds")
         if window:
             env["TRAINCACHE_GATE_TMAX"] = f"{int(window)}s"
+    # 并行下载族的链路条件:时延、每连接上限、丢包率,经 up.sh 传给 tc_apply.sh。
+    if cond["family"] == "rangepar":
+        net = cond["network"]
+        env["TC_DELAY"] = f"{int(net.get('delay_ms', 20))}ms"
+        env["TC_PER_CONN_MBIT"] = str(int(net.get("per_conn_mbit", 0)))
+        env["TC_LOSS_PERCENT"] = str(net.get("loss_percent", 0))
     return env
 
 

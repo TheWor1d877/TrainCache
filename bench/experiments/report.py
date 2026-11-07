@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ FAMILY_CN = {
     "compare": "对照族", "gateway": "网关族", "evict": "淘汰策略族",
     "prefetch": "预取参数族", "warmup": "预热族", "switch": "阶段切换族",
     "chaos": "混沌族", "multiconsumer": "多消费者族", "e2e": "端到端族",
+    "rangepar": "并行下载族",
 }
 FAMILY_Q = {
     "compare": "缓存摘掉源站字节后，启动与全程各快多少；ρ 从 0.5 到 8 在哪一段收益消失",
@@ -35,6 +37,7 @@ FAMILY_Q = {
     "chaos": "注入故障后三条状态线能否回到正常读数",
     "multiconsumer": "热比例与读端放置对命中率和耗时的影响",
     "e2e": "中断后从 checkpoint 续跑，缓存与数据加载是否仍然有效",
+    "rangepar": "把每个块拆成 4 条 Range GET 并行取，在什么链路条件下端到端变快",
 }
 FAMILY_CRITERION = {
     "compare": "4.3 §3.2「compare·组间胜负」",
@@ -46,6 +49,7 @@ FAMILY_CRITERION = {
     "chaos": "4.3 §3.2 混沌族逐故障判据",
     "multiconsumer": "4.3 §3.2「multiconsumer·热比例效应」",
     "e2e": "4.3 §3.2「e2e·恢复成功」",
+    "rangepar": "4.3 §3.2「rangepar·并行收益」「rangepar·字节守恒」「rangepar·命中不退化」",
 }
 FAMILY_FIGURES = {
     "compare": ["compare-groups-rho4", "compare-rho"],
@@ -65,6 +69,7 @@ FAMILY_METRICS = {
     "switch": ["recovery_time_s", "recovery_censored", "total_makespan"],
     "multiconsumer": ["hit_rate", "total_makespan"],
     "e2e": ["total_makespan", "read_errors"],
+    "rangepar": ["total_makespan", "fetch_bytes_run", "hit_rate"],
 }
 
 
@@ -79,6 +84,10 @@ def _vals(rows, metric):
 
 def _mean(values):
     return sum(values) / len(values) if values else None
+
+
+def _median(values):
+    return float(np.median(values)) if values else None
 
 
 def _diff_ci(a, b, iters=10000, seed=7):
@@ -255,6 +264,62 @@ def verdict_multiconsumer(rows):
     return "；".join(facts) or "样本不足"
 
 
+# 并行下载族的比值合格区间(4.3 §3.2):下限为 0 时只看上限。
+RANGEPAR_RATIO = {
+    "l0": (0.9, 1.1),
+    "l1": (1.8, None),
+    "l2": (1.8, None),
+    "l3": (1.5, None),
+}
+
+
+RANGEPAR_CELL_RE = re.compile(r"^rangepar-(l\d+)-(par-on|par-off)$")
+
+
+def _rangepar_parts(row):
+    """COND 名 rangepar-<档>-<臂> → (档, 臂)。"""
+    match = RANGEPAR_CELL_RE.match(pf._cell(row))
+    if not match:
+        return None, None
+    return match.group(1), match.group(2)
+
+
+def verdict_rangepar(rows):
+    """并行下载族:同档两臂的总耗时比,外加字节守恒与命中不退化两条约束。"""
+    if not rows:
+        return "未跑"
+    facts = []
+    tiers = sorted({t for t, _ in map(_rangepar_parts, rows) if t})
+    for tier in tiers:
+        on = [r for r in rows if _rangepar_parts(r) == (tier, "par-on")]
+        off = [r for r in rows if _rangepar_parts(r) == (tier, "par-off")]
+        on_ms = _median(_vals(on, "total_makespan"))
+        off_ms = _median(_vals(off, "total_makespan"))
+        if not on_ms or not off_ms:
+            continue
+        ratio = off_ms / on_ms
+        low, high = RANGEPAR_RATIO.get(tier, (None, None))
+        if low is not None and ratio < low:
+            mark = f"未达下限 {low}"
+        elif high is not None and ratio > high:
+            mark = f"超出上限 {high}"
+        else:
+            mark = "在合格区间"
+        facts.append(f"{tier}：关臂/开臂 总耗时 {ratio:.2f}×（{mark}）")
+        for metric in ("origin_egress_bytes", "fetch_bytes_run"):
+            ov = _mean(_vals(on, metric))
+            fv = _mean(_vals(off, metric))
+            if ov and fv:
+                delta = abs(ov - fv) / max(ov, fv) * 100
+                if delta >= 2:
+                    facts.append(f"{tier} 字节不守恒（{metric} 差 {delta:.1f}%）")
+        oh = _mean(_vals(on, "hit_rate"))
+        fh = _mean(_vals(off, "hit_rate"))
+        if oh is not None and fh is not None and oh < fh - 0.02:
+            facts.append(f"{tier} 命中退化（{(oh - fh) * 100:+.1f}pp）")
+    return "；".join(facts) or "样本不足"
+
+
 def chaos_results():
     root = config.family_results_dir("chaos")
     out = []
@@ -293,6 +358,7 @@ VERDICTS = {
     "switch": verdict_switch,
     "multiconsumer": verdict_multiconsumer,
     "e2e": verdict_e2e,
+    "rangepar": verdict_rangepar,
 }
 
 

@@ -50,6 +50,17 @@ MAX_FILL_FRACTION="0.125"
 # 这两项就停在清单默认,不额外触发滚动重启。
 PREFETCH_LOOKAHEAD="${TRAINCACHE_PREFETCH_LOOKAHEAD:-16}"
 EVICT_POLICY="${TRAINCACHE_EVICT_POLICY:-heat}"
+# Range 并行开关:每个块是否拆成 4 条 Range GET 并行取。取值来自环境变量,
+# 与 controller/deploy/agent/configmap.yaml 的默认值一致;独立调用时停在清单默认,
+# 不额外触发滚动重启。
+FETCH_RANGE_PARALLEL="${TRAINCACHE_FETCH_RANGE_PARALLEL:-true}"
+case "$FETCH_RANGE_PARALLEL" in
+  true|false) ;;
+  *)
+    log_group "$GROUP" "错误: TRAINCACHE_FETCH_RANGE_PARALLEL='$FETCH_RANGE_PARALLEL' 非法(只接受 true 或 false)" >&2
+    exit 1
+    ;;
+esac
 # gate 网络带宽上限(bytes/sec):门控把 Agent 上报吞吐与该值的 0.8 倍比较,接近
 # 上限即认为带宽够快、跳过门控。取值来自环境变量,bench 侧不写死集群专有数值;
 # 缺省 0 = 不启用带宽判断,门控行为与加这一项之前一致。
@@ -442,7 +453,7 @@ ensure_gate_bandwidth() {
 # apply 之后按环境变量再对齐一次,COND 的自变量才留得住(4.2 §4 的淘汰矩阵、
 # §5.2 的 lookahead 扫点都靠它)。
 ensure_agent_config() {
-  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw cur_la cur_ep changed=0
+  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw cur_la cur_ep cur_frp changed=0
   cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"
   cur_cap="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null || true)"
   cur_sw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
@@ -451,19 +462,21 @@ ensure_agent_config() {
   cur_gw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gatewayEndpoint}' 2>/dev/null || true)"
   cur_la="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.prefetchLookahead}' 2>/dev/null || true)"
   cur_ep="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.evictPolicy}' 2>/dev/null || true)"
+  cur_frp="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.fetchRangeParallel}' 2>/dev/null || true)"
   if [ "$cur_wl" != "$DATASET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ] \
      || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ] \
      || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_gw" != "$WANT_GATEWAY_ENDPOINT" ] \
-     || [ "$cur_la" != "$PREFETCH_LOOKAHEAD" ] || [ "$cur_ep" != "$EVICT_POLICY" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY"
+     || [ "$cur_la" != "$PREFETCH_LOOKAHEAD" ] || [ "$cur_ep" != "$EVICT_POLICY" ] \
+     || [ "$cur_frp" != "$FETCH_RANGE_PARALLEL" ]; then
+    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY FETCH_RANGE_PARALLEL=$FETCH_RANGE_PARALLEL"
     kubectl -n "$NS" patch configmap traincache-config --type merge \
-      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\",\"prefetchLookahead\":\"$PREFETCH_LOOKAHEAD\",\"evictPolicy\":\"$EVICT_POLICY\"}}" >/dev/null
+      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\",\"prefetchLookahead\":\"$PREFETCH_LOOKAHEAD\",\"evictPolicy\":\"$EVICT_POLICY\",\"fetchRangeParallel\":\"$FETCH_RANGE_PARALLEL\"}}" >/dev/null
     changed=1
   fi
   if [ "$changed" -eq 1 ]; then
     kubectl -n "$NS" rollout restart daemonset/traincache-agentd >/dev/null
     if ! kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null 2>&1; then
-      log_group "$GROUP" "错误: agentd 滚动更新未在 240s 内就绪(配置 WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY)" >&2
+      log_group "$GROUP" "错误: agentd 滚动更新未在 240s 内就绪(配置 WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY FETCH_RANGE_PARALLEL=$FETCH_RANGE_PARALLEL)" >&2
       kubectl -n "$NS" get pods -l app.kubernetes.io/name=traincache-agentd -o wide >&2 || true
       kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data}' >&2 || true
       echo >&2
@@ -471,7 +484,7 @@ ensure_agent_config() {
     fi
     log_group "$GROUP" "agentd 配置已修正并滚动更新完成"
   else
-    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY)"
+    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY FETCH_RANGE_PARALLEL=$FETCH_RANGE_PARALLEL)"
   fi
 }
 

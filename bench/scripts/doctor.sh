@@ -652,6 +652,16 @@ PYEOF
     else
         warn "tc qdisc 在位但读不到 rate/burst 字段,跳过 burst 断言: $tbf_line"
     fi
+    # 单流限速档的形态:根 tbf 之下挂 fq,fq 的 maxrate 给出每连接上限,netem
+    # 挂在 fq 的 leaf class 上(4.2 §13)。挂了 fq 就要能看到 maxrate。
+    if printf '%s' "$tc_out" | grep -q 'qdisc fq'; then
+        fq_line="$(printf '%s\n' "$tc_out" | grep -m1 'qdisc fq' || true)"
+        if printf '%s' "$fq_line" | grep -q 'maxrate'; then
+            pass "fq maxrate 在位: $fq_line"
+        else
+            fail "qdisc 里有 fq 但读不到 maxrate(单流上限没挂上): $fq_line"
+        fi
+    fi
 else
     warn "tc qdisc 未挂(跑分前 make tc-up 或 cold_reset 会挂)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'
