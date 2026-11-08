@@ -1,4 +1,4 @@
-// Command traincache 是 TrainCache CLI:纯 gRPC 客户端(design §5.6;D20)。
+// Command traincache 是 TrainCache CLI:纯 gRPC 客户端(设计《CLI》)。
 // 不直接操作缓存目录,不重复实现索引/下载/落盘逻辑。
 //
 // 子命令:
@@ -7,6 +7,7 @@
 //	traincache node status --node NODE [--item agent|catalog|space|tasks|rescan]
 //	traincache status --node NODE --task-id ID
 //	traincache ls --dataset NAME [--snapshot-id ID] [--prefix P] [--chunks]
+//	traincache resolve --node NODE
 //
 // 退出码:0 成功;1 RPC/运行错误;2 参数错误(usage)。
 package main
@@ -34,9 +35,10 @@ import (
 )
 
 const (
-	// defaultEndpoint 是全局 --endpoint 默认值(D20);直连模式(Q2 结案:开发态先行)。
+	// defaultEndpoint 是本机 Agent 的地址:--endpoint 留空、目标节点就是本机、
+	// 或没给节点名时用它(docs/CLI-INTERFACE.md《地址解析顺序》)。
 	defaultEndpoint = "127.0.0.1:9410"
-	// rpcTimeout 是每 RPC 的 context 超时(design §5.1:默认 10s)。
+	// rpcTimeout 是每 RPC 的 context 超时(设计《gRPC 接口》:默认 10s)。
 	rpcTimeout = 10 * time.Second
 )
 
@@ -65,6 +67,8 @@ func run(args []string) int {
 		return runStatus(args[1:])
 	case "ls":
 		return runLS(args[1:])
+	case "resolve":
+		return runResolve(args[1:])
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return exitOK
@@ -81,20 +85,24 @@ func printUsage(w io.Writer) {
   traincache node status --node NODE [--item agent|catalog|space|tasks|rescan]
   traincache status --node NODE --task-id ID
   traincache ls --dataset NAME [--snapshot-id ID] [--prefix P] [--chunks]
+  traincache resolve --node NODE
 
 全局选项:
-  --endpoint ADDR   Agent gRPC 地址(默认 127.0.0.1:9410;--node 仅作请求校验字段,不做地址解析)
+  --endpoint ADDR    Agent gRPC 地址;留空表示按节点名自动解析
+  --controller ADDR  控制面地址,用于按节点名解析 Agent 地址
+                      (默认 traincache-controller-manager.traincache.svc:9412)
 `)
 }
 
-// runPrefetch 实现 `traincache prefetch`(design §5.6)。
+// runPrefetch 实现 `traincache prefetch`(设计《CLI》)。
 func runPrefetch(args []string) int {
 	fs := flag.NewFlagSet("traincache prefetch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	endpoint := fs.String("endpoint", defaultEndpoint, "Agent gRPC 地址(全局选项)")
+	endpoint := fs.String("endpoint", "", "Agent gRPC 地址(全局选项;留空按节点名解析)")
+	controller := fs.String("controller", defaultControllerEndpoint(), "控制面地址(全局选项)")
 	taskID := fs.String("task-id", "", "预热任务 ID(幂等键,必填)")
 	path := fs.String("path", "", "数据路径前缀(必填)")
-	node := fs.String("node", "", "目标节点(必填;仅作请求校验字段)")
+	node := fs.String("node", "", "目标节点(必填;请求校验字段,留空 --endpoint 时用于解析地址)")
 	chunks := fs.String("chunks", "", "精确块清单,逗号分隔,格式 path:chunk")
 	files := fs.String("files", "", "tar 分片名清单,逗号分隔;经 ListSnapshot 展开为块")
 	dataset := fs.String("dataset", "", "dataset 名(可选)")
@@ -125,7 +133,11 @@ func runPrefetch(args []string) int {
 		return usageError(fs, "prefetch: --priority=%q 非法(仅支持 p0|p1|p2|p3)", *priority)
 	}
 
-	conn, err := dial(*endpoint)
+	conn, err := dialAgent(context.Background(), agentTarget{
+		Endpoint:   *endpoint,
+		Controller: *controller,
+		Node:       *node,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "traincache: 建立连接失败: %v\n", err)
 		return exitError
@@ -176,7 +188,7 @@ func runPrefetch(args []string) int {
 	return exitOK
 }
 
-// runNode 实现 `traincache node` 子命令族(design §5.6 当前仅 status)。
+// runNode 实现 `traincache node` 子命令族(设计《CLI》当前仅 status)。
 func runNode(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "traincache: node 需要子命令(status)")
@@ -195,12 +207,13 @@ func runNode(args []string) int {
 	}
 }
 
-// runNodeStatus 实现 `traincache node status`(design §5.6)。
+// runNodeStatus 实现 `traincache node status`(设计《CLI》)。
 func runNodeStatus(args []string) int {
 	fs := flag.NewFlagSet("traincache node status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	endpoint := fs.String("endpoint", defaultEndpoint, "Agent gRPC 地址(全局选项)")
-	node := fs.String("node", "", "目标节点(必填;仅作请求校验字段)")
+	endpoint := fs.String("endpoint", "", "Agent gRPC 地址(全局选项;留空按节点名解析)")
+	controller := fs.String("controller", defaultControllerEndpoint(), "控制面地址(全局选项)")
+	node := fs.String("node", "", "目标节点(必填;请求校验字段,留空 --endpoint 时用于解析地址)")
 	item := fs.String("item", "", "只查一项:agent|catalog|space|tasks|rescan(缺省=全量)")
 	if err := fs.Parse(args); err != nil {
 		return parseExitCode(err)
@@ -216,7 +229,11 @@ func runNodeStatus(args []string) int {
 		return usageError(fs, "node status: --item=%q 非法(仅支持 agent|catalog|space|tasks|rescan)", *item)
 	}
 
-	conn, err := dial(*endpoint)
+	conn, err := dialAgent(context.Background(), agentTarget{
+		Endpoint:   *endpoint,
+		Controller: *controller,
+		Node:       *node,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "traincache: 建立连接失败: %v\n", err)
 		return exitError
@@ -238,12 +255,13 @@ func runNodeStatus(args []string) int {
 	return exitOK
 }
 
-// runStatus 实现 `traincache status`(design §5.6)。
+// runStatus 实现 `traincache status`(设计《CLI》)。
 func runStatus(args []string) int {
 	fs := flag.NewFlagSet("traincache status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	endpoint := fs.String("endpoint", defaultEndpoint, "Agent gRPC 地址(全局选项)")
-	node := fs.String("node", "", "目标节点(必填;仅作请求校验字段)")
+	endpoint := fs.String("endpoint", "", "Agent gRPC 地址(全局选项;留空按节点名解析)")
+	controller := fs.String("controller", defaultControllerEndpoint(), "控制面地址(全局选项)")
+	node := fs.String("node", "", "目标节点(必填;请求校验字段,留空 --endpoint 时用于解析地址)")
 	taskID := fs.String("task-id", "", "预热任务 ID(必填)")
 	if err := fs.Parse(args); err != nil {
 		return parseExitCode(err)
@@ -255,7 +273,11 @@ func runStatus(args []string) int {
 		return usageError(fs, "status: --node 与 --task-id 必填")
 	}
 
-	conn, err := dial(*endpoint)
+	conn, err := dialAgent(context.Background(), agentTarget{
+		Endpoint:   *endpoint,
+		Controller: *controller,
+		Node:       *node,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "traincache: 建立连接失败: %v\n", err)
 		return exitError
@@ -281,7 +303,7 @@ type snapshotLister interface {
 	ListSnapshot(ctx context.Context, in *agentpb.ListSnapshotRequest, opts ...grpc.CallOption) (*agentpb.ListSnapshotResponse, error)
 }
 
-// runLS 实现 `traincache ls`(design §5.6;只读列快照)。
+// runLS 实现 `traincache ls`(设计《CLI》;只读列快照)。
 func runLS(args []string) int {
 	return lsSnapshot(args, os.Stdout, os.Stderr, dialSnapshot)
 }
@@ -290,7 +312,8 @@ func runLS(args []string) int {
 func lsSnapshot(args []string, stdout, stderr io.Writer, newClient func(string) (snapshotLister, func(), error)) int {
 	fs := flag.NewFlagSet("traincache ls", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	endpoint := fs.String("endpoint", defaultEndpoint, "Agent gRPC 地址(全局选项)")
+	endpoint := fs.String("endpoint", "", "Agent gRPC 地址(全局选项;留空按节点名解析)")
+	controller := fs.String("controller", defaultControllerEndpoint(), "控制面地址(全局选项)")
 	dataset := fs.String("dataset", "", "dataset 名(必填)")
 	snapshotID := fs.String("snapshot-id", "", "快照 ID(空=当前 CURRENT)")
 	prefix := fs.String("prefix", "", "路径前缀(空=不过滤)")
@@ -305,7 +328,17 @@ func lsSnapshot(args []string, stdout, stderr io.Writer, newClient func(string) 
 		return usageError(fs, "ls: --dataset 必填")
 	}
 
-	client, closeClient, err := newClient(*endpoint)
+	// ls 没有 --node,不会向控制面解析地址;这里仍走同一条寻址路径。
+	candidates, _, err := agentCandidates(context.Background(), agentTarget{
+		Endpoint:   *endpoint,
+		Controller: *controller,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "traincache: 解析 Agent 地址失败: %v\n", err)
+		return exitError
+	}
+
+	client, closeClient, err := newClient(candidates[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "traincache: 建立连接失败: %v\n", err)
 		return exitError
@@ -407,7 +440,7 @@ func writeListSnapshot(w io.Writer, entries []*agentpb.EntryRef, byChunk bool) e
 	return tw.Flush()
 }
 
-// printNodeStatus 输出两列表格(design §5.6;Q9 结案:默认表格);--item 只显示对应行。
+// printNodeStatus 输出两列表格(设计《CLI》;Q9 结案:默认表格);--item 只显示对应行。
 func printNodeStatus(resp *agentpb.NodeStatus, item agentpb.NodeStatusItem) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer w.Flush()
@@ -440,7 +473,7 @@ func printNodeStatus(resp *agentpb.NodeStatus, item agentpb.NodeStatusItem) {
 	}
 }
 
-// printPreheatStatus 输出任务状态表(design §5.6:任务 id、目标节点、数据路径、任务状态、
+// printPreheatStatus 输出任务状态表(设计《CLI》:任务 id、目标节点、数据路径、任务状态、
 // 总块数/已完成/失败、开始时间、最近更新时间)。
 func printPreheatStatus(st *agentpb.PreheatStatus) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)

@@ -18,7 +18,7 @@ make e2e    # create a kind cluster, load images, run six assertions
 
 ## Background
 
-Fluid 1.1.0-alpha.9 runs DataLoad apart from scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md) §2.2). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid. §0). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and trigger no rescheduling, so the blocks written at startup stop matching what later epochs read, and no component fetches ahead of the reader.
+Fluid 1.1.0-alpha.9 runs DataLoad apart from scheduling: a Pod enters scheduling right after creation, and warmup progress plays no part in node selection ([field survey](docs/3-field-survey.md), the zero webhook injection diff section). JuiceFS Community Edition ships a local cache only; distributed cache groups, IORPC and RDMA are Enterprise features (ibid., the conclusion section). A training Pod stays on one node from epoch 0 to the end. Epoch and shuffle switches happen inside the Pod and trigger no rescheduling, so the blocks written at startup stop matching what later epochs read, and no component fetches ahead of the reader.
 
 ## Where it applies
 
@@ -59,10 +59,10 @@ One order of magnitude more data pushes the reuse ratio down and leaves only the
 ## Features
 
 - After a `WarmupTask` is submitted, the webhook injects the `traincache.io/warmup` SchedulingGate into matching training Pods, which stay Pending. The controller requests blocks from candidate nodes per Pod shard and removes the gate once block readiness reaches the threshold `M`.
-- If readiness is still below `M` after `t_max`, the controller removes the gate and the Pod goes through default scheduling ([protocol](docs/4.4-experiment-protocol.md) §2).
+- If readiness is still below `M` after `t_max`, the controller removes the gate and the Pod goes through default scheduling ([metrics](docs/4.3-bench-metrics-and-decisions.md)).
 - The scheduler plugin reads the Pod annotation `traincache.io/node-scores`, scores candidate nodes by readiness with global position decay, and picks the highest score.
 - Once the Pod is scheduled, agentd prefetches the next blocks in the order training consumes them. When an epoch, shuffle or curriculum switch arrives, agentd prefetches in the new order (`agent/ordersrc/`).
-- Bytes fetched to candidate nodes during warmup are counted in `startup_warmup_bytes`; bytes fetched during sustained prefetch are counted in `sustained_prefetch_bytes`. Every configuration in a cell shares these definitions ([protocol](docs/4.4-experiment-protocol.md) §1.5).
+- Bytes fetched to candidate nodes during warmup are counted in `startup_warmup_bytes`; bytes fetched during sustained prefetch are counted in `sustained_prefetch_bytes`. Every configuration in a cell shares these definitions ([metrics](docs/4.3-bench-metrics-and-decisions.md) §2).
 
 ## Quick start
 
@@ -108,7 +108,7 @@ traincache-gateway-<hash>                        1/1     Running
 traincache-webhook-<hash>                        1/1     Running
 ```
 
-The scheduler runs in `kube-system`; check it with `kubectl -n kube-system rollout status deploy/traincache-scheduler`. A sample training Pod is in `agent/deploy/train-pod.yaml`; `DataSet` and `WarmupTask` fields are in [4.3 startup and experiments](docs/4.3-startup-and-experiments.md).
+The scheduler runs in `kube-system`; check it with `kubectl -n kube-system rollout status deploy/traincache-scheduler`. A sample training Pod is in `agent/deploy/train-pod.yaml`; `DataSet` and `WarmupTask` fields are in [4.4 runbook](docs/4.4-bench-runbook.md).
 
 Uninstall:
 
@@ -161,7 +161,7 @@ Blocks come from one of two paths. With `gatewayEndpoint` empty, agentd sends ev
 
 ## Relationship to upstream
 
-Fluid 1.1.0-alpha.9 and JuiceFS CE 1.3.0 were deployed and benchmarked on a kind cluster as control groups among the seven configurations ([field survey](docs/3-field-survey.md), [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md)). The `DataSet` and `Runtime` naming and the nodeAffinity injection follow Fluid. Block readiness lives in `controller/cmd/controller-manager`, SchedulingGate injection in `controller/cmd/webhook`, node scoring in `controller/cmd/scheduler`, and prefetch in `agent/cmd/agentd`. No upstream code is vendored. Both projects are Apache-2.0: [fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid), [juicedata/juicefs](https://github.com/juicedata/juicefs).
+Fluid 1.1.0-alpha.9 and JuiceFS CE 1.3.0 were deployed and benchmarked on a kind cluster as control groups among the seven configurations ([field survey](docs/3-field-survey.md), [4.1 apparatus](docs/4.1-bench-apparatus.md)). The `DataSet` and `Runtime` naming and the nodeAffinity injection follow Fluid. Block readiness lives in `controller/cmd/controller-manager`, SchedulingGate injection in `controller/cmd/webhook`, node scoring in `controller/cmd/scheduler`, and prefetch in `agent/cmd/agentd`. No upstream code is vendored. Both projects are Apache-2.0: [fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid), [juicedata/juicefs](https://github.com/juicedata/juicefs).
 
 
 ## Build and test
@@ -184,12 +184,11 @@ Documents under `docs/` are written in Chinese.
 | [1 Introduction and background](docs/1-introduction-and-background.md) | Problem statement, external facts, positioning against Fluid and JuiceFS |
 | [2 Three-layer architecture](docs/2-three-layer-architecture.md) | Control plane, node plane, data sources and data-plane conventions |
 | [3 Field survey](docs/3-field-survey.md) | How Fluid and JuiceFS work, and the gaps found |
-| [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.6 and standing commands |
-| [4.1 Bench setup and rules](docs/4.1-bench-setup-and-rules.md) | Rig, parameters and data locations |
-| [4.2 JuiceFS and Fluid](docs/4.2-juicefs-and-fluid.md) | Images, startup, warmup, runs and teardown for the control groups |
-| [4.3 Startup and experiments](docs/4.3-startup-and-experiments.md) | Image builds, control plane startup, experiment families |
-| [4.4 Experiment protocol](docs/4.4-experiment-protocol.md) | Pre-registered hypotheses, metric definitions, condition matrix and criteria |
-| [4.5 Metric decisions](docs/4.5-metric-decisions.md) | Decided acceptance criteria and metric definitions |
+| [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.4 and standing commands |
+| [4.1 Apparatus and variable space](docs/4.1-bench-apparatus.md) | Rig, ρ ladder, parameters, data generation and locations |
+| [4.2 Families and grids](docs/4.2-bench-families.md) | Ten experiment families, cell matrices, COND contract, machine-hour account |
+| [4.3 Metrics and decisions](docs/4.3-bench-metrics-and-decisions.md) | Metric formulas, pass criteria, numbered decisions |
+| [4.4 Runbook](docs/4.4-bench-runbook.md) | Environment, startup, data preparation, running a family, troubleshooting, artifacts |
 | [5.x Cache core library](docs/5.1-design.md) | Requirements, plan, decisions and tests |
 | [6.x Agent service](docs/6.1-design.md) | Node-plane interfaces and decisions |
 | [7.x Controller and Scheduler](docs/7.1-design.md) | Control-plane interfaces and decisions |

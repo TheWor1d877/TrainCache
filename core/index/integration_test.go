@@ -14,7 +14,7 @@ import (
 
 // TestEndToEndLifecycle 端到端全链路（mock objectstore + 临时目录 cas + fetch.Fetcher）：
 //
-//	写块（fetch.Fetch 经 mock 下载）→ 测试代码扮演调用方 cas.Acquire(fp)+1（§7.1 步骤 1）
+//	写块（fetch.Fetch 经 mock 下载）→ 测试代码扮演调用方 cas.Acquire(fp)+1（design.md《提交》第 1 步）
 //	→ Writer.Commit → Catalog.Refresh → Lookup 命中 → cas.Open 读回与源数据逐字节一致
 //	→ 数据集合更新（新条目可见、旧条目保留）→ Collector 回收窗口外对象（复用分片保留）、
 //		LocalGC 按节点口径回收本地副本（活块 = CURRENT ∪ 有效 claim）

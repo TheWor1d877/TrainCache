@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// 环境变量名（design 10.1 §4.2、§5.4 与任务约定冻结）。
+// 环境变量名（design 10.1「准入契约」、「部署与配置」与任务约定冻结）。
 const (
 	envTaskID             = "TASK_ID"
 	envRank               = "RANK"

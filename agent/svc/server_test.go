@@ -356,7 +356,7 @@ func TestReflectionListServices(t *testing.T) {
 	}
 }
 
-// TestReportBlocksUnimplemented:北向流服务端推迟至 Controller 里程碑(decisions Q1)。
+// TestReportBlocksUnimplemented:块级上报通道保留占位不实现(decisions D67)。
 func TestReportBlocksUnimplemented(t *testing.T) {
 	conn := startServer(t)
 	stream, err := agentpb.NewReportServiceClient(conn).ReportBlocks(context.Background())
@@ -407,7 +407,7 @@ func TestSubmitPreheatRPC(t *testing.T) {
 	}
 }
 
-// TestSubmitPreheatRPCInvalidNode:node 不符 → InvalidArgument(design §5.1)。
+// TestSubmitPreheatRPCInvalidNode:node 不符 → InvalidArgument(设计《gRPC 接口》)。
 func TestSubmitPreheatRPCInvalidNode(t *testing.T) {
 	conn := startServer(t)
 	req := validSubmitReq()

@@ -20,7 +20,7 @@ func newFakeClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	client, err := New(strings.TrimPrefix(srv.URL, "http://"), "ak", "sk", "traincache", false)
+	client, err := New(strings.TrimPrefix(srv.URL, "http://"), "ak", "sk", "traincache", false, false)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -130,7 +130,7 @@ func TestOpenUnreachableExposesErrorOnFirstRead(t *testing.T) {
 	minio.MaxRetry = 1
 	t.Cleanup(func() { minio.MaxRetry = oldRetry })
 
-	client, err := New(addr, "ak", "sk", "traincache", false)
+	client, err := New(addr, "ak", "sk", "traincache", false, false)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

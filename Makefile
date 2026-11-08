@@ -65,16 +65,21 @@ BENCH_VARS = $(foreach v,TIER RATE REPS TAG COND QUICK DELAY GROUP FORCE,$(if $(
 .PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-list \
 	bench-cold bench-verify bench bench-selftest tc-up tc-down \
 	track-d-up track-d-verify track-d-down \
-	kind-up k8s-up data-up upload bench-data bench-tc track-d-data \
-	e2e-local e2e-k8s
+	kind-up k8s-up data-up upload bench-data bench-tc track-d-data
 
 bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-list \
 bench-cold bench-verify bench tc-up tc-down \
 track-d-up track-d-verify track-d-down \
-kind-up k8s-up data-up upload bench-data bench-tc track-d-data \
-e2e-local e2e-k8s:
+kind-up k8s-up data-up upload bench-data bench-tc track-d-data:
 	+@$(BENCH_MAKE) $@ $(BENCH_VARS)
 
 # bench/Makefile 里的目标名是 selftest;根入口统一叫 bench-selftest。
 bench-selftest:
 	+@$(BENCH_MAKE) selftest $(BENCH_VARS)
+
+# agent 模块的两个 e2e 演练脚本是入口,不属 bench 装置,这里直接调脚本。
+e2e-local:
+	@bash $(REPO_ROOT)/agent/e2e/run-local.sh
+
+e2e-k8s:
+	@bash $(REPO_ROOT)/agent/e2e/run-k8s.sh

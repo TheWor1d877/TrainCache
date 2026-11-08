@@ -57,9 +57,9 @@ const (
 	gatewayFallbackName = "traincache_gateway_fallback_total"
 )
 
-// sevenLineFamilies 是 39 个 family → 标签名集合(design §5.8 冻结契约;无标签为 nil;
-// 含 R3/R4 新增的 2 个;M4 策略相关 3 个死指标已随 D29 删除)。
-// M9/D46 变更 6 个既有 family 的标签(source/phase/reason/dataset),D44+D48 新增 9 个。
+// sevenLineFamilies 是 39 个 family → 标签名集合(设计《指标清单》冻结契约;无标签为 nil;
+// 含 R3/R4 新增的 2 个;M4 策略相关 3 个死指标已随策略档位收缩删除)。
+// M9 变更 6 个既有 family 的标签(source/phase/reason/dataset),D44+ 新增 9 个。
 // 9.1 网关线新增 source_mode 与 gateway_fallback_total 2 个(§7.4)。
 var sevenLineFamilies = map[string][]string{
 	cacheHitsName:             {"dataset", "result", "source", "phase"},
@@ -86,7 +86,7 @@ var sevenLineFamilies = map[string][]string{
 	prefetchQueueDepthName: {"priority"},
 	prefetchCursorName:     nil,
 	stageSwitchETAName:     {"dataset"},
-	// D44/D46/D47/D48。
+	// D44/D47。
 	hookReadMissName:             {"reason"},
 	prefetchHitRatioName:         {"dataset"},
 	readStallName:                {"dataset", "phase", "cause"},
@@ -96,7 +96,7 @@ var sevenLineFamilies = map[string][]string{
 	prefetchLeadBlocksName:       {"dataset"},
 	consumptionAdvanceName:       {"dataset", "source"},
 	fetchBandwidthLimitBytesName: {"dataset"},
-	// R3/R4(6.1 §5.11/§5.12)。
+	// R3/R4(设计《快照与回收》)。
 	indexSweepSkippedName:                    {"dataset", "reason"},
 	objectstoreConditionalWriteSupportedName: nil,
 	// D63 订单通道。
@@ -152,7 +152,7 @@ var sevenLineTypes = map[string]string{
 }
 
 // TestSevenLineFamiliesRegisteredAtStartup:构造后(未打点)gather 恰含 42 个 family
-// (七线 23 + ordersource 格式错误 counter[D23] + 钩子帧格式错误 counter[D33] + D44 读 miss
+// (七线 23 + ordersource 格式错误 counter + 钩子帧格式错误 counter +D44 读 miss
 // + M9 的 8 个证据 family + R3/R4 的 2 个 + capacity_bytes 1 个 + D63 订单通道 3 个
 // + 9.1 网关线 2 个);每个 family 的类型与标签名集合与
 // 冻结清单一致,且靠构造预置自启动即有子指标(dataset 类预置值全为归并值 other;
@@ -219,7 +219,7 @@ func TestSevenLinePointValues(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track", "b-track"}, Node: "node-1"})
 
 	// ① 命中率线:a-track 3/4、b-track 1/2、other(c/d/e-track 归并)1/3。
-	// D46:命中显式带 source/phase,未命中带 phase。
+	// :命中显式带 source/phase,未命中带 phase。
 	r.ObserveCacheHit("a-track", metrics.SourcePrefetch, metrics.PhaseSteady)
 	r.ObserveCacheHit("a-track", metrics.SourcePrefetch, metrics.PhaseSteady)
 	r.ObserveCacheHit("a-track", metrics.SourcePrefetch, metrics.PhaseSteady)
@@ -522,7 +522,7 @@ func TestCacheHitRatioInternalCounting(t *testing.T) {
 }
 
 // TestSevenLineFixedBuckets:延迟线 histogram 的固定 bucket 集 {.01,.05,.1,.5,1,5,10,30}s
-// (design §5.8 冻结);index_refresh_duration 复用同一固定集;样本落桶正确。
+// (设计《指标清单》冻结);index_refresh_duration 复用同一固定集;样本落桶正确。
 func TestSevenLineFixedBuckets(t *testing.T) {
 	want := []float64{0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30}
 	r := metrics.New(metrics.Config{Node: "node-1"})
@@ -672,7 +672,7 @@ func TestEvidenceFamilyBuckets(t *testing.T) {
 	}
 }
 
-// TestEvidencePointValues:D44/D48 新增 family 的打点值逐项校验。
+// TestEvidencePointValues:D44 新增 family 的打点值逐项校验。
 func TestEvidencePointValues(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
 

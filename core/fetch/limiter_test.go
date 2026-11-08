@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestOptionsDefaults：Options 零值（及负值）字段按 design.md §8 取默认值。
+// TestOptionsDefaults：Options 零值（及负值）字段按 design.md《默认值》取值。
 func TestOptionsDefaults(t *testing.T) {
 	got := Options{}.withDefaults()
 	if got.MaxInflightBytes != defaultMaxInflightBytes || got.MaxConnsPerHost != defaultMaxConnsPerHost ||

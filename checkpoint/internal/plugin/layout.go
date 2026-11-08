@@ -5,7 +5,7 @@ import (
 	"path"
 )
 
-// 后端对象布局（design 10.1 §5.1）。local 插件把同样的相对路径挂在 root 下，
+// 后端对象布局（design 10.1「数据格式」）。local 插件把同样的相对路径挂在 root 下，
 // S3 插件把它拼在 prefix 后；两个实现共用这一组函数，避免键格式分叉。
 //
 //	<prefix>/<task_id>/step-<step>/rank-<rank>/files/<相对路径>

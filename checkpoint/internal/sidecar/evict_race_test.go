@@ -14,10 +14,10 @@ import (
 	"traincache/checkpoint/internal/plugin"
 )
 
-// 本文件补 10.3 §6「并发上传与淘汰竞争」的缺口：cache_test.go 里的回填与
+// 本文件覆盖 10.3 覆盖矩阵里的「缓存回填、淘汰与并发」一行：cache_test.go 里的回填与
 // 淘汰是各跑一轮，queue_test.go 只锁队列。这里让保存循环（入队、串行上传、
 // 回填、淘汰）与一个高频淘汰循环同时跑，在 -race 下断言两条不变量：
-// 在途上传的目标不会被删，被软链引用的缓存不会被删（10.1 §6.2 第 4 步）。
+// 在途上传的目标不会被删，被软链引用的缓存不会被删（10.1「关键流程」）。
 
 // cacheReporter 是 *testing.T 用到的最小子集：一致性断言既能接真正的测试，
 // 也能接变异自证里的记录器（见 evict_race_mutant_test.go）。
@@ -133,7 +133,7 @@ func TestConcurrentUploadAndEvictKeepsInFlightAndLinked(t *testing.T) {
 	}}
 	s := newTestSidecar(t, opts, factory)
 
-	// 被软链引用的缓存：restore 命中时由 linkCache 建链并登记（10.1 §6.4）。
+	// 被软链引用的缓存：restore 命中时由 linkCache 建链并登记（10.1「关键流程」）。
 	const linkedStep = int64(3)
 	linkedDir := writeCachedStep(t, opts.NVMEDir, opts.TaskID, linkedStep, "linked-payload")
 	s.addCache(linkedStep, linkedDir)
@@ -172,7 +172,7 @@ func TestConcurrentUploadAndEvictKeepsInFlightAndLinked(t *testing.T) {
 		defer close(loopDone)
 		s.saveLoop(ctx)
 	}()
-	// 轮询与保存并行：入队读缓存索引，淘汰写缓存索引（10.1 §6.2 第 1 步）。
+	// 轮询与保存并行：入队读缓存索引，淘汰写缓存索引（10.1「关键流程」）。
 	pollDone := make(chan struct{})
 	go func() {
 		defer close(pollDone)
@@ -239,7 +239,7 @@ func TestConcurrentUploadAndEvictKeepsInFlightAndLinked(t *testing.T) {
 }
 
 // TestConcurrentRestoreBackfillAndEvict 覆盖恢复成功后的异步回填与淘汰并发
-// （10.1 §6.4 第 5 步 + §6.2 第 4 步）：回填途中的目录不会被删成半截，
+// （10.1「关键流程」）：回填途中的目录不会被删成半截，
 // 被引用的那份照样留着。
 func TestConcurrentRestoreBackfillAndEvict(t *testing.T) {
 	opts := testOptions(t)

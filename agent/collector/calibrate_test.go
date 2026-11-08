@@ -7,7 +7,7 @@ import (
 	"traincache/core/cas"
 )
 
-// calibrate_test.go:交叉校准(§5.5/D15)——滑动窗口内实际打开顺序与订单期望顺序的
+// calibrate_test.go:交叉校准(设计《热度与命中率》)——滑动窗口内实际打开顺序与订单期望顺序的
 // 匹配率 < 阈值 → 触发 cursor 重对齐(回调收到 dataset 与实际 ref)。
 
 // refChunk 构造与 testOrder 同 Path 的块引用(ChunkRef 可比较,Path+Chunk 全等才算命中)。

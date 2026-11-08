@@ -1,6 +1,6 @@
 package svc
 
-// phase.go:分阶段命中率状态机(D46;M9 落地)。
+// phase.go:分阶段命中率状态机(M9 落地)。
 //
 // 冻结词汇:phase ∈ {startup, steady, switch, unknown}。
 //   - startup:Agent 启动起,至首个 ConsumeOrder 的首 K 块就绪;
@@ -26,7 +26,7 @@ import (
 // phaseState 是单个 dataset 的阶段状态(phaseTracker.mu 保护)。
 type phaseState struct {
 	hasOrder     bool // 是否见过该 dataset 的订单/切换
-	startupDone  bool // 启动窗口(或已被 switch 取代)完成
+	startupDone  bool // 阶段首批(或已被 switch 取代)完成
 	switchActive bool // 切换窗口进行中(优先于 startup)
 
 	// 窗口就绪按去重块计数(同一块重复完成不重复推进)。
@@ -68,7 +68,7 @@ func (p *phaseTracker) windowKLocked(dataset string) int {
 	return p.k
 }
 
-// setWindowKLocked 记录 dataset 的订单窗口大小(D46:K = ConsumeOrder.PrefetchChunks;
+// setWindowKLocked 记录 dataset 的订单窗口大小(K = ConsumeOrder.PrefetchChunks;
 // k<0 归一为 0,K=0 表示窗口立即就绪;调用方持 p.mu)。
 func (p *phaseTracker) setWindowKLocked(dataset string, k int) {
 	if k < 0 {
@@ -82,7 +82,7 @@ func (p *phaseTracker) setWindowKLocked(dataset string, k int) {
 	}
 }
 
-// OnOrderForDataset 记录订单上下文并注入该订单的窗口 K(D46;装配层在 ForOrder 处调用)。
+// OnOrderForDataset 记录订单上下文并注入该订单的窗口 K(装配层在 ForOrder 处调用)。
 // k 为该订单的 ConsumeOrder.PrefetchChunks;未注入的 dataset 回退缺省 K。
 func (p *phaseTracker) OnOrderForDataset(dataset string, k int) {
 	if dataset == "" {
@@ -96,7 +96,7 @@ func (p *phaseTracker) OnOrderForDataset(dataset string, k int) {
 }
 
 // OnOrderWithK 是 ref 形式的订单事件入口(新增方法;不改变冻结的 OnOrder(ref) 签名):
-// 解析 ref 归属 dataset 后注入该订单的窗口 K(D46)。
+// 解析 ref 归属 dataset 后注入该订单的窗口 K。
 func (p *phaseTracker) OnOrderWithK(ref ordersource.ChunkRef, k int) {
 	dataset, ok := p.resolveDataset(ref)
 	if !ok {
@@ -142,7 +142,7 @@ func (p *phaseTracker) stateLocked(dataset string) *phaseState {
 	return st
 }
 
-// OnOrder 记录一次消费推进/订单上下文事件(D46):标记 dataset 已有订单。
+// OnOrder 记录一次消费推进/订单上下文事件:标记 dataset 已有订单。
 // 不直接迁移 phase——startup 的结束只由窗口块就绪触发,switch 由 OnStageSwitch 触发。
 func (p *phaseTracker) OnOrder(ref ordersource.ChunkRef) {
 	dataset, ok := p.resolveDataset(ref)
@@ -164,7 +164,7 @@ func (p *phaseTracker) OnStageSwitch(stageID string) {
 	p.OnStageSwitchFor(dataset, stageID)
 }
 
-// OnStageSwitchFor 按 dataset 记录一次阶段切换(D46:迁移到 switch,直到新窗口 K 块就绪)。
+// OnStageSwitchFor 按 dataset 记录一次阶段切换(迁移到 switch,直到新窗口 K 块就绪)。
 // assemble 层的 OnStageSwitch 闭包携带 dataset 调用本方法。
 func (p *phaseTracker) OnStageSwitchFor(dataset, stageID string) {
 	_ = stageID
@@ -186,7 +186,7 @@ func (p *phaseTracker) OnStageSwitchFor(dataset, stageID string) {
 	st.switchActive = true
 }
 
-// OnBlockReady 记录一块就绪(D46):按 ref 归属 dataset 推进窗口就绪计数。
+// OnBlockReady 记录一块就绪:按 ref 归属 dataset 推进窗口就绪计数。
 // switch 活跃时只推进 switch 窗口(switch 优先);startup 阶段推进 startup 窗口。
 func (p *phaseTracker) OnBlockReady(ref ordersource.ChunkRef) {
 	dataset, ok := p.resolveDataset(ref)
@@ -209,7 +209,7 @@ func (p *phaseTracker) OnBlockReady(ref ordersource.ChunkRef) {
 		}
 		return
 	}
-	// startup 窗口只归属于已见订单的 dataset(D46:首个 ConsumeOrder 的首 K 块);
+	// startup 窗口只归属于已见订单的 dataset(首个 ConsumeOrder 的首 K 块);
 	// 订单到达前的预取块不结束 startup。
 	if st.startupDone || !st.hasOrder {
 		return
@@ -224,7 +224,7 @@ func (p *phaseTracker) OnBlockReady(ref ordersource.ChunkRef) {
 	}
 }
 
-// Current 返回 dataset 当前 phase(D46)。
+// Current 返回 dataset 当前 phase。
 func (p *phaseTracker) Current(dataset string) string {
 	if dataset == "" {
 		return metrics.PhaseUnknown

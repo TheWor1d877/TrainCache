@@ -1,4 +1,4 @@
-// Package logging 初始化 checkpointd 的结构化日志（design 10.1 §7；docs/8.1 §3）。
+// Package logging 初始化 checkpointd 的结构化日志（design 10.1「可观测出口」；docs/8.1 §3）。
 //
 // 与 gateway/internal/logging 同构：只做设级别、装处理器、注入
 // component/version/log_schema_version 三件事；脱敏与采样全部复用

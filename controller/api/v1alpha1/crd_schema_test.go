@@ -74,13 +74,13 @@ func TestCRDShapeAndValidation(t *testing.T) {
 		t.Errorf("WarmupTask CRD has no score.cutoff")
 	}
 
-	// preheatFanout defaults to 2 (D42) and rejects zero/negative values (M13).
+	// preheatFanout defaults to 2 (D42) and rejects zero/negative values.
 	fanout := regexp.MustCompile(`(?s)preheatFanout:\n\s+default: 2\n.*?\n\s+minimum: 1\n`)
 	if !fanout.MatchString(warmups) {
 		t.Errorf("WarmupTask CRD preheatFanout is missing default: 2 and minimum: 1")
 	}
 
-	// M14: preheatFanout is the upper bound and preheatFanoutMin the lower
+	// preheatFanout is the upper bound and preheatFanoutMin the lower
 	// bound. The minimum side gets the same default/minimum constraints, and a
 	// type-level CEL rule rejects min > max.
 	fanoutMin := regexp.MustCompile(`(?s)preheatFanoutMin:\n\s+default: 1\n.*?\n\s+minimum: 1\n`)
@@ -168,7 +168,7 @@ func TestGoContractSurface(t *testing.T) {
 		t.Errorf("WarmupTaskSpec.Candidate = %v, want CandidatePolicy", candidate.Type)
 	}
 
-	// M13: one entry per (Pod, preheat node); AssignedNode is replaced by
+	// One entry per (Pod, preheat node); AssignedNode is replaced by
 	// NodeName.
 	readiness := reflect.TypeOf(PodNodeReadiness{})
 	for _, field := range []string{

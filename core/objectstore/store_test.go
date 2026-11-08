@@ -300,7 +300,7 @@ func TestMockContextCanceled(t *testing.T) {
 	}
 }
 
-// TestMockList 覆盖 D19：按 prefix 过滤、字典序升序、无匹配返回空切片、ctx 取消报错。
+// TestMockList 覆盖 List 契约：按 prefix 过滤、字典序升序、无匹配返回空切片、ctx 取消报错。
 func TestMockList(t *testing.T) {
 	ctx := context.Background()
 	m := NewMock()

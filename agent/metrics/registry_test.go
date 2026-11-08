@@ -11,7 +11,7 @@ import (
 	"traincache/agent/metrics"
 )
 
-// family 名与实现侧一致(D23、M3、D33;测试独立字面量,防改名后测试跟着漂移)。
+// family 名与实现侧一致(M3、;测试独立字面量,防改名后测试跟着漂移)。
 const (
 	ordersourceFormatErrorsName              = "traincache_ordersource_format_errors_total"
 	hookFormatErrorsName                     = "traincache_hook_format_errors_total"
@@ -65,9 +65,9 @@ func TestPrometheusRegistry(t *testing.T) {
 
 	// R3/R4 新增 2 个 family(index_sweep_skipped_total / objectstore_conditional_write_supported),
 	// 注册表恰含 42 个 family:本节校验 M2/M3 的 4 个
-	// (ordersource 格式错误 counter[D23]、prefetch 队列深度/游标 gauge 与阶段切换停滞
+	// (ordersource 格式错误 counter、prefetch 队列深度/游标 gauge 与阶段切换停滞
 	// histogram[M3]);七线 23 个(M6,含复用的这 3 个)在 TestSevenLineFamiliesRegisteredAtStartup
-	// 校验;D33 钩子帧错误、D44 读 miss、M9 的 8 个证据 family、D63 订单通道 3 个与
+	// 校验;钩子帧错误、D44 读 miss、M9 的 8 个证据 family、D63 订单通道 3 个与
 	// 9.1 网关线 2 个也在该测试校验。
 	families, err := reg.Gather()
 	if err != nil {
@@ -147,7 +147,7 @@ func TestOrdersourceFormatErrorsSync(t *testing.T) {
 	}
 }
 
-// TestHookFormatErrors：钩子帧格式错误 counter(D33,与 D23 同风格):构造预置 parse/size
+// TestHookFormatErrors：钩子帧格式错误 counter(与 同风格):构造预置 parse/size
 // 两个 reason 子指标为 0;IncHookFormatErrors 按 reason 计数;集合外 reason 忽略,不新增基数。
 func TestHookFormatErrors(t *testing.T) {
 	r := metrics.New(metrics.Config{})
@@ -244,7 +244,7 @@ func TestPrefetchCursorGauge(t *testing.T) {
 }
 
 // TestStageSwitchStallHistogram：Observe 后 count/sum 正确;bucket 为 prometheus.DefBuckets;
-// M9/D46 起必须带 dataset 标签(缺省调用归并为 other)。
+// M9 起必须带 dataset 标签(缺省调用归并为 other)。
 func TestStageSwitchStallHistogram(t *testing.T) {
 	r := metrics.New(metrics.Config{DatasetWhitelist: []string{"a-track"}})
 

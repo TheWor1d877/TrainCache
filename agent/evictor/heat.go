@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// HeatPolicy 是 heat 档策略(M4 D8):包装现有淘汰排序逻辑,行为逐字不变。
+// HeatPolicy 是 heat 档策略(M4):包装现有淘汰排序逻辑,行为逐字不变。
 //
 //   - normal 轮:S = max(h, R),R = 0.5^(Δt/T_R),T_R = heatHalfLife(6h);
 //   - danger 轮:R 清零,只按 h 升序;
@@ -21,7 +21,7 @@ func NewHeatPolicy() *HeatPolicy { return &HeatPolicy{halfLife: heatHalfLife} }
 // Name 返回策略名 "heat"。
 func (p *HeatPolicy) Name() string { return "heat" }
 
-// Rank 按现有淘汰得分排序(与 evictor.go 原 candidates 逻辑逐字一致;D8 heat 档行为不变)。
+// Rank 按现有淘汰得分排序(与 evictor.go 原 candidates 逻辑逐字一致;heat 档行为不变)。
 // 返回 blocks 的副本排序,不修改入参。
 func (p *HeatPolicy) Rank(blocks []Block, danger bool) []Block {
 	out := make([]Block, len(blocks))

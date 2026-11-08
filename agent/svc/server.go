@@ -28,7 +28,7 @@ import (
 // 状态查询尽力而为,不得被对象存储拖死;超时后返回已完成部分。
 const catalogTimeout = 3 * time.Second
 
-// Server 实现 design §5.1 的三个 gRPC 服务。M3:预热任务、GetPreheatStatus、ListSnapshot
+// Server 实现设计《gRPC 接口》的三个 gRPC 服务。M3:预热任务、GetPreheatStatus、ListSnapshot
 // 与 GetNodeStatus.running_tasks 接入业务组件(ag);北向上报(Controller 里程碑)未实现。
 type Server struct {
 	agentpb.UnimplementedPreheatServiceServer
@@ -40,7 +40,7 @@ type Server struct {
 	health *health.Server
 }
 
-// NewServer 构造服务并把 health 置为 SERVING(design §8:liveness = gRPC health check)。
+// NewServer 构造服务并把 health 置为 SERVING(设计《部署与配置》:liveness = gRPC health check)。
 // ag 提供业务组件(预热任务表/预取管理器);nil 时业务 RPC 返回 Unavailable(仅测试骨架用)。
 func NewServer(cfg Config, ag *Agent) *Server {
 	h := health.NewServer()
@@ -76,7 +76,7 @@ func (s *Server) observeRequest(endpoint string, start time.Time, err error) {
 
 // GetNodeStatus 返回节点状态(M5 起为动态字段:目录用量/磁盘余量由本机文件系统实测,
 // rescan 由重扫描器实时状态映射,catalog 由已知 dataset 索引汇总)。
-// node 为空 → 查本机;node 与 NODE_NAME 不符 → InvalidArgument(design §5.1 错误语义)。
+// node 为空 → 查本机;node 与 NODE_NAME 不符 → InvalidArgument(设计《gRPC 接口》错误语义)。
 // item 过滤:UNSPECIFIED 全量,其余仅返回请求字段,未请求字段置零。
 // 延迟线:入口 defer 打点(observeRequest)。
 func (s *Server) GetNodeStatus(ctx context.Context, req *agentpb.GetNodeStatusRequest) (resp *agentpb.NodeStatus, err error) {
@@ -151,8 +151,8 @@ func (s *Server) freeBytes() int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
-// rescanStatus 返回重扫描实时状态(D35 映射):未装配重扫描器 → DONE(枚举零值 SAMPLING
-// 会卡 readiness,design §8:readiness = rescan.phase != SAMPLING);未知阶段 → SAMPLING
+// rescanStatus 返回重扫描实时状态(映射):未装配重扫描器 → DONE(枚举零值 SAMPLING
+// 会卡 readiness,设计《部署与配置》:readiness = rescan.phase != SAMPLING);未知阶段 → SAMPLING
 // (零值安全,保守不误报就绪)。
 func (s *Server) rescanStatus() *agentpb.RescanStatus {
 	if s.ag == nil || s.ag.Rescan == nil {
@@ -247,7 +247,7 @@ func (s *Server) runningTasks() int64 {
 	return s.ag.Preheat.RunningCount()
 }
 
-// SubmitPreheat 下发预热任务(§5.1/§7.2;校验顺序与状态机在 PreheatTasks)。
+// SubmitPreheat 下发预热任务(设计《gRPC 接口》《预热任务生命周期》;校验顺序与状态机在 PreheatTasks)。
 // 延迟线:入口 defer 打点(observeRequest)。
 func (s *Server) SubmitPreheat(ctx context.Context, req *agentpb.SubmitPreheatRequest) (resp *agentpb.SubmitPreheatResponse, err error) {
 	start := time.Now()
@@ -258,7 +258,7 @@ func (s *Server) SubmitPreheat(ctx context.Context, req *agentpb.SubmitPreheatRe
 	return s.ag.Preheat.Submit(ctx, req)
 }
 
-// GetPreheatStatus 查询预热任务进度(§5.1;不存在 → NotFound)。
+// GetPreheatStatus 查询预热任务进度(设计《gRPC 接口》;不存在 → NotFound)。
 // 延迟线:入口 defer 打点(observeRequest)。
 func (s *Server) GetPreheatStatus(ctx context.Context, req *agentpb.GetPreheatStatusRequest) (resp *agentpb.PreheatStatus, err error) {
 	start := time.Now()
@@ -269,7 +269,7 @@ func (s *Server) GetPreheatStatus(ctx context.Context, req *agentpb.GetPreheatSt
 	return s.ag.Preheat.Status(ctx, req.GetTaskId())
 }
 
-// UpdatePreheat 全量更新预热窗口(8.x D55/D56;位序=本次 chunks 顺序)。
+// UpdatePreheat 全量更新预热窗口(8.xD55;位序=本次 chunks 顺序)。
 // 延迟线:入口 defer 打点(observeRequest)。
 func (s *Server) UpdatePreheat(ctx context.Context, req *agentpb.UpdatePreheatRequest) (resp *agentpb.UpdatePreheatResponse, err error) {
 	start := time.Now()
@@ -291,8 +291,7 @@ func (s *Server) CancelPreheat(ctx context.Context, req *agentpb.CancelPreheatRe
 	return s.ag.Preheat.Cancel(ctx, req)
 }
 
-// ReportBlocks 未实现(decisions Q1:北向流服务端实现推迟至 Controller 里程碑;8.x
-// 不使用推送模型,D55)。
+// ReportBlocks 未实现(decisions D67:保留占位不实现,8.x 不使用推送模型,D55)。
 func (s *Server) ReportBlocks(_ agentpb.ReportService_ReportBlocksServer) error {
-	return status.Error(codes.Unimplemented, "ReportBlocks 未实现(Controller 里程碑,decisions Q1)")
+	return status.Error(codes.Unimplemented, "ReportBlocks 未实现(保留占位,decisions D67)")
 }

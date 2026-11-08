@@ -373,7 +373,7 @@ func TestListErrorKeepsOldMapping(t *testing.T) {
 	assertMiss(t, c, eD.Path, eD.Chunk)
 }
 
-// TestShardsLoaded：D30 契约——尚无快照（未 Start/Refresh/LoadPrefixes 成功）返回 0；
+// TestShardsLoaded 契约：尚无快照（未 Start/Refresh/LoadPrefixes 成功）返回 0；
 // 加载成功后返回当前生效快照的 Manifest 分片数（Shards 长度：Refresh 全量与
 // LoadPrefixes 局部加载均为全量 manifest 长度，非本次前缀匹配到的分片数）；加载失败
 // 不动旧值（失败不动旧映射）；且纯读不长持锁（mu 被持有时仍立即返回）。
@@ -422,7 +422,7 @@ func TestShardsLoaded(t *testing.T) {
 		t.Fatalf("ShardsLoaded(Refresh 后) = %d, want %d", got, len(m.Shards))
 	}
 
-	// LoadPrefixes 仅 /data 相关（1 片）：D30 口径仍为 Manifest 分片数（全量 3）。
+	// LoadPrefixes 仅 /data 相关（1 片）：口径仍为 Manifest 分片数（全量 3）。
 	c2 := NewCatalog(env.store, dataset, cfg)
 	if err := c2.LoadPrefixes(ctx, []string{"/data"}); err != nil {
 		t.Fatalf("LoadPrefixes(/data): %v", err)

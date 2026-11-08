@@ -47,6 +47,29 @@ func (f *fakeBackendStore) Get(_ context.Context, _ string, w io.Writer) error {
 	return err
 }
 
+func (f *fakeBackendStore) GetRange(_ context.Context, _ string, start, end int64, w io.Writer) error {
+	if start < 0 || end < start {
+		return objectstore.ErrInvalidRange
+	}
+	f.mu.Lock()
+	f.gets++
+	data, n, err := f.data, f.writeN, f.err
+	f.mu.Unlock()
+	if err == nil {
+		n = len(data)
+	}
+	if n > len(data) {
+		n = len(data)
+	}
+	if start >= int64(n) || end >= int64(n) {
+		return objectstore.ErrInvalidRange
+	}
+	if _, werr := w.Write(data[start : end+1]); werr != nil {
+		return werr
+	}
+	return err
+}
+
 func (f *fakeBackendStore) Put(_ context.Context, _ string, _ io.Reader, _ int64) (string, error) {
 	f.mu.Lock()
 	f.puts++

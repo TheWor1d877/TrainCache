@@ -13,9 +13,9 @@ import (
 	"traincache/core/index"
 )
 
-// ListSnapshot 枚举 dataset 当前快照的条目(§5.6 CLI --chunks 名字解析;§7.2):dataset
+// ListSnapshot 枚举 dataset 当前快照的条目(设计《CLI》 CLI --chunks 名字解析;设计《预热任务生命周期》):dataset
 // 空 → InvalidArgument;snapshot_id 非空 → InvalidArgument(M3 仅支持 CURRENT);prefix
-// 任意过滤(空 = 全量,字面语义同 core Catalog.List)。条目取自 Catalog.List(D29):
+// 任意过滤(空 = 全量,字面语义同 core Catalog.List)。条目取自 Catalog.List:
 // 只下载相关分片、不切换内存映射,按 (path, chunk) 字典序返回;Size 为块字节数。
 //
 // dataset 尚无 CURRENT(ErrNoCurrent)→ 空 entries 且无错误(裁决:与"前缀无匹配返回空"

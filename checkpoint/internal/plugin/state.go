@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-// PartRecord 是一条续传记录（design 10.1 §5.2）。前半段字段是分片记录；
+// PartRecord 是一条续传记录（design 10.1「数据格式」）。前半段字段是分片记录；
 // 多文件上传还需要知道上传 id 与对象键，因此增加可选的头字段，旧文件仍可读。
 type PartRecord struct {
 	Kind     string `json:"kind,omitempty"`      // upload 表示头记录，空表示分片
@@ -48,7 +48,7 @@ func AppendPart(path string, rec PartRecord) error {
 }
 
 // LoadParts 读取续传状态。末行没有换行说明上一次写没有完成，按 design
-// 10.1 §5.2 丢弃；中间行损坏则说明文件本身不可信，返回错误而不是猜。
+// 10.1「数据格式」丢弃；中间行损坏则说明文件本身不可信，返回错误而不是猜。
 func LoadParts(path string) ([]PartRecord, error) {
 	f, err := os.Open(path)
 	if err != nil {

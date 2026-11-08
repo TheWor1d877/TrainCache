@@ -1,4 +1,4 @@
-// Package origin 封装网关到源站的对象存储客户端（design 9.1 §3、§4.1）。
+// Package origin 封装网关到源站的对象存储客户端（design 9.1「网关 HTTP 契约」）。
 //
 // 只提供两种操作：Stat（HEAD）与 Open（单次 GET，懒发送）。本包不改写
 // minio 的错误语义，源站错误与连接层失败都由 server 层按 4.2 的规则映射。
@@ -17,15 +17,21 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// ObjectInfo 是 HEAD 需要回填到 HTTP 响应头的最小字段集。
+// ObjectInfo 是 HEAD/GET 需要回填到 HTTP 响应头的最小字段集。
+// 带 Range 的 GET（206）额外提供 ContentRange 与原始状态码，供网关透传。
 type ObjectInfo struct {
 	Size         int64
 	ETag         string
 	LastModified time.Time
 	ContentType  string
+	// ContentRange 是 206 响应的 Content-Range 原文（如 "bytes 0-99/1000"）；
+	// 非区间响应为空。
+	ContentRange string
+	// StatusCode 是产生本次元数据的 HTTP 状态码（200 或 206）；0 表示未知。
+	StatusCode int
 }
 
-// Client 是绑定单个桶的 minio-go 客户端（v1 单桶，9.2 D18）。
+// Client 是绑定单个桶的 minio-go 客户端（v1 单桶）。
 type Client struct {
 	client *minio.Client
 	bucket string
@@ -33,11 +39,14 @@ type Client struct {
 
 // New 构造源站客户端。endpoint 形如 "127.0.0.1:9000"，不带 scheme；
 // secure 为 true 时网关到源站使用 TLS。accessKey/secretKey 为空时按匿名访问处理。
-func New(endpoint, accessKey, secretKey, bucket string, secure bool) (*Client, error) {
+// compression 为 true 时向源站声明 gzip，传输层解压后交给网关的是原始字节；
+// 带 Range 的请求不参与协商（Go 传输层的行为）。
+func New(endpoint, accessKey, secretKey, bucket string, secure, compression bool) (*Client, error) {
 	transport, err := minio.DefaultTransport(secure)
 	if err != nil {
 		return nil, fmt.Errorf("origin: 构造传输层失败: %w", err)
 	}
+	transport.DisableCompression = !compression
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:     credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure:    secure,
@@ -63,12 +72,28 @@ func (c *Client) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 	}, nil
 }
 
-// Open 发起一次 GET。minio-go 的 GetObject 是懒发送：连接与 4xx/5xx 错误
-// 在首次 Read 时才暴露，由调用方处理（design 9.1 §6.3）。
+// Open 发起一次整对象 GET。minio-go 的 GetObject 是懒发送：连接与 4xx/5xx
+// 错误在首次 Read 时才暴露，由调用方处理（design 9.1「取数与扇出」）。
 func (c *Client) Open(ctx context.Context, key string) (*Object, error) {
+	return c.open(ctx, key, minio.GetObjectOptions{})
+}
+
+// OpenRange 发起一次带 Range 头的 GET，闭区间 [start, end] 与 HTTP 的
+// bytes=start-end 一致。Range 通过 minio-go 的 GetObjectOptions.SetRange 写入
+// 请求头，随 SigV4 签名一起发往源站。
+func (c *Client) OpenRange(ctx context.Context, key string, start, end int64) (*Object, error) {
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(start, end); err != nil {
+		return nil, err
+	}
+	return c.open(ctx, key, opts)
+}
+
+// open 是 Open/OpenRange 的共同实现：把响应头捕获器挂进 ctx 后创建懒发送对象。
+func (c *Client) open(ctx context.Context, key string, opts minio.GetObjectOptions) (*Object, error) {
 	cap := &metadataCapture{}
 	obj, err := c.client.GetObject(context.WithValue(ctx, metadataKey{}, cap),
-		c.bucket, key, minio.GetObjectOptions{})
+		c.bucket, key, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +111,7 @@ func (o *Object) Read(p []byte) (int, error) { return o.rc.Read(p) }
 func (o *Object) Close() error { return o.rc.Close() }
 
 // Stat 返回对象元数据，不发新请求：值来自 metadataTransport 记录的 GET
-// 响应头（design 9.1 §5.2 的元数据来源）。
+// 响应头（design 9.1「网关 HTTP 契约」的元数据来源）。
 //
 // 不直接调用 minio.Object.Stat：v7.3.0 的 Stat 会把 objectInfo.Size 改写成
 // 「剩余字节数」，而 Object.Read 用该值判断 EOF，读流中调用会提前截断响应体。
@@ -109,13 +134,15 @@ type metadataCapture struct {
 	ok   bool
 }
 
-// store 在收到 200 响应头时记录元数据；同一 GET 的重试会覆盖为最后一次。
+// store 在收到 200/206 响应头时记录元数据；同一 GET 的重试会覆盖为最后一次。
 func (c *metadataCapture) store(resp *http.Response) {
 	h := resp.Header
 	info := ObjectInfo{
-		Size:        resp.ContentLength,
-		ETag:        h.Get("ETag"),
-		ContentType: h.Get("Content-Type"),
+		Size:         resp.ContentLength,
+		ETag:         h.Get("ETag"),
+		ContentType:  h.Get("Content-Type"),
+		ContentRange: h.Get("Content-Range"),
+		StatusCode:   resp.StatusCode,
 	}
 	if t, err := http.ParseTime(h.Get("Last-Modified")); err == nil {
 		info.LastModified = t
@@ -137,7 +164,7 @@ func (c *metadataCapture) load() (ObjectInfo, error) {
 	return c.info, nil
 }
 
-// metadataTransport 包装 minio 的传输层，把对象 GET 的 200 响应头交给该
+// metadataTransport 包装 minio 的传输层，把对象 GET 的 200/206 响应头交给该
 // 请求 context 中的捕获器。桶位置查询（?location=）不是对象 GET，跳过。
 type metadataTransport struct {
 	base http.RoundTripper
@@ -148,7 +175,8 @@ func (t *metadataTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, err
 	}
-	if req.Method == http.MethodGet && resp.StatusCode == http.StatusOK &&
+	if req.Method == http.MethodGet &&
+		(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) &&
 		!req.URL.Query().Has("location") {
 		if c, ok := req.Context().Value(metadataKey{}).(*metadataCapture); ok {
 			c.store(resp)

@@ -18,7 +18,7 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="direct"
 NS="direct"
-TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.json}"
 
 group_header "$GROUP"
 check_minio "$GROUP"

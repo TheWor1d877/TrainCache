@@ -1,7 +1,7 @@
-// Package config 读取并校验 checkpointd 的运行配置（design 10.1 §5.4）。
+// Package config 读取并校验 checkpointd 的运行配置（design 10.1「部署与配置」）。
 //
 // 配置一次性读取，不做热加载；非法值返回错误，进程以退出码 2 结束，
-// 训练容器保持不启动（design 10.1 §6.1）。
+// 训练容器保持不启动（design 10.1「关键流程」）。
 package config
 
 import (
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// 默认值逐字来自 design 10.1 §5.4。
+// 默认值逐字来自 design 10.1「部署与配置」。
 const (
 	defaultLogLevel        = "info"
 	defaultSaveDeadline    = 15 * time.Minute
@@ -22,7 +22,7 @@ const (
 	defaultScanStable      = 3
 )
 
-// env 名（design 10.1 §5.4 冻结）。
+// env 名（design 10.1「部署与配置」冻结）。
 const (
 	envLogLevel        = "TRAINCACHE_CHECKPOINT_LOG_LEVEL"
 	envSaveDeadline    = "TRAINCACHE_CHECKPOINT_SAVE_DEADLINE"
@@ -32,7 +32,7 @@ const (
 	envScanStable      = "TRAINCACHE_CHECKPOINT_SCAN_STABLE"
 )
 
-// Config 是 checkpointd 进程的完整配置（design 10.1 §5.4）。
+// Config 是 checkpointd 进程的完整配置（design 10.1「部署与配置」）。
 type Config struct {
 	LogLevel        string        // TRAINCACHE_CHECKPOINT_LOG_LEVEL，默认 info；非法值报错
 	SaveDeadline    time.Duration // TRAINCACHE_CHECKPOINT_SAVE_DEADLINE，默认 15m
@@ -80,7 +80,7 @@ func Load() (*Config, error) {
 }
 
 // loadLogLevel 解析日志级别。未设置时取 info，未知值报错而不是静默退化，
-// 与 gateway 的宽松口径不同，理由见 design 10.1 §6.1。
+// 与 gateway 的宽松口径不同，理由见 design 10.1「关键流程」。
 func loadLogLevel() (string, error) {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(envLogLevel)))
 	if v == "" {

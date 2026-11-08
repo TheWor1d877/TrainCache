@@ -3,7 +3,7 @@ package ordersource
 // heartbeat_interop_test.go:真实写端 agent/ordersrc/ordersrc.py 造的 ring 喂给真实读端。
 //
 // D57 的 ring 保活心跳踩的正是这条跨进程契约:Python 侧每次调用都按「新写端会话」算代际,
-// Go 侧把代际变化判成 sidecar 重启并按 design §7.4 重放订单。两边各自都「没错」,只有接起来
+// Go 侧把代际变化判成 sidecar 重启并按设计《订单通道降级》重放订单。两边各自都「没错」,只有接起来
 // 才看得见:每 10s 一次心跳 = 每 10s 一次 OnStageSwitch = 预取队列整段重铺。
 
 import (

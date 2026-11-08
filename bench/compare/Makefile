@@ -22,7 +22,7 @@
 # 环境变量(可选,覆盖 config.py 缺省):
 #   TC_RATE / TC_DELAY / TC_BURST     tc 档位(五组共用)
 #   MINIO_ACCESS_KEY / MINIO_SECRET_KEY  MinIO 凭证(不硬编码)
-#   JFS_CACHE_MB / FLUID_CACHE_GI     缓存容量(与其他组对齐)
+#   JFS_CACHE_MB / FLUID_CACHE_MB      缓存容量(与其他组对齐,单位 MiB)
 # ============================================================================
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PY := $(abspath $(ROOT)/../../.venv/bin/python)
@@ -100,7 +100,7 @@ juicefs-warm:
 	@bash $(ROOT)/juicefs/warm.sh
 
 # ---- 统一轨迹生成 ----
-TRACE_OUT ?= $(ROOT)/../experiments/traces/track-compare-d-s8-per-epoch.json
+TRACE_OUT ?= $(ROOT)/../experiments/traces/track-16-per-epoch-ep3.json
 trace:
 	@mkdir -p $(dir $(TRACE_OUT))
 	@$(PY) $(ROOT)/trace.py --out $(TRACE_OUT)

@@ -36,7 +36,7 @@ func policyEqual(a, b []int) bool {
 	return true
 }
 
-// 三档策略编译期都实现 Policy 接口(D9 撤档后接口只剩 Rank)。
+// 三档策略编译期都实现 Policy 接口(撤档后接口只剩 Rank)。
 var (
 	_ Policy = (*HeatPolicy)(nil)
 	_ Policy = (*LRUPolicy)(nil)

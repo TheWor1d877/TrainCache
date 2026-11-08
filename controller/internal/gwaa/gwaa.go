@@ -1,12 +1,12 @@
 // Package gwaa implements Greedy Window Affinity Assignment (GWAA) from
-// docs/7.0 §GWAA and docs/7.1 §5.5.
+// docs/7.0《GWAA：贪心窗口亲和分配》and docs/7.1-design.md《GWAA 分配》.
 //
 // Compute is a pure function: it reads only its Input, performs no I/O, does
 // not touch Kubernetes types and emits no log records. Callers own logging and
 // RPC orchestration. Pods that must share a node (AffinityGroup) are merged
 // into one placement unit.
 //
-// M14 splits placement into two steps. First each unit gets a deterministic
+// Placement splits into two steps. First each unit gets a deterministic
 // target set within [FanoutMin, Fanout], chosen from the window cache
 // distribution (docs/7.2 D39). Then claims, conflict adjudication, top-up and
 // out-of-target fallback run only inside that target set. Target-set ordering
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// MaxPods and MaxNodes are the Q11 P x N limits, also validated by the
+	// MaxPods and MaxNodes are the P x N limits, also validated by the
 	// warmup controller before submission.
 	MaxPods  = 64
 	MaxNodes = 256
@@ -69,26 +69,26 @@ type Input struct {
 
 	// AllowMultiPodPerNode defaults to false: at most one placement unit per
 	// node. When true, units may share a node unless their anti-affinity
-	// groups conflict (Q6(b), v1 does not bin-pack resources).
+	// groups conflict (v1 does not bin-pack resources).
 	AllowMultiPodPerNode bool
 
 	// MaxRounds overrides the convergence limit for tests and diagnostics.
-	// Zero means len(Pods), the contract from docs/7.2 M6; larger values are
+	// Zero means len(Pods), the contract from docs/7.1-design.md《GWAA 分配》; larger values are
 	// clamped to len(Pods).
 	MaxRounds int
 
 	// Fanout is the upper bound on the number of preheat nodes each Pod claims
-	// (docs/7.1 §5.5). Zero means 1; the CRD rejects zero and negative values,
+	// (docs/7.1-design.md《GWAA 分配》). Zero means 1; the CRD rejects zero and negative values,
 	// but Compute still treats zero as the single-node default for callers that
-	// predate M13.
+	// predate the fanout contract.
 	Fanout int32
 
 	// FanoutMin is the lower bound on the number of preheat nodes each Pod
-	// claims (M14). Zero or negative means 1; Compute rejects a normalized
+	// claims (docs/7.2 D39). Zero or negative means 1; Compute rejects a normalized
 	// minimum larger than the normalized maximum.
 	FanoutMin int32
 
-	// Held is the in-register set for the D45 hysteresis (docs/7.1 §5.5):
+	// Held is the in-register set for the D45 hysteresis (docs/7.1-design.md《GWAA 分配》):
 	// podIndex -> nodes whose preheat task this Agent confirmed it is still
 	// running this round. A held node that remains feasible and within the
 	// retention line keeps its place in the target set, so lockstep progress
@@ -97,7 +97,7 @@ type Input struct {
 	Held map[int32][]string
 }
 
-// PodDecision records why GWAA chose a Pod's target fanout (M14). It is the
+// PodDecision records why GWAA chose a Pod's target fanout. It is the
 // per-Pod explanation attached to Output.Decisions.
 type PodDecision struct {
 	// TargetFanout is the number of nodes chosen for this Pod, within
@@ -142,7 +142,7 @@ type Output struct {
 	Decisions map[int32]PodDecision
 }
 
-// Placement is the docs/7.1 §5.5 name for Output. New code should use Output.
+// Placement is the docs/7.1-design.md《GWAA 分配》name for Output. New code should use Output.
 type Placement = Output
 
 // unit is one placement unit: a singleton Pod or a merged affinity group.
@@ -152,7 +152,7 @@ type unit struct {
 	top1     float64
 	top2     float64
 	top1Hits int
-	// target is the M14 target set in deterministic order: c_ij descending,
+	// target is the target set in deterministic order: c_ij descending,
 	// node name ascending.
 	target []int
 	// pref is the target set in claim order. It keeps the injected RNG for
@@ -227,7 +227,7 @@ func Validate(in Input) error {
 	return nil
 }
 
-// normalizedFanout applies the M14 defaults: a non-positive maximum or
+// normalizedFanout applies the fanout defaults: a non-positive maximum or
 // minimum means 1. Validate rejects a negative maximum before Compute reaches
 // this helper, but the helper stays total for direct callers.
 func normalizedFanout(in Input) (fanout, fanoutMin int32) {
@@ -363,12 +363,12 @@ func Compute(in Input) Output {
 	}
 	// The bounded-round conflict resolution may stop with a unit below its
 	// target even though acceptable free target nodes remain. Fill those units
-	// without evicting anyone. The ceiling is the M14 target, never Fanout.
+	// without evicting anyone. The ceiling is the target, never Fanout.
 	for _, u := range order {
 		st.topUp(u, targetLen(u), units, allowMulti)
 	}
 	// A unit that could not claim any target node would otherwise be fully
-	// unassigned. M14 allows exactly one out-of-target fallback in that case;
+	// unassigned. The contract allows exactly one out-of-target fallback in that case;
 	// only a unit with no feasible node at all stays unassigned.
 	fallback := make([]bool, len(units))
 	for _, u := range order {
@@ -567,7 +567,7 @@ func memberBounds(pods []int32, fanout, fanoutMin int32) (unitMin, unitMax int32
 }
 
 // planUnit fills the deterministic target set and the claim orders from the
-// per-node readiness aggregate. It implements docs/7.1 §5.5 steps 1-9 plus the
+// per-node readiness aggregate. It implements docs/7.1-design.md《GWAA 分配》steps 1-9 plus the
 // D45 hysteresis over held.
 //
 // target is ordered by c_ij descending and node name ascending, independent of
@@ -655,7 +655,7 @@ func planUnit(u *unit, nodes []node, fullPref []int, held map[int]struct{}, unit
 		}
 	}
 	// Fallback order stays deterministic (c_ij descending, node name ascending)
-	// because it is a new M14 path, not one of the existing RNG tie-breaks.
+	// because it is the target-set path, not one of the existing RNG tie-breaks.
 	for _, n := range order {
 		if _, ok := choice[n]; !ok {
 			u.fallback = append(u.fallback, n)
@@ -669,7 +669,7 @@ func planUnit(u *unit, nodes []node, fullPref []int, held map[int]struct{}, unit
 	}
 }
 
-// keepHeld applies the D45 hysteresis (docs/7.1 §5.5): a node the Agent reports
+// keepHeld applies the D45 hysteresis (docs/7.1-design.md《GWAA 分配》): a node the Agent reports
 // as still running this round keeps its place in the target set while it is
 // feasible and within the retention line, displacing the lowest-ranked member
 // that is not itself held. Without it the wide preheat's lockstep progress makes
@@ -706,7 +706,7 @@ func keepHeld(u *unit, order []int, held map[int]struct{}, choice map[int]struct
 }
 
 // targetOrder lists non-stopped nodes by c_ij descending and node name
-// ascending. This is the deterministic M14 target-set order.
+// ascending. This is the deterministic target-set order.
 func targetOrder(c []float64, nodes []node) []int {
 	order := make([]int, 0, len(nodes))
 	for n := range nodes {

@@ -19,13 +19,13 @@ import (
 	"traincache/core/cas"
 )
 
-// heatmap.go:热度映射的周期衰减、heatmap.json 的原子写与启动恢复(§6.4),以及 inotify
-// 旁路监听打开事件(§5.5"inotify 旁路监听缓存目录打开事件,不侵入训练进程";D18)。
+// heatmap.go:热度映射的周期衰减、heatmap.json 的原子写与启动恢复(设计《数据格式》),以及 inotify
+// 旁路监听打开事件(设计《热度与命中率》"inotify 旁路监听缓存目录打开事件,不侵入训练进程")。
 
-// heatmapVersion 是 heatmap.json 格式版本(§6.4:version=1)。
+// heatmapVersion 是 heatmap.json 格式版本(设计《数据格式》:version=1)。
 const heatmapVersion = 1
 
-// heatmapFile 是 heatmap.json 的磁盘格式(§6.4 冻结):
+// heatmapFile 是 heatmap.json 的磁盘格式(设计《数据格式》冻结):
 //
 //	{"version":1,"dumped_at":RFC3339,"entries":{"<fp32hex>":{"heat":1.5,
 //	 "last_access":1763000000,"access_count":3}}}
@@ -38,7 +38,7 @@ type heatmapFile struct {
 	Entries  map[string]heatmapEntry `json:"entries"`
 }
 
-// heatmapEntry 是单条热度记录(§6.4)。
+// heatmapEntry 是单条热度记录(设计《数据格式》)。
 type heatmapEntry struct {
 	Heat        float64 `json:"heat"`
 	LastAccess  int64   `json:"last_access"`
@@ -60,7 +60,7 @@ func (c *Collector) decay() {
 	}
 }
 
-// Dump 原子写出 heatmap.json(§6.4:临时文件 + rename;失败返回错误,调用方记日志,
+// Dump 原子写出 heatmap.json(设计《数据格式》:临时文件 + rename;失败返回错误,调用方记日志,
 // 不影响服务)。时间戳取 clock(注入时钟下与判定口径一致)。
 func (c *Collector) Dump() error {
 	f := heatmapFile{
@@ -113,7 +113,7 @@ func (c *Collector) snapshotHeatmap() map[string]heatmapEntry {
 	return out
 }
 
-// Load 读取 heatmap.json 并以文件内容替换内存热度表(§6.4/§7.1 启动恢复):
+// Load 读取 heatmap.json 并以文件内容替换内存热度表(设计《数据格式》《启动与重启重扫描》启动恢复):
 //   - 文件缺失(首次启动 / 被清理)→ 空表,nil(容错口径);
 //   - 文件损坏(非 JSON / 非法指纹键)→ 逐条容错:整体解析失败置空表,单条非法跳过,均告警;
 //   - version 非 1 → 告警但仍按同字段读取(字段自描述,宽松兼容);
@@ -166,13 +166,13 @@ func (c *Collector) replaceEntries(m map[cas.Fingerprint]*heatEntry) {
 	c.mu.Unlock()
 }
 
-// hookSilenceWindow 是"钩子为主,inotify 兜底"的判定窗(§5.4/D15):钩子在该窗内报告过
+// hookSilenceWindow 是"钩子为主,inotify 兜底"的判定窗(设计《钩子 socket 协议》):钩子在该窗内报告过
 // 打开事件时,inotify 打开事件不计入统计(同一打开事件双源只算一次,主源优先);
 // 钩子沉默超过该窗(或从未报告)→ inotify 兜底生效。包内变量,NewCollector
 // 构造时固化为 Collector.hookSilence,测试改包变量后构造即可覆盖。
 var hookSilenceWindow = 30 * time.Second
 
-// —— inotify 旁路(§5.5;平台锁定 linux,与 ordersource 直接 syscall.Mmap 同风格)——
+// —— inotify 旁路(设计《热度与命中率》;平台锁定 linux,与 ordersource 直接 syscall.Mmap 同风格)——
 //
 // 实现说明:fsnotify(v1.9/v1.10)的公开 API 不暴露 IN_OPEN/IN_ACCESS(xUnportableOpen 等
 // 未导出,AddWith 的 withOps 选项亦未导出),外部包无法观测"打开事件";故此处用 stdlib

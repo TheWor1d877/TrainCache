@@ -17,7 +17,7 @@ var errNoCheckpoint = errors.New("sidecar: 后端没有完整 checkpoint")
 
 // ErrRestoreGiveUp 标记「慢速重试到放弃期限仍未恢复成功」这一终态。Run 把它
 // 原样向上返回，cmd/checkpointd 按 errors.Is 识别并以退出码 3 结束（design
-// 10.1 §7.3、§8），与配置非法的退出码 2 分开：2 重拉一定没用，3 交给 Job 的
+// 10.1「可观测出口」、「关键流程」），与配置非法的退出码 2 分开：2 重拉一定没用，3 交给 Job 的
 // backoffLimit 记账，重启次数用完才判 Failed。
 var ErrRestoreGiveUp = errors.New("sidecar: 恢复放弃")
 
@@ -29,7 +29,7 @@ type restoreState struct {
 	step     int64
 }
 
-// restore 按 design 10.1 §6.4、§6.5 与 10.2 D14 分三段恢复：
+// restore 按 design 10.1「关键流程」与 10.2 D14 分三段恢复：
 // RestoreDeadline 内密集重试；到点后每 RestoreSlowInterval 一轮慢速重试，
 // 每轮写一条 ERROR；到 RestoreGiveUpAfter 记 reason=restore_give_up 的 ERROR
 // 并返回 ErrRestoreGiveUp，让进程退出，不再无限重试。

@@ -135,7 +135,7 @@ func (s *deleteTrackingStore) reset() {
 }
 
 // TestCommitChangesDeleteRemovesFromNewSnapshotOnly：删除一条 → 新快照不含它、旧快照
-// 仍逐字段可读出该条、旧快照对象一个都没被删（design.md §11.4 第 1 点：删除 = 新快照里
+// 仍逐字段可读出该条、旧快照对象一个都没被删（design.md《提交》：删除 = 新快照里
 // 不存在，不 tombstone、不动已提交对象），且读侧刷新后未命中、其余条目照常解析。
 func TestCommitChangesDeleteRemovesFromNewSnapshotOnly(t *testing.T) {
 	ctx := context.Background()
@@ -245,7 +245,7 @@ func TestCommitChangesDeleteAllChunksOfPath(t *testing.T) {
 	assertMiss(t, c, "/data/b.tar", 1)
 }
 
-// TestCommitChangesPutWinsOverDelete：同一 (path, chunk) 既删又放 → 新值生效（§11.4 第 3
+// TestCommitChangesPutWinsOverDelete：同一 (path, chunk) 既删又放 → 新值生效（design.md《提交》合并规则第 3
 // 点）；Chunk == -1 与该 path 某一块的 put 并存时，该块由 put 保留、其余块删除。
 func TestCommitChangesPutWinsOverDelete(t *testing.T) {
 	ctx := context.Background()
@@ -287,7 +287,7 @@ func TestCommitChangesPutWinsOverDelete(t *testing.T) {
 	assertHit(t, c, b0)
 }
 
-// TestCommitChangesDeleteIsIdempotent：dels 指向不存在的条目 = 幂等 no-op（§11.4 第 2 点）
+// TestCommitChangesDeleteIsIdempotent：dels 指向不存在的条目 = 幂等 no-op（design.md《提交》删除语义第 2 点）
 // ——提交成功、条目集与上一快照逐字段相同；同一批 dels 重复提交仍成功。
 func TestCommitChangesDeleteIsIdempotent(t *testing.T) {
 	ctx := context.Background()

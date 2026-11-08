@@ -6,7 +6,7 @@ package svc
 //   - 索引线(③):本文件 measureLoadPrefixes —— 包住 agent 侧唯一真实发起 Catalog 刷新的
 //     调用点(ForOrder 的 LoadPrefixes);
 //   - 延迟线(⑥):埋点在各 RPC 入口,见 server.go 的 observeRequest;
-//   - 订单到达 t_touch 刷新(§7.6 任务 4;D24 t_touch 三源之"新订单刷新"):本文件
+//   - 订单到达 t_touch 刷新(设计《回收与磁盘淘汰》任务 4;D24 t_touch 三源之"新订单刷新"):本文件
 //     SetOrderTouchHook/dispatchOrderTouch + wire.go onOrderTouch。
 //
 // 标签纪律沿用 metrics 打点 API 自身(DatasetLabel 归并、result 集合外忽略),本文件不
@@ -22,7 +22,7 @@ import (
 )
 
 // orderTouchHook 是"新 ConsumeOrder 到达 → 刷新订单内块 t_touch"的 svc 侧窄接口
-// (§7.6 任务 4):dataset 归属 + 该 dataset 的 Catalog(供回调内解析指纹)+ 订单块引用。
+// (设计《回收与磁盘淘汰》任务 4):dataset 归属 + 该 dataset 的 Catalog(供回调内解析指纹)+ 订单块引用。
 // 在 ForOrder 调用链内同步调用(索引解析为纯内存查询),实现不得阻塞。
 type orderTouchHook func(dataset string, cat *index.Catalog, refs []prefetch.ChunkRef)
 

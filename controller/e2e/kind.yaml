@@ -1,4 +1,4 @@
-# kind cluster for the M11 end-to-end run (kind v0.33.0, node image v1.37.0).
+# kind cluster for the end-to-end run (kind v0.33.0, node image v1.37.0).
 # Three workers so GWAA has a real per-node choice and the workload can pin
 # Pods to a two-node subset: with three Pods assigned to three distinct Nodes,
 # at least one lands outside the subset (deterministic NodeDeviation) while

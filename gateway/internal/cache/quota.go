@@ -17,7 +17,7 @@ type blockFile struct {
 	mtime time.Time
 }
 
-// makeRoom 在写盘之前跑一遍三步淘汰（design 9.1 §6.8；9.2 D33）。
+// makeRoom 在写盘之前跑一遍三步淘汰（design 9.1「盘上布局与配额淘汰」；9.2 D33）。
 //
 // need 是本次要写入的字节数。BeginPut 时还不知道块有多大，按 0 算；Writer.Close
 // 时按实际写入量算。

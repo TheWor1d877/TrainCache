@@ -80,6 +80,16 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: objstoreSecure
+            - name: TRAINCACHE_OBJSTORE_COMPRESSION
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreCompression
+            - name: TRAINCACHE_FETCH_RANGE_PARALLEL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: fetchRangeParallel
             - name: TRAINCACHE_OBJSTORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef:

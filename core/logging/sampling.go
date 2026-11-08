@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// 采样与限流的固定参数(docs/8.1-design.md §3.3 冻结,暂不开放配置)。
+// 采样与限流的固定参数(docs/8.1-design.md 的「级别与采样」一节冻结,暂不开放配置)。
 const (
 	controlRate  = 100.0
 	controlBurst = 200.0
@@ -26,7 +26,7 @@ const (
 	dedupSweepThreshold = 4096
 )
 
-// 采样率配置项(8.1 §3.3);非法值退默认,不阻断启动。
+// 采样率配置项(docs/8.1-design.md 的「级别与采样」一节);非法值退默认,不阻断启动。
 const (
 	infoSampleRateEnv  = "TRAINCACHE_LOG_SAMPLE_RATE"
 	debugSampleRateEnv = "TRAINCACHE_LOG_DEBUG_SAMPLE_RATE"
@@ -210,7 +210,7 @@ func (s *Sampler) sampleRate(level slog.Level) float64 {
 
 // sampledState 返回放行记录的采样标记与采样率:Warn/Error 固定 sampled=false、
 // sample_rate=1.0;Info/Debug 只有在采样率小于 1 且记录已通过采样时才标记
-// sampled=true,否则同样放 1.0,便于按比例估算真实量(8.1 §3.1、§3.3)。
+// sampled=true,否则同样放 1.0,便于按比例估算真实量(docs/8.1-design.md 的「公共字段契约」与「级别与采样」两节)。
 func (s *Sampler) sampledState(level slog.Level) (bool, float64) {
 	rate := s.sampleRate(level)
 	if rate >= 1 {

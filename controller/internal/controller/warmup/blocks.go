@@ -13,17 +13,17 @@ import (
 )
 
 const (
-	// maxPods and maxCandidateNodes are the Q11 P x N limits. P is validated
+	// maxPods and maxCandidateNodes are the P x N limits. P is validated
 	// before submission; N is checked after candidate filtering.
 	maxPods           = 64
 	maxCandidateNodes = 256
 )
 
 // errInvalidSpec marks permanent spec problems. The controller turns it into
-// Condition InvalidSpec=False and does not retry (docs/7.1 §7.2).
+// Condition InvalidSpec=False and does not retry (docs/7.1-design.md《候选节点筛选与预热下发》).
 var errInvalidSpec = errors.New("warmup: invalid spec")
 
-// ValidateTask checks the PodDetail mapping and the Q11 Pod limit. The DataSet
+// ValidateTask checks the PodDetail mapping and the Pod limit. The DataSet
 // is validated separately.
 func ValidateTask(task *traincachev1alpha1.WarmupTask) []string {
 	if task == nil {
@@ -44,7 +44,7 @@ func ValidateTask(task *traincachev1alpha1.WarmupTask) []string {
 		reasons = append(reasons, fmt.Sprintf("spec.preheatFanoutMin must be >= 0, got %d", spec.PreheatFanoutMin))
 	}
 	// Zero means the default 1 on both bounds. Reject an effective minimum above
-	// the effective maximum even though the CRD CEL rule already does (M14).
+	// the effective maximum even though the CRD CEL rule already does.
 	if normalizeFanoutMin(spec.PreheatFanoutMin) > normalizeFanout(spec.PreheatFanout) {
 		reasons = append(reasons, fmt.Sprintf(
 			"spec.preheatFanoutMin %d must not exceed spec.preheatFanout %d",
@@ -308,7 +308,7 @@ func WindowChunks(order []int32, k, cutoff int32, layout []traincachev1alpha1.Bl
 
 // PodWindows expands every Pod's request window. The returned slice is indexed
 // by PodDetail.Index and preserves request order, which is also the bitmap bit
-// order used by polling (docs/7.1 §5.9).
+// order used by polling (docs/7.1-design.md《Agent gRPC 客户端》).
 func PodWindows(task *traincachev1alpha1.WarmupTask, layout []traincachev1alpha1.BlockLayout, orders [][]int32) ([][]*agentpb.ChunkRef, error) {
 	windows := make([][]*agentpb.ChunkRef, len(orders))
 	for index := range orders {
@@ -325,7 +325,7 @@ func PodWindows(task *traincachev1alpha1.WarmupTask, layout []traincachev1alpha1
 	return windows, nil
 }
 
-// TaskID is the idempotency key from docs/7.1 §5.9 / D12.
+// TaskID is the idempotency key from docs/7.1-design.md《Agent gRPC 客户端》and docs/7.2 D12.
 func TaskID(task *traincachev1alpha1.WarmupTask, podIndex int32) string {
 	if task == nil {
 		return ""

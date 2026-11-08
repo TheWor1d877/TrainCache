@@ -76,10 +76,10 @@ func TestRestartRebuildsStateFromStatus(t *testing.T) {
 		ConsumeOrderSource: traincachev1alpha1.ConsumeOrderSourceSpec,
 		StartedAt:          &started,
 		CandidateNodes:     []string{"n1", "n2"},
-		ReadinessTable:     [][]int32{{2, 1}, {1, 2}},
+		ReadinessTable:     [][]int32{{3, 1}, {1, 3}},
 		PodNodeReadiness: []traincachev1alpha1.PodNodeReadiness{
-			{PodIndex: 0, PodName: "trainer-0", NodeName: "n1", ReadyInWindow: 2, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
-			{PodIndex: 1, PodName: "trainer-1", NodeName: "n2", ReadyInWindow: 2, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
+			{PodIndex: 0, PodName: "trainer-0", NodeName: "n1", ReadyInWindow: 3, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
+			{PodIndex: 1, PodName: "trainer-1", NodeName: "n2", ReadyInWindow: 3, RequiredReady: 3, State: traincachev1alpha1.PreheatStatePreheating},
 		},
 	}
 
@@ -125,8 +125,10 @@ func TestRestartRebuildsStateFromStatus(t *testing.T) {
 	if progressCalls == 0 {
 		t.Fatal("Progress was not polled after restart")
 	}
-	if result.RequeueAfter == 0 {
-		t.Fatal("gate cycle stopped without release; want requeue while Hold")
+	// fixture: ReadyInWindow >= threshold so gate self-releases on same round
+	// and no requeue is needed.
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter = %v, want 0 (gate released)", result.RequeueAfter)
 	}
 
 	updated := getTask(t, c)

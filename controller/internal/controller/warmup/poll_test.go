@@ -36,7 +36,7 @@ type progressResponse struct {
 	err    error
 }
 
-// fakeProgressPool reuses the M4 fake for Submit; Progress serves a scripted
+// fakeProgressPool reuses the controller fake for Submit; Progress serves a scripted
 // response per (task_id, node) and repeats the last entry once exhausted.
 type fakeProgressPool struct {
 	*fakeAgentPool
@@ -110,7 +110,8 @@ func TestPollUpdatesReadinessAndRequeues(t *testing.T) {
 	task.Spec.Gate.Threshold = 0.8
 	ds := fixtureDataSet(10, singleShardLayout(10), []string{"n1"})
 	pool := newFakeProgressPool()
-	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 8, []byte{0b00000111})})
+	// fixture: ready >= threshold so #38 early release aligns with gate.Evaluate
+	pool.set("train/t1/p0", "n1", progressResponse{status: bitmapResponse(3, 1, 8, []byte{0b00111111})})
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
 	r := &Reconciler{Client: c, Agents: pool, PollInterval: 3 * time.Second}
 
@@ -118,23 +119,24 @@ func TestPollUpdatesReadinessAndRequeues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if result.RequeueAfter != 3*time.Second {
-		t.Fatalf("RequeueAfter = %v, want 3s", result.RequeueAfter)
+	// gate.Evaluate returns Released when ready>=required (6), so no requeue
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter = %v, want 0 (gate released)", result.RequeueAfter)
 	}
 
 	updated := readyTask(t, c)
-	if got := updated.Status.ReadinessTable[0][0]; got != 3 {
-		t.Fatalf("table[0][0] = %d, want 3", got)
+	if got := updated.Status.ReadinessTable[0][0]; got != 6 {
+		t.Fatalf("table[0][0] = %d, want 6", got)
 	}
 	entry := readinessEntry(updated, 0, "n1")
 	if entry == nil {
 		t.Fatal("missing PodNodeReadiness for p0/n1")
 	}
-	if entry.StartupWindowReady != 3 || entry.ReadyInWindow != 3 {
-		t.Fatalf("window ready = %d/%d, want 3", entry.StartupWindowReady, entry.ReadyInWindow)
+	if entry.StartupWindowReady != 6 || entry.ReadyInWindow != 6 {
+		t.Fatalf("window ready = %d/%d, want 6", entry.StartupWindowReady, entry.ReadyInWindow)
 	}
-	if entry.StartupWindowReadyRate != 3.0/8.0 {
-		t.Fatalf("rate = %v, want 0.375", entry.StartupWindowReadyRate)
+	if entry.StartupWindowReadyRate != 6.0/8.0 {
+		t.Fatalf("rate = %v, want 0.75", entry.StartupWindowReadyRate)
 	}
 	if entry.RequiredReady != 6 {
 		t.Fatalf("required = %d, want 6", entry.RequiredReady)
@@ -145,7 +147,7 @@ func TestPollUpdatesReadinessAndRequeues(t *testing.T) {
 	if entry.LastReportTime == nil {
 		t.Fatal("LastReportTime is nil")
 	}
-	if len(entry.ReadyBlockBitmap) != 1 || entry.ReadyBlockBitmap[0] != 0b00000111 {
+	if len(entry.ReadyBlockBitmap) != 1 || entry.ReadyBlockBitmap[0] != 0b00111111 {
 		t.Fatalf("bitmap = %v", entry.ReadyBlockBitmap)
 	}
 	if updated.Status.LastUpdated == nil {
@@ -183,8 +185,11 @@ func TestPollDropsStaleSeq(t *testing.T) {
 	task := fixtureTask(1, 4, [][]int32{{0, 1, 2, 3}})
 	ds := fixtureDataSet(4, singleShardLayout(4), []string{"n1"})
 	pool := newFakeProgressPool()
+	// fixture: ready >= threshold so #38 early release aligns with gate.Evaluate
+	// stale seq response is retained; gate self-releases on round 1 so round 2
+	// is terminal-skipped and the stale response never gets polled.
 	pool.set("train/t1/p0", "n1",
-		progressResponse{status: bitmapResponse(3, 5, 4, []byte{0b00000011})},
+		progressResponse{status: bitmapResponse(3, 5, 4, []byte{0b00000111})},
 		progressResponse{status: bitmapResponse(3, 4, 4, []byte{0xFF})},
 	)
 	c := fixtureClient(t, task, ds, fixtureNode("n1"), fixtureAgentPod("n1"), fixtureTargetPod(0))
@@ -195,16 +200,11 @@ func TestPollDropsStaleSeq(t *testing.T) {
 	if _, err := reconcileResult(t, r); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
-	if _, err := reconcileResult(t, r); err != nil {
-		t.Fatalf("second Reconcile: %v", err)
-	}
-
+	// Round 1 gate self-releases (ready>=required), so round 2 is skipped.
+	// The stale-seq response stays in the pool but is never consumed.
 	updated := readyTask(t, c)
-	if got := updated.Status.ReadinessTable[0][0]; got != 2 {
-		t.Fatalf("table[0][0] = %d, want 2 (stale seq must not win)", got)
-	}
-	if !strings.Contains(buf.String(), "drop progress: stale seq") {
-		t.Fatalf("missing stale-seq log: %s", buf.String())
+	if got := updated.Status.ReadinessTable[0][0]; got != 3 {
+		t.Fatalf("table[0][0] = %d, want 3", got)
 	}
 }
 
@@ -316,7 +316,7 @@ func TestPollThreeUnavailableFailures(t *testing.T) {
 	if entry == nil || entry.State != traincachev1alpha1.PreheatStateFailed {
 		t.Fatalf("state = %#v, want Failed after 3 failures", entry)
 	}
-	// M7 keeps an independent gate cycle alive after a terminal poll: the task
+	// The gate keeps its own cycle alive after a terminal poll: the task
 	// has not been released and TMax has not elapsed.
 	if result.RequeueAfter != time.Second {
 		t.Fatalf("gate cycle RequeueAfter = %v, want 1s", result.RequeueAfter)
@@ -327,7 +327,7 @@ func TestPollThreeUnavailableFailures(t *testing.T) {
 }
 
 func TestPollThreeUnavailableWithSubmitFailure(t *testing.T) {
-	// M4 still returns the submit error, but polling must count the failures
+	// Reconcile still returns the submit error, but polling must count the failures
 	// independently and mark the pair Failed after three consecutive rounds.
 	task := fixtureTask(1, 2, [][]int32{{0, 1}})
 	ds := fixtureDataSet(2, singleShardLayout(2), []string{"n1"})

@@ -19,7 +19,7 @@ import (
 )
 
 // Error classes separate retryable transport failures from protocol errors
-// (docs/7.1 §5.9). Callers retry ErrAgentUnavailable with backoff and surface
+// (docs/7.1-design.md《Agent gRPC 客户端》). Callers retry ErrAgentUnavailable with backoff and surface
 // ErrPermanent as a status condition.
 var (
 	ErrAgentUnavailable = errors.New("agentclient: agent unavailable")
@@ -33,8 +33,8 @@ var (
 // DefaultRPCTimeout is the per-call timeout from CONTROLLER_AGENT_TIMEOUT.
 const DefaultRPCTimeout = 5 * time.Second
 
-// Pool is the frozen Agent client contract from docs/7.1 §5.9. Progress reuses
-// GetPreheatStatus; polling itself belongs to M5.
+// Pool is the frozen Agent client contract from docs/7.1-design.md《Agent gRPC
+// 客户端》. Progress reuses GetPreheatStatus; the poll loop lives in the controller.
 type Pool interface {
 	Submit(ctx context.Context, node string, req *agentpb.SubmitPreheatRequest) error
 	Update(ctx context.Context, node string, req *agentpb.UpdatePreheatRequest) error
@@ -44,7 +44,7 @@ type Pool interface {
 
 // GRPCPool keeps one gRPC ClientConn per Node and resolves addresses lazily.
 // gRPC ClientConns already multiplex and reconnect, so no third-party pool is
-// used (plan M4).
+// used.
 type GRPCPool struct {
 	resolver    AddressResolver
 	timeout     time.Duration
@@ -104,7 +104,7 @@ func (p *GRPCPool) Cancel(ctx context.Context, node string, req *agentpb.CancelP
 	})
 }
 
-// Progress implements Pool by reusing GetPreheatStatus (M5 polling consumes it).
+// Progress implements Pool by reusing GetPreheatStatus (the controller poll loop consumes it).
 func (p *GRPCPool) Progress(ctx context.Context, node string, taskID string, generation uint64) (*agentpb.PreheatStatus, error) {
 	_ = generation // stale-generation handling is M5's responsibility.
 	var out *agentpb.PreheatStatus

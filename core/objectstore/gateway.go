@@ -1,6 +1,6 @@
 package objectstore
 
-// gateway.go：S3 合并回源网关的错误契约与客户端支持（9.1 design §4.4）。
+// gateway.go：S3 合并回源网关的错误契约与客户端支持（design 9.1「失败判断标准」）。
 //
 // 网关与源站共用 S3 协议，但「网关这一跳坏了」必须与「源站坏了」区分开：前者
 // 503 + x-traincache-gateway: unavailable，Agent 可据同一次 Get 降级直连；后者
@@ -18,7 +18,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// 网关响应头与 XML 错误码（9.1 §4.2/§4.4；取值与 gateway 模块各写一份，D24）。
+// 网关响应头与 XML 错误码（design 9.1「错误响应」「失败判断标准」；取值与 gateway 模块各写一份，D3）。
 const (
 	// GatewayHeaderName 是网关自报「这一跳坏了」的响应头名。
 	GatewayHeaderName = "x-traincache-gateway"
@@ -73,17 +73,42 @@ func IsGatewayTimeout(err error) bool {
 
 // Options 是 S3Store 的可选构造参数。
 type Options struct {
-	// Transport 是底层 HTTP 传输层；nil 时使用 http.DefaultTransport。
+	// Transport 是底层 HTTP 传输层；nil 时使用 minio-go 的默认传输层。
 	Transport http.RoundTripper
 	// Region 固定 SigV4 签名区域（9.2 D17）。非空时 minio-go 不再请求
 	// GET /<bucket>?location=，网关只需处理 GET 与 HEAD 对象请求。
 	Region string
 	// MaxRetries 覆盖 SDK 的重试次数（>0 时生效；0 沿用 minio-go 全局默认）。
 	// 网关的 503 是控制信号（准入拒绝/降级触发），不允许 SDK 放大重试次数
-	// （9.1 §4.2/§6.5）。minio-go 的 Minio.Options.MaxRetries 只接受正数，
+	// （design 9.1「错误响应」「准入与公平调度」）。minio-go 的 Minio.Options.MaxRetries 只接受正数，
 	// 0 表示沿用全局默认 minio.MaxRetry；本仓库的 v7.3.0 中该值语义为
 	// 「总尝试次数」（1 = 不重试）。
 	MaxRetries int
+	// Compression 允许请求声明 gzip。默认 false：传输层设置
+	// DisableCompression，不发 Accept-Encoding，响应按原始字节读取。
+	// 开启后 Go 传输层自动解压，指纹仍对解压后的原始字节计算。
+	// 带 Range 头的请求不参与协商（Go 传输层的行为），区间字节不会错位。
+	Compression bool
+}
+
+// baseTransport 按 Compression 选择传输层的压缩行为。调用方传入
+// *http.Transport 时先 Clone 再改标志，不影响其它使用者；传入其它
+// RoundTripper 时原样返回，压缩口径由该实现自己决定。
+func baseTransport(opts Options, secure bool) (http.RoundTripper, error) {
+	if opts.Transport != nil {
+		if t, ok := opts.Transport.(*http.Transport); ok {
+			clone := t.Clone()
+			clone.DisableCompression = !opts.Compression
+			return clone, nil
+		}
+		return opts.Transport, nil
+	}
+	t, err := minio.DefaultTransport(secure)
+	if err != nil {
+		return nil, err
+	}
+	t.DisableCompression = !opts.Compression
+	return t, nil
 }
 
 // gatewayProbeKey 是每请求探针在 ctx 中的键（仅本包内部使用，不跨包）。
@@ -145,14 +170,14 @@ func newS3Store(endpoint, accessKey, secretKey, bucket string, secure bool, opts
 	if opts.MaxRetries > 0 {
 		minioOpts.MaxRetries = opts.MaxRetries
 	}
+	base, err := baseTransport(opts, secure)
+	if err != nil {
+		return nil, err
+	}
 	if probe {
-		base := opts.Transport
-		if base == nil {
-			base = http.DefaultTransport
-		}
 		minioOpts.Transport = &gatewayTransport{base: base}
-	} else if opts.Transport != nil {
-		minioOpts.Transport = opts.Transport
+	} else {
+		minioOpts.Transport = base
 	}
 	client, err := minio.New(endpoint, minioOpts)
 	if err != nil {
@@ -161,7 +186,7 @@ func newS3Store(endpoint, accessKey, secretKey, bucket string, secure bool, opts
 	return &S3Store{client: client, bucket: bucket, probe: probe}, nil
 }
 
-// classifyGetError 按 9.1 §4.4 的顺序分类 Get 三类出错点（GetObject/Stat/io.Copy）
+// classifyGetError 按 design 9.1「失败判断标准」的顺序分类 Get 三类出错点（GetObject/Stat/io.Copy）
 // 返回的错误。probe 为 nil 表示源站 Store，此时只在对象不存在时改写，其余原样返回。
 func classifyGetError(ctx context.Context, probe *gatewayProbe, err error) error {
 	// 1. 响应头命中 unavailable：即使响应体不是合法 S3 XML 也成立。

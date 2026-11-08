@@ -1,0 +1,19 @@
+# controller-manager Service. It publishes the metrics server, which also
+# serves GET /resolve?node=<node> for the CLI to look up an Agent address by
+# Node name (docs/7.1-design.md《地址解析端点》).
+apiVersion: v1
+kind: Service
+metadata:
+  name: traincache-controller-manager
+  namespace: traincache
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+    app.kubernetes.io/part-of: traincache
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: traincache-controller-manager
+  ports:
+    - name: metrics
+      port: 9412
+      targetPort: metrics

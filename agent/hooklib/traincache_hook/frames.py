@@ -1,4 +1,4 @@
-"""五帧构造：字段与 agent/svc/hooksock.go 的 hookFrame 逐字一致（docs/6.1-design.md §5.4）。
+"""五帧构造：字段与 agent/svc/hooksock.go 的 hookFrame 逐字一致（docs/6.1-design.md《钩子 socket 协议》）。
 
 单帧上限 4 KiB，超限由发送端丢弃并计数，不截断——截断的 JSON 在 Agent 侧同样算解析失败。
 """

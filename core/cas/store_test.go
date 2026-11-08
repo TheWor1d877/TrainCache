@@ -629,7 +629,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 	}
 	enc := h.Encode()
 
-	// 布局逐字段核对（design.md §6.3，全部小端）。
+	// 布局逐字段核对（design.md《本地块存储》，全部小端）。
 	if string(enc[0:4]) != Magic {
 		t.Fatalf("magic = %q，期望 %q", enc[0:4], Magic)
 	}
@@ -746,7 +746,7 @@ func TestFingerprintHex(t *testing.T) {
 	}
 }
 
-// TestList 覆盖 D20：枚举 blocks/ 下全部块指纹（升序、忽略临时文件与非法文件名）。
+// TestList 覆盖 List 契约：枚举 blocks/ 下全部块指纹（升序、忽略临时文件与非法文件名）。
 func TestList(t *testing.T) {
 	s, blocksDir := newTestStore(t, VerifyXXH3)
 

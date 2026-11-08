@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh — TrainCache M11 kind end-to-end: DataSet + WarmupTask -> preheat ->
+# run.sh — TrainCache kind end-to-end: DataSet + WarmupTask -> preheat ->
 # gate release -> scheduler scoring.
 #
 # Usage:
@@ -539,7 +539,7 @@ assert_preheat_and_release() {
   [[ "$phase" == "Released" ]] && ok "WarmupTask phase=Released" || fail "WarmupTask phase=$phase"
   [[ "$gate_state" == "Released" ]] && ok "gateDecision.state=Released ($(kubectl -n "$TENANT" get warmuptask "$TASK" -o jsonpath='{.status.gateDecision.reason}'))" \
     || fail "gateDecision.state=$gate_state"
-  # docs/7.1 §6.1: rows expand per (Pod, 预热节点) pair, so the count is bounded by
+  # docs/7.1-design.md《CRD 状态布局》: rows expand per (Pod, 预热节点) pair, so the count is bounded by
   # podCount × preheatFanout rather than equal to podCount. A Pod that claimed no
   # Node appears only as a NodeName-empty summary row, which is the starvation
   # signal GWAA's MinUnmet reports.
@@ -583,7 +583,7 @@ assert_pod_scores() {
   info "score annotation key: $SCORE_ANNOTATION"
   local p ann index want_nodes got_nodes
   # 控制器把每个 Pod 的节点分数表写进它自己的注解，并与摘 gate 同一次 patch
-  # （docs/7.1 §6.2/D49）。条目集合必须等于该 Pod 在 podNodeReadiness 里真实
+  # （docs/7.1-design.md《Pod 分数注解》、docs/7.2 D49）。条目集合必须等于该 Pod 在 podNodeReadiness 里真实
   # 配过对的节点。
   for p in $(kubectl -n "$TENANT" get pods -l job-name="$JOB" -o name); do
     ann="$(kubectl -n "$TENANT" get "$p" -o json | jq -r --arg k "$SCORE_ANNOTATION" '.metadata.annotations[$k] // empty')"

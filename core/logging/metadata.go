@@ -2,7 +2,7 @@ package logging
 
 import "context"
 
-// gRPC metadata 关联键（docs/8.1 §5 第 4 跳）。Controller 客户端注入，Agent
+// gRPC metadata 关联键（docs/8.1-design.md 的「跨进程关联」一节）。Controller 客户端注入，Agent
 // 拦截器解析后写进 context logger。键名是运维契约，只能加不能改。
 const (
 	MetadataKeyRequestID  = "x-traincache-request-id"

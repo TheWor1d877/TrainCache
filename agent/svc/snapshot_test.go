@@ -1,6 +1,6 @@
 package svc
 
-// 本文件是 ListSnapshot 的用例(§5.6 CLI --chunks 名字解析;D29):直接调 Server 方法
+// 本文件是 ListSnapshot 的用例(设计《CLI》 CLI --chunks 名字解析):直接调 Server 方法
 // (bufconn 链路已由 server_test 覆盖),装置用 svcFixture(Mock 源站 + 临时 CAS)。
 
 import (

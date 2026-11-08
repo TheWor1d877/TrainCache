@@ -15,8 +15,8 @@ import (
 	"traincache/agent/ordersource"
 )
 
-// heatmap_test.go:热度衰减(§5.5/D24)、heatmap.json 原子 dump 与启动恢复(§6.4),以及
-// inotify 兜底监听的真机端到端(§5.5"inotify 旁路监听缓存目录打开事件")。
+// heatmap_test.go:热度衰减(设计《热度与命中率》/D24)、heatmap.json 原子 dump 与启动恢复(设计《数据格式》),以及
+// inotify 兜底监听的真机端到端(设计《热度与命中率》"inotify 旁路监听缓存目录打开事件")。
 
 // TestDecayFactorAndAge:周期衰减 h × factor;超过 HeatDecayAge 未 touch 直接置 0。
 func TestDecayFactorAndAge(t *testing.T) {
@@ -74,7 +74,7 @@ func TestDecayLoopWiring(t *testing.T) {
 	})
 }
 
-// TestDumpLoadRoundTrip:dump 原子落盘、JSON 格式(§6.4)与启动恢复(Load 还原热度/计数/t_touch)。
+// TestDumpLoadRoundTrip:dump 原子落盘、JSON 格式(设计《数据格式》)与启动恢复(Load 还原热度/计数/t_touch)。
 func TestDumpLoadRoundTrip(t *testing.T) {
 	env := newTestEnv(t, CollectorConfig{})
 	fp1, fp2 := testFP(0xc1), testFP(0xc2)
@@ -257,7 +257,7 @@ func TestWatchBlocksCountsOpenEvent(t *testing.T) {
 }
 
 // TestWatchBlocksNewShardDir:Start 之后新建的分片子目录由其 CREATE 事件补挂 watch,
-// 随后的打开事件被捕获(§5.5 inotify 兜底动态增删 watch)。
+// 随后的打开事件被捕获(设计《热度与命中率》 inotify 兜底动态增删 watch)。
 func TestWatchBlocksNewShardDir(t *testing.T) {
 	env := newTestEnv(t, CollectorConfig{})
 	env.start()

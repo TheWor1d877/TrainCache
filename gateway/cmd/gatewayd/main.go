@@ -1,5 +1,5 @@
 // Command traincache-gatewayd 是 S3 合并回源网关的进程入口
-// （design 9.1 §6.6/§7）。启动序：日志 → 配置 → 源站客户端 → server → 监听 →
+// （design 9.1「部署与更新」「日志与可观测性」）。启动序：日志 → 配置 → 源站客户端 → server → 监听 →
 // ready；收到 SIGINT/SIGTERM 后先关 ready，再排水，最后退出。
 package main
 
@@ -26,9 +26,9 @@ import (
 )
 
 const (
-	// debugAddr 是 /debug/loglevel 的固定回环地址（design 9.1 §7.1；不走 env）。
+	// debugAddr 是 /debug/loglevel 的固定回环地址（design 9.1「日志与可观测性」；不走 env）。
 	debugAddr = "127.0.0.1:6060"
-	// shutdownTimeout 是排水上限（design 9.1 §6.6；terminationGracePeriodSeconds=40）。
+	// shutdownTimeout 是排水上限（design 9.1「部署与更新」；terminationGracePeriodSeconds=40）。
 	shutdownTimeout = 30 * time.Second
 	// readHeaderTimeout 防止慢速请求头占住连接。
 	readHeaderTimeout = 5 * time.Second
@@ -39,7 +39,7 @@ var version = "dev"
 
 func main() {
 	// 日志先于配置初始化：配置错误也要以同一套 JSON 结构输出。
-	// 未知级别在 logging.New 内退化为 info（design 9.1 §5.3）。
+	// 未知级别在 logging.New 内退化为 info（design 9.1「配置」）。
 	logging.New("gateway", version, os.Getenv("TRAINCACHE_LOG_LEVEL"))
 
 	cfg, err := config.Load()
@@ -49,7 +49,7 @@ func main() {
 	}
 
 	org, err := origin.New(cfg.ObjstoreEndpoint, cfg.ObjstoreAccessKey, cfg.ObjstoreSecretKey,
-		cfg.Bucket, cfg.ObjstoreSecure)
+		cfg.Bucket, cfg.ObjstoreSecure, cfg.ObjstoreCompression)
 	if err != nil {
 		slog.Error("构造源站客户端失败", "origin", cfg.ObjstoreEndpoint, "err", err)
 		os.Exit(1)
@@ -61,7 +61,7 @@ func main() {
 	defer summary.Stop()
 
 	// 缓存开关关闭时不构造 Store、不扫描盘：关闭态走改动前的代码路径
-	// （design 9.1 §6.6；9.2 D29）。
+	// （design 9.1「缓存开关与取数顺序」；9.2 D29）。
 	var store *cache.Store
 	if cfg.Cache {
 		store = cache.New(cache.RootDir, cfg.CacheDatasetBytes, cfg.CacheTotalBytes)
@@ -79,7 +79,7 @@ func main() {
 	}, slog.Default())
 
 	// 扫描填 last-touch 表并重建驻写字节账；扫描失败只记 Warn，不阻塞启动
-	// （design 9.1 §6.6）。
+	// （design 9.1「盘上布局与配额淘汰」）。
 	if store != nil {
 		if err := store.Scan(context.Background()); err != nil {
 			slog.Warn("扫描缓存目录失败", "dir", cache.RootDir, "err", err)
@@ -103,7 +103,7 @@ func main() {
 	// 动态级别只绑回环，不进 Service；监听失败不影响网关本体。
 	go corelog.ServeLevel(ctx, debugAddr, "gateway", slog.Default())
 
-	// 监听成功后才 ready，探针不依赖源站（design 9.1 §6.6）。
+	// 监听成功后才 ready，探针不依赖源站（design 9.1「部署与更新」）。
 	srv.SetReady(true)
 	slog.Info("traincache-gatewayd 启动",
 		"listen", cfg.Listen,

@@ -1,6 +1,6 @@
 package svc
 
-// follow.go:R1 前缀感知快照跟随、R2 读者声明的装配侧接线(6.1 §5.9/§5.10)。
+// follow.go:R1 前缀感知快照跟随、R2 读者声明的装配侧接线(设计《快照与回收》)。
 // 冻结语义:每个 dataset 一个 Catalog.Follow(周期 = Config.IndexRefreshInterval),
 // prefixes 取该 dataset 最近订单的路径;快照切换经 OnSnapshotChange 立即声明,
 // 单轮失败经 OnSnapshotError 计错误并保持旧映射(由 core 保证)。
@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	// snapshotDeclareTimeout 是 OnSnapshotChange 触发 Declare 的上限(6.1 §5.10)。
+	// snapshotDeclareTimeout 是 OnSnapshotChange 触发 Declare 的上限(设计《快照与回收》)。
 	snapshotDeclareTimeout = 5 * time.Second
-	// snapshotWithdrawTimeout 是进程退出时 Withdraw 的上限(6.1 §5.10)。
+	// snapshotWithdrawTimeout 是进程退出时 Withdraw 的上限(设计《快照与回收》)。
 	snapshotWithdrawTimeout = 5 * time.Second
-	// conditionalWriteProbeTimeout 是装配期条件写探测上限(6.1 §5.12)。
+	// conditionalWriteProbeTimeout 是装配期条件写探测上限(设计《快照与回收》)。
 	conditionalWriteProbeTimeout = 5 * time.Second
 	// heartbeatMinInterval 是读者心跳间隔下限(IndexRefreshInterval/2 至少 1s)。
 	heartbeatMinInterval = time.Second
@@ -153,7 +153,7 @@ func (a *Agent) snapshotSources() []datasetSnapshot {
 }
 
 // StartBackground 启动 Agent 的后台循环:采集层(inotify/热度,D63 起无 ring 也启动)、
-// 快照跟随(R1)、读者心跳(R2)与本地副本清扫(§11.5);必须在 agentd 的 signal ctx 下
+// 快照跟随(R1)、读者心跳(R2)与本地副本清扫(docs/5.1-design.md《回收》);必须在 agentd 的 signal ctx 下
 // 调用。ctx 取消时停止后台循环,并对已知 dataset best-effort Withdraw。
 func (a *Agent) StartBackground(ctx context.Context) {
 	if a.Collector != nil {

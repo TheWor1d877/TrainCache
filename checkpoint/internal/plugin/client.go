@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// 默认超时来自 design 10.1 §4.1：握手 10 秒，连续 5 分钟无进展判僵死。
+// 默认超时来自 design 10.1「插件进程契约」：握手 10 秒，连续 5 分钟无进展判僵死。
 const (
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultLivenessTimeout  = 5 * time.Minute
@@ -108,7 +108,7 @@ type pendingCall struct {
 }
 
 // Client 是 checkpointd 侧的插件子进程与连接。一个 Client 同时只跑一个
-// 请求：协议本身按 id 关联结果，但 design 10.1 §4.4 要求同 rank 串行，
+// 请求：协议本身按 id 关联结果，但 design 10.1「关键流程」要求同 rank 串行，
 // 这里提前拒绝并发调用，免得插件侧还要排队。
 type Client struct {
 	opts Options
@@ -256,7 +256,7 @@ func (c *Client) abort(err error) (*Client, error) {
 }
 
 // waitProcess 回收子进程。退出码只用于诊断，成败以 result 为准
-// （design 10.1 §4.1），因此这里不向业务侧传播退出码。
+// （design 10.1「插件进程契约」），因此这里不向业务侧传播退出码。
 func (c *Client) waitProcess() {
 	err := c.cmd.Wait()
 	if err != nil {
@@ -381,7 +381,7 @@ func (c *Client) finishCall(method string, p *pendingCall, out any) error {
 }
 
 // readLoop 串行处理服务端发来的 progress 与 result。读失败或 EOF 时若
-// 仍有在途请求，按 design 10.1 §4.1 转成 INTERNAL，而不是让调用方等超时。
+// 仍有在途请求，按 design 10.1「插件进程契约」转成 INTERNAL，而不是让调用方等超时。
 func (c *Client) readLoop() {
 	defer close(c.readDone)
 	for {
@@ -462,7 +462,7 @@ func (c *Client) writeFrame(v any) error {
 	return nil
 }
 
-// Close 按 design 10.1 §4.1 收尾：有在途请求先发 cancel 并最多等 5 秒，
+// Close 按 design 10.1「插件进程契约」收尾：有在途请求先发 cancel 并最多等 5 秒，
 // 没有则直接断开让插件走 EOF；超时杀进程，最后关连接、监听并删 socket。
 func (c *Client) Close() error {
 	var closeErr error

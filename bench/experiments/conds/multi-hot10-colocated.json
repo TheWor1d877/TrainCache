@@ -1,0 +1,53 @@
+{
+  "schema_version": "4",
+  "name": "multi-hot10-colocated",
+  "family": "multiconsumer",
+  "group": "traincache-cold",
+  "load": "tilt",
+  "dataset": {
+    "name": "dataset-4gib",
+    "shards": 16,
+    "shard_size_bytes": 268435456,
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "shuffle": "per-epoch",
+    "readers": 2,
+    "access_pattern": "replicated"
+  },
+  "network": {
+    "rate_mbit": 1000
+  },
+  "cache": {
+    "enabled": true,
+    "rho": 4.0,
+    "evict_policy": "heat",
+    "warmup_seconds": 0
+  },
+  "sampling": {
+    "reps": 3
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "gateway_cache": false,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7"
+  },
+  "tags": [
+    "multiconsumer",
+    "hot=0.10",
+    "placement=colocated",
+    "anti-affinity=0"
+  ],
+  "notes": "multiconsumer 族格子；hot_ratio=0.10，placement=同节点 2 读端（TRAINCACHE_ANTI_AFFINITY=0），rho=4，rate=1000，readers=2；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
+  "prefetch": {
+    "lookahead": 16,
+    "fanout": 2
+  },
+  "trace": {
+    "file": "traces/track-16-per-epoch-ep3.json",
+    "sha256": "feae8a4700aaed509fe7489c08e7c8a728be6c688ba1355adf21681e2dfdef9b",
+    "seed": 20261006
+  }
+}

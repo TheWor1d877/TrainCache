@@ -16,8 +16,9 @@ import (
 
 // fakeOrigin 是本地假源站；未设置的函数返回错误，避免用例意外访问网络。
 type fakeOrigin struct {
-	statFn func(context.Context, string) (origin.ObjectInfo, error)
-	openFn func(context.Context, string) (io.ReadCloser, error)
+	statFn      func(context.Context, string) (origin.ObjectInfo, error)
+	openFn      func(context.Context, string) (io.ReadCloser, error)
+	openRangeFn func(context.Context, string, int64, int64) (*origin.Object, error)
 	// openInfo 是 Open 之后 Stat 返回的元数据；合并路径会用它回填响应头。
 	openInfo origin.ObjectInfo
 }
@@ -38,6 +39,13 @@ func (f *fakeOrigin) Open(ctx context.Context, key string) (*origin.Object, erro
 		return nil, err
 	}
 	return origin.NewObject(rc, f.openInfo), nil
+}
+
+func (f *fakeOrigin) OpenRange(ctx context.Context, key string, start, end int64) (*origin.Object, error) {
+	if f.openRangeFn == nil {
+		return nil, errors.New("fake origin: OpenRange 未设置")
+	}
+	return f.openRangeFn(ctx, key, start, end)
 }
 
 // newTestServer 构造使用内存日志的网关服务。

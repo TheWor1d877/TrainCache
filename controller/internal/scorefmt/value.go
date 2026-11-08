@@ -1,5 +1,5 @@
 // Package scorefmt encodes and decodes the Pod score annotation value
-// (docs/7.1-design.md §6.2, D49).
+// (docs/7.1-design.md《Pod 分数注解》, docs/7.2 D49).
 //
 // The annotation lives on the training Pod itself and is written in the same
 // patch that removes its scheduling gate, so the scheduler reads the snapshot
@@ -30,7 +30,7 @@ const (
 
 // Value is the JSON payload stored in the Pod score annotation.
 //
-// The wire format is frozen by docs/7.1-design.md §6.2:
+// The wire format is frozen by docs/7.1-design.md《Pod 分数注解》:
 //
 //	{"v":1,"task":"default/train-1","g":12,"t":"2026-10-20T08:00:00Z","s":{"node-a":87}}
 //
@@ -47,7 +47,7 @@ type Value struct {
 
 // EncodeValue validates v and returns its single-line UTF-8 JSON encoding with
 // no trailing newline. Timestamps are normalized to UTC so controller and
-// scheduler always observe the RFC3339 UTC form from §6.2.
+// scheduler always observe the RFC3339 UTC form from the《Pod 分数注解》contract.
 func EncodeValue(v Value) (string, error) {
 	if err := v.validate(); err != nil {
 		return "", fmt.Errorf("scorefmt: encode value: %w", err)

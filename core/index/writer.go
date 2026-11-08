@@ -31,9 +31,9 @@ func NewWriter(store objectstore.Store, cs *cas.Store, cfg Config) *Writer {
 // Chunk == -1 删该 path 的全部块（D33）。
 //
 // 删除不产生 tombstone、不原地修改任何对象：commitOnce 本就把全量现存条目重新物化为
-// 新快照，"删除"只是"新快照里没带上它"（design.md §11.4 第 1 点）。dels 中的重复描述
+// 新快照，"删除"只是"新快照里没带上它"（design.md《提交》的删除语义）。dels 中的重复描述
 // （含同一 path 的 -1 与指定块并存）合法且坍缩为同一结果；指向不存在条目的描述是幂等
-// no-op（§11.4 第 2 点）。
+// no-op（design.md《提交》的删除语义）。
 type Delete struct {
 	Path  string
 	Chunk int64
@@ -57,7 +57,7 @@ func (w *Writer) Commit(ctx context.Context, dataset string, entries []Entry) (s
 
 // CommitChanges 是 Commit 的扩展形态：puts 与 dels 可同时出现（改名 = put 新 + delete 旧）。
 // 合并规则：new = filter(old, dels) ∪ puts，同 (path, chunk) 冲突时 puts 赢（D33、
-// design.md §11.4 第 3 点）——dels 只过滤现有条目，随后叠加的 puts 始终生效。
+// design.md《提交》的合并规则）——dels 只过滤现有条目，随后叠加的 puts 始终生效。
 //
 // 其余流程（排序、切分、未变更分片物理复用、验证、PutIfMatch、冲突重试）与 Commit 逐字
 // 一致，同样受 CommitMaxAttempts 的冲突重试上限约束。
@@ -254,7 +254,7 @@ func (w *Writer) commitOnce(ctx context.Context, dataset string, puts []Entry, d
 	}
 	manifestFP8 := fp8(manifestBytes)
 
-	// 6) 提交前四步验证（design.md §7.1 第 4 点）：
+	// 6) 提交前四步验证（design.md《提交》的第 6 步）：
 	//    ① 新 manifest 已上传成功（读回内容指纹一致）；
 	//    ② manifest 引用的所有分片可下载且内容指纹一致；
 	//    ③ 分片条目数与其上限相符；

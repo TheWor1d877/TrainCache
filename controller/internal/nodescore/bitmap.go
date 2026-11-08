@@ -1,6 +1,6 @@
 // Package nodescore holds the pure readiness/score helpers used by the warmup
-// controller (docs/7.1-design.md §7.3). Bitmap decoding is M5; the decay score
-// implementation is M8.
+// controller (docs/7.1-design.md《进度拉取与就绪表》). Bitmap decoding lives here;
+// the decay score implementation is in score.go.
 package nodescore
 
 import (
@@ -11,7 +11,7 @@ import (
 
 // ErrBitmapLength reports a ready_bitmap whose length does not match
 // ceil(requested/8). Polling treats it as a parse failure and leaves the
-// readiness table untouched (plan M5 criterion ②).
+// readiness table untouched (criterion ②).
 var ErrBitmapLength = errors.New("nodescore: ready bitmap length mismatch")
 
 // Readiness is the decoded view of one Agent ready_bitmap.

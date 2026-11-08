@@ -6,18 +6,17 @@ fluid-warm / traincache-cold / traincache-warm)共用一份 trace.json,保证消
 (分片顺序、seed、每步样本数)逐位一致,否则 makespan 与 stall 不可比。
 
 轨迹语义与 bench/scripts/bench_track_d.py 的 epoch_perm()/stage_of() 逐字对齐
-(docs/4.4 §4.1、§C2.4):
+(docs/4.2 的阶段切换族与 COND 契约两节):
   * fixed:     所有 epoch 用同一个 seed 生成的分片置换;
   * per-epoch: 每个 epoch 用 seed+epoch 生成置换(默认);
   * curriculum:全局置换 P=Random(seed).permutation(n),stage 取嵌套前缀
                P[:ceil(n*fraction)],stage 内顺序固定;stage 归属按 equal-thirds。
 
-口径(docs/4.4 §1.8、docs/4.1 §1,与 run_bench.py 和 D 轨统一):
-  * 数据量: 2GiB 级、8MiB 块(D20)、steps_per_epoch=400、batch=32;
-  * B 轨 MinIO 分片 ~256MiB/份、images_per_tar=1600 → 每 epoch 恰 400×32/1600=8
-    次整片读取,即 S 档(n_tars=8)每 epoch 恰好一轮全量消费;
-  * 容量档位(D19)只改 n_tars:S=8(2GiB)、M=32(8GiB)、L=128(32GiB),
-    缓存侧固定 1GiB;其余参数(seed/batch/steps/images_per_tar)三档一致。
+口径(docs/4.1 的变量空间 ρ 与一次读的分区与计量两节,与 run_bench.py 统一):
+  * 数据集 16 × 256 MiB = 4 GiB、8 MiB 块、steps_per_epoch=400、batch=32;
+  * images_per_tar=1600 → 每 epoch 恰 400×32/1600=8 次整片读取,16 片在
+    3 个 epoch 里各被消费一遍半;
+  * 缓存容量由 ρ 决定,轨迹不随 ρ 变。
 
 输出 trace.json 结构:
 {
@@ -37,11 +36,10 @@ fluid-warm / traincache-cold / traincache-warm)共用一份 trace.json,保证消
 }
 
 用法:
-  python3 bench/compare/trace.py --n-tars 8 --seed 20261015 \
+  python3 bench/compare/trace.py --n-tars 16 --seed 20261006 \
       --shuffle per-epoch --epochs 3 --batch 32 --steps-per-epoch 400 \
       --images-per-tar 1600 \
-      --out bench/experiments/traces/track-compare-d-s8-per-epoch.json
-  # M 档:--n-tars 32;L 档:--n-tars 128(其余参数不变)
+      --out bench/experiments/traces/track-16-per-epoch-ep3.json
   python3 bench/compare/trace.py --selftest
 
   # 批量生成参考轨迹套件(COND 的 trace.file 指向这些文件):
@@ -60,25 +58,13 @@ from pathlib import Path
 CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)
 SCHEMA_VERSION = "1"
 
-# ---- 参考轨迹套件(T1)----
-# COND 的 trace.file 指向这里生成的文件;每份的 sha256 由 trace_sha256 现场算,
-# 不在仓库里硬编码。参数口径:
-#   * n_tars 按容量档位(D19):S=8 / M=32 / L=128,分片 256MiB;
-#   * seed 20261015(D/B 轨对照,run_bench.py TRACE_SEED)、20261006(C 轨,bench/config.py SEED);
-#   * shuffle=per-epoch、batch=32、steps_per_epoch=400、images_per_tar=1600 三档一致;
-#   * epochs:对照 S 档 3(B 轨对照 M/L 档 1)、C 轨 3。
+# ---- 参考轨迹 ----
+# COND 的 trace.file 指向这里生成的文件;sha256 由 trace_sha256 现场算,
+# 不在仓库里硬编码。装置只有一份数据集(16 × 256 MiB),轨迹也只有一份:
+# n_tars=16、seed 20261006、per-epoch、3 epoch、batch 32、steps 400。
 TRACE_SUITE = (
-    ("track-compare-d-s8-per-epoch.json",
-     dict(n_tars=8, seed=20261015, shuffle="per-epoch", epochs=3,
-          batch=32, steps_per_epoch=400, images_per_tar=1600)),
-    ("track-compare-b-m32-per-epoch.json",
-     dict(n_tars=32, seed=20261015, shuffle="per-epoch", epochs=1,
-          batch=32, steps_per_epoch=400, images_per_tar=1600)),
-    ("track-compare-b-l128-per-epoch.json",
-     dict(n_tars=128, seed=20261015, shuffle="per-epoch", epochs=1,
-          batch=32, steps_per_epoch=400, images_per_tar=1600)),
-    ("track-c-32shard-per-epoch.json",
-     dict(n_tars=32, seed=20261006, shuffle="per-epoch", epochs=3,
+    ("track-16-per-epoch-ep3.json",
+     dict(n_tars=16, seed=20261006, shuffle="per-epoch", epochs=3,
           batch=32, steps_per_epoch=400, images_per_tar=1600)),
 )
 
@@ -174,7 +160,7 @@ def write_trace(trace: dict, out_path: Path) -> str:
 def emit_suite(out_dir: Path | None = None) -> list[tuple[str, str]]:
     """批量生成整套参考轨迹,返回 [(文件名, sha256)]。
 
-    轨迹清单见 TRACE_SUITE:对照 S/M/L 三档 + C 轨各一份。
+    轨迹清单见 TRACE_SUITE:数据集一份。
     同一参数生成的文件逐字一致,故 COND 的 trace.sha256 可由本函数复算。
     """
     target_dir = Path(out_dir) if out_dir is not None else DEFAULT_SUITE_DIR
@@ -240,7 +226,7 @@ def selftest() -> None:
     assert len(t4["per_epoch"][0]["shard_perm"]) == 16
 
     # 7. 套件清单自洽:每项参数可生成、hash 稳定且为 64 位小写 hex
-    assert len(TRACE_SUITE) == 4, TRACE_SUITE
+    assert len(TRACE_SUITE) == 1, TRACE_SUITE
     for filename, params in TRACE_SUITE:
         t5 = build_trace(**params)
         sha = trace_sha256(t5)
@@ -253,9 +239,9 @@ def selftest() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="对照组统一请求轨迹生成器(同一 track+档位的七组态共用一份 trace.json)")
-    ap.add_argument("--n-tars", type=int, default=8,
-                    help="分片总数(默认 8=S 档 2GiB;M 档 32、L 档 128,6.13/D19)")
+        description="请求轨迹生成器(同一格子的七个组态共用一份 trace.json)")
+    ap.add_argument("--n-tars", type=int, default=16,
+                    help="分片总数(默认 16,即 4 GiB 主数据集)")
     ap.add_argument("--seed", type=int, default=20261015, help="轨迹种子(默认 20261015)")
     ap.add_argument("--shuffle", choices=("fixed", "per-epoch", "curriculum"),
                     default="per-epoch", help="消费顺序形态(默认 per-epoch)")

@@ -1,4 +1,4 @@
-// Package digest 封装 xxh3-128 与 sha256 摘要（design.md §5.5，decisions.md D10）。
+// Package digest 封装 xxh3-128 与 sha256 摘要（design.md《包与依赖方向》，decisions.md D10）。
 //
 // 一次性与流式接口输出一致：XXH3_128 与 NewXXH3 的 Sum 使用同一编码
 // （zeebo/xxh3 的 Sum128().Bytes()，大端规范形式）。

@@ -22,6 +22,10 @@
 #      gatewayEndpoint(开网关指向 traincache-gateway.<NS>.svc:9413,关网关置空)
 #      与本轮的 PREFETCH_LOOKAHEAD/EVICT_POLICY(apply 会盖回清单默认,所以在 apply 之后对齐);
 #      只有取值真的变化才 patch 并重启一次 agentd
+#   8b. gate 网络带宽上限(TRAINCACHE_GATE_NETWORK_BANDWIDTH):patch
+#      traincache-config 的 gateNetworkBandwidthBytes,再重启
+#      deployment/traincache-controller-manager(configMapKeyRef 不热生效)。
+#      缺省 0 = 不启用带宽判断。见 ensure_gate_bandwidth
 #   9. 五个工作负载 rollout 就绪(开网关时含网关),打印 Ready 数与 Pod UID
 #
 # 幂等:清单哈希记在 namespace 注解 traincache.io/deploy-hash。哈希未变且
@@ -46,6 +50,27 @@ MAX_FILL_FRACTION="0.125"
 # 这两项就停在清单默认,不额外触发滚动重启。
 PREFETCH_LOOKAHEAD="${TRAINCACHE_PREFETCH_LOOKAHEAD:-16}"
 EVICT_POLICY="${TRAINCACHE_EVICT_POLICY:-heat}"
+# Range 并行开关:每个块是否拆成 4 条 Range GET 并行取。取值来自环境变量,
+# 与 controller/deploy/agent/configmap.yaml 的默认值一致;独立调用时停在清单默认,
+# 不额外触发滚动重启。
+FETCH_RANGE_PARALLEL="${TRAINCACHE_FETCH_RANGE_PARALLEL:-true}"
+case "$FETCH_RANGE_PARALLEL" in
+  true|false) ;;
+  *)
+    log_group "$GROUP" "错误: TRAINCACHE_FETCH_RANGE_PARALLEL='$FETCH_RANGE_PARALLEL' 非法(只接受 true 或 false)" >&2
+    exit 1
+    ;;
+esac
+# gate 网络带宽上限(bytes/sec):门控把 Agent 上报吞吐与该值的 0.8 倍比较,接近
+# 上限即认为带宽够快、跳过门控。取值来自环境变量,bench 侧不写死集群专有数值;
+# 缺省 0 = 不启用带宽判断,门控行为与加这一项之前一致。
+GATE_NETWORK_BANDWIDTH="${TRAINCACHE_GATE_NETWORK_BANDWIDTH:-0}"
+case "$GATE_NETWORK_BANDWIDTH" in
+  ''|*[!0-9]*)
+    log_group "$GROUP" "错误: TRAINCACHE_GATE_NETWORK_BANDWIDTH='$GATE_NETWORK_BANDWIDTH' 非法(要非负整数字节/秒)" >&2
+    exit 1
+    ;;
+esac
 CLUSTER_NAME="${CLUSTER_NAME:-$(cfg CLUSTER_NAME)}"
 CLUSTER_NAME="${CLUSTER_NAME:-traincache}"
 WEBHOOK_CA_B64=""
@@ -325,14 +350,42 @@ workloads_present() {
     && kubectl -n "$NS" get deployment traincache-gateway >/dev/null 2>&1
 }
 
+# 集群里五个工作负载的镜像引用,与清单渲染结果比对。清单哈希只覆盖仓库文件,
+# 集群里的对象被别处改过(例如 e2e 脚本 set image)时哈希不变,残留就纠正不掉,
+# 后续任何一次滚动更新都会拉不到镜像。这一项把这种残留判出来。
+live_images() {
+  {
+    kubectl -n "$NS" get deployment traincache-controller-manager \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n "$NS" get deployment traincache-webhook \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n kube-system get deployment traincache-scheduler \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n "$NS" get daemonset traincache-agentd \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+    kubectl -n "$NS" get deployment traincache-gateway \
+      -o jsonpath='{.spec.template.spec.containers[*].image}' 2>/dev/null; echo
+  } | tr ' ' '\n' | grep -v '^$' | sort -u
+}
+
+images_match_manifest() {
+  local want have
+  want="$(rendered_images | sort -u)"
+  have="$(live_images)"
+  [ -n "$want" ] && [ "$want" = "$have" ]
+}
+
 ensure_control_plane() {
   local want cur
   want="$(deploy_hash)"
   cur="$(kubectl -n "$NS" get namespace "$NS" \
     -o jsonpath='{.metadata.annotations.traincache\.io/deploy-hash}' 2>/dev/null || true)"
-  if [ "$want" = "$cur" ] && workloads_present; then
+  if [ "$want" = "$cur" ] && workloads_present && images_match_manifest; then
     log_group "$GROUP" "控制面清单未变化且五个工作负载都在,跳过 apply(hash=${want:0:12})"
     return 0
+  fi
+  if [ "$want" = "$cur" ] && ! images_match_manifest; then
+    log_group "$GROUP" "集群里的镜像引用与清单不一致(清单哈希未变,对象被别处改过),重新 apply"
   fi
   log_group "$GROUP" "应用控制面清单 kubectl apply -k controller/deploy"
   kubectl apply -k "$DEPLOY_DIR" >/dev/null
@@ -397,16 +450,38 @@ ensure_gateway_cache() {
   fi
 }
 
+# ---- gate 网络带宽上限:patch traincache-config 的 gateNetworkBandwidthBytes ----
+# configMapKeyRef 不热生效:改完必须重启 controller-manager Deployment 才吃到新值。
+# 值没变就不 patch 也不重启(与 agentd 配置同一口径,重复调用不滚 Pod)。
+ensure_gate_bandwidth() {
+  local cur
+  cur="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gateNetworkBandwidthBytes}' 2>/dev/null || true)"
+  if [ "$cur" = "$GATE_NETWORK_BANDWIDTH" ]; then
+    log_group "$GROUP" "gate 网络带宽上限已是 gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH,不改值不重启"
+    return 0
+  fi
+  kubectl -n "$NS" patch configmap traincache-config --type merge \
+    -p "{\"data\":{\"gateNetworkBandwidthBytes\":\"$GATE_NETWORK_BANDWIDTH\"}}" >/dev/null
+  log_group "$GROUP" "gate 网络带宽上限已 patch: gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH"
+  kubectl -n "$NS" rollout restart deployment/traincache-controller-manager >/dev/null
+  if ! kubectl -n "$NS" rollout status deployment/traincache-controller-manager --timeout=240s >/dev/null 2>&1; then
+    log_group "$GROUP" "错误: controller-manager 滚动更新未在 240s 内就绪(gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH)" >&2
+    kubectl -n "$NS" get pods -l app.kubernetes.io/name=traincache-controller-manager -o wide >&2 || true
+    return 1
+  fi
+  log_group "$GROUP" "controller-manager 已重启,带宽上限生效(gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH)"
+}
+
 # ---- 5. agentd 配置(白名单/桶/容量/自动 K 参数/网关端点/预取提前量/淘汰策略)----
 # 这六处取值全部在 traincache-config ConfigMap:DaemonSet 只写 configMapKeyRef
 # 引用,改值不再动工作负载清单。桶以前由 `kubectl set env` 直接覆盖 DaemonSet 的
 # 显式 env,那份覆盖会在下次 `kubectl apply -k` 时被仓库清单盖回去。
 # 同一件事也发生在 ConfigMap 上:apply -k 会把整份 data 回到清单里的默认值,所以
 # run_bench.py 起跑前写的 prefetchLookahead/evictPolicy 会被 up.sh 盖掉。这里在
-# apply 之后按环境变量再对齐一次,COND 的自变量才留得住(4.4 §5.3 的淘汰矩阵、
-# §5.2 的 lookahead 扫点都靠它)。
+# apply 之后按环境变量再对齐一次,COND 的自变量才留得住(4.2 的淘汰策略族与预取参数族
+# 两节都靠它)。
 ensure_agent_config() {
-  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw cur_la cur_ep changed=0
+  local cur_wl cur_bucket cur_cap cur_sw cur_mf cur_gw cur_la cur_ep cur_frp changed=0
   cur_wl="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.datasetMetricsWhitelist}' 2>/dev/null || true)"
   cur_cap="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.cacheCapacityBytes}' 2>/dev/null || true)"
   cur_sw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.startupWindowBytes}' 2>/dev/null || true)"
@@ -415,19 +490,21 @@ ensure_agent_config() {
   cur_gw="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.gatewayEndpoint}' 2>/dev/null || true)"
   cur_la="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.prefetchLookahead}' 2>/dev/null || true)"
   cur_ep="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.evictPolicy}' 2>/dev/null || true)"
+  cur_frp="$(kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data.fetchRangeParallel}' 2>/dev/null || true)"
   if [ "$cur_wl" != "$DATASET" ] || [ "$cur_cap" != "$CAPACITY_BYTES" ] \
      || [ "$cur_sw" != "$STARTUP_WINDOW_BYTES" ] || [ "$cur_mf" != "$MAX_FILL_FRACTION" ] \
      || [ "$cur_bucket" != "$MINIO_BUCKET" ] || [ "$cur_gw" != "$WANT_GATEWAY_ENDPOINT" ] \
-     || [ "$cur_la" != "$PREFETCH_LOOKAHEAD" ] || [ "$cur_ep" != "$EVICT_POLICY" ]; then
-    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY"
+     || [ "$cur_la" != "$PREFETCH_LOOKAHEAD" ] || [ "$cur_ep" != "$EVICT_POLICY" ] \
+     || [ "$cur_frp" != "$FETCH_RANGE_PARALLEL" ]; then
+    log_group "$GROUP" "修正 agentd 配置: WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES(1GiB) STARTUP_WINDOW_BYTES=$STARTUP_WINDOW_BYTES MAX_FILL_FRACTION=$MAX_FILL_FRACTION GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY FETCH_RANGE_PARALLEL=$FETCH_RANGE_PARALLEL"
     kubectl -n "$NS" patch configmap traincache-config --type merge \
-      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\",\"prefetchLookahead\":\"$PREFETCH_LOOKAHEAD\",\"evictPolicy\":\"$EVICT_POLICY\"}}" >/dev/null
+      -p "{\"data\":{\"datasetMetricsWhitelist\":\"$DATASET\",\"objstoreBucket\":\"$MINIO_BUCKET\",\"cacheCapacityBytes\":\"$CAPACITY_BYTES\",\"startupWindowBytes\":\"$STARTUP_WINDOW_BYTES\",\"maxFillFraction\":\"$MAX_FILL_FRACTION\",\"gatewayEndpoint\":\"$WANT_GATEWAY_ENDPOINT\",\"prefetchLookahead\":\"$PREFETCH_LOOKAHEAD\",\"evictPolicy\":\"$EVICT_POLICY\",\"fetchRangeParallel\":\"$FETCH_RANGE_PARALLEL\"}}" >/dev/null
     changed=1
   fi
   if [ "$changed" -eq 1 ]; then
     kubectl -n "$NS" rollout restart daemonset/traincache-agentd >/dev/null
     if ! kubectl -n "$NS" rollout status daemonset/traincache-agentd --timeout=240s >/dev/null 2>&1; then
-      log_group "$GROUP" "错误: agentd 滚动更新未在 240s 内就绪(配置 WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY)" >&2
+      log_group "$GROUP" "错误: agentd 滚动更新未在 240s 内就绪(配置 WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY FETCH_RANGE_PARALLEL=$FETCH_RANGE_PARALLEL)" >&2
       kubectl -n "$NS" get pods -l app.kubernetes.io/name=traincache-agentd -o wide >&2 || true
       kubectl -n "$NS" get cm traincache-config -o jsonpath='{.data}' >&2 || true
       echo >&2
@@ -435,7 +512,7 @@ ensure_agent_config() {
     fi
     log_group "$GROUP" "agentd 配置已修正并滚动更新完成"
   else
-    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY)"
+    log_group "$GROUP" "agentd 配置正确(WHITELIST=$DATASET BUCKET=$MINIO_BUCKET CACHE_CAPACITY_BYTES=$CAPACITY_BYTES GATEWAY_ENDPOINT='$WANT_GATEWAY_ENDPOINT' PREFETCH_LOOKAHEAD=$PREFETCH_LOOKAHEAD EVICT_POLICY=$EVICT_POLICY FETCH_RANGE_PARALLEL=$FETCH_RANGE_PARALLEL)"
   fi
 }
 
@@ -503,7 +580,8 @@ ensure_control_plane
 ensure_gateway_cache
 ensure_gateway
 ensure_ca_bundle
+ensure_gate_bandwidth
 ensure_agent_config
 wait_ready
 print_status
-log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON gatewayCache=${WANT_GATEWAY_CACHE:-<未设置,保持现状>})"
+log_group "$GROUP" "TrainCache 控制面就绪(gateway=$GATEWAY_ON gatewayCache=${WANT_GATEWAY_CACHE:-<未设置,保持现状>} gateNetworkBandwidthBytes=$GATE_NETWORK_BANDWIDTH)"

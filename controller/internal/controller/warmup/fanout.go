@@ -1,6 +1,6 @@
 package warmup
 
-// M14 controller-side fanout helpers. Bound normalization lives in status.go;
+// Controller-side fanout helpers. Bound normalization lives in status.go;
 // this file formats the adaptive decision fields for logs and attributes the
 // reason a previously submitted (Pod, node) pair was pruned.
 
@@ -12,7 +12,7 @@ import (
 	"traincache/controller/internal/gwaa"
 )
 
-// fanoutSummary flattens the per-Pod M14 decisions into the values attached to
+// fanoutSummary flattens the per-Pod fanout decisions into the values attached to
 // placement log records.
 type fanoutSummary struct {
 	Target              string
@@ -43,7 +43,7 @@ func summarizeFanout(placement gwaa.Output, actions []PlacementAction) fanoutSum
 	return summary
 }
 
-// fields returns the M14 fields shared by every placement log record. The
+// fields returns the fanout fields shared by every placement log record. The
 // caller adds fanout_min/fanout_max because they come from the spec.
 func (s fanoutSummary) fields() []any {
 	return []any{

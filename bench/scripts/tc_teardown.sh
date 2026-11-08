@@ -4,7 +4,7 @@
 # 用法:tc_teardown.sh [--target minio|source-d] [--dry-run] [--help]
 #   minio(默认):拆 kind 内 MinIO Pod 的 eth0 egress 限速 —— 既有行为,与改造前一致
 #                (无参调用即此路径,make bench-down / cold_reset.sh 流程不变)。
-#   source-d   :拆 v4 D 轨本地源站容器(名取自 config.py 的 TRACK_D_SOURCE_CONTAINER,
+#   source-d   :拆 v4 train 本地源站容器(名取自 config.py 的 TRAIN_SOURCE_CONTAINER,
 #                可被同名环境变量覆盖)的 eth0 egress 限速;容器不在跑时 qdisc 已随
 #                netns 消失,视为已拆,直接跳过。
 #   --dry-run  :只打印将执行的命令,不实际执行。
@@ -19,7 +19,7 @@ usage() {
   cat <<'EOF'
 用法: tc_teardown.sh [--target minio|source-d] [--dry-run] [--help]
   (无参/--target minio)  拆 kind 内 MinIO Pod 的 eth0 egress 限速(既有行为,不变)
-  --target source-d      拆本地源站容器 TRACK_D_SOURCE_CONTAINER 的 eth0 egress 限速
+  --target source-d      拆本地源站容器 TRAIN_SOURCE_CONTAINER 的 eth0 egress 限速
   --dry-run              只打印将执行的命令,不实际执行
   --help                 本用法
 EOF
@@ -72,9 +72,9 @@ nsenter --net="$NETNS" tc qdisc del dev eth0 root 2>/dev/null \
   && echo "已拆除 $POD eth0 限速" || echo "无 qdisc 可拆"
 EOF
   ;;
-# ================= source-d(v4 D 轨:宿主机本地源站容器拆除)=================
+# ================= source-d(v4 train:宿主机本地源站容器拆除)=================
 source-d)
-  NAME="${TRACK_D_SOURCE_CONTAINER:-$(CFG TRACK_D_SOURCE_CONTAINER)}"
+  NAME="${TRAIN_SOURCE_CONTAINER:-$(CFG TRAIN_SOURCE_CONTAINER)}"
   TC_IMAGE="${TC_IMAGE:-kindest/node:v1.28.15}"   # 同 tc_apply.sh,本机已有
   if [ "$DRY_RUN" = 1 ]; then
     echo "[dry-run] target=source-d container=$NAME 将执行(本次不实际执行):"

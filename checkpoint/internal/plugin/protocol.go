@@ -1,5 +1,5 @@
 // Package plugin 实现 checkpointd 与存储插件子进程之间的 NDJSON 帧协议
-// （design 10.1 §4.1）。
+// （design 10.1「插件进程契约」）。
 //
 // 一帧一行，判别键固定为 frame；握手版本固定为 1。编解码与读取都集中在
 // 本文件，client 与 serve 只处理业务字段，避免两端对线格式产生分叉。
@@ -14,7 +14,7 @@ import (
 	"io"
 )
 
-// ProtocolVersion 是当前插件协议版本（design 10.1 §4.1）。
+// ProtocolVersion 是当前插件协议版本（design 10.1「插件进程契约」）。
 const ProtocolVersion = 1
 
 // maxFrameBytes 是单行 JSON 的上限。插件故障时可能写出没有换行的超长
@@ -77,7 +77,7 @@ type Cancel struct {
 	ID    string `json:"id"`
 }
 
-// Code 是插件错误码，取值与 design 10.1 §4.1 的错误分类表一致。
+// Code 是插件错误码，取值与 design 10.1「插件进程契约」的错误分类表一致。
 type Code string
 
 const (
@@ -118,7 +118,7 @@ func (e *Error) Error() string {
 	return "plugin: " + string(e.Code) + ": " + e.Message
 }
 
-// Retryable 按 design 10.1 §4.1 分类：只有前三个错误码不重试。
+// Retryable 按 design 10.1「插件进程契约」分类：只有前三个错误码不重试。
 func (e *Error) Retryable() bool {
 	if e == nil {
 		return false
@@ -214,7 +214,7 @@ func Decode(line []byte) (any, error) {
 }
 
 // ReadFrame 从流里读一帧。单行超过上限立即报错，不继续缓冲；EOF 时如果
-// 只剩没有换行的半行，按 design 10.1 §5.2 的续传语义丢弃并返回 io.EOF。
+// 只剩没有换行的半行，按 design 10.1「数据格式」的续传语义丢弃并返回 io.EOF。
 func ReadFrame(r *bufio.Reader) (any, error) {
 	var buf []byte
 	for {

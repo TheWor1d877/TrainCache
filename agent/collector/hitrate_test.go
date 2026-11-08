@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// hitrate_test.go:滚动窗口(分钟桶环形)与阶段聚合(§5.5)。
+// hitrate_test.go:滚动窗口(分钟桶环形)与阶段聚合(设计《热度与命中率》)。
 
 // TestHitRateRollingWindow:窗口内 命中/(命中+未命中);超出窗口的桶滚出。
 func TestHitRateRollingWindow(t *testing.T) {

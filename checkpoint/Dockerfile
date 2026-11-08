@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# traincache-checkpointd 及 S3/local 插件镜像（design 10.1 §4.1、§6.1）。
+# traincache-checkpointd 及 S3/local 插件镜像（design 10.1「插件进程契约」、「关键流程」）。
 #
 # 构建（仓库根为构建上下文；go.work 同时 use ./agent、./core、./controller、
 # ./gateway、./checkpoint，五个模块目录都需入上下文）：

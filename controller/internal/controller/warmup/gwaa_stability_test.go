@@ -1,6 +1,6 @@
 package warmup
 
-// Regression for the M11 e2e cold-start thrash: GWAA tie-breaking must stay
+// Regression for the kind e2e cold-start thrash: GWAA tie-breaking must stay
 // pinned to one WarmupTask generation. With a fresh random draw per poll, an
 // all-zero readiness table reshuffles the preference order every reconcile, so
 // the target set flips and the previous submits are cancelled as target_shrink

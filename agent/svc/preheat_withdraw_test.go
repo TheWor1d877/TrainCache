@@ -111,7 +111,7 @@ func TestPreheatCancelWithdrawsAdmissionWaiters(t *testing.T) {
 	}
 }
 
-// TestPreheatCancelReleasesDownloadScope:被撤的块不再占 P0 在途硬保护(§7.6),
+// TestPreheatCancelReleasesDownloadScope:被撤的块不再占 P0 在途硬保护(设计《回收与磁盘淘汰》),
 // 任务出表(TTL/drop)也不留作用域。
 func TestPreheatCancelReleasesDownloadScope(t *testing.T) {
 	gate := &gateStore{Mock: objectstore.NewMock(), release: make(chan struct{})}

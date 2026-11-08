@@ -1,6 +1,6 @@
 package server
 
-// cache_test.go：取数顺序编排（docs/9.3-test.md §4.1）。
+// cache_test.go：取数顺序编排（docs/9.3-test.md「测试文件」）。
 //
 // 覆盖三条分支（在途 / 读盘命中 / 回源）与两种状态（开关开、开关关）：
 // 在途优先于查盘；读盘条目回填 .meta 里的两个头；未命中回源并落盘；独立
@@ -242,7 +242,7 @@ func TestCacheHitServesFromDiskWithMetaHeaders(t *testing.T) {
 }
 
 // TestCacheMissFetchesOriginAndWritesDisk 覆盖未命中分支：回源、正常返回，
-// 并把同一批字节按 §6.8 的协议落盘（写 .meta 再 rename）。
+// 并把同一批字节按 design 9.1「盘上布局与配额淘汰」的协议落盘（写 .meta 再 rename）。
 func TestCacheMissFetchesOriginAndWritesDisk(t *testing.T) {
 	const key = "ds/blocks/miss#0"
 	originBody := []byte("origin-block-body")
@@ -389,7 +389,7 @@ func TestCacheInFlightBeatsDiskLookup(t *testing.T) {
 }
 
 // TestCacheIndependentOriginBranchWritesDisk 覆盖独立回源分支：条目在途但
-// 已越过合并窗口时，这次回源的字节同样按 §6.8 落盘。
+// 已越过合并窗口时，这次回源的字节同样按 design 9.1「盘上布局与配额淘汰」落盘。
 func TestCacheIndependentOriginBranchWritesDisk(t *testing.T) {
 	const (
 		c   = 8

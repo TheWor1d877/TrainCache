@@ -1,5 +1,5 @@
-// Package metrics 是 Prometheus 指标注册骨架(design §5.8;decisions D17)。
-// M2 落容器与 dataset 白名单归并("other")及 ordersource 格式错误 counter(D23);
+// Package metrics 是 Prometheus 指标注册骨架(设计《指标清单》)。
+// M2 落容器与 dataset 白名单归并("other")及 ordersource 格式错误 counter;
 // M3 增 prefetch 队列深度/游标 gauge 与阶段切换停滞 histogram;
 // M6 落七线 23 个 family 全量与专用打点 API(families.go)。
 package metrics
@@ -12,62 +12,62 @@ import (
 	agentlog "traincache/agent/internal/logging"
 )
 
-// ordersource 格式错误 counter 的固定维度(decisions D23:counter,labels=["reason"]∈{magic,version};
+// ordersource 格式错误 counter 的固定维度(counter,labels=["reason"]∈{magic,version};
 // 不带 dataset 标签——坏文件读不出 dataset,防基数膨胀)。
 const (
-	// ordersourceFormatErrorsName 是 family 名(D23)。
+	// ordersourceFormatErrorsName 是 family 名。
 	ordersourceFormatErrorsName = "traincache_ordersource_format_errors_total"
-	// reason 标签取值,编译期固定(D23)。
+	// reason 标签取值,编译期固定。
 	reasonMagic   = "magic"
 	reasonVersion = "version"
 )
 
-// M3 预取线 family 名(design §5.8 节点状态线与延迟线;设计冻结的三个打点方法)。
+// M3 预取线 family 名(设计《指标清单》节点状态线与延迟线;设计冻结的三个打点方法)。
 const (
 	prefetchQueueDepthName = "traincache_prefetch_queue_depth"
 	prefetchCursorName     = "traincache_prefetch_cursor"
 	stageSwitchETAName     = "traincache_stage_switch_eta_seconds"
 )
 
-// 钩子帧格式错误 counter 的固定维度(decisions D33:counter,labels=["reason"]∈{parse,size};
-// 与 D23 同风格,不带 dataset 标签——§6.3"解析失败丢弃并计数",防基数膨胀)。
+// 钩子帧格式错误 counter 的固定维度(counter,labels=["reason"]∈{parse,size};
+// 与 同风格,不带 dataset 标签——设计《数据格式》"解析失败丢弃并计数",防基数膨胀)。
 const (
-	// hookFormatErrorsName 是 family 名(D33)。
+	// hookFormatErrorsName 是 family 名。
 	hookFormatErrorsName = "traincache_hook_format_errors_total"
 	// ReasonParse / ReasonSize 是 reason 标签取值(M5 hooksock 调用 IncHookFormatErrors 时
-	// 引用,防字面量漂移):parse=帧 JSON 解析/字段校验失败,size=帧超过 4 KiB 上限(§5.4/§6.3)。
+	// 引用,防字面量漂移):parse=帧 JSON 解析/字段校验失败,size=帧超过 4 KiB 上限(设计《钩子 socket 协议》《数据格式》)。
 	ReasonParse = "parse"
 	ReasonSize  = "size"
 )
 
 // priorityLabels 是 prefetch 队列深度 gauge 的 priority 标签取值:下标即内部优先级
-// 0..3(P0>P1>P2>P3,design §5.2);标签取值编译期固定,不引入用户输入。
+// 0..3(P0>P1>P2>P3,设计《预取主循环》);标签取值编译期固定,不引入用户输入。
 var priorityLabels = [4]string{"P0", "P1", "P2", "P3"}
 
 // Config 是指标层配置(由 svc.Config 映射)。
 type Config struct {
 	// DatasetWhitelist 是 dataset 标签白名单;未命中的 dataset 一律归并为 "other"
-	// (§5.8 基数纪律:标签编译期固定,不引入用户输入)。
+	// (设计《指标清单》基数纪律:标签编译期固定,不引入用户输入)。
 	DatasetWhitelist []string
-	// Node 是 node 标签取值(traincache_agent_up / traincache_agent_degraded;§5.8
-	// "node 为第二正交维度"),由 svc 映射 NODE_NAME(§8:必填,启动校验非空)。
+	// Node 是 node 标签取值(traincache_agent_up / traincache_agent_degraded;设计《指标清单》
+	// "node 为第二正交维度"),由 svc 映射 NODE_NAME(设计《部署与配置》:必填,启动校验非空)。
 	// 空串照原样进标签(svc 契约保证非空)。
 	Node string
 }
 
 // Registry 持有 dataset 白名单与 Prometheus 注册表(七线 23 个 family 在此挂载;
 // 新增 family 的构造/注册/预置见 families.go 的 initSevenLine / initHooksAndEvidence /
-// initGateway;全量 42 个 family,含 D23/D33 两条格式错误线、D44 读 miss 线、
+// initGateway;全量 42 个 family,含 两条格式错误线、D44 读 miss 线、
 // D63 订单通道 3 个与 9.1 网关线 2 个)。
 type Registry struct {
 	whitelist map[string]struct{}
 	reg       *prometheus.Registry
 	node      string // traincache_agent_up / traincache_agent_degraded 的 node 标签值(Config.Node)
 
-	// formatErrors 是 ordersource ring 头格式错误 counter(D23);New 内 MustRegister。
+	// formatErrors 是 ordersource ring 头格式错误 counter;New 内 MustRegister。
 	formatErrors *prometheus.CounterVec
 
-	// hookFormatErrors 是钩子帧格式错误 counter(D33,与 D23 同风格);New 内 MustRegister,
+	// hookFormatErrors 是钩子帧格式错误 counter(与 同风格);New 内 MustRegister,
 	// 两个 reason 子指标构造时预置 0。
 	hookFormatErrors *prometheus.CounterVec
 
@@ -76,7 +76,7 @@ type Registry struct {
 	prefetchCursor     prometheus.Gauge         // 值 = 游标块的 chunk 号
 	stageSwitchStall   *prometheus.HistogramVec // stage_switch_eta_seconds;labels=["dataset"](M9/D46 补);prometheus.DefBuckets
 
-	// 七线新增 20 个 family(design §5.8;M6;New 内构造/注册/预置,打点 API 见 families.go)。
+	// 七线新增 20 个 family(设计《指标清单》;M6;New 内构造/注册/预置,打点 API 见 families.go)。
 	// ① 命中率线。
 	cacheHits     *prometheus.CounterVec // dataset,result 固定 success,source,phase
 	cacheMisses   *prometheus.CounterVec // dataset,result∈{success,refetched,error},phase
@@ -93,7 +93,7 @@ type Registry struct {
 	gcSweeps         *prometheus.CounterVec // dataset,result∈{success,error}
 	gcBlocksRemoved  *prometheus.CounterVec // dataset,result 固定 success
 	gcObjectsRemoved *prometheus.CounterVec // dataset,result 固定 success
-	// R3(6.1 §5.11):protected manifest 不可用导致本轮块删除跳过。
+	// R3(设计《快照与回收》):protected manifest 不可用导致本轮块删除跳过。
 	indexSweepSkipped *prometheus.CounterVec // dataset,reason∈{manifest_unavailable,other}
 	// ⑤ 磁盘淘汰线。
 	evictBlocks           *prometheus.CounterVec // dataset,result∈{normal,danger}
@@ -106,13 +106,13 @@ type Registry struct {
 	rescanProgress prometheus.Gauge     // 无标签
 	quarantined    *prometheus.GaugeVec // dataset
 	diskUsageRatio *prometheus.GaugeVec // dataset
-	// capacityBytes 是字节累计 gauge(§14 D58;source∈{disk,bytes})。
+	// capacityBytes 是字节累计 gauge(设计《回收与磁盘淘汰》D58;source∈{disk,bytes})。
 	capacityBytes *prometheus.GaugeVec
 
 	// M8/D44:读 miss 线(不带 dataset)。
 	hookReadMiss *prometheus.CounterVec // reason∈{absent,corrupt}
 
-	// M9/D46~D48:8 个证据/阶段 family。
+	// M9~:8 个证据/阶段 family。
 	prefetchHitRatio     *prometheus.GaugeVec     // dataset
 	readStall            *prometheus.HistogramVec // dataset,phase,cause
 	fetchSingleflight    *prometheus.CounterVec   // dataset
@@ -122,10 +122,10 @@ type Registry struct {
 	consumptionAdvance   *prometheus.CounterVec   // dataset,source
 	fetchBandwidthLimit  *prometheus.GaugeVec     // dataset
 
-	// R4(6.1 §5.12):对象存储条件写探测结果(0/1,无标签)。
+	// R4(设计《快照与回收》):对象存储条件写探测结果(0/1,无标签)。
 	objectstoreConditionalWriteSupported prometheus.Gauge
 
-	// D63 订单通道(6.1 §7.4):每源状态计数、源回收与丢单计数。
+	// D63 订单通道(设计《订单通道降级》):每源状态计数、源回收与丢单计数。
 	ordersourceStates *prometheus.GaugeVec   // node,state∈{discovered,healthy,stalled}
 	ordersourceEnded  *prometheus.CounterVec // node,reason∈{missing_ttl,stale_file}
 	ordersDropped     *prometheus.CounterVec // reason∈{resync,corrupt,invalid}
@@ -189,7 +189,7 @@ func New(cfg Config) *Registry {
 	// 预置两个 reason 子指标为 0:family 自启动即出现在 /metrics(无坏文件时也可见)。
 	r.formatErrors.WithLabelValues(reasonMagic)
 	r.formatErrors.WithLabelValues(reasonVersion)
-	// 钩子帧错误 counter 同风格预置 reason∈{parse,size}(D33)。
+	// 钩子帧错误 counter 同风格预置 reason∈{parse,size}。
 	r.hookFormatErrors.WithLabelValues(ReasonParse)
 	r.hookFormatErrors.WithLabelValues(ReasonSize)
 	// 预置 P0..P3 四个队列深度子指标为 0(同上:family 自启动即可见)。
@@ -200,7 +200,7 @@ func New(cfg Config) *Registry {
 	r.stageSwitchStall.WithLabelValues(otherDatasetLabel)
 	// 七线新增 20 个 family:构造、注册与预置(含 agent_up=1)。
 	r.initSevenLine()
-	// M8/D44 与 M9/D46~D48 新增 9 个 family。
+	// M8/D44 与 M9~ 新增 9 个 family。
 	r.initHooksAndEvidence()
 	// D63 订单通道 3 个 family。
 	r.initOrderChannel()
@@ -214,7 +214,7 @@ func New(cfg Config) *Registry {
 	return r
 }
 
-// initOrderChannel 构造并注册订单通道 family(D63/§7.4),三个 state、两个 ended reason
+// initOrderChannel 构造并注册订单通道 family(D63/设计《订单通道降级》),三个 state、两个 ended reason
 // 与三个 dropped reason 全部预置为 0(自启动即在 /metrics 可见)。
 func (r *Registry) initOrderChannel() {
 	r.ordersourceStates = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -241,7 +241,7 @@ func (r *Registry) initOrderChannel() {
 	}
 }
 
-// DatasetLabel 返回 dataset 标签值:白名单命中返回原名,否则 "other"(§5.8/§6.5)。
+// DatasetLabel 返回 dataset 标签值:白名单命中返回原名,否则 "other"(设计《指标清单》《数据格式》)。
 func (r *Registry) DatasetLabel(dataset string) string {
 	if _, ok := r.whitelist[dataset]; ok {
 		return dataset
@@ -250,7 +250,7 @@ func (r *Registry) DatasetLabel(dataset string) string {
 }
 
 // SyncOrdersourceFormatErrors 把 ordersource 包级累计计数以绝对值同步到 counter
-// (D23:svc 每 tick 调用)。Prometheus counter 只增不降:内部记录上次同步值,按正增量 Add;
+// (svc 每 tick 调用)。Prometheus counter 只增不降:内部记录上次同步值,按正增量 Add;
 // 重复同步同一值幂等(绝对值语义;ordersource.FormatErrorTotals 是单调 atomic 计数)。
 func (r *Registry) SyncOrdersourceFormatErrors(magic, version int64) {
 	r.mu.Lock()
@@ -269,7 +269,7 @@ func (r *Registry) SyncOrdersourceFormatErrors(magic, version int64) {
 func (r *Registry) OrdersourceFormatErrors() *prometheus.CounterVec { return r.formatErrors }
 
 // IncHookFormatErrors 记一次钩子帧格式错误(traincache_hook_format_errors_total{reason},
-// decisions D33;由 M5 hooksock 收端调用)。reason∈{parse,size}(见 ReasonParse / ReasonSize);
+// 由 M5 hooksock 收端调用)。reason∈{parse,size}(见 ReasonParse / ReasonSize);
 // 集合外忽略该次打点,不新增基数(标签取值编译期固定,与 SetPrefetchQueueDepth 越界忽略同风格)。
 func (r *Registry) IncHookFormatErrors(reason string) {
 	if reason != ReasonParse && reason != ReasonSize {
@@ -299,7 +299,7 @@ func (r *Registry) SetPrefetchCursor(cursor int64) {
 // ObserveStageSwitchStall 记录一次阶段切换 ETA(histogram traincache_stage_switch_eta_seconds,
 // prometheus.DefBuckets):值 = OnStageSwitch 返回的"切换到新窗口就绪"预估秒数(非实测 stall;
 // 方法名沿用冻结签名)。
-// M9/D46 起补 dataset 标签;datasets 为可选参数(缺省 → 归并值 other),兼容冻结的
+// M9 起补 dataset 标签;datasets 为可选参数(缺省 → 归并值 other),兼容冻结的
 // prefetch 调用点 p.m.ObserveStageSwitchStall(eta.Seconds())。
 func (r *Registry) ObserveStageSwitchStall(seconds float64, datasets ...string) {
 	dataset := ""

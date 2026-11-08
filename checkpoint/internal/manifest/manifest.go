@@ -1,5 +1,5 @@
 // Package manifest 定义 checkpoint 的 manifest 结构与校验规则
-// （design 10.1 §5.1）。
+// （design 10.1「数据格式」）。
 //
 // manifest 是后端上的提交标记：它存在且校验通过，该 rank 的该 step 才算
 // 完整。写入方必须按 path 排序后再写，读取方据此得到稳定的字节表示。
@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// Version 是当前 manifest 结构版本（design 10.1 §5.1）。
+// Version 是当前 manifest 结构版本（design 10.1「数据格式」）。
 const Version = 1
 
 // File 是 manifest 里的单个文件条目。
@@ -128,7 +128,7 @@ func (m *Manifest) Marshal() ([]byte, error) {
 }
 
 // Unmarshal 解码并校验。校验放在这里，调用方拿到的 Manifest 一定满足
-// design 10.1 §5.1 的约束。
+// design 10.1「数据格式」的约束。
 func Unmarshal(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {

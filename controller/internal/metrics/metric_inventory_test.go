@@ -11,7 +11,7 @@ import (
 )
 
 // m12ControllerInventory is the reviewable family/label inventory for the
-// controller-owned registry (docs/7.1-design.md §9.5). Any family or label
+// controller-owned registry (docs/7.1-design.md《指标清单》). Any family or label
 // change must update this map and m12AllowedLabelValues in the same change.
 var m12ControllerInventory = map[string][]string{
 	"traincache_controller_reconcile_total":            {"controller", "result"},
@@ -76,7 +76,7 @@ var m12ForbiddenLabelParts = []string{
 }
 
 // m12ForbiddenLabelNames are bare labels whose values are identities rather
-// than bounded enums. design §9.5 originally proposed several of these;
+// than bounded enums. the design doc's指标清单 originally proposed several of these;
 // implementing them verbatim would create one series per Pod/task/Node.
 var m12ForbiddenLabelNames = map[string]struct{}{
 	"pod":         {},

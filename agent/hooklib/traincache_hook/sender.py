@@ -1,7 +1,7 @@
 """钩子发送端：单向 Unix datagram，漏发只计数，绝不打断训练。
 
 socket 不存在、权限不足、发送缓冲满都按"丢一帧"处理——Agent 侧的 inotify 兜底
-不依赖这些帧的完整性（docs/6.1-design.md §5.4）。
+不依赖这些帧的完整性（docs/6.1-design.md《钩子 socket 协议》）。
 """
 
 from __future__ import annotations

@@ -10,9 +10,9 @@ import (
 	"traincache/core/objectstore"
 )
 
-// fetchReporter 是可选的 repair 回源打点能力(D48):注入的 Metrics 若同时实现该接口,
+// fetchReporter 是可选的 repair 回源打点能力:注入的 Metrics 若同时实现该接口,
 // RepairOne 的真实下载以 reason=repair 记入 fetch_bytes/fetch_requests;未实现则静默
-// 跳过(不扩大冻结的 Metrics 窄接口 D35)。
+// 跳过(不扩大冻结的 Metrics 窄接口)。
 type fetchReporter interface {
 	AddFetchBytes(dataset string, n int64, reasons ...string)
 	IncFetchRequests(dataset, result string, reasons ...string)
@@ -39,7 +39,7 @@ type repairFlight struct {
 	waiters int // 等待者数(flights 与 waiters 均受 r.mu 保护;白盒测试观测合并行为用)
 }
 
-// RepairOne 修复单块(D35/D25):按 D25 键 <dataset>/blocks/<path>#<chunk> 经
+// RepairOne 修复单块(D25):按D25 键 <dataset>/blocks/<path>#<chunk> 经
 // fetch.Fetch(ctx, key, expectSize=0) 重下(Fetch 内部 Put 落块并读回校验),成功后
 // RemoveQuarantined(重下指纹;约定内容同源、指纹与原隔离块一致)。返回重下块的指纹。
 //
@@ -95,7 +95,7 @@ func (r *Rescanner) RepairOne(ctx context.Context, dataset string, ref ordersour
 	return fp, err
 }
 
-// reportRepairFetch 为 repair 路径的真实回源打点(D48):成功记交付字节 + requests{success,
+// reportRepairFetch 为 repair 路径的真实回源打点:成功记交付字节 + requests{success,
 // reason=repair},失败记 requests{error,reason=repair};注入 Metrics 未实现 fetchReporter
 // 时跳过(无指标场景)。
 func (r *Rescanner) reportRepairFetch(dataset string, fp cas.Fingerprint, err error) {
@@ -123,7 +123,7 @@ func blockKey(dataset string, ref ordersource.ChunkRef) string {
 	return objectstore.BlockKey(dataset, ref.Path, ref.Chunk)
 }
 
-// buildMapping 构建 块指纹 → (dataset, path, chunk) 映射(D35 修复队列入队用):
+// buildMapping 构建 块指纹 → (dataset, path, chunk) 映射(修复队列入队用):
 // dataset 枚举 = objectstore.List(ctx,"") 经 datasetsOf 取名;每个 dataset 经 catalogFor
 // 取 Catalog → List(ctx,"") 全量条目(含不在本地的块)。Catalog 不可用(ErrNoCurrent 等)
 // 或枚举失败的 dataset 跳过:其坏块只隔离不修复(留待订单到达后由读时路径修)。映射在

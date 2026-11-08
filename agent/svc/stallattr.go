@@ -34,7 +34,7 @@ type stallAttributor struct {
 	exists func(ref ordersource.ChunkRef) (dataset string, found bool)
 	// inflight 报告该块是否在 fetcher/prefetch pending 中(origin_slow 判据)。
 	inflight func(dataset string, ref ordersource.ChunkRef) bool
-	// currentWindow 报告该块是否属于当前消费窗口(D46 prefetch 来源判据)。
+	// currentWindow 报告该块是否属于当前消费窗口(prefetch 来源判据)。
 	currentWindow func(dataset string, ref ordersource.ChunkRef) bool
 	// now 是时间源(测试注入;生产默认 time.Now)。
 	now func() time.Time

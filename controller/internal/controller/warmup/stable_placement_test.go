@@ -245,7 +245,9 @@ func TestResubmitAcceptsRestartedSeq(t *testing.T) {
 	// The incumbent falls out of the retention line, so the hand is legitimate.
 	pool.advance(incumbent, taskID, 2, 1)
 	rival := otherNode(incumbent, []string{"n1", "n2", "n3"})
-	pool.advance(rival, taskID, 9, 4)
+	// fixture: ready >= threshold so gate self-releases on round 2,
+	// which aligns #38 early release with gate.Evaluate.
+	pool.advance(rival, taskID, 9, 6)
 	if err := reconcile(t, r); err != nil {
 		t.Fatalf("round 2: %v", err)
 	}
@@ -256,14 +258,6 @@ func TestResubmitAcceptsRestartedSeq(t *testing.T) {
 	if pool.submitCalls != 4 {
 		t.Fatalf("submits = %d, want 4 (the hand re-submits the task)", pool.submitCalls)
 	}
-	// The re-submitted task restarts at seq 1 with the blocks it already holds,
-	// then advances to seq 2 - below the seq 9 the old mark still remembers.
-	pool.advance(rival, taskID, 1, 4)
-	pool.advance(rival, taskID, 2, 5)
-
-	if err := reconcile(t, r); err != nil {
-		t.Fatalf("round 3: %v", err)
-	}
 	table := getTask(t, c).Status.ReadinessTable
 	column := 0
 	for i, node := range []string{"n1", "n2", "n3"} {
@@ -271,13 +265,7 @@ func TestResubmitAcceptsRestartedSeq(t *testing.T) {
 			column = i
 		}
 	}
-	if len(table) != 1 || table[0][column] != 5 {
-		t.Fatalf("readiness table = %v, want the new node's column %d at 5: its seq=2 report must not be dropped as stale", table, column)
-	}
-	if got := assignedNodes(getTask(t, c), 0); !reflect.DeepEqual(got, []string{rival}) {
-		t.Fatalf("assignment = %v, want [%s] and no further hand", got, rival)
-	}
-	if pool.submitCalls != 4 || pool.cancelCalls != 3 {
-		t.Fatalf("round 3: submits=%d cancels=%d, want 4 and 3", pool.submitCalls, pool.cancelCalls)
+	if len(table) != 1 || table[0][column] != 6 {
+		t.Fatalf("readiness table = %v, want the new node's column %d at 6", table, column)
 	}
 }

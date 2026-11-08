@@ -23,7 +23,7 @@ import (
 // 提供 32 字符小写 hex 编解码。
 type Fingerprint [16]byte
 
-// VerifyLevel 是校验等级开关（design.md §8：verify_level = xxh3 | xxh3+sha256）。
+// VerifyLevel 是校验等级开关（design.md《默认值》：verify_level = xxh3 | xxh3+sha256）。
 type VerifyLevel int
 
 const (
@@ -38,7 +38,7 @@ var (
 )
 
 const (
-	// blocksDirName 是块目录名：块文件布局 blocks/<fp[0:2]hex>/<fp hex>.blk（design.md §6.3）。
+	// blocksDirName 是块目录名：块文件布局 blocks/<fp[0:2]hex>/<fp hex>.blk（design.md《本地块存储》）。
 	blocksDirName = "blocks"
 	// quarantineDirName 是隔离目录名（D25）：坏块布局 quarantine/<fp[0:2]hex>/<fp hex>.blk，
 	// 与 blocks/ 并列在 cas 根下（同一文件系统，移动用 os.Rename 原子完成）。
@@ -91,6 +91,22 @@ func New(dir string, verify VerifyLevel) (*Store, error) {
 func (s *Store) blockPath(fp Fingerprint) string {
 	hexs := fp.String()
 	return filepath.Join(s.dir, hexs[:2], hexs+".blk")
+}
+
+// TempDir 返回块目录路径，供需要同卷临时文件的调用方使用（分片聚合的临时文件）。
+// 系统临时目录不可用时（容器根文件系统只读，/tmp 不可写）必须用它。
+func (s *Store) TempDir() string {
+	return s.dir
+}
+
+// CreateTempFile 在块目录内建一个临时文件，名字带块目录的临时文件前缀。
+// 分片聚合这类「先写临时文件再喂给 Put」的用法必须走它：临时文件要与 Put 的
+// 临时文件同卷，且命名要能被 List 的忽略规则识别。
+func (s *Store) CreateTempFile(pattern string) (*os.File, error) {
+	if pattern == "" {
+		pattern = tempPrefix + "*"
+	}
+	return os.CreateTemp(s.dir, pattern)
 }
 
 // quarantinePath 返回隔离块文件的最终路径 quarantine/<fp[0:2]hex>/<fp hex>.blk（与 blocks/ 同两级分片，D25）。
@@ -297,7 +313,7 @@ func (s *Store) Quarantine(fp Fingerprint) error {
 	return nil
 }
 
-// List 枚举 blocks/ 下全部块指纹（D20）：递归扫描块目录，解析块文件名
+// List 枚举 blocks/ 下全部块指纹（design.md《本地块存储》）：递归扫描块目录，解析块文件名
 // （<32 位 hex>.blk）为指纹；忽略 .tmp-* 临时文件与无法解析为 32 位 hex 的文件名。
 // 返回按指纹字典序（字节序）升序排序的切片；无块返回空切片。
 func (s *Store) List() ([]Fingerprint, error) {

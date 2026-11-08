@@ -21,16 +21,20 @@ source "$SCRIPT_DIR/../_common.sh"
 
 GROUP="fluid"
 NS="fluid"
-TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-compare-d-s8-per-epoch.json}"
-# 本档位消费的分片数(run_bench 按 S/M/L 档位下发;缺省取 M 档全量 32 片)。
-# 同步按这个数收窄:桶里共有 32 片,不收窄的话 S 档(只消费 8 片 = 2GiB)会把 8GiB
-# 全同步进来,数据集口径与容量比都失真,DataLoad 预热也要多搬 4 倍字节。
-N_TARS="${N_TARS:-$(cfg TRACK_B_N_TARS)}"
-N_TARS="${N_TARS:-32}"
+TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.json}"
+# 本格消费的分片数(run_bench 按格子下发;缺省取主数据集全部 16 片)。
+# 同步按这个数收窄:桶里有 128 片,不收窄会把整桶同步进来,
+# 数据集口径与容量比都失真,DataLoad 预热也要多搬字节。
+N_TARS="${N_TARS:-$(cfg DATASET_SHARDS)}"
 SHARD_INCLUDES="$(shard_include_args "$N_TARS")"
 
-# Fluid 缓存配额(统一 1GiB,数据 ~2.1GiB > 缓存,模拟真实场景)
-FLUID_CACHE_GI="${FLUID_CACHE_GI:-1}"
+# Fluid 缓存配额。优先取 FLUID_CACHE_MB(MiB 精度,run_bench 按 ρ 下发):
+# 配额取整数 GiB 时 ρ=8 的 0.5 GiB 会被进位到 1 GiB,与另两组的配额对不上。
+# 没有 FLUID_CACHE_MB 时回退 FLUID_CACHE_GI(GiB 整数,老的调用方式)。
+FLUID_CACHE_MB="${FLUID_CACHE_MB:-}"
+if [ -z "$FLUID_CACHE_MB" ]; then
+  FLUID_CACHE_MB="$(( ${FLUID_CACHE_GI:-1} * 1024 ))"
+fi
 # 是否预热(1=DataLoad 预热 1GB,0=不预热冷启动)
 FLUID_PREHEAT="${FLUID_PREHEAT:-1}"
 
@@ -179,7 +183,7 @@ spec:
     levels:
       - mediumtype: HDD
         path: /tmp/juicefs-cache
-        quota: ${FLUID_CACHE_GI}Gi
+        quota: ${FLUID_CACHE_MB}Mi
         low: "0.1"
 EOF
 )
@@ -187,7 +191,7 @@ if resource_exists juicefsruntime jfs-demo -n "$NS"; then
   log_group "$GROUP" "juicefsruntime/jfs-demo 已存在,跳过"
 else
   echo "$RUNTIME_YAML" | kubectl apply -f -
-  log_group "$GROUP" "juicefsruntime/jfs-demo 已创建(cache=${FLUID_CACHE_GI}Gi)"
+  log_group "$GROUP" "juicefsruntime/jfs-demo 已创建(cache=${FLUID_CACHE_MB}Mi)"
 fi
 
 # ---- 6. 等待 Dataset Bound ----
@@ -301,7 +305,7 @@ EOF
 # DataLoad 每次需重新创建(同名不能重复 apply),先删旧的
 kubectl -n "$NS" delete dataload jfs-load --ignore-not-found 2>/dev/null || true
 echo "$DATALOAD_YAML" | kubectl apply -f -
-log_group "$GROUP" "dataload/jfs-load 已创建(预热整棵数据树到 ${FLUID_CACHE_GI}GiB 缓存)"
+log_group "$GROUP" "dataload/jfs-load 已创建(预热整棵数据树到 ${FLUID_CACHE_MB}Mi 缓存)"
 
 # 等待 DataLoad 完成(硬编码 15 分钟超时)
 log_group "$GROUP" "等待 dataload/jfs-load 完成(预热数据到缓存,超时 ${FLUID_WARMUP_TIMEOUT}s)"
@@ -331,7 +335,7 @@ else
   log_group "$GROUP" "FLUID_PREHEAT=0,跳过 DataLoad 预热(冷启动)"
 fi
 
-log_group "$GROUP" "up 完成:Fluid Dataset+Runtime+DataLoad 已部署,cache=${FLUID_CACHE_GI}Gi"
+log_group "$GROUP" "up 完成:Fluid Dataset+Runtime+DataLoad 已部署,cache=${FLUID_CACHE_MB}Mi"
 echo "等待 DataLoad 完成: kubectl -n $NS get dataload jfs-load -w"
 echo "查看缓存 worker: kubectl -n $NS get pods -l role=juicefs-worker"
 echo "拆除: make -C $COMPARE_ROOT compare-down GROUP=fluid"

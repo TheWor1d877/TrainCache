@@ -50,6 +50,28 @@ func (m *Mock) Get(ctx context.Context, key string, w io.Writer) error {
 	return err
 }
 
+// GetRange 实现 Store.GetRange：先取回完整对象，再切出闭区间 [start, end]。
+// 区间越界（含 end 不小于对象长度）返回 ErrInvalidRange。
+func (m *Mock) GetRange(ctx context.Context, key string, start, end int64, w io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if start < 0 || end < start {
+		return ErrInvalidRange
+	}
+	m.mu.RLock()
+	content, ok := m.objs[key]
+	m.mu.RUnlock()
+	if !ok {
+		return ErrNotFound
+	}
+	if start >= int64(len(content)) || end >= int64(len(content)) {
+		return ErrInvalidRange
+	}
+	_, err := w.Write(content[start : end+1])
+	return err
+}
+
 // Put 实现 Store.Put；size 仅作 S3 语义提示，内容以 r 读至 EOF 为准。
 func (m *Mock) Put(ctx context.Context, key string, r io.Reader, size int64) (string, error) {
 	if err := ctx.Err(); err != nil {

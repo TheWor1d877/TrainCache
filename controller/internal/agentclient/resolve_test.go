@@ -126,6 +126,62 @@ func TestResolverFallsBackToNodeAddress(t *testing.T) {
 	}
 }
 
+func TestResolveCandidatesReturnsPodIPThenNodeAddress(t *testing.T) {
+	reader := &countingReader{Client: fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(agentPod("agent-a", "n1", "10.0.0.5", true), testNode("n1", "192.168.1.20")).
+		Build()}
+	r := NewResolver(reader, 9410)
+	addrs, err := r.ResolveCandidates(context.Background(), "n1")
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	if len(addrs) != 2 || addrs[0] != "10.0.0.5:9410" || addrs[1] != "192.168.1.20:9410" {
+		t.Fatalf("addrs = %v, want podIP first then node address", addrs)
+	}
+	// Resolve 取第一个候选。
+	addr, err := r.Resolve(context.Background(), "n1")
+	if err != nil || addr != "10.0.0.5:9410" {
+		t.Fatalf("Resolve() = (%q, %v)", addr, err)
+	}
+}
+
+func TestResolveCandidatesOnlyNodeAddress(t *testing.T) {
+	reader := &countingReader{Client: fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(testNode("n2", "192.168.1.20")).
+		Build()}
+	r := NewResolver(reader, 9410)
+	addrs, err := r.ResolveCandidates(context.Background(), "n2")
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	if len(addrs) != 1 || addrs[0] != "192.168.1.20:9410" {
+		t.Fatalf("addrs = %v", addrs)
+	}
+}
+
+func TestResolveCandidatesWithoutAnyAddress(t *testing.T) {
+	reader := &countingReader{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build()}
+	r := NewResolver(reader, 9410)
+	_, err := r.ResolveCandidates(context.Background(), "missing")
+	if !errors.Is(err, ErrAgentUnavailable) {
+		t.Fatalf("error = %v, want ErrAgentUnavailable", err)
+	}
+	if !errors.Is(err, ErrNoAgentAddress) {
+		t.Fatalf("error = %v, want ErrNoAgentAddress", err)
+	}
+}
+
+func TestResolveCandidatesUsesOverride(t *testing.T) {
+	r := NewResolver(nil, 9410)
+	r.Overrides = map[string]string{"n1": "10.9.8.7:19410"}
+	addrs, err := r.ResolveCandidates(context.Background(), "n1")
+	if err != nil || len(addrs) != 1 || addrs[0] != "10.9.8.7:19410" {
+		t.Fatalf("ResolveCandidates() = (%v, %v)", addrs, err)
+	}
+}
+
 func TestResolverUnavailableWithoutPodOrNode(t *testing.T) {
 	reader := &countingReader{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build()}
 	r := NewResolver(reader, 9410)

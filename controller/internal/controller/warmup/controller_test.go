@@ -39,7 +39,7 @@ type heldTask struct {
 	chunks     int
 	canceled   bool
 	// seq is the bitmap-change counter the Agent reports; a Submit restarts it
-	// at 1, exactly as docs/6.1 附录 A.2 prescribes for a resubmitted task.
+	// at 1, exactly as docs/7.1《预热接口增量契约》 prescribes for a resubmitted task.
 	seq uint64
 	// ready is the number of window blocks that are resident on this node.
 	ready int32
@@ -397,7 +397,7 @@ func TestReconcileIsIdempotent(t *testing.T) {
 	}
 	second := getTask(t, c)
 
-	// M6 makes later rounds differential: the initial M4 fan-out runs once,
+	// Later rounds are differential: the initial wide fan-out runs once,
 	// the Agents report they hold the submitted tasks and the replay issues
 	// no duplicate Submit. The second pass already sees the Agents' answers,
 	// so the status is compared from the steady state onwards.
@@ -650,7 +650,7 @@ func TestReconcilePodSetMismatch(t *testing.T) {
 	}
 }
 
-// M4 wide preheat runs before the training Pods exist; zero matches is the
+// The initial wide preheat runs before the training Pods exist; zero matches is the
 // expected pre-creation state, so the condition must be cleared, not set (D48).
 func TestReconcilePodSetEmptyClearsMismatch(t *testing.T) {
 	task := fixtureTask(2, 1, [][]int32{{0, 1}, {2, 3}})

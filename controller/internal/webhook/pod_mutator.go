@@ -1,6 +1,6 @@
 // Package webhook implements the TrainCache Pod mutating admission handler.
 // It injects the scheduling gate and WarmupTask binding annotations defined by
-// docs/7.1-design.md §5.7/§6.3 (D8-D10). It never rejects a Pod.
+// docs/7.1-design.md《Webhook 注入》(docs/7.2 D8-D10). It never rejects a Pod.
 package webhook
 
 import (
@@ -29,7 +29,7 @@ const MutatePodPath = "/mutate-v1-pod"
 // objectSelector traincache.io/warmup=enabled.
 //
 // Client and Log are the frozen 8.1 fields. Recorder and GateName are optional
-// M9 extensions: Recorder emits WarmupTaskMappingFailed events and GateName
+// Optional extensions: Recorder emits WarmupTaskMappingFailed events and GateName
 // defaults to the frozen traincache.io/warmup gate.
 type PodMutator struct {
 	Client   client.Client

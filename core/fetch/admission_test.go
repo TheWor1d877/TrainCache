@@ -17,7 +17,7 @@ func TestLimiterSpeculativeQuota(t *testing.T) {
 		wantBytes int64
 		wantTasks int
 	}{
-		{"默认 1GiB/8", defaultMaxInflightBytes, defaultMaxTasks, defaultMaxInflightBytes / 2, defaultMaxTasks / 2},
+		{"默认 1GiB/16", defaultMaxInflightBytes, defaultMaxTasks, defaultMaxInflightBytes / 2, defaultMaxTasks / 2},
 		{"任务数 1 至少 1 槽", 1 << 20, 1, 1 << 19, 1},
 		{"字节 1 至少 1 字节", 1, 4, 1, 2},
 		{"奇数任务数向下取整", 1 << 20, 5, 1 << 19, 2},

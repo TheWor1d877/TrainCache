@@ -1,7 +1,7 @@
-// Package warmup implements the WarmupTask reconcile loop for M4: candidate
+// Package warmup implements the WarmupTask reconcile loop: candidate
 // filtering, consume-order resolution, window expansion and preheat submission
-// (docs/7.1-design.md §5.3, §5.4, §7.2). Polling, readiness tables, GWAA,
-// gating and scoring belong to M5-M8 and are intentionally absent.
+// (docs/7.1-design.md《WarmupTask 控制器》《候选节点筛选与预热下发》). Polling, readiness
+// tables, GWAA, gating and scoring live in the sibling files of this package.
 package warmup
 
 import (
@@ -36,9 +36,9 @@ import (
 	corelog "traincache/core/logging"
 )
 
-// Condition types written by the M4 reconciler. Negative-named conditions use
+// Condition types written by the reconciler. Negative-named conditions use
 // ConditionFalse to mean "the problem is present"; they are removed on success,
-// mirroring the DataSet controller (docs/7.1 §5.2/§7.2).
+// mirroring the DataSet controller (docs/7.1-design.md《DataSet 控制器》《候选节点筛选与预热下发》).
 const (
 	ConditionDataSetNotReady   = "DataSetNotReady"
 	ConditionInvalidSpec       = "InvalidSpec"
@@ -73,7 +73,7 @@ const EventKDefaulted = "KDefaulted"
 const EventKExceedsFillLimit = "KExceedsFillLimit"
 
 // Retry sentinels request controller-runtime backoff because Node/Pod/DataSet
-// state may change (docs/7.1 §7.9).
+// state may change (docs/7.1-design.md《异常与降级》).
 var (
 	ErrDataSetNotReady   = errors.New("warmup: DataSet is not ready")
 	ErrNoCandidates      = errors.New("warmup: no candidate nodes")
@@ -102,10 +102,21 @@ type Reconciler struct {
 	CacheCapacityBytes int64
 	StartupWindowBytes int64
 	MaxFillFraction    float64
+	// NetworkBandwidthBytes is the gate's configured network ceiling (bytes/sec).
+	// Zero disables the "bandwidth fast enough" skip condition (#37).
+	NetworkBandwidthBytes int64
 	// Rand overrides the GWAA tie-breaking source. Tests set it to a fixed seed;
 	// the manager leaves it nil so gwaaRand seeds each task from its own UID and
 	// generation (D32).
 	Rand *rand.Rand
+
+	// MetricsFetcher 可选地从 agent 9411 /metrics 抓取 observed throughput，
+	// 用于 gate 的带宽够快跳过条件。nil 时条件不启用。
+	MetricsFetcher *agentclient.MetricsFetcher
+
+	// lastMetricSample 是每个 node 上次 metrics 采样（用于计算增量）。
+	// 首次 nil，第一次 bestObservedThroughput 会初始化。
+	lastMetricSample map[string]nodeMetricSample
 
 	// progress holds seq high-water marks, consecutive failure counters and
 	// rateHistory. It is intentionally in-memory only (D24); a restart starts
@@ -117,14 +128,14 @@ type Reconciler struct {
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&traincachev1alpha1.WarmupTask{}).
-		// M11: released Pods are watched so a spec.nodeName change can be
-		// compared with the GWAA assignment (docs/7.1 §7.8).
+		// Released Pods are watched so a spec.nodeName change can be
+		// compared with the GWAA assignment (docs/7.1-design.md《落点兜底》).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToTasks)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
 
-// Reconcile implements docs/7.1 §7.2 steps 1-6 for M4.
+// Reconcile implements docs/7.1-design.md《候选节点筛选与预热下发》 steps 1-6.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	start := r.now()
 	// Registered before the first Get so every return path, including
@@ -190,7 +201,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		log.Info("warmup reconcile finished", fields...)
 	}()
 
-	// M11 fallback (docs/7.1 §7.8): a released Pod may land on a Node other
+	// The deviation fallback (docs/7.1-design.md《落点兜底》): a released Pod may land on a Node other
 	// than its GWAA assignment. This must run for terminal tasks too, so it
 	// stays before the isTerminal short-circuit.
 	r.reconcileDeviation(ctx, log, task)
@@ -303,7 +314,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	// M4 wide preheat runs before the training Pods exist, so an empty match is
+	// The initial wide preheat runs before the training Pods exist, so an empty match is
 	// the expected pre-creation state (D48). PodSetMismatch describes a partial
 	// set only; keeping it true through preheat floods logs and alerts.
 	if matchedPods == 0 {
@@ -383,7 +394,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		task.Status.Phase = traincachev1alpha1.WarmupPhasePreheating
 	}
 
-	// M5 runs before M4: the Agents' replies are the only record of which
+	// Polling runs before submission: the Agents' replies are the only record of which
 	// preheat tasks exist, and the wide preheat must not repeat towards a Node
 	// that already holds one. Polling failures degrade individual pairs; they
 	// never replace the submission error/backoff.
@@ -393,7 +404,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		outcome, facts = r.pollReadiness(ctx, log, task, windows, candidates, podNames)
 	}
 
-	// M4 submits every candidate while no Agent reports holding a task for this
+	// The initial pass submits every candidate while no Agent reports holding a task for this
 	// Warmup Task. From the first accepted task on only the diff RPCs run, so a
 	// preheat task is never cancelled and recreated round after round.
 	initialFanout := !anyTaskHeld(outcome.Tasks)
@@ -421,8 +432,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 	}
 
-	// M6: recompute GWAA after each poll and issue only the RPC differences.
-	// M7: evaluate the gate on the assigned node's readiness.
+	// Each poll recomputes GWAA and issues only the RPC differences.
+	// The gate is evaluated on the assigned nodes' readiness.
 	if len(candidates) > 0 && len(windows) > 0 {
 		stopped := submitFailures(submission)
 		ledger := submittedLedger(task, windows, candidates, outcome.Tasks, initialFanout, submission)
@@ -472,13 +483,41 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 
 		evaluation := r.evaluateGate(task)
+
+		// #37: 前置跳过条件（数据集太小 / 带宽够快）。
+		// 只有门控仍处于 Hold 时才采样 agent /metrics：门控已 Released 后再抓一次
+		// 没有判断价值，而每个候选节点一次 5s 超时会按候选节点数放大 reconcile 延迟。
+		// 不采样时 lastMetricSample 基线保持不变，下次 Hold 仍能算出吞吐增量。
+		if evaluation.Decision.State == gate.Hold {
+			totalBytes := dataSetTotalBytes(ds)
+			observedThroughput := r.bestObservedThroughput(ctx, log, candidates)
+			if reason, skip := shouldSkipGate(totalBytes, r.CacheCapacityBytes,
+				observedThroughput, r.NetworkBandwidthBytes); skip {
+				log.Info("gate skipped (#37)",
+					"reason", reason,
+					"total_bytes", totalBytes,
+					"cache_capacity_bytes", r.CacheCapacityBytes,
+					"observed_throughput", observedThroughput,
+					"network_bandwidth_bytes", r.NetworkBandwidthBytes)
+				evaluation.Decision.State = gate.Released
+				evaluation.Decision.Reason = reason
+			}
+		}
+
+		// #38: 至少有一个 agent 上报非零 ready → 提前放行
+		if evaluation.Decision.State == gate.Hold && hasMinProgress(evaluation.Pods) {
+			log.Info("gate early release: min progress met (#38)")
+			evaluation.Decision.State = gate.Released
+			evaluation.Decision.Reason = "min_progress_any_node"
+		}
+
 		logGateDecision(log, taskKey, evaluation)
 		if evaluation.Decision.State == gate.Hold {
 			r.Metrics.ObserveGateTask(taskKey, metrics.GateHold, r.now())
 			if !outcome.Pending {
 				task.Status.Phase = traincachev1alpha1.WarmupPhaseGating
 			}
-			// M7 independent gate cycle: a terminal poll (all Ready/Failed)
+			// The gate keeps its own cycle: a terminal poll (all Ready/Failed)
 			// still requeues until release or TMax.
 			return ctrl.Result{RequeueAfter: r.pollRequeueAfter()}, submitErr
 		}
@@ -492,7 +531,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	return ctrl.Result{}, submitErr
 }
 
-// submitFailures turns the initial M4 per-node failures into the GWAA stopped
+// submitFailures turns the initial per-node submission failures into the GWAA stopped
 // node set.
 func submitFailures(submission submitResult) map[string]error {
 	failed := make(map[string]error, len(submission.Unavailable)+len(submission.Permanent))
@@ -685,4 +724,48 @@ func sortedErrorKeys(m map[string]error) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// bestObservedThroughput 从所有 candidate node 里取最大 observed throughput（bytes/sec）。
+// 每次调用更新每个 node 的内部采样基线（首次采样只有 counter 值，没有时间差，返回 0）。
+// MetricsFetcher 为 nil 或 NetworkBandwidthBytes == 0 时直接返回 0，不做 HTTP 调用。
+func (r *Reconciler) bestObservedThroughput(ctx context.Context, log *slog.Logger, nodes []string) float64 {
+	if r.MetricsFetcher == nil || r.NetworkBandwidthBytes <= 0 {
+		return 0
+	}
+	if r.lastMetricSample == nil {
+		r.lastMetricSample = make(map[string]nodeMetricSample)
+	}
+	best := 0.0
+	now := r.now()
+	for _, node := range nodes {
+		nm, err := r.MetricsFetcher.FetchNodeMetrics(ctx, node)
+		if err != nil {
+			log.Debug("agent metrics fetch failed (skip bandwidth gate check)",
+				"node", node, "err", err)
+			continue
+		}
+		if nm == nil || nm.FetchBytesTotal <= 0 {
+			continue
+		}
+		cur := nodeMetricSample{bytesTotal: nm.FetchBytesTotal, at: now}
+		if last, ok := r.lastMetricSample[node]; ok {
+			delta := cur.bytesTotal - last.bytesTotal
+			elapsed := cur.at.Sub(last.at).Seconds()
+			if delta > 0 && elapsed > 0 {
+				tp := delta / elapsed
+				if tp > best {
+					best = tp
+				}
+			}
+		}
+		r.lastMetricSample[node] = cur
+	}
+	return best
+}
+
+// nodeMetricSample 是 bestObservedThroughput 的 per-node 内部采样。
+type nodeMetricSample struct {
+	bytesTotal float64
+	at         time.Time
 }

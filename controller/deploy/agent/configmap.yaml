@@ -37,6 +37,19 @@
 #                              read. The bench harness rewrites it per dataset.
 #   objstoreSecure           — "true"/"1"/"yes" enables TLS to the origin;
 #                              anything else, including "", means plain HTTP.
+#   objstoreCompression      — "true"/"1"/"yes" lets the Agent and the gateway
+#                              declare gzip to the origin; anything else reads
+#                              responses as raw bytes. Off by default: training
+#                              data is already compressed. Written here even
+#                              though it equals the code default, so the switch
+#                              is discoverable in the manifest.
+#   fetchRangeParallel      — Agent-only switch for splitting every block into
+#                              four parallel Range GETs; "true"/"1"/"yes" turns
+#                              it on, "false"/"0"/"no" turns it off. On by
+#                              default. Written here because the DaemonSet
+#                              references it: patching the key is the supported
+#                              way to change it per run, and a missing key
+#                              blocks Pod startup.
 #   gatewayEndpoint          — S3 gateway the Agent routes block GETs to. ""
 #                              means every block GET goes straight to the
 #                              origin; "<host>:<port>" routes them through the
@@ -68,6 +81,15 @@
 #                              schedulerScoreTTL, in traincache-scheduler-config
 #                              (kube-system): a configMapKeyRef cannot cross
 #                              namespaces, so the scheduler cannot read this CM.
+#   gateNetworkBandwidthBytes — Controller-only network ceiling in bytes/sec.
+#                               The warmup gate compares the throughput the
+#                               Agent reports against 0.8 of this value and
+#                               releases the gate early when the link is
+#                               already saturated. "0" turns the check off.
+#                               Written here because the manager Deployment
+#                               references it: patching the key is the
+#                               supported way to change the ceiling per run,
+#                               and a missing key blocks Pod startup.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -86,12 +108,15 @@ data:
   objstoreEndpoint: "minio.minio.svc.cluster.local:9000"
   objstoreBucket: "traincache"
   objstoreSecure: "false"
+  objstoreCompression: "false"
+  fetchRangeParallel: "true"
   gatewayEndpoint: ""
   gatewaySecure: "false"
-  gatewayBucketConcurrency: "32"
+  gatewayBucketConcurrency: "64"
   gatewayBlockBufferBytes: "10485760"
   gatewayCache: "true"
   gatewayCacheDatasetBytes: "34359738368"
   gatewayCacheTotalBytes: "68719476736"
   controllerPollInterval: "1s"
   controllerScoreTTL: "10m"
+  gateNetworkBandwidthBytes: "0"

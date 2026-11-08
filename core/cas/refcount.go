@@ -1,6 +1,6 @@
 package cas
 
-// 引用计数与读者 pin（design.md §5.2、§7.3；decisions.md D9：内存表，不持久化）。
+// 引用计数与读者 pin（design.md《本地块存储》与《读者登记》；decisions.md D9：内存表，不持久化）。
 //
 //   - 引用计数 = 已提交快照对该 CAS 块的逻辑引用（Acquire/Release）；
 //   - 读操作用 Pin/Unpin 单独管理生命周期，不占引用计数。

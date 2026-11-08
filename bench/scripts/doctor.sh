@@ -23,10 +23,9 @@ ACCESS_KEY="$(CFG MINIO_ACCESS_KEY)"
 SECRET_KEY="$(CFG MINIO_SECRET_KEY)"
 SUDO_PASS="$(CFG SUDO_PASS_FILE)"
 DATA_ROOT="$(CFG DATA_ROOT)"
-TRACK_A="$(CFG TRACK_A_DIR)"
-TRACK_B="$(CFG TRACK_B_DIR)"
-TRACK_C="$(CFG TRACK_C_DIR)"
-TRACK_D="$(CFG TRACK_D_DIR)"
+DATASET_DIR="$(CFG DATASET_DIR)"
+TILT_DIR="$(CFG TILT_DIR)"
+TRAIN_DIR="$(CFG TRAIN_DIR)"
 RESULTS_DIR="$(CFG RESULTS_DIR)"
 
 FAILED=0
@@ -61,6 +60,7 @@ show_tc() {
             | grep -oE "\"/var/run/netns/[^\"]+\"" | head -1 | tr -d "\"")
         [ -n "$netns" ] || { echo "  找不到 Pod netns"; exit 0; }
         nsenter --net="$netns" tc qdisc show dev eth0
+        nsenter --net="$netns" tc class show dev eth0 2>/dev/null || true
     ' _ "$pod" 2>/dev/null || echo "  读取失败(docker/crictl/nsenter 不可用)"
 }
 
@@ -123,10 +123,9 @@ status() {
                 "$(ls -1A "$dir" 2>/dev/null | wc -l)" "$dir"
         fi
     }
-    print_dir "A 轨" "$TRACK_A"
-    print_dir "B 轨" "$TRACK_B" 'shard-*.tar'
-    print_dir "C 轨" "$TRACK_C"
-    print_dir "D 轨" "$TRACK_D" 'shard-*.tar'
+    print_dir "主数据集" "$DATASET_DIR" 'shard-*.tar'
+    print_dir "tilt" "$TILT_DIR"
+    print_dir "train" "$TRAIN_DIR" 'shard-*.tar'
     echo "  结果根: $RESULTS_DIR"
 
     echo
@@ -183,7 +182,7 @@ for mod in numpy torch webdataset; do
     if "$PY" -c "import $mod" >/dev/null 2>&1; then
         pass "import $mod"
     else
-        fail "import $mod 失败(D 轨负载器需要)"
+        fail "import $mod 失败(train负载器需要)"
     fi
 done
 if "$PY" -c "import boto3" >/dev/null 2>&1; then
@@ -288,7 +287,7 @@ else
 fi
 
 section "控制面与 Agent"
-# 缓存上限的期望值不写死：环境变量 > 本次 COND(traincache-policy-*/pareto2-*)
+# 缓存上限的期望值不写死：环境变量 > 本次 COND(cache 字段)
 # 的 cache.capacity_bytes > COND 层固定值(1GiB)。输出两行：字节数与来源
 # (env|cond|default)；来源是 default 时说明这一批没声明档位，只比对不判死。
 expected_capacity_bytes() {
@@ -301,17 +300,21 @@ import os
 import sys
 
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 import cond  # noqa: E402
+import config as bench_config  # noqa: E402
 
 name = (os.environ.get("TRAINCACHE_COND") or "").strip()
 if name:
     try:
-        print(int(cond.load_cond(name)["cache"]["capacity_bytes"]))
+        # COND 里没有 capacity_bytes 字段，容量由 rho 与数据集推导。
+        print(int(cond.cache_bytes(cond.load_cond(name))))
         print("cond")
         sys.exit(0)
     except Exception as exc:  # COND 缺失/没有该字段时退回固定值
         print(f"读 COND {name} 失败: {exc}", file=sys.stderr)
-print(cond.COMPARE_CACHE_BYTES)
+# 没给 COND 时按清单默认（rho=4，1 GiB）算，与 ConfigMap 的默认值一致。
+print(bench_config.cache_bytes(4.0))
 print("default")
 PYEOF
 }
@@ -422,7 +425,40 @@ else
     warn "agentd 未部署(首次 make bench-up 或 make ctrl-up 会部署)"
 fi
 
-section "淘汰证据(4.4 §1.7)"
+# gate 网络带宽上限(bytes/sec):0 = 不启用带宽判断,门控只看数据量与进度。
+# 期望值来自环境变量 TRAINCACHE_GATE_NETWORK_BANDWIDTH,缺省 0;没给这一项时
+# 只比对不判死(本批没声明带宽档位)。
+if [ "$HAVE_K8S" -eq 1 ]; then
+    gnb="$(kubectl -n traincache get cm traincache-config \
+        -o jsonpath='{.data.gateNetworkBandwidthBytes}' 2>/dev/null || true)"
+    exp_gnb="${TRAINCACHE_GATE_NETWORK_BANDWIDTH:-0}"
+    if [ -z "$gnb" ]; then
+        fail "traincache-config 缺少 gateNetworkBandwidthBytes(期望 $exp_gnb)"
+    elif [ "$gnb" != "$exp_gnb" ]; then
+        if [ -n "${TRAINCACHE_GATE_NETWORK_BANDWIDTH:-}" ]; then
+            fail "traincache-config 的 gateNetworkBandwidthBytes=$gnb,本批期望 $exp_gnb;make ctrl-up 会重新对齐"
+        else
+            warn "traincache-config 的 gateNetworkBandwidthBytes=$gnb,与缺省 $exp_gnb 不同(本批未给 env)"
+        fi
+    else
+        pass "gate 网络带宽上限 $gnb 字节/秒"
+    fi
+    # configMapKeyRef 不热生效:值在起 Pod 时才进容器,改了 ConfigMap 没重启的
+    # 时候,带宽判断用的还是旧上限。
+    cm_pods="$(kubectl -n traincache get pods \
+        -l app.kubernetes.io/name=traincache-controller-manager \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+    for pod in $cm_pods; do
+        live="$(kubectl -n traincache exec "$pod" -- \
+            printenv TRAINCACHE_GATE_NETWORK_BANDWIDTH 2>/dev/null || true)"
+        if [ "$live" != "$gnb" ]; then
+            fail "controller-manager $pod 容器内 TRAINCACHE_GATE_NETWORK_BANDWIDTH=${live:-未设置},ConfigMap 声明 $gnb"
+        fi
+    done
+fi
+
+section "淘汰证据(4.3 缓存峰值与声明容量、全体判据)"
 if [ "$HAVE_K8S" -eq 1 ]; then
     agentd_pods="$(kubectl -n traincache get pods -l app=traincache-agentd \
         -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
@@ -485,7 +521,7 @@ if [ "$HAVE_K8S" -eq 1 ]; then
             fail "节点上有 $dir_total 字节的块,但各 agentd 的字节累计最大为 $accum_max → 累计没生效,淘汰闸门不会触发"
         elif [ "$dir_total" -gt 0 ] \
                 && [ "$(awk -v a="$accum_max" -v d="$dir_total" 'BEGIN{print (a+0>1.5*d)?1:0}')" = "1" ]; then
-            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.4 §1.7 判据 2) → 同一批块被重复记账"
+            fail "字节累计 $accum_max 对目录实占 $dir_total 字节超 1.5 倍(4.3 全体判据的字节账自洽) → 同一批块被重复记账"
         elif [ "$dir_total" -eq 0 ]; then
             pass "缓存目录为空(agentd 复位后),累计 $accum_max 是复位前残账,不作判据"
         else
@@ -551,10 +587,10 @@ PY
             OK*)
                 shard_n="$(printf '%s' "$bucket_report" | sed -n 's/.*shards=\([0-9]*\).*/\1/p')"
                 snap="$(printf '%s' "$bucket_report" | sed -n 's/.*snapshot_8m=\([a-z]*\).*/\1/p')"
-                if [ "${shard_n:-0}" -ge 8 ]; then
+                if [ "${shard_n:-0}" -ge 16 ]; then
                     pass "桶 $BUCKET 有 $shard_n 个 shard-*.tar"
                 elif [ "${shard_n:-0}" -ge 1 ]; then
-                    warn "桶 $BUCKET 只有 $shard_n 个 shard-*.tar,不足 S 档 8 个"
+                    warn "桶 $BUCKET 只有 $shard_n 个 shard-*.tar,不足 16 个"
                 else
                     fail "桶 $BUCKET 没有 shard-*.tar"
                 fi
@@ -575,6 +611,7 @@ fi
 
 section "tc qdisc"
 tc_out="$(show_tc 2>/dev/null || true)"
+# 两形态:不给单流上限时是 根 tbf → netem;给单流上限时是 htb → netem → fq。
 if printf '%s' "$tc_out" | grep -q 'tbf'; then
     pass "tc qdisc 在位(MinIO Pod eth0)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'
@@ -621,45 +658,81 @@ PYEOF
     else
         warn "tc qdisc 在位但读不到 rate/burst 字段,跳过 burst 断言: $tbf_line"
     fi
+elif printf '%s' "$tc_out" | grep -q 'qdisc htb'; then
+    # 单流上限档的形态:根 htb(类给聚合带宽)→ netem → fq(maxrate 给单流上限)。
+    # tbf 不是 classful,挂不了子 qdisc,所以这一档的根是 htb。
+    pass "tc qdisc 在位(单流上限档:htb → netem → fq)"
+    printf '%s\n' "$tc_out" | sed 's/^/      /'
+    htb_line="$(printf '%s\n' "$tc_out" | grep -m1 'class htb' || true)"
+    htb_rate="$(printf '%s\n' "$htb_line" | sed -n 's/.* rate \([0-9.][0-9.]*[A-Za-z]*\).*/\1/p')"
+    htb_ceil="$(printf '%s\n' "$htb_line" | sed -n 's/.* ceil \([0-9.][0-9.]*[A-Za-z]*\).*/\1/p')"
+    if [ -n "$htb_rate" ] && [ "$htb_rate" = "$htb_ceil" ]; then
+        pass "htb 类的 rate 与 ceil 相同(聚合带宽是硬上限): rate=$htb_rate"
+    else
+        fail "htb 类的 rate 与 ceil 不一致(聚合带宽不是硬上限): $htb_line"
+    fi
 else
     warn "tc qdisc 未挂(跑分前 make tc-up 或 cold_reset 会挂)"
     printf '%s\n' "$tc_out" | sed 's/^/      /'
 fi
+# fq maxrate 检查(两形态共用):单流上限档的 fq 给出每连接上限,挂了 fq 就要能
+# 看到 maxrate,否则单流上限没生效(4.2 的并行下载族一节)。
+if printf '%s' "$tc_out" | grep -q 'qdisc fq'; then
+    fq_line="$(printf '%s\n' "$tc_out" | grep -m1 'qdisc fq' || true)"
+    if printf '%s' "$fq_line" | grep -q 'maxrate'; then
+        pass "fq maxrate 在位: $fq_line"
+    else
+        fail "qdisc 里有 fq 但读不到 maxrate(单流上限没挂上): $fq_line"
+    fi
+fi
 
 section "数据目录与磁盘"
-if [ -n "$TRACK_A" ] && [ -d "$TRACK_A" ] && [ -n "$(ls -A "$TRACK_A" 2>/dev/null)" ]; then
-    pass "A 轨数据在位: $TRACK_A"
-else
-    warn "A 轨未生成(data-up 会生成): $TRACK_A"
-fi
-b_n="$(ls -1 "$TRACK_B"/shard-*.tar 2>/dev/null | wc -l)"
-if [ "$b_n" -ge 8 ]; then
-    pass "B 轨 shard 数 $b_n: $TRACK_B"
+b_n="$(ls -1 "$DATASET_DIR"/shard-*.tar 2>/dev/null | wc -l)"
+if [ "$b_n" -ge 16 ]; then
+    pass "主数据集 shard 数 $b_n: $DATASET_DIR"
 elif [ "$b_n" -ge 1 ]; then
-    warn "B 轨只有 $b_n 个 shard,不足 S 档 8 个: $TRACK_B"
+    warn "主数据集只有 $b_n 个 shard,不足 16 个: $DATASET_DIR"
 else
-    fail "B 轨没有 shard-*.tar: $TRACK_B"
+    fail "主数据集没有 shard-*.tar: $DATASET_DIR"
 fi
-if [ -f "$TRACK_C/hot-shards.txt" ] && [ -f "$TRACK_C/full-shards.txt" ]; then
-    pass "C 轨清单在位: $TRACK_C"
+if [ -f "$TILT_DIR/hot-shards.txt" ] && [ -f "$TILT_DIR/full-shards.txt" ]; then
+    pass "tilt 清单在位: $TILT_DIR"
 else
-    warn "C 轨清单缺失(synth_track_c.py 会生成)"
+    warn "tilt 清单缺失(synth_tilt.py 会生成)"
 fi
-d_n="$(ls -1 "$TRACK_D"/shard-*.tar 2>/dev/null | wc -l)"
+d_n="$(ls -1 "$TRAIN_DIR"/shard-*.tar 2>/dev/null | wc -l)"
 if [ "$d_n" -gt 0 ]; then
-    pass "D 轨 shard 数 $d_n: $TRACK_D"
+    pass "train shard 数 $d_n: $TRAIN_DIR"
 else
-    warn "D 轨未生成(track-d-data 会生成)"
+    warn "train 未生成(track-d-data 会生成)"
 fi
-if [ -e "$SUDO_PASS" ]; then
+cache_reset_via=""
+cache_reset_node=""
+if [ "$(id -u)" = "0" ]; then
+    cache_reset_via="root 直跑"
+elif sudo -n true 2>/dev/null; then
+    cache_reset_via="sudo -n"
+elif have kind && have docker; then
+    for n in $(kind get nodes --name "$CLUSTER" 2>/dev/null); do
+        # /proc 挂载是 ro 就写不进 drop_caches(容器内 uid 0 也一样)。
+        if docker exec "$n" awk '$2=="/proc"{print $4}' /proc/mounts 2>/dev/null | grep -q '^rw'; then
+            cache_reset_via="kind 节点容器"
+            cache_reset_node="$n"
+            break
+        fi
+    done
+fi
+if [ -n "$cache_reset_via" ]; then
+    pass "清页缓存通道可用: $cache_reset_via${cache_reset_node:+ ($cache_reset_node)}"
+elif [ -e "$SUDO_PASS" ]; then
     mode="$(stat -c '%a' "$SUDO_PASS" 2>/dev/null || echo '?')"
     if [ "$mode" = "600" ]; then
-        pass "$SUDO_PASS 存在且权限 600"
+        pass "$SUDO_PASS 存在且权限 600(可作 sudo -S 通道)"
     else
         warn "$SUDO_PASS 权限 $mode,期望 600"
     fi
 else
-    fail "$SUDO_PASS 不存在(cold_reset/drop_caches 需要 sudo)"
+    fail "没有可用的清页缓存通道(root 直跑 / sudo -n / kind 节点容器 / .sudo-pass 至少要有一条通)"
 fi
 if [ -n "$DATA_ROOT" ] && [ -d "$DATA_ROOT" ]; then
     avail_g="$(df -Pk "$DATA_ROOT" 2>/dev/null | awk 'NR==2{printf "%d", $4/1024/1024}')"

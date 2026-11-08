@@ -1,0 +1,53 @@
+{
+  "schema_version": "4",
+  "name": "evict-lfu-rho1",
+  "family": "evict",
+  "group": "traincache-cold",
+  "load": "tilt",
+  "dataset": {
+    "name": "dataset-4gib",
+    "shards": 16,
+    "shard_size_bytes": 268435456,
+    "seed": 20261006
+  },
+  "workload": {
+    "epochs": 3,
+    "shuffle": "per-epoch",
+    "readers": 1,
+    "access_pattern": "single"
+  },
+  "network": {
+    "rate_mbit": 1000
+  },
+  "cache": {
+    "enabled": true,
+    "rho": 1.0,
+    "evict_policy": "lfu",
+    "warmup_seconds": 0
+  },
+  "sampling": {
+    "reps": 3
+  },
+  "environment": {
+    "gateway": false,
+    "gateway_image": null,
+    "gateway_cache": false,
+    "image_set": "sha256:78a306f01df540818ae5fe56417f6a3e1e497a114bd0f06a10cdbaefa95577f7"
+  },
+  "tags": [
+    "evict",
+    "evict_policy=lfu",
+    "rho=1.0",
+    "load=tilt"
+  ],
+  "notes": "evict 族格子；evict_policy=lfu，rho=1.0，rate=1000，load=tilt 热 10%；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
+  "prefetch": {
+    "lookahead": 16,
+    "fanout": 2
+  },
+  "trace": {
+    "file": "traces/track-16-per-epoch-ep3.json",
+    "sha256": "feae8a4700aaed509fe7489c08e7c8a728be6c688ba1355adf21681e2dfdef9b",
+    "seed": 20261006
+  }
+}

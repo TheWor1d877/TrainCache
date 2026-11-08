@@ -64,7 +64,7 @@ func run(ctx context.Context) error {
 	logStartup(log, cfg)
 
 	// Independent registry owned by the control plane. The reconcilers emit
-	// into it and managerOptions exposes it at metricsPath (docs/7.1 §9.5).
+	// into it and managerOptions exposes it at metricsPath (docs/7.1-design.md《指标清单》).
 	registry := metrics.New()
 	log.Info("metrics registry initialized",
 		"addr", cfg.MetricsAddr,
@@ -113,32 +113,40 @@ func runBusiness(ctx context.Context, cfg *config.Config, log *slog.Logger, regi
 	}
 
 	resolver := agentclient.NewResolver(mgr.GetClient(), cfg.AgentPort)
+	// The node address lookup shares the metrics server, so the CLI can find
+	// an Agent by Node name (docs/7.1-design.md《地址解析端点》).
+	if err := mgr.AddMetricsServerExtraHandler(agentclient.ResolvePath, agentclient.ResolveHandler(resolver)); err != nil {
+		return fmt.Errorf("register resolve handler: %w", err)
+	}
 	agents := agentclient.NewPool(resolver, cfg.AgentTimeout)
 	defer func() {
 		if err := agents.Close(); err != nil {
 			log.Warn("close agent client pool", "err", err)
 		}
 	}()
+	metricsFetcher := &agentclient.MetricsFetcher{Resolver: resolver}
 	warmupReconciler := &warmupcontroller.Reconciler{
-		Client:             mgr.GetClient(),
-		Agents:             agents,
-		Recorder:           mgr.GetEventRecorderFor("warmuptask-controller"),
-		Log:                log.With("controller", "warmup"),
-		Metrics:            registry,
-		PollInterval:       cfg.PollInterval,
-		ScoreAnnotation:    cfg.ScoreAnnotation,
-		GateName:           cfg.GateName,
-		CacheCapacityBytes: cfg.CacheCapacityBytes,
-		StartupWindowBytes: cfg.StartupWindowBytes,
-		MaxFillFraction:    cfg.MaxFillFraction,
+		Client:                mgr.GetClient(),
+		Agents:                agents,
+		Recorder:              mgr.GetEventRecorderFor("warmuptask-controller"),
+		Log:                   log.With("controller", "warmup"),
+		Metrics:               registry,
+		PollInterval:          cfg.PollInterval,
+		ScoreAnnotation:       cfg.ScoreAnnotation,
+		GateName:              cfg.GateName,
+		CacheCapacityBytes:    cfg.CacheCapacityBytes,
+		StartupWindowBytes:    cfg.StartupWindowBytes,
+		MaxFillFraction:       cfg.MaxFillFraction,
+		NetworkBandwidthBytes: cfg.GateNetworkBandwidthBytes,
+		MetricsFetcher:        metricsFetcher,
 	}
 	if err := warmupReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("register warmup controller: %w", err)
 	}
 
-	// M9 wiring: watch Pods selected by traincache.io/warmup=enabled and
+	// Wiring: watch Pods selected by traincache.io/warmup=enabled and
 	// record GateInjectionDegraded when the webhook did not inject the task
-	// annotation (docs/7.1 §5.7, §7.9).
+	// annotation (docs/7.1-design.md《Webhook 注入》《异常与降级》).
 	degradedReconciler := &warmupcontroller.DegradedReconciler{
 		Client:   mgr.GetClient(),
 		Log:      log.With("controller", "warmup-degraded"),
@@ -192,7 +200,7 @@ func managerOptions(cfg *config.Config, scheme *runtime.Scheme, registry *metric
 		LeaderElection:         cfg.LeaderElection,
 		LeaderElectionID:       "traincache-controller-leader",
 		HealthProbeBindAddress: cfg.HealthAddr,
-		// Q9 keeps Secret read RBAC namespaced. A cached client would start a
+		// Secret read RBAC stays namespaced. A cached client would start a
 		// cluster-wide Secret informer (list/watch in every namespace), which
 		// that RBAC cannot grant. Read Secrets live instead; the storage
 		// factory already caches stores by resourceVersion.

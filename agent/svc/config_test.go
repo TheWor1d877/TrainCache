@@ -40,6 +40,8 @@ func setBaseEnv(t *testing.T) {
 		"TRAINCACHE_INDEX_REFRESH_INTERVAL",
 		"TRAINCACHE_LOCAL_GC_INTERVAL",
 		"TRAINCACHE_OBJSTORE_PROBE_CONDITIONAL_WRITE",
+		"TRAINCACHE_OBJSTORE_COMPRESSION",
+		"TRAINCACHE_FETCH_RANGE_PARALLEL",
 		"TRAINCACHE_GATEWAY_ENDPOINT",
 		"TRAINCACHE_GATEWAY_SECURE",
 	} {
@@ -65,7 +67,7 @@ func unsetEnv(t *testing.T, key string) {
 	})
 }
 
-// wantDefaultHeat 是 D14/D30 默认十一值:N=24h、M=30min、T=24h(因子 0.5)、β=0.15、
+// wantDefaultHeat 是 默认十一值:N=24h、M=30min、T=24h(因子 0.5)、β=0.15、
 // T_R=6h、校准窗口 100/阈值 0.8、k=80、Δ=5、M=90。
 func wantDefaultHeat() HeatConfig {
 	return HeatConfig{
@@ -135,13 +137,19 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("ReadStallWindowMS = %d, want %d(C3 默认)", cfg.ReadStallWindowMS, defaultReadStallWindowMS)
 	}
 	if cfg.IndexRefreshInterval != defaultIndexRefreshInterval {
-		t.Errorf("IndexRefreshInterval = %v, want %v(6.1 §5.9 默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
+		t.Errorf("IndexRefreshInterval = %v, want %v(6.1《快照与回收》默认)", cfg.IndexRefreshInterval, defaultIndexRefreshInterval)
 	}
 	if cfg.LocalGCInterval != defaultLocalGCInterval {
 		t.Errorf("LocalGCInterval = %v, want %v(§11.5 默认)", cfg.LocalGCInterval, defaultLocalGCInterval)
 	}
 	if cfg.ObjstoreProbeConditionalWrite {
-		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1 §5.12)")
+		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1《快照与回收》)")
+	}
+	if cfg.ObjstoreCompression {
+		t.Error("ObjstoreCompression 默认值 = true, want false(压缩默认关闭)")
+	}
+	if !cfg.FetchRangeParallel {
+		t.Error("FetchRangeParallel 默认值 = false, want true(并行下载默认打开)")
 	}
 	if cfg.GatewayEndpoint != "" {
 		t.Errorf("GatewayEndpoint 默认值 = %q, want 空(9.1 §5.3:全部直连)", cfg.GatewayEndpoint)
@@ -193,7 +201,7 @@ func TestLoadDebugAddr(t *testing.T) {
 	}
 }
 
-// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(6.1 §5.9/§5.12)。
+// TestLoadIndexRefreshAndProbeEnv:新增两个配置项的环境变量解析(设计《快照与回收》)。
 func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
 	setBaseEnv(t)
 	t.Setenv("NODE_NAME", "worker-01")
@@ -212,7 +220,7 @@ func TestLoadIndexRefreshAndProbeEnv(t *testing.T) {
 	}
 }
 
-// TestLoadLocalGCInterval:TRAINCACHE_LOCAL_GC_INTERVAL 解析(§11.5)——未设置取默认
+// TestLoadLocalGCInterval:TRAINCACHE_LOCAL_GC_INTERVAL 解析(docs/5.1-design.md《回收》)——未设置取默认
 // 10m;合法值覆盖;非法取值与其余 duration 参数同口径判启动错误。
 func TestLoadLocalGCInterval(t *testing.T) {
 	cases := []struct {
@@ -266,6 +274,8 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("TRAINCACHE_OBJSTORE_SECRET_KEY", "sk-test")
 	t.Setenv("TRAINCACHE_OBJSTORE_BUCKET", "tc-blocks")
 	t.Setenv("TRAINCACHE_OBJSTORE_SECURE", "1")
+	t.Setenv("TRAINCACHE_OBJSTORE_COMPRESSION", "yes")
+	t.Setenv("TRAINCACHE_FETCH_RANGE_PARALLEL", "false")
 	t.Setenv("TRAINCACHE_GATEWAY_ENDPOINT", "gateway.traincache.svc:9413")
 	t.Setenv("TRAINCACHE_GATEWAY_SECURE", "yes")
 	t.Setenv("TRAINCACHE_HEAT_DECAY_AGE", "48h")
@@ -319,6 +329,12 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !cfg.ObjstoreSecure {
 		t.Error("ObjstoreSecure = false, want true(TRAINCACHE_OBJSTORE_SECURE=1)")
+	}
+	if !cfg.ObjstoreCompression {
+		t.Error("ObjstoreCompression = false, want true(TRAINCACHE_OBJSTORE_COMPRESSION=yes)")
+	}
+	if cfg.FetchRangeParallel {
+		t.Error("FetchRangeParallel = true, want false(TRAINCACHE_FETCH_RANGE_PARALLEL=false)")
 	}
 	if cfg.GatewayEndpoint != "gateway.traincache.svc:9413" {
 		t.Errorf("GatewayEndpoint = %q, want gateway.traincache.svc:9413(9.1 §5.3)", cfg.GatewayEndpoint)
@@ -382,7 +398,7 @@ func TestLoadReadStallWindowMS(t *testing.T) {
 	}
 }
 
-// TestLoadObjstoreSecureBool:TRAINCACHE_OBJSTORE_SECURE 真值口径(D26:"1"/"true"/"yes",
+// TestLoadObjstoreSecureBool:TRAINCACHE_OBJSTORE_SECURE 真值口径("1"/"true"/"yes",
 // 大小写不敏感);其余取值(含未设置、垃圾值)一律 false。
 func TestLoadObjstoreSecureBool(t *testing.T) {
 	truthy := []string{"1", "true", "TRUE", "Yes", " yes "}
@@ -417,7 +433,48 @@ func TestLoadObjstoreSecureBool(t *testing.T) {
 	}
 }
 
-// TestLoadGatewayEnv:网关入口与独立 TLS 开关(9.1 §5.3 / 9.2 D15/D16)。
+// TestLoadFetchRangeParallel:并行下载开关(默认打开,不做块大小判定)。
+// 未设置 → true;"false"/"0"/"no" → false;"true"/"1"/"yes" → true;
+// 其余取值 → 拒绝启动(配置错即拦,不静默回退)。
+func TestLoadFetchRangeParallel(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		set     bool
+		want    bool
+		wantErr bool
+	}{
+		{name: "缺省打开", want: true},
+		{name: "显式打开", set: true, value: "true", want: true},
+		{name: "显式关闭", set: true, value: "false", want: false},
+		{name: "显式关闭零", set: true, value: "0", want: false},
+		{name: "非法取值", set: true, value: "on", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			if tc.set {
+				t.Setenv("TRAINCACHE_FETCH_RANGE_PARALLEL", tc.value)
+			}
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load 未报错，期望拒绝非法开关取值 %q", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.FetchRangeParallel != tc.want {
+				t.Errorf("FetchRangeParallel = %v, want %v(env=%q)", cfg.FetchRangeParallel, tc.want, tc.value)
+			}
+		})
+	}
+}
+
+// TestLoadGatewayEnv:网关入口与独立 TLS 开关(9.1 §5.3 / 9.2)。
 // 缺省为空/false;TRAINCACHE_GATEWAY_SECURE 按 envBool 口径(1/true/yes);
 // 两个 secure 互相独立;地址不做 scheme 校验(非法值不阻断启动)。
 func TestLoadGatewayEnv(t *testing.T) {
@@ -494,7 +551,7 @@ func TestLoadGatewayEnv(t *testing.T) {
 	})
 }
 
-// TestLoadOrdersDirDefault:未设 TRAINCACHE_ORDERS_DIR → §6.2 默认发现目录。
+// TestLoadOrdersDirDefault:未设 TRAINCACHE_ORDERS_DIR → 设计《数据格式》默认发现目录。
 func TestLoadOrdersDirDefault(t *testing.T) {
 	setBaseEnv(t)
 	os.Unsetenv("TRAINCACHE_ORDERS_DIR") // t.Setenv 的 cleanup 会恢复原值
@@ -510,7 +567,7 @@ func TestLoadOrdersDirDefault(t *testing.T) {
 }
 
 // TestLoadCacheRootBlankFallsBack：TRAINCACHE_CACHE_ROOT 全空白 → 回退默认
-// /var/cache/traincache(与 OrdersDir 等字符串 env 同一 envOr 解析口径;D38)。
+// /var/cache/traincache(与 OrdersDir 等字符串 env 同一 envOr 解析口径)。
 func TestLoadCacheRootBlankFallsBack(t *testing.T) {
 	setBaseEnv(t)
 	t.Setenv("NODE_NAME", "worker-01")
@@ -570,7 +627,7 @@ func TestLoadVerifyInvalid(t *testing.T) {
 	}
 }
 
-// TestLoadHeatEnvInvalid:TRAINCACHE_HEAT_* 非法取值启动即报错(D30:duration 走
+// TestLoadHeatEnvInvalid:TRAINCACHE_HEAT_* 非法取值启动即报错(duration 走
 // time.ParseDuration,percent 0..100;比值类按 (0,1]、窗口 >0 校验),错误信息指明 env 名。
 func TestLoadHeatEnvInvalid(t *testing.T) {
 	cases := []struct{ key, val string }{

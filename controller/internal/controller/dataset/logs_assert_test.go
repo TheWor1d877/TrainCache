@@ -1,6 +1,6 @@
 package dataset
 
-// Log assertions for docs/7.1-design.md §9.3/§9.4. The tests assert
+// Log assertions for docs/7.1-design.md《日志》. The tests assert
 // structured JSON output from the real reconcile path, including the rule
 // that Secret credential values never reach the log stream.
 
@@ -19,7 +19,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// §9.3 快照/存储校验失败: storage factory failure is Warn with dataset/err.
+// 《日志》必记点 快照/存储校验失败: storage factory failure is Warn with dataset/err.
 func TestDatasetStorageUnavailableLogFields(t *testing.T) {
 	ds := newDataSet()
 	env := newTestEnv(t, []client.Object{ds}, &fakeFactory{err: storage.ErrSecretNotFound}, nil)
@@ -65,7 +65,7 @@ func (f *m12CredentialFactory) Store(
 
 func (f *m12CredentialFactory) Close() error { return nil }
 
-// §9.4 脱敏: Secret/accessKey/secretKey values never appear in controller logs.
+// 《日志》脱敏纪律: Secret/accessKey/secretKey values never appear in controller logs.
 func TestDatasetLogsRedactSecretCredentials(t *testing.T) {
 	const (
 		accessKey = "ACCESS-KEY-SENTINEL"

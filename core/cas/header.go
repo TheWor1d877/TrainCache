@@ -1,7 +1,7 @@
-// Package cas 是内容寻址的本地块存储（design.md §5.2、§6.3）。
+// Package cas 是内容寻址的本地块存储（design.md《本地块存储》）。
 //
 // 本文件负责 128 字节块头的编解码、magic/version 校验与指纹的 hex 编解码。
-// 块头布局（design.md §6.3、decisions.md D3，v1 即最终格式）：
+// 块头布局（design.md《本地块存储》、decisions.md D3，v1 即最终格式）：
 //
 //	offset  size  field
 //	0       4     magic  "TCBK"（0x54 43 42 4B）
@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	// HeaderSize 是块头字节数（design.md §6.3，对齐到 128B）。
+	// HeaderSize 是块头字节数（design.md《本地块存储》，对齐到 128B）。
 	HeaderSize = 128
 	// FlagHasSHA256 是 flags bit0：置位时块头 SHA256 字段有效。
 	FlagHasSHA256 = 1 << 0
@@ -80,7 +80,7 @@ func (h Header) Encode() [HeaderSize]byte {
 	return b
 }
 
-// String 返回指纹的 32 字符小写 hex 编码（design.md §6.2：fp 为 32 字符 hex）。
+// String 返回指纹的 32 字符小写 hex 编码（design.md《索引条目与对象布局》：fp 为 32 字符 hex）。
 func (f Fingerprint) String() string {
 	return hex.EncodeToString(f[:])
 }

@@ -1,4 +1,4 @@
-# Local S3-compatible object store for the kind e2e run (plan M11 11.2).
+# Local S3-compatible object store for the kind e2e run.
 # Pinned release tag; the registry mirror prefix is required because k8s does
 # not read /etc/docker/daemon.json.
 #

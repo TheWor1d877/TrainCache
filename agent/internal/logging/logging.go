@@ -47,7 +47,7 @@ func New(component, version, level string) *slog.Logger {
 	sampler := corelog.NewAgentSampler(component)
 	processSampler.Store(sampler)
 	// 脱敏包在 JSON handler 外层：消息、字符串与 error 属性写出前统一处理，
-	// 调用点不需要逐个调用 Redact（D32）。
+	// 调用点不需要逐个调用 Redact。
 	handler := corelog.NewSamplingHandler(
 		corelog.NewRedactingHandler(
 			slog.NewJSONHandler(output, &slog.HandlerOptions{Level: corelog.Level()}),

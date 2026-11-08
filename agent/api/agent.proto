@@ -19,7 +19,7 @@ service NodeService {
 }
 
 // 北向:Agent → Controller,块级任务上报。
-// proto 随本设计冻结,服务端实现推迟至 Controller 里程碑(decisions Q1)。
+// 保留占位不实现:服务端返回 Unimplemented,控制面不用这个通道(decisions D67)。
 service ReportService {
   rpc ReportBlocks(stream BlockReport) returns (ReportAck);
 }

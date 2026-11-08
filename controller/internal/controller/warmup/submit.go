@@ -52,7 +52,7 @@ func submitToCandidates(
 		for index := range windows {
 			taskID := TaskID(task, int32(index))
 			podName := podNames[int32(index)]
-			// snapshot_id must stay empty: the 7.x Agent contract (M3) only
+			// snapshot_id must stay empty: the Agent preheat contract only
 			// supports CURRENT and rejects any concrete id with
 			// InvalidArgument. DataSet validation already resolved and froze
 			// ds.Status.SnapshotID against CURRENT.

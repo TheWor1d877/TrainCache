@@ -16,7 +16,7 @@ import (
 	"traincache/core/objectstore"
 )
 
-// 降级状态机的常量（9.2 D5 / 9.1 §4.3）。
+// 降级状态机的常量（9.2 / 9.1 §4.3）。
 const (
 	// gatewayInitialBackoff 是首次降级的退避时长。
 	gatewayInitialBackoff = 10 * time.Second
@@ -30,15 +30,15 @@ const (
 // backendStore 实现 objectstore.Store：Get 按 sourceState 决定走网关或源站，
 // 网关失败时在「已写字节为 0」的前提下同次改走源站；其余方法一律转 origin。
 type backendStore struct {
-	origin  objectstore.Store
-	gateway objectstore.Store // nil 表示未启用
+	origin  objectstore.RangeStore
+	gateway objectstore.RangeStore // nil 表示未启用
 	state   *sourceState
 }
 
-var _ objectstore.Store = (*backendStore)(nil)
+var _ objectstore.RangeStore = (*backendStore)(nil)
 
 // newBackendStore 构造选择器。gateway 为 nil 时 state 也为 nil（未启用，全部直连）。
-func newBackendStore(origin, gateway objectstore.Store) *backendStore {
+func newBackendStore(origin, gateway objectstore.RangeStore) *backendStore {
 	s := &backendStore{origin: origin, gateway: gateway}
 	if gateway != nil {
 		s.state = newSourceState(true)
@@ -48,16 +48,32 @@ func newBackendStore(origin, gateway objectstore.Store) *backendStore {
 
 // Get 实现 objectstore.Store。失败分类与降级规则见 9.1 §4.4 表。
 func (s *backendStore) Get(ctx context.Context, key string, w io.Writer) error {
+	return s.routedGet(ctx, w, func(st objectstore.RangeStore, out io.Writer) error {
+		return st.Get(ctx, key, out)
+	})
+}
+
+// GetRange 实现 objectstore.RangeStore：后端选择与降级规则与 Get 完全相同，
+// 只是把闭区间 [start, end] 交给选中的 Store。
+func (s *backendStore) GetRange(ctx context.Context, key string, start, end int64, w io.Writer) error {
+	return s.routedGet(ctx, w, func(st objectstore.RangeStore, out io.Writer) error {
+		return st.GetRange(ctx, key, start, end, out)
+	})
+}
+
+// routedGet 在网关/源站之间选择后端，并按 9.1 §4.4 处理失败与降级。
+// call 把同一次取数请求施加到目标 Store；已写字节为 0 时才允许同次降级重试。
+func (s *backendStore) routedGet(ctx context.Context, w io.Writer, call func(objectstore.RangeStore, io.Writer) error) error {
 	if s.gateway == nil || s.state == nil {
-		return s.origin.Get(ctx, key, w)
+		return call(s.origin, w)
 	}
 	viaGateway, gen := s.state.route()
 	if !viaGateway {
-		return s.origin.Get(ctx, key, w)
+		return call(s.origin, w)
 	}
 
 	cw := &countingWriter{w: w}
-	err := s.gateway.Get(ctx, key, cw)
+	err := call(s.gateway, cw)
 	if err == nil {
 		// mode=1 下成功不变；探测成功则由状态机切回网关模式并清零退避。
 		s.state.reportSuccess(gen)
@@ -80,9 +96,9 @@ func (s *backendStore) Get(ctx context.Context, key string, w io.Writer) error {
 		return err
 	}
 
-	// 已向调用方写过任何字节就不能重试，否则会污染已落盘内容（9.2 D6）。
+	// 已向调用方写过任何字节就不能重试，否则会污染已落盘内容（9.2）。
 	if cw.written == 0 {
-		return s.origin.Get(ctx, key, w)
+		return call(s.origin, w)
 	}
 	return err
 }

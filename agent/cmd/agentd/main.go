@@ -1,4 +1,4 @@
-// Command traincache-agentd 是 TrainCache 节点常驻 Agent(DaemonSet 入口,design §3/§8)。
+// Command traincache-agentd 是 TrainCache 节点常驻 Agent(DaemonSet 入口,设计《架构与依赖方向》《部署与配置》)。
 // 启动序:配置 → 装配 → /metrics HTTP → gRPC server(health + 三服务)→ 业务后台循环
 // (重扫描/淘汰/发现);收到 SIGINT/SIGTERM 优雅停止。
 package main
@@ -88,17 +88,17 @@ func main() {
 	// /debug/loglevel 只绑回环;随 ctx 取消优雅停止,监听失败不影响缓存服务。
 	go corelog.ServeLevel(ctx, cfg.DebugAddr, "agentd", slog.Default())
 
-	// R1/R2(6.1 §5.9/§5.10):前缀感知快照跟随 + 读者声明心跳;随 signal ctx 退出,
+	// R1/R2(设计《快照与回收》):前缀感知快照跟随 + 读者声明心跳;随 signal ctx 退出,
 	// 退出时对已知 dataset 撤销 claim。
 	ag.StartBackground(ctx)
 
-	// 钩子收端(M5/§5.4):绑定失败不致命(钩子为可选观测输入,不影响缓存服务本体),
+	// 钩子收端(M5/设计《钩子 socket 协议》):绑定失败不致命(钩子为可选观测输入,不影响缓存服务本体),
 	// 记错误后继续;gRPC health 不反映该状态。
 	if err := ag.HookSock.Start(ctx); err != nil {
 		slog.Error("钩子收端启动失败(继续,仅钩子上报不可用)", "err", err)
 	}
 
-	// 重扫描(M4/D35)与淘汰循环(M6/§7.6):非阻塞后台循环,随 ctx 取消退出。
+	// 重扫描(M4)与淘汰循环(M6/设计《回收与磁盘淘汰》):非阻塞后台循环,随 ctx 取消退出。
 	ag.Rescan.Start(ctx)
 	ag.Evictor.Start(ctx)
 

@@ -26,7 +26,7 @@ func TestChunkRefJSONRoundtrip(t *testing.T) {
 }
 
 // TestConsumeOrderJSONRoundtrip 全字段(含 chunks 顺序)写→读一致;
-// design §6.1 示例 JSON 逐字段解析断言。
+// 设计《数据格式》示例 JSON 逐字段解析断言。
 func TestConsumeOrderJSONRoundtrip(t *testing.T) {
 	in := ConsumeOrder{
 		Dataset:        "b-track",
@@ -57,7 +57,7 @@ func TestConsumeOrderJSONRoundtrip(t *testing.T) {
 	}
 }
 
-// TestConsumeOrderDesignExample 逐字段解析 design §6.1 的示例 JSON。
+// TestConsumeOrderDesignExample 逐字段解析设计《数据格式》的示例 JSON。
 func TestConsumeOrderDesignExample(t *testing.T) {
 	const example = `{
   "dataset": "b-track", "snapshot_id": "snap-20261014",

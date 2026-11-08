@@ -1,6 +1,6 @@
-// Package rescan 实现启动期重扫描与坏块修复(design §7.1/§7.5;decisions D13/D35)。
+// Package rescan 实现启动期重扫描与坏块修复(设计《启动与重启重扫描》《demand 补块与坏块修复》;decisionsD13)。
 //
-// Start 后在内部 goroutine 内执行(D35 冻结流程):枚举 blocks/(cas.List)→ 1% 抽样全读
+// Start 后在内部 goroutine 内执行(冻结流程):枚举 blocks/(cas.List)→ 1% 抽样全读
 // 校验(cas.Open 自校验 xxh3;四舍五入、非空至少 1 块,空目录直接 DONE)→ Phase=FULL_SCAN,
 // 后台全量校验其余块。发现 ErrCorrupt → Quarantine 入修复队列(计数器),全量扫描期间修复
 // 队列优先(先进先出:队列非空先修队内块,再继续扫描)。修复 = RepairOne:按 D25 键
@@ -8,7 +8,7 @@
 // 并发单飞)→ RemoveQuarantined(同指纹;约定内容同源、重下指纹不变)。读时坏块路径
 // (prefetch Config.OnCorrupt)复用同一 RepairOne,由接线阶段注入"Quarantine + RepairOne"包装。
 //
-// dataset 映射(D35):objectstore.List(ctx,"") 按对象键提取数据集名去重(规则见 datasetsOf),
+// dataset 映射:objectstore.List(ctx,"") 按对象键提取数据集名去重(规则见 datasetsOf),
 // 每个 dataset 经 catalogFor 取 Catalog 后 List(ctx,"") 全量构建 块指纹→(dataset,path,chunk)
 // 映射;Catalog 不可用(ErrNoCurrent 等)的 dataset 其坏块只隔离不修复,留待订单到达后由
 // 读时路径修。映射在进入 FULL_SCAN 时构建一次(快照语义);此前已处于 quarantine/ 的块
@@ -34,17 +34,17 @@ import (
 	"traincache/core/objectstore"
 )
 
-// Metrics 是 rescan 的指标窄接口(D35 冻结;由接线层注入——agent/metrics.Registry 的
+// Metrics 是 rescan 的指标窄接口(冻结;由接线层注入——agent/metrics.Registry 的
 // SetQuarantined 带 dataset 标签,需适配器包装,见 DECISIONS)。实现须并发安全;
 // m 允许为 nil(无指标场景,打点静默跳过)。
 type Metrics interface {
 	// SetRescanProgress 设置重扫描进度 0..1(已校验块数 ÷ 总块数;DONE 时 1)。
 	SetRescanProgress(v float64)
-	// SetQuarantined 设置当前 quarantine/ 目录中的坏块数(修复成功后递减;design §5.7)。
+	// SetQuarantined 设置当前 quarantine/ 目录中的坏块数(修复成功后递减;设计《坏块隔离》)。
 	SetQuarantined(n int64)
 }
 
-// Phase 是重扫描阶段(D35):SAMPLING(1% 抽样,完成后即可服务)→ FULL_SCAN(后台全量,
+// Phase 是重扫描阶段:SAMPLING(1% 抽样,完成后即可服务)→ FULL_SCAN(后台全量,
 // 修复队列优先)→ DONE(全量扫描与队列修复完成)。
 type Phase string
 
@@ -54,7 +54,7 @@ const (
 	PhaseDone     Phase = "DONE"
 )
 
-// Status 是重扫描状态快照(D35;锁下并发安全)。
+// Status 是重扫描状态快照(锁下并发安全)。
 // 计数口径:Sampled = 校验尝试累计数(抽样 + 全量,含损坏/跳过块),Verified = 其中通过数,
 // Quarantined = 累计隔离数(本 Rescanner 检测到 ErrCorrupt 并执行隔离的坏块数),
 // RepairQueue = 当前修复队列长度。
@@ -66,7 +66,7 @@ type Status struct {
 	RepairQueue int64
 }
 
-// Rescanner 执行重扫描与坏块修复(D35 冻结接口;字段并发语义见包注释)。
+// Rescanner 执行重扫描与坏块修复(冻结接口;字段并发语义见包注释)。
 type Rescanner struct {
 	cs         *cas.Store
 	f          *fetch.Fetcher
@@ -95,7 +95,7 @@ type Rescanner struct {
 	qset             map[cas.Fingerprint]bool // 当前已知位于 quarantine/ 的块(节点级快照)
 }
 
-// New 构造 Rescanner(D35 冻结签名)。cs/fetcher/obj/catalogFor 分别提供本地块存取、下载
+// New 构造 Rescanner(冻结签名)。cs/fetcher/obj/catalogFor 分别提供本地块存取、下载
 // 编排、对象枚举与按 dataset 取索引;m 允许为 nil。Start 前 Status 报告 Phase=SAMPLING、
 // 计数全零;构造不做任何 IO(quarantine 目录的快照与 gauge 初值在 Start/首次修复时装载)。
 func New(cs *cas.Store, fetcher *fetch.Fetcher, obj objectstore.Store,
@@ -146,7 +146,7 @@ func (r *Rescanner) Start(ctx context.Context) {
 	go r.run(ctx)
 }
 
-// Status 返回当前状态快照(D35;锁下并发安全):阶段、四计数(口径见 Status 注释)。
+// Status 返回当前状态快照(锁下并发安全):阶段、四计数(口径见 Status 注释)。
 func (r *Rescanner) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -360,7 +360,7 @@ func (r *Rescanner) noteRepaired(fp cas.Fingerprint) (int64, bool) {
 	return int64(len(r.qset)), true
 }
 
-// sampleSize 返回抽样块数(D35/§7.1.3:1% 四舍五入,空列表 0,非空至少 1 块)。
+// sampleSize 返回抽样块数(设计《启动与重启重扫描》:1% 四舍五入,空列表 0,非空至少 1 块)。
 func sampleSize(n int) int {
 	if n <= 0 {
 		return 0

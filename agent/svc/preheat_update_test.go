@@ -1,6 +1,6 @@
 package svc
 
-// 本文件覆盖 Agent 增量(docs/6.1-design.md 附录 A):
+// 本文件覆盖 Agent 增量(docs/7.1-design.md《预热接口增量契约》):
 // generation 单调与陈旧拒绝、Update 全量替换与位序、Cancel 幂等与重建、
 // GetPreheatStatus 新字段、seq 单调、位图形状校验、ReportBlocks 仍 Unimplemented。
 // 等待一律有界轮询(waitTaskState),不依赖裸 sleep 做时序断言。

@@ -12,7 +12,7 @@ package svc
 //	验收 8(TestOrderStartsPrefetcher):发现循环收到 ConsumeOrder →
 //	  ForOrder 启动 PersistentPrefetcher、安装首个阶段、块就绪推进游标;
 //	验收 9(TestStageSwitchKWindow):阶段切换 → 新阶段开头 K 块在"零完成"
-//	  前提下即刻进入启动窗口并拉起下载,K 之外的块待 K 块就绪后才入 P2 邻域。
+//	  前提下即刻进入阶段首批并拉起下载,K 之外的块待 K 块就绪后才入 P2 邻域。
 //
 // 等待一律有界轮询(复用 orders_test 的 waitFor / preheat_test 的 waitTaskState);
 // 下载门闩(而非裸 sleep)制造可控时序,断言确定性优先,-race 安全。
@@ -47,7 +47,7 @@ const (
 	m3OrderDataset  = "m3-order"  // 验收 8/9:订单驱动预取
 )
 
-// ring 布局常量(design §6.2,与 ordersource 读端一致;测试内独立字面量防冻结布局漂移)。
+// ring 布局常量(设计《数据格式》,与 ordersource 读端一致;测试内独立字面量防冻结布局漂移)。
 const (
 	m3RingHeaderSize = 64 // 头固定 64B
 	m3SlotHeaderSize = 12 // 槽头:seq int64 + len int32
@@ -579,8 +579,8 @@ func TestOrderStartsPrefetcher(t *testing.T) {
 //
 // 观察手段(确定性,不用裸 sleep):新阶段三块本地均无副本(仅源站可达)且装载下载门闩,
 // 于是"没有任何块完成(新阶段游标仍为 -1)"的状态由测试完全控制,可以断言:
-//  1. 前 K=2 块(按新订单顺序)已被拉起下载 —— 启动窗口在切换时刻入队,不依赖完成推进;
-//  2. 第 3 块零触碰 —— P2 邻域须待 K 块就绪后才开放(§7.3),即 K 块优先于其余块;
+//  1. 前 K=2 块(按新订单顺序)已被拉起下载 —— 阶段首批在切换时刻入队,不依赖完成推进;
+//  2. 第 3 块零触碰 —— P2 邻域须待 K 块就绪后才开放(设计《持续预取与阶段切换》),即 K 块优先于其余块;
 //  3. 放行后 K 块完成 → 邻域开放 → 第 3 块下载并完成,游标推进到新阶段末块。
 //
 // (P1 队列深度的字面量断言由 prefetch 单测 TestStageSwitchEnqueuesKWindowAsP1 覆盖;
@@ -609,13 +609,13 @@ func TestStageSwitchKWindow(t *testing.T) {
 		return b.prefetcher.Status().PrefetchFrontier == stage1[len(stage1)-1]
 	})
 
-	// 第二份订单(新阶段):K=2 启动窗口;chunks 顺序重排为 b → a → c。
+	// 第二份订单(新阶段):K=2 阶段首批;chunks 顺序重排为 b → a → c。
 	newOrder := []ordersource.ChunkRef{
 		{Path: "stage2/b-000.tar", Chunk: 0},
 		{Path: "stage2/a-000.tar", Chunk: 0},
 		{Path: "stage2/c-000.tar", Chunk: 0},
 	}
-	window, rest := newOrder[:2], newOrder[2] // 前 K 块(启动窗口)vs K 之外的块
+	window, rest := newOrder[:2], newOrder[2] // 前 K 块(阶段首批)vs K 之外的块
 	winKeys, restKey :=
 		[]string{
 			blockKeyLiteral(m3OrderDataset, window[0]),
@@ -630,8 +630,8 @@ func TestStageSwitchKWindow(t *testing.T) {
 	waitFor(t, "阶段切换事件已安装(Stage=stage-2)", func() bool {
 		return b.prefetcher.Status().Stage == "stage-2"
 	})
-	// 断言 1:前 K 块在零完成前提下已被拉起下载(启动窗口 = 切换时刻入队)。
-	waitFor(t, "新阶段开头 K 块即刻入队并拉起下载(P1 启动窗口)", func() bool {
+	// 断言 1:前 K 块在零完成前提下已被拉起下载(阶段首批 = 切换时刻入队)。
+	waitFor(t, "新阶段开头 K 块即刻入队并拉起下载(P1 阶段首批)", func() bool {
 		return env.store.getCount(winKeys[0]) >= 1 && env.store.getCount(winKeys[1]) >= 1
 	})
 	// 断言 2:此刻无任何块完成(预取前沿未建立),且 K 之外的块零触碰(P2 邻域未开放)。
@@ -639,7 +639,7 @@ func TestStageSwitchKWindow(t *testing.T) {
 		t.Errorf("门闩期不应有块完成: PrefetchFrontier = %+v, want 零值", got)
 	}
 	if got := env.store.getCount(restKey); got != 0 {
-		t.Errorf("K 之外的块在启动窗口期被触碰: Get(%s) = %d, want 0", restKey, got)
+		t.Errorf("K 之外的块在阶段首批期被触碰: Get(%s) = %d, want 0", restKey, got)
 	}
 
 	// 断言 3:放行 → K 块完成 → 邻域开放 → 第 3 块下载完成,游标到新阶段末块。

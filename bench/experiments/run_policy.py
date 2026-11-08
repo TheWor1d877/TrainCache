@@ -37,26 +37,22 @@ SCRIPTS_DIR = BENCH_ROOT / "scripts"
 sys.path.insert(0, str(BENCH_ROOT))
 import config as bench_config  # noqa: E402
 
-RESULTS_DIR = bench_config.RESULTS_DIR
-POLICY_RESULTS_DIR = bench_config.POLICY_RESULTS_DIR
-
-BENCH_TRACK_C = SCRIPTS_DIR / "bench_track_c.py"
 RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"
 
 PY = sys.executable
 
-# bench_track_c 模块(selftest 时直接复用其 Downloader / run_job_a /
-# run_job_b / compute_eviction_stats,保证 mock 逻辑与真实一致)
+# 倾斜负载器(selftest 时直接复用其 Downloader / run_job_a / run_job_b /
+# compute_eviction_stats,保证 mock 逻辑与真实一致)
 _btc = None
 
 
 def _import_btc():
-    """延迟导入 bench_track_c,避免污染 sys.path。"""
+    """延迟导入 load_tilt,避免污染 sys.path。"""
     global _btc
     if _btc is not None:
         return _btc
     sys.path.insert(0, str(SCRIPTS_DIR))
-    import bench_track_c as btc  # noqa: E402
+    import load_tilt as btc  # noqa: E402
     _btc = btc
     return btc
 
@@ -90,12 +86,12 @@ def _run_cmd(cmd: list, env: dict | None = None,
 
 
 # ---------------------------------------------------------------------------
-# Mock 实验(selftest 专用,完全复用 bench_track_c 的组件)
+# Mock 实验(selftest 专用,完全复用 load_tilt 的组件)
 # ---------------------------------------------------------------------------
 def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]:
     """用 mock 模式跑一轮 C 轨双 Job 实验,产物写入 run_dir。
 
-    复用 bench_track_c.Downloader / run_job_a / run_job_b /
+    复用 load_tilt.Downloader / run_job_a / run_job_b /
     compute_eviction_stats,保证逻辑与真实一致。
     返回 (run_obj, eviction_stats)。
     """
@@ -164,7 +160,7 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
         "full_shard_count": len(full_shards),
         "n_steps_a": sa["n_steps"],
         "n_steps_b": sb["n_steps"],
-        # 正式 C 轨的 A 步预算是常量(4.4 §C3)；mock 这里按合成热集规模给等价的量
+        # 正式 C 轨的 A 步预算是常量(4.2 的 COND 契约一节)；mock 这里按合成热集规模给等价的量
         "tilt_a_budget": a_epochs * len(hot_shards),
         "selftest": True,
         "evict_policy": cond["cache"]["evict_policy"],
@@ -177,7 +173,7 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
     ev = btc.compute_eviction_stats(sa, len(hot_shards), len(full_shards))
     # mock 产物显式标来源:这里的 evictions 是 mock 下载器自己的 LRU 挤出次数,
     # 只验统计形态。产品淘汰是否生效看 run_bench 落进 summary.csv 的三列
-    # (evict_blocks_run/capacity_bytes_final/cache_dir_peak_bytes,4.4 §1.7)。
+    # (evict_blocks_run/capacity_bytes_final/cache_dir_peak_bytes,4.3 全体判据)。
     ev["data_source"] = "mock-selftest"
     (run_dir / "eviction_stats.json").write_text(
         json.dumps(ev, ensure_ascii=False, indent=2) + "\n")
@@ -193,7 +189,7 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
     """跑一轮实验,返回本轮产物目录路径。
 
     selftest=True:完全 mock,跳过 cold_reset / tc_apply / collect,
-    用 bench_track_c 的 mock 下载器生成产物。
+    用 load_tilt 的 mock 下载器生成产物。
     任一步失败:写 VOID 标记,记录原因,返回目录路径(不抛异常)。
     """
     reps_dir = Path(reps_dir)
@@ -231,8 +227,10 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
             "TC_RATE": f"{cond['network']['rate_mbit']}mbit",
             "TC_DELAY": f"{cond_mod.DEFAULTS['delay_ms']}ms",
         })
-        rb_cmd = [PY, str(RUN_BENCH),
-                  "--tier", "S",
+        rb_cmd = [PY, str(RUN_BENCH)]
+        if (cond.get("cache") or {}).get("enabled"):
+            rb_cmd += ["--rho", str(cond["cache"]["rho"])]
+        rb_cmd += [
                   "--rate", f"{cond['network']['rate_mbit']}mbit",
                   "--groups", cond["group"],
                   "--reps", "1",
@@ -285,7 +283,7 @@ def run_reps(cond_name: str, reps: int | None = None,
              results_root: Path | None = None) -> list[Path]:
     """跑 reps 轮。cond_name 传给 load_cond。
 
-    reps=None 时取 COND 的 sampling.reps(D18:`evict-policy` 每点 1 次、`pareto-sustained` 每点 2 次)。
+    reps=None 时取 COND 的 sampling.reps。
     selftest=True 时:reps 强制为 1,使用 mock 模式。
     results_root=selftest 的落点覆盖,自检用它把 mock 产物引离正式分区。
     返回每轮产物目录列表。
@@ -301,7 +299,8 @@ def run_reps(cond_name: str, reps: int | None = None,
     elif reps is None:
         reps = cond["sampling"]["reps"]
 
-    reps_dir = (results_root or POLICY_RESULTS_DIR) / cond_name
+    reps_dir = (results_root
+                or bench_config.family_results_dir(cond["family"])) / cond_name
     reps_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[Path] = []
@@ -320,7 +319,7 @@ def run_reps(cond_name: str, reps: int | None = None,
 # ---------------------------------------------------------------------------
 # selftest:跑一个策略的 mock 实验并校验产物
 # ---------------------------------------------------------------------------
-def selftest(cond_name: str = "policy-heat") -> int:
+def selftest(cond_name: str = "evict-heat-rho8") -> int:
     """跑一个策略的 mock 实验,校验产物齐全且字段正确。返回 0=通过。"""
     print(f"run_policy selftest: cond={cond_name}")
 
@@ -350,7 +349,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
     # 3. 跑 mock 实验(产物落在临时目录,不进正式分区)
     with tempfile.TemporaryDirectory(prefix="tc-policy-selftest-") as tmp:
         results = run_reps(cond_name, reps=1, selftest=True,
-                           results_root=Path(tmp) / "policy")
+                           results_root=Path(tmp) / "evict")
         assert len(results) == 1
         run_dir = results[0]
 
@@ -369,7 +368,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
         assert run_obj["selftest"] is True
         assert run_obj["evict_policy"] == cond["cache"]["evict_policy"]
         assert run_obj["tilt_a_budget"] == 15 * 2, \
-            "mock 的 A 步预算字段与合成热集规模脱节(4.4 §C3 口径)"
+            "mock 的 A 步预算字段与合成热集规模脱节(4.2 的 COND 契约一节 口径)"
 
         a_recs = [json.loads(ln) for ln
                   in (run_dir / "per_step_a.jsonl").read_text().splitlines()
@@ -397,7 +396,7 @@ def selftest(cond_name: str = "policy-heat") -> int:
         assert ev["data_source"] == "mock-selftest", \
             "mock 产物必须自带 data_source=mock-selftest,否则会被当成真实淘汰证据"
         # selftest 容量仅 3 片、B 扫 8 片,mock LRU 应挤出热分片。
-        # 这条只验计数链路,产品淘汰证据看 4.4 §1.7 的三列。
+        # 这条只验计数链路,产品淘汰证据看 4.3 全体判据 的三列。
         assert ev["b_evictions_of_hot"] > 0, \
             "selftest 的 mock LRU 应挤出热分片(b_evictions_of_hot > 0)"
 
@@ -406,8 +405,8 @@ def selftest(cond_name: str = "policy-heat") -> int:
               f"hit_ratio={ev['a_hit_ratio']:.2%}")
 
         # 6. 产物目录隔离:路径包含 policy/<cond_name>/<run_id>
-        assert "policy" in run_dir.parts, \
-            f"产物目录未隔离到 policy/: {run_dir}"
+        assert "evict" in run_dir.parts, \
+            f"产物目录未隔离到 evict/: {run_dir}"
         assert cond_name in run_dir.parts, \
             f"产物目录未包含 cond_name: {run_dir}"
         print(f"  产物目录隔离正确: {run_dir}")
@@ -419,8 +418,8 @@ def selftest(cond_name: str = "policy-heat") -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="M5 实验 runner:淘汰与预取协同实验(C 轨倾斜场景)")
-    ap.add_argument("--cond", default="policy-heat",
-                    help="COND 名(conds/<name>.json,默认 policy-heat)")
+    ap.add_argument("--cond", default="evict-heat-rho8",
+                    help="COND 名(conds/<name>.json,默认 evict-heat-rho8)")
     ap.add_argument("--reps", type=int, default=None,
                     help="重复次数(默认取 COND 的 sampling.reps;"
                          "显式传入时以命令行为准;selftest 时强制为 1)")

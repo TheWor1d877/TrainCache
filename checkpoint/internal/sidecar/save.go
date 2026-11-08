@@ -16,7 +16,7 @@ import (
 	"traincache/checkpoint/internal/plugin"
 )
 
-// 两个标记文件由训练程序与 checkpointd 维护（design 10.1 §4.3），
+// 两个标记文件由训练程序与 checkpointd 维护（design 10.1「本地目录契约」），
 // 不属于训练数据，扫描与缓存复制时都排除。
 const (
 	doneMarker     = ".done"
@@ -303,7 +303,7 @@ func (s *Sidecar) logSkip(step int64, path, reason string, level slog.Level) {
 }
 
 // processSave 按 SaveDeadline 与 SaveRetryIntervals 重试保存。不可重试错误码
-// 立即失败；最终失败会停止接收新 step，但保留工作目录（design 10.1 §6.3）。
+// 立即失败；最终失败会停止接收新 step，但保留工作目录（design 10.1「关键流程」）。
 func (s *Sidecar) processSave(ctx context.Context, step int64, path string) error {
 	start := time.Now()
 	saveCtx, cancel := context.WithTimeout(ctx, s.opts.SaveDeadline)
@@ -455,7 +455,7 @@ func (s *Sidecar) saveSucceeded(step int64, path string, res plugin.TransferResu
 }
 
 // backfill 把工作卷 step 目录复制到 NVMe 临时目录，fsync 后 rename，最后
-// 写 .complete（design 10.1 §5.3、§6.2）。
+// 写 .complete（design 10.1「数据格式」、「关键流程」）。
 func (s *Sidecar) backfill(step int64, src string) error {
 	if s.nvmeTaskDir == "" {
 		return nil
@@ -503,7 +503,7 @@ func (s *Sidecar) backfill(step int64, src string) error {
 }
 
 // evictCache 按 step 从旧到新淘汰，保留 NVMERetention 份；被本进程软链
-// 引用的目录不删（design 10.1 §6.2）。
+// 引用的目录不删（design 10.1「关键流程」）。
 func (s *Sidecar) evictCache() {
 	s.mu.Lock()
 	steps := make([]int64, 0, len(s.cache))

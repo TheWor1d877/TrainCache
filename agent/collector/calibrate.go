@@ -6,7 +6,7 @@ import (
 	"traincache/agent/ordersource"
 )
 
-// calibrate.go:交叉校准(design §5.5、decisions D15):滑动窗口 CalibrateWindow 次打开内,
+// calibrate.go:交叉校准(设计《热度与命中率》):滑动窗口 CalibrateWindow 次打开内,
 // "实际打开顺序 与 订单期望顺序(ConsumeOrder.Chunks)"的匹配率 < CalibrateThreshold
 // (默认 0.8,即 7.0"默认 20% 偏差"的精确口径)→ 触发 cursor 重对齐到实际位点。
 //

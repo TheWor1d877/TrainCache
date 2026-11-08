@@ -145,7 +145,7 @@ func TestLocalGCSkipsRoundOnEnumerateFailure(t *testing.T) {
 }
 
 // TestLocalGCNormalRoundEvictsOrphanBlock:端到端一轮(临时目录真实 cas.Store)——
-// 快照按 §11.4 提交为不含 gone.tar 后,该条目的本地副本在本轮被回收,块文件确已删除;
+// 快照按 docs/5.1-design.md《提交》提交为不含 gone.tar 后,该条目的本地副本在本轮被回收,块文件确已删除;
 // 快照引用的副本保留;删除数计入 gc_blocks_removed_total{other}。
 func TestLocalGCNormalRoundEvictsOrphanBlock(t *testing.T) {
 	spy := &recordingStore{Mock: objectstore.NewMock()}

@@ -20,7 +20,7 @@ import (
 	"traincache/core/index"
 )
 
-// PreheatTasks 是预热任务状态机(design §7.2;D7:任务引用 =(dataset, snapshot_id,
+// PreheatTasks 是预热任务状态机(设计《预热任务生命周期》:任务引用 =(dataset, snapshot_id,
 // prefixes, chunks);状态 QUEUED→RUNNING→DONE/ERROR)。task_id 幂等:内容摘要相同幂等
 // 返回现有任务,不同返回 AlreadyExists。块进度经 prefetch.Config.OnP0Done 逐块回调
 // (回调在预取器调度协程内同步;本表回调路径只做 atomic 计数与无锁查表,不取表锁,不阻塞)。
@@ -48,7 +48,7 @@ type PreheatTasks struct {
 // DECISIONS 回传)。
 const taskTTL = 24 * time.Hour
 
-// preheatRequest 是任务内容摘要(D7 任务引用四元组;task_id 幂等/冲突判据)。
+// preheatRequest 是任务内容摘要(任务引用四元组;task_id 幂等/冲突判据)。
 type preheatRequest struct {
 	dataset    string
 	snapshotID string
@@ -62,7 +62,7 @@ func (a preheatRequest) matches(b preheatRequest) bool {
 		slices.Equal(a.prefixes, b.prefixes) && slices.Equal(a.chunks, b.chunks)
 }
 
-// preheatTask 是一个预热任务(§7.2 状态机;字段与 §5.1 PreheatStatus 一一对应)。
+// preheatTask 是一个预热任务(设计《预热任务生命周期》状态机;字段与设计《gRPC 接口》 PreheatStatus 一一对应)。
 // 8.x 增量:generation/seq/ready_bitmap 及取消标记;位序 = chunks 切片顺序。
 // 并发约定:chunks/bitmap/pending/priority 由 mu 保护(Update 会全量替换,须与调度
 // 协程的 claim 互斥);generation/canceled/seq 用 atomic,供 Submit 在表锁内只读。
@@ -201,7 +201,7 @@ func (t *preheatTask) unfinishedRefs() []prefetch.ChunkRef {
 	return refs
 }
 
-// bitmapLen 返回 chunks 数 n 对应的位图字节数(ceil(n/8);D56)。
+// bitmapLen 返回 chunks 数 n 对应的位图字节数(ceil(n/8))。
 func bitmapLen(n int) int { return (n + 7) / 8 }
 
 // setBitmapBit 把位图第 i 位置 1(位 i = 字节 i/8 的第 i%8 位,LittleEndian 位序);
@@ -320,7 +320,7 @@ func (t *PreheatTasks) onP0Done(dataset string, ref prefetch.ChunkRef, err error
 	// 无匹配任务(任务不在本表或回调重复):静默忽略,不影响调度。
 }
 
-// Submit 处理一次 SubmitPreheat(§7.2 流程):校验(node → task_id → dataset → snapshot_id →
+// Submit 处理一次 SubmitPreheat(设计《预热任务生命周期》流程):校验(node → task_id → dataset → snapshot_id →
 // prefixes/chunks,顺序固定)→ task_id 幂等/AlreadyExists → 解析块列表(catalog.List,
 // 不切换内存映射)→ 先登记进度表后 EnqueueP0(防块完成回调早于登记)→ RUNNING;
 // 空列表立即 DONE(completed = 0);入队失败置 ERROR(任务仍可查)。返回 accepted=true
@@ -445,7 +445,7 @@ func (t *PreheatTasks) Submit(ctx context.Context, req *agentpb.SubmitPreheatReq
 	}, nil
 }
 
-// Update 处理 UpdatePreheat(8.x D55/D56):校验 → 代际 → 全量替换 chunks(位序=本次
+// Update 处理 UpdatePreheat(8.xD55):校验 → 代际 → 全量替换 chunks(位序=本次
 // 请求顺序,旧位图重置、seq++)→ 唯一 ref 入 P0;已落盘块不清理,在途请求不取消。
 // 空 chunks 视为清空窗口(总数为 0,立即 DONE)。返回 accepted 表示窗口已替换;
 // 入队失败置 ERROR,状态经 GetPreheatStatus 可见。
@@ -541,7 +541,7 @@ func (t *PreheatTasks) Cancel(ctx context.Context, req *agentpb.CancelPreheatReq
 	}
 	tk.advanceGeneration(req.GetGeneration())
 	tk.canceled.Store(true)
-	// 「停止调度新块」(docs/6.1-design.md 附录 A.2 的 CancelPreheat 语义,D62):撤回=取消本任务的下载生存期 ctx,
+	// 「停止调度新块」(docs/7.1-design.md《预热接口增量契约》的 CancelPreheat 语义,D62):撤回=取消本任务的下载生存期 ctx,
 	// 卡在 core fetch 准入门口的块立刻退出;已在途的块不保证跑完。
 	pending := len(tk.unfinishedRefs())
 	tk.cancelDownloads()
@@ -551,7 +551,7 @@ func (t *PreheatTasks) Cancel(ctx context.Context, req *agentpb.CancelPreheatReq
 	return &agentpb.CancelPreheatResponse{Accepted: true}, nil
 }
 
-// checkNode 校验请求 node 必填且等于本节点(design §5.1;InvalidArgument)。
+// checkNode 校验请求 node 必填且等于本节点(设计《gRPC 接口》;InvalidArgument)。
 func (t *PreheatTasks) checkNode(node string) error {
 	if node == "" || node != t.cfg.NodeName.String() {
 		return status.Errorf(codes.InvalidArgument,
@@ -587,7 +587,7 @@ func validateWindowChunks(chunks []*agentpb.ChunkRef) (ordered, enq []prefetch.C
 	return ordered, enq, nil
 }
 
-// Status 返回任务状态(§5.1 PreheatStatus 字段逐一映射);task_id 缺失(空、不存在或
+// Status 返回任务状态(设计《gRPC 接口》 PreheatStatus 字段逐一映射);task_id 缺失(空、不存在或
 // 已过 taskTTL 被入口清理)→ NotFound。计数走 atomic;入口在表锁内顺带惰性清理过期任务。
 func (t *PreheatTasks) Status(ctx context.Context, taskID string) (*agentpb.PreheatStatus, error) {
 	t.mu.Lock()
@@ -794,7 +794,7 @@ func (t *PreheatTasks) drop(taskID string, tk *preheatTask) {
 //   - chunks 非空:prefixes 为空 → 以 chunks 为准;否则与 prefix 结果求交
 //     (交集为空 → 空列表,调用方立即 DONE);
 //   - ordered 保留请求 chunks 顺序(含重复项,定义位图位序);enq 去重保序,供下载/回调
-//     认领(与 Update 同口径,D56);
+//     认领(与 Update 同口径);
 //   - ErrNoCurrent(该 dataset 尚无 CURRENT 快照)→ 视作空列表(与 ListSnapshot 同口径)。
 func (t *PreheatTasks) resolveRefs(ctx context.Context, dataset string, prefixes []string, chunks []*agentpb.ChunkRef) (ordered, enq []prefetch.ChunkRef, err error) {
 	if err := ctx.Err(); err != nil {

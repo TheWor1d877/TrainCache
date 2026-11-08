@@ -4,8 +4,8 @@
 格子名带臂后缀（D23）：`gateway=1` 记 `+gw`，`gateway_cache=1` 再叠 `+cache`，
 两列各自成组，带网关与带缓存的产物不混进同一格。
 
-口径来源 docs/4.4：§1.6 平均数 + 10,000 次重采样的 95% CI 与胜负判据，
-§1.7 作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
+口径来源 docs/4.3：全体判据一节的平均数 + 10,000 次重采样的 95% CI 与胜负判据，
+作废轮不进汇总；顶替行（`baseline_substituted` 非空）同样剔除。
 
 用法：
     .venv/bin/python bench/compare/summarize.py [--root DIR] [--fallback DIR]
@@ -49,7 +49,8 @@ METRICS = [
 DIRECTION = dict(METRICS)
 GROUP_ORDER = ["direct", "juicefs-cold", "juicefs-warm",
                "fluid-cold", "fluid-warm", "traincache-cold", "traincache-warm"]
-CELL_ORDER = ["S-100", "S-300", "S-1000", "M-1000", "L-1000"]
+# 格子目录名就是 COND 名（compare-<group>-rho<ρ>-<rate>），排序交给 _cell_order。
+CELL_ORDER = []
 BASELINES = {
     "traincache-cold": ["direct", "fluid-cold"],
     "traincache-warm": ["juicefs-warm", "fluid-warm"],
@@ -94,13 +95,13 @@ def _arm_suffix(row: dict) -> str:
     return suffix
 
 
-def _read_root(root: Path, version: str | None = None,
+def _read_root(root: Path, filtered: bool = False,
                rejected: list[dict] | None = None
                ) -> dict[tuple[str, str], list[dict]]:
     """收一份 root 下的 summary.csv。
 
-    `version` 给了就按读侧三道过滤筛 TrainCache 行（row_gate.py：版本戳、
-    §1.7 证据列与 void、倾斜两族的字节地板）；不给时保留旧行为，只按
+    `filtered` 打开时按读侧两道过滤筛 TrainCache 行（row_gate.py：void、
+    三列淘汰证据、倾斜两族的字节地板）；关掉时保留旧行为，只按
     void/顶替行剔除。被排除的行随 `rejected` 带出，让「谁被排除」入账。
     """
     cells: dict[tuple[str, str], list[dict]] = {}
@@ -111,13 +112,12 @@ def _read_root(root: Path, version: str | None = None,
         hidden = [p for p in parts if p.startswith("_") or p == "quick"]
         if any(not p.startswith("_topup") for p in hidden):
             continue
-        if not parts or parts[0] not in CELL_ORDER:
+        if not parts or parts[0].startswith("_"):
             continue
         cell = parts[0]
-        stamp = row_gate.stamp_of(path.parent) if version else None
         with open(path) as f:
             for row in csv.DictReader(f):
-                reason = row_gate.reject_reason(row, stamp, version) if version else ""
+                reason = row_gate.reject_reason(row) if filtered else ""
                 if reason:
                     if rejected is not None:
                         rejected.append({"source": str(path.parent),
@@ -143,7 +143,7 @@ def _read_root(root: Path, version: str | None = None,
 
 
 def read_cells(root: Path, fallback: Path | None = None,
-               version: str | None = None,
+               filtered: bool = False,
                rejected: list[dict] | None = None
                ) -> dict[tuple[str, str], list[dict]]:
     """返回 {(格子, 组态): [有效行]}；下划线目录（汇总/临时）不取。
@@ -151,11 +151,14 @@ def read_cells(root: Path, fallback: Path | None = None,
     `fallback` 只补非 traincache 组：本轮重跑只做 traincache 两组态，
     direct/juicefs/fluid 沿用既有产物（它们不读 TrainCache 快照）。同一
     (格子, 组态) 在 root 已有行时一律用 root，fallback 不覆盖。
+
+    `filtered` 打开时按 row_gate 的拒因筛 TrainCache 行，被排除的行随
+    `rejected` 带出。
     """
-    cells = _read_root(root, version, rejected)
+    cells = _read_root(root, filtered, rejected)
     if fallback is None or fallback == root or not fallback.is_dir():
         return cells
-    for (cell, group), rows in _read_root(fallback, version, rejected).items():
+    for (cell, group), rows in _read_root(fallback, filtered, rejected).items():
         if group.startswith("traincache") or (cell, group) in cells:
             continue
         for r in rows:
@@ -178,8 +181,10 @@ def build_table(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
             if picked is None:
                 continue
             row = {"cell": cell, "group": group,
-                   # `S-100+gw` 与基础格子同规则：L 档仍是探点
-                   "status": "exploratory" if cell.startswith("L-") else "ok",
+                   # 探点标记由行里的 exploratory 字段决定，没有该列按正式读数
+                   "status": ("exploratory"
+                              if any(r.get("exploratory") == "true" for r in picked)
+                              else "ok"),
                    "source": "reused" if all(
                        r.get("_source") == "reused" for r in picked) else "new"}
             for m, _d in METRICS:
@@ -226,17 +231,26 @@ def _verdict(direction: str, mg: float, mb: float,
     return "可忽略"
 
 
+def _direct_cell_for(cell: str) -> str:
+    """direct 无缓存，rho 对它没有含义：同带宽取 rho=4 的代表点。"""
+    rate = cell.rsplit("-", 1)[-1]
+    return f"compare-direct-rho4-{rate}"
+
+
 def build_verdict(cells: dict[tuple[str, str], list[dict]]) -> list[dict]:
     out = []
     for cell in _cell_order({cell for cell, _g in cells}):
         if cell.startswith("L-"):
-            continue  # 探点不做判定（4.4 §1.9）
+            continue  # 探点不做判定
         for group, bases in BASELINES.items():
             grows = cells.get((cell, group))
             if not grows:
                 continue
             for base in bases:
                 brows = cells.get((cell, base))
+                if not brows and base == "direct":
+                    # direct 只在 rho=4 有格子，其余 rho 的格对照这个代表点。
+                    brows = cells.get((_direct_cell_for(cell), base))
                 if not brows:
                     continue
                 for m in VERDICT_METRICS:
@@ -302,7 +316,7 @@ def render_markdown(rows: list[dict], verdict: list[dict]) -> str:
     lines += _render(rows, TABLE_A, "makespan 与 stall")
     lines += [""]
     lines += _render(rows, TABLE_B, "命中率与字节成本")
-    lines += ["", "### 组间判定（S/M 档；改善 ≥5% 且差值 CI 不跨 0）", "",
+    lines += ["", "### 组间判定（改善 ≥5% 且差值 CI 不跨 0）", "",
               "| 格子 | 组态 | 基线 | 指标 | 组均值 | 基线均值 | 差值 95% CI | 改善 | 判定 |",
               "|---|---|---|---|---|---|---|---|---|"]
     for v in verdict:
@@ -333,12 +347,13 @@ def selftest() -> None:
                               {"startup_makespan": "11"}],
         ("S-100", "traincache-cold"): [{"startup_makespan": "8"}, {"startup_makespan": "8.2"},
                                        {"startup_makespan": "8.1"}],
-        ("L-1000", "fluid-cold"): [{"total_makespan": "5"}],
+        ("compare-fluid-cold-rho4-1000", "fluid-cold"):
+            [{"total_makespan": "5", "exploratory": "true"}],
     }
     rows = build_table(cells)
     r0 = [r for r in rows if r["cell"] == "S-100" and r["group"] == "direct"][0]
     assert r0["startup_makespan_n"] == 3 and abs(r0["startup_makespan_mean"] - 11.0) < 1e-9
-    lr = [r for r in rows if r["cell"] == "L-1000"][0]
+    lr = [r for r in rows if r["cell"] == "compare-fluid-cold-rho4-1000"][0]
     assert lr["status"] == "exploratory"
     # 差值 CI：明显更低的组应判赢
     verdict = build_verdict(cells)
@@ -469,9 +484,8 @@ def main() -> int:
         return 1
     fallback = None if args.no_fallback else (
         args.fallback or config.BASELINE_RESULTS_DIR)
-    version = row_gate.current_version()
     rejected: list[dict] = []
-    cells = read_cells(root, fallback, version, rejected)
+    cells = read_cells(root, fallback, True, rejected)
     if rejected:
         row_gate.print_rejects(rejected, config.RESULTS_DIR)
     rows = build_table(cells)

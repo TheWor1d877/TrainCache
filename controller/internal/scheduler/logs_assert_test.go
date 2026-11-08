@@ -1,6 +1,6 @@
 package scheduler
 
-// Log assertions for docs/7.1-design.md §9.3 (Scheduler 打分).
+// Log assertions for docs/7.1-design.md《日志》(Scheduler 打分).
 
 import (
 	"bytes"
