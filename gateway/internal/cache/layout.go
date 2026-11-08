@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,10 +43,16 @@ const (
 )
 
 // Metadata 是块在盘上的元数据，落成 .meta 里的 JSON。
+//
+// 片段比整块多三项：区间的起点与终点、对象总长。对象总长是回 206 时填
+// Content-Range 用的，命中缓存时网关手里没有源站响应，总长只能从这里取。
 type Metadata struct {
 	ETag         string    `json:"etag"`
 	LastModified time.Time `json:"last_modified"`
 	Size         int64     `json:"size"`
+	RangeStart   int64     `json:"range_start,omitempty"`
+	RangeEnd     int64     `json:"range_end,omitempty"`
+	ObjectSize   int64     `json:"object_size,omitempty"`
 }
 
 // layout 是一次「键 → 盘上路径」的映射结果。
@@ -85,6 +92,20 @@ func keyLayout(root, key string) (layout, error) {
 		meta:    final + metaSuffix,
 		tmp:     final + tmpSuffix,
 	}, nil
+}
+
+// FragmentKey 给出片段的缓存键：dataset 仍是第一段，其后是 frag 子树、
+// 原键剩下的部分与闭区间。整块缓存的键就是对象键，两套键落在不同子树上，
+// 同一个块既可以整块落盘也可以分段落盘，互不覆盖。
+//
+// 键里含 NUL 字节时按非法键处理，由调用方跳过写盘。
+func FragmentKey(key string, start, end int64) string {
+	rangeSeg := strconv.FormatInt(start, 10) + "-" + strconv.FormatInt(end, 10)
+	dataset, rest, ok := strings.Cut(key, "/")
+	if !ok {
+		return key + "/frag/" + rangeSeg
+	}
+	return dataset + "/frag/" + rest + "/" + rangeSeg
 }
 
 // writeMetaAtomic 先写临时文件再 rename，避免 .meta 出现半截内容。

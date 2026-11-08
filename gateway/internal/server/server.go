@@ -277,8 +277,8 @@ func (s *Server) serveHead(w http.ResponseWriter, r *http.Request, key string) {
 // 读盘命中与回源共用同一个准入槽、同一个扇出路径、同一个环形缓冲
 // （9.2 D34）。
 func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) {
-	// 带 Range 的块 GET 直接透传源站：不进在途合并表、不查盘、不写盘。
-	// 不带 Range 的请求保持原有合并/缓存路径不变。
+	// 带 Range 的块 GET 按「键+区间」进在途合并表与片段缓存；不带 Range 的
+	// 请求走整块合并与整块缓存。
 	if r.Header.Get("Range") != "" {
 		s.serveBlockRange(w, r, key)
 		return
@@ -365,9 +365,11 @@ func (s *Server) serveBlock(w http.ResponseWriter, r *http.Request, key string) 
 	s.serveWithSub(w, r, key, dataset, e, sub)
 }
 
-// serveBlockRange 处理带 Range 的块 GET：直接带 Range 头回源并原样透传 206
-// 响应。这条路径不进入在途合并表、不查磁盘缓存、不写盘（design 9.0：Range
-// 只用于 Agent 大块并行下载，不参与合并与缓存）。
+// serveBlockRange 处理带 Range 的块 GET：按「键+区间」进在途表与磁盘缓存。
+//
+// 片段键既是在途表的键也是缓存键。同一段的并发请求合并成一次回源，这一段的
+// 字节落进盘上的片段缓存，后来者从盘上读（design 9.1「网关 HTTP 契约」；
+// 9.2 D36、D37）。
 func (s *Server) serveBlockRange(w http.ResponseWriter, r *http.Request, key string) {
 	dataset := datasetOf(key)
 	s.obs.Get(dataset)
@@ -396,20 +398,191 @@ func (s *Server) serveBlockRange(w http.ResponseWriter, r *http.Request, key str
 		}
 	}
 
-	rc, err := s.origin.OpenRange(r.Context(), key, start, end)
+	fragKey := cache.FragmentKey(key, start, end)
+
+	// 1) 在途优先。
+	if e, ok := s.registry.Attach(fragKey); ok {
+		s.serveFragmentAttached(w, r, key, dataset, start, end, e, nil)
+		return
+	}
+
+	// 2) 不在途且开关打开时先查盘。命中与否都要占准入槽。
+	var probed *cache.Object
+	if s.cacheOn && !s.registry.InFlight(fragKey) {
+		probed = s.lookupFragmentCache(dataset, fragKey, start, end)
+	}
+
+	// 3) 占准入槽。
+	release, ok := s.acquire(w, r, dataset)
+	if !ok {
+		if probed != nil {
+			_ = probed.Close()
+		}
+		return
+	}
+
+	// 4) 拿槽后再试一次 Attach 与一次 Lookup。
+	s.createMu.Lock()
+	if e, ok := s.registry.Attach(fragKey); ok {
+		s.createMu.Unlock()
+		if probed != nil {
+			_ = probed.Close()
+		}
+		s.serveFragmentAttached(w, r, key, dataset, start, end, e, release)
+		return
+	}
+	if s.registry.InFlight(fragKey) {
+		// 条目在途但 written > C：不加入、也不新建同名条目，独立回源。
+		s.createMu.Unlock()
+		if probed != nil {
+			_ = probed.Close()
+		}
+		s.serveFragmentIndependent(w, r, key, dataset, fragKey, start, end, release)
+		return
+	}
+
+	obj := s.lookupFragmentCache(dataset, fragKey, start, end)
+	if obj == nil {
+		// 首次探到的对象在第二次查盘时被淘汰了，但已打开的描述符仍能读到
+		// 文件尾。
+		obj = probed
+	}
+
+	buf := s.registry.GetBuffer()
+	e := s.registry.Create(fragKey, buf)
+	s.createMu.Unlock()
+
+	if obj != nil {
+		if probed != nil && probed != obj {
+			_ = probed.Close()
+		}
+		s.serveFragmentCacheHit(w, r, key, dataset, start, end, e, obj, release)
+		return
+	}
+
+	// 5) 都没有命中：回源建条目。
+	e.SetRelease(release)
+	e.SetRange(start, end, total)
+	s.obs.Owner(dataset)
+	s.log.Debug("条目创建", "dataset", dataset, "key", key,
+		"range", fmt.Sprintf("%d-%d", start, end))
+
+	sub := e.Subscribe()
+	s.log.Debug("订阅者加入", "dataset", dataset, "subs", e.Subscribers())
+	started := time.Now()
+
+	go s.pumpRange(e, key, dataset, fragKey, start, end, started)
+
+	s.serveFragmentWithSub(w, r, key, dataset, e, sub, start, end)
+}
+
+// serveFragmentAttached 把 Attach 命中的片段条目转成订阅者。条目可能在
+// Attach 与订阅之间结束，此时转为独立回源，绝不能交付空响应。
+func (s *Server) serveFragmentAttached(w http.ResponseWriter, r *http.Request, key, dataset string,
+	start, end int64, e *merge.Entry, held func()) {
+	sub, ok := e.TrySubscribe()
+	if !ok {
+		s.log.Debug("条目在订阅前结束", "dataset", dataset, "key", key)
+		if held != nil {
+			s.serveFragmentIndependent(w, r, key, dataset, cache.FragmentKey(key, start, end),
+				start, end, held)
+			return
+		}
+		release, ok := s.acquire(w, r, dataset)
+		if !ok {
+			return
+		}
+		s.serveFragmentIndependent(w, r, key, dataset, cache.FragmentKey(key, start, end),
+			start, end, release)
+		return
+	}
+
+	if held != nil {
+		held()
+	}
+	s.obs.Merged(dataset)
+	s.log.Debug("订阅者加入", "dataset", dataset, "subs", e.Subscribers())
+	s.serveFragmentWithSub(w, r, key, dataset, e, sub, start, end)
+}
+
+// serveFragmentCacheHit 用盘上的片段当 owner 侧读手：条目按普通扇出路径供
+// 订阅者读取，.meta 里的 ETag、Last-Modified 与对象总长回填进 206 响应。
+func (s *Server) serveFragmentCacheHit(w http.ResponseWriter, r *http.Request, key, dataset string,
+	start, end int64, e *merge.Entry, obj *cache.Object, release func()) {
+	e.SetRelease(release)
+	meta := obj.Metadata()
+	e.SetMetadata(meta.ETag, meta.LastModified)
+	total := meta.ObjectSize
+	if total <= 0 {
+		total = -1
+	}
+	e.SetRange(start, end, total)
+
+	s.obs.CacheHit()
+	s.log.Debug("读盘命中", "dataset", dataset, "key", key,
+		"range", fmt.Sprintf("%d-%d", start, end))
+
+	sub := e.Subscribe()
+	s.log.Debug("订阅者加入", "dataset", dataset, "subs", e.Subscribers())
+	started := time.Now()
+
+	go s.pumpCache(e, key, dataset, started, obj)
+
+	s.serveFragmentWithSub(w, r, key, dataset, e, sub, start, end)
+}
+
+// serveFragmentIndependent 处理「片段条目在途但已越过合并窗口」的请求：直接
+// 带 Range 回源，不建条目、不参与合并，结束后释放准入槽。
+//
+// 开关打开时这条分支的片段同样落盘。
+func (s *Server) serveFragmentIndependent(w http.ResponseWriter, r *http.Request, key, dataset, fragKey string,
+	start, end int64, release func()) {
+	defer release()
+
+	ctx := r.Context()
+	rc, err := s.origin.OpenRange(ctx, key, start, end)
 	if err != nil {
 		s.writeOriginError(w, r, key, err)
 		return
 	}
 	defer rc.Close()
+
 	s.obs.Owner(dataset)
 
-	reader := io.Reader(&countingReader{r: rc, add: s.obs.Bytes})
+	var info origin.ObjectInfo
+	src := io.Reader(&countingReader{r: rc, add: s.obs.Bytes})
+
+	var tee *cacheTee
+	if s.cacheOn {
+		if writer := s.beginCachePut(ctx, dataset, fragKey); writer != nil {
+			tee = &cacheTee{
+				s:       s,
+				r:       src,
+				w:       writer,
+				dataset: dataset,
+				key:     fragKey,
+				meta: func() cache.Metadata {
+					return cache.Metadata{
+						ETag:         info.ETag,
+						LastModified: info.LastModified,
+						RangeStart:   start,
+						RangeEnd:     end,
+						ObjectSize:   info.Size,
+					}
+				},
+				expect: end - start + 1,
+			}
+			src = tee
+			// 正常收尾后是空操作；中途失败时删掉 .tmp，盘上不留半成品。
+			defer tee.abort()
+		}
+	}
+
 	first := make([]byte, 32*1024)
 	var n int
 	var rerr error
 	for {
-		n, rerr = reader.Read(first)
+		n, rerr = src.Read(first)
 		if n > 0 || rerr != nil {
 			break
 		}
@@ -418,9 +591,8 @@ func (s *Server) serveBlockRange(w http.ResponseWriter, r *http.Request, key str
 	if n == 0 {
 		if errors.Is(rerr, io.EOF) {
 			// 空区间：源站成功但零字节，仍回 206 与区间头。
-			info, _ := rc.Stat()
-			s.writeRangeHeaders(w.Header(), info, start, end, total)
-			w.WriteHeader(rangeStatus(info))
+			s.writeRangeHeaders(w.Header(), origin.ObjectInfo{}, start, end, -1)
+			w.WriteHeader(http.StatusPartialContent)
 			return
 		}
 		s.writeOriginError(w, r, key, rerr)
@@ -428,14 +600,14 @@ func (s *Server) serveBlockRange(w http.ResponseWriter, r *http.Request, key str
 	}
 
 	// 首读已收到 GET 响应头，Stat 从传输层记录取值、不发新请求。
-	if info, serr := rc.Stat(); serr != nil {
+	if stat, serr := rc.Stat(); serr != nil {
 		s.log.Debug("读取源站元数据失败", "dataset", dataset, "err", serr)
-		s.writeRangeHeaders(w.Header(), origin.ObjectInfo{}, start, end, total)
-		w.WriteHeader(http.StatusPartialContent)
+		s.writeRangeHeaders(w.Header(), origin.ObjectInfo{}, start, end, -1)
 	} else {
-		s.writeRangeHeaders(w.Header(), info, start, end, total)
-		w.WriteHeader(rangeStatus(info))
+		info = stat
+		s.writeRangeHeaders(w.Header(), info, start, end, info.Size)
 	}
+	w.WriteHeader(http.StatusPartialContent)
 	if _, werr := w.Write(first[:n]); werr != nil {
 		return
 	}
@@ -443,13 +615,221 @@ func (s *Server) serveBlockRange(w http.ResponseWriter, r *http.Request, key str
 		if !errors.Is(rerr, io.EOF) {
 			s.log.Warn("源站响应中断", "dataset", dataset, "err", rerr,
 				"err_class", corelog.Classify(rerr))
+			return
+		}
+		// 首读就是 EOF：这一段已读完，正常收尾落盘。
+		if tee != nil {
+			tee.finish()
 		}
 		return
 	}
-	if _, err := io.Copy(w, reader); err != nil {
+	if _, err := io.Copy(w, src); err != nil {
 		s.log.Warn("源站响应中断", "dataset", dataset, "err", err,
 			"err_class", corelog.Classify(err))
 	}
+	// 这一段读完：写 .meta 再 rename 成正式名。
+	if tee != nil {
+		tee.finish()
+	}
+}
+
+// serveFragmentWithSub 等第一个数据块或结束，然后把 [pos, written) 写给客户端。
+// 响应是 206，区间头按条目记录的区间写。踢出时 panic(http.ErrAbortHandler)
+// 断开连接。
+func (s *Server) serveFragmentWithSub(w http.ResponseWriter, r *http.Request, key, dataset string,
+	e *merge.Entry, sub *merge.Sub, start, end int64) {
+	defer sub.Close()
+
+	wroteHeader := false
+	for {
+		data, err := sub.Wait(r.Context())
+
+		if len(data) > 0 {
+			if !wroteHeader {
+				s.setFragmentEntryHeaders(w.Header(), e, start, end)
+				w.WriteHeader(http.StatusPartialContent)
+				wroteHeader = true
+			}
+			if _, werr := w.Write(data); werr != nil {
+				return
+			}
+			_ = http.NewResponseController(w).Flush()
+		}
+
+		if err == nil {
+			continue
+		}
+
+		switch {
+		case errors.Is(err, merge.ErrKicked):
+			s.obs.Kicked()
+			s.log.Warn("订阅者被踢",
+				"dataset", dataset,
+				"reason", "slow_consumer",
+				"written", e.Written(),
+				"pos", sub.Pos(),
+			)
+			panic(http.ErrAbortHandler)
+		case errors.Is(err, merge.ErrClosed):
+			if !wroteHeader {
+				s.setFragmentEntryHeaders(w.Header(), e, start, end)
+				w.WriteHeader(http.StatusPartialContent)
+			}
+			return
+		case r.Context().Err() != nil:
+			return
+		default:
+			// 拉取协程失败：尚未开始响应时按源站错误渲染；已写出字节时只能截断。
+			if !wroteHeader {
+				s.writeOriginError(w, r, key, err)
+			}
+			return
+		}
+	}
+}
+
+// pumpRange 是片段条目的拉取协程：带 Range 从源站取这一段，写进环形缓冲，
+// 同一批字节写进盘上的片段缓存。
+func (s *Server) pumpRange(e *merge.Entry, key, dataset, fragKey string, start, end int64, started time.Time) {
+	pumpCtx, cancel := context.WithCancel(s.baseCtx)
+	defer cancel()
+	e.SetCancel(cancel)
+
+	rc, err := s.origin.OpenRange(pumpCtx, key, start, end)
+	if err != nil {
+		e.Finish(err)
+		s.logEntryEnd(e, dataset, key, started, err, fromOrigin)
+		return
+	}
+	defer rc.Close()
+
+	src := &rangeMetadataReader{r: rc, obj: rc, e: e, log: s.log, dataset: dataset,
+		start: start, end: end}
+	var reader io.Reader = &countingReader{r: src, add: s.obs.Bytes}
+
+	var tee *cacheTee
+	if s.cacheOn {
+		if writer := s.beginCachePut(pumpCtx, dataset, fragKey); writer != nil {
+			tee = &cacheTee{
+				s:       s,
+				r:       reader,
+				w:       writer,
+				dataset: dataset,
+				key:     fragKey,
+				meta: func() cache.Metadata {
+					etag, lastModified := e.Metadata()
+					_, _, total, _ := e.Range()
+					return cache.Metadata{
+						ETag:         etag,
+						LastModified: lastModified,
+						RangeStart:   start,
+						RangeEnd:     end,
+						ObjectSize:   total,
+					}
+				},
+				auto:   true,
+				expect: end - start + 1,
+			}
+			reader = tee
+			// 正常收尾后是空操作；中途失败时删掉 .tmp，盘上不留半成品。
+			defer tee.abort()
+		}
+	}
+
+	err = e.Pump(pumpCtx, reader)
+	s.logEntryEnd(e, dataset, key, started, err, fromOrigin)
+	if err != nil && !errors.Is(err, context.Canceled) && e.Written() > 0 {
+		resp := minio.ToErrorResponse(err)
+		s.log.Warn("源站失败",
+			"dataset", dataset,
+			"status", resp.StatusCode,
+			"code", resp.Code,
+			"err", err,
+			"err_class", corelog.Classify(err),
+		)
+	}
+}
+
+// lookupFragmentCache 查盘上的片段。区间长度与元数据里的字节数不一致时按未命中
+// 处理：短读的片段交给客户端会少字节。
+func (s *Server) lookupFragmentCache(dataset, fragKey string, start, end int64) *cache.Object {
+	obj := s.lookupCache(dataset, fragKey)
+	if obj == nil {
+		return nil
+	}
+	if obj.Metadata().Size != end-start+1 {
+		_ = obj.Close()
+		return nil
+	}
+	return obj
+}
+
+// setFragmentEntryHeaders 把条目记录的区间与元数据回填进片段响应。对象总长
+// 优先用源站这次响应给的（条目里记着），命中缓存时用元数据里存的那一份；
+// 都没有就回总长未知的区间。
+func (s *Server) setFragmentEntryHeaders(h http.Header, e *merge.Entry, start, end int64) {
+	h.Set("Accept-Ranges", "bytes")
+	_, _, total, ok := e.Range()
+	if ok && total >= 0 {
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	} else {
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/*", start, end))
+	}
+	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	etag, lastModified := e.Metadata()
+	setMetadataHeaders(h, etag, lastModified)
+}
+
+// rangeMetadataReader 在第一次读到字节时补齐条目元数据与对象总长，再把这次
+// 字节交给上层。元数据来自这次 GET 的响应头，obj.Stat() 不再发请求。
+//
+// 对象总长从 Content-Range 头里取：源站回 206 时带着它，命中缓存时网关手里
+// 没有源站响应，只能用片段元数据里存的那一份。
+type rangeMetadataReader struct {
+	r       io.Reader
+	obj     *origin.Object
+	e       *merge.Entry
+	log     *slog.Logger
+	dataset string
+	start   int64
+	end     int64
+	set     bool
+}
+
+func (m *rangeMetadataReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	if n > 0 && !m.set {
+		m.set = true
+		// 必须在字节交给 Entry.Pump 之前写好元数据，保证第一次 write 广播
+		// 时订阅者已能读到 Last-Modified/ETag 与区间总长。
+		info, serr := m.obj.Stat()
+		if serr != nil {
+			m.log.Debug("读取源站元数据失败", "dataset", m.dataset, "err", serr)
+		} else {
+			m.e.SetMetadata(info.ETag, info.LastModified)
+			if total, ok := parseContentRangeTotal(info.ContentRange); ok {
+				m.e.SetRange(m.start, m.end, total)
+			}
+		}
+	}
+	return n, err
+}
+
+// parseContentRangeTotal 从 Content-Range 头里取对象总长。格式是
+// "bytes start-end/total"；总长是 * 或格式不对时返回 ok=false。
+func parseContentRangeTotal(v string) (int64, bool) {
+	if v == "" {
+		return 0, false
+	}
+	i := strings.LastIndex(v, "/")
+	if i < 0 {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(strings.TrimSpace(v[i+1:]), 10, 64)
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
 }
 
 // writeRangeHeaders 回填 Range 响应的头部：Accept-Ranges 恒为 bytes；206 时
@@ -652,8 +1032,11 @@ func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 				w:       writer,
 				dataset: dataset,
 				key:     key,
-				meta:    func() (string, time.Time) { return e.Metadata() },
-				auto:    true,
+				meta: func() cache.Metadata {
+					etag, lastModified := e.Metadata()
+					return cache.Metadata{ETag: etag, LastModified: lastModified}
+				},
+				auto: true,
 			}
 			reader = tee
 			// 正常收尾后是空操作；中途失败时删掉 .tmp，盘上不留半成品。
@@ -821,7 +1204,7 @@ func (s *Server) serveIndependent(w http.ResponseWriter, r *http.Request, key, d
 				w:       writer,
 				dataset: dataset,
 				key:     key,
-				meta:    func() (string, time.Time) { return info.ETag, info.LastModified },
+				meta:    func() cache.Metadata { return cache.Metadata{ETag: info.ETag, LastModified: info.LastModified} },
 			}
 			src = tee
 			// 正常收尾后是空操作；中途失败时删掉 .tmp，盘上不留半成品。
@@ -902,7 +1285,7 @@ type cacheTee struct {
 	s       *Server
 	r       io.Reader
 	w       *cache.Writer
-	meta    func() (string, time.Time)
+	meta    func() cache.Metadata
 	dataset string
 	key     string
 	// auto 为 true 时读到 EOF 立即收尾。回源条目路径用 true：条目的元数据
@@ -911,11 +1294,16 @@ type cacheTee struct {
 	auto bool
 	done bool
 	eof  bool
+	// expect 是这一份应有的字节数，0 表示不校验。片段按区间长度校验：读到的
+	// 字节少于区间长度就是短读，短读的片段不进缓存。
+	expect  int64
+	written int64
 }
 
 // Read 读上层给的字节，并把这批字节写进 .tmp。
 func (t *cacheTee) Read(p []byte) (int, error) {
 	n, err := t.r.Read(p)
+	t.written += int64(n)
 	if n > 0 && t.w != nil {
 		if _, werr := t.w.Write(p[:n]); werr != nil {
 			// 写盘失败：不再写盘，字节照常返回。
@@ -941,12 +1329,18 @@ func (t *cacheTee) finish() {
 	if t.w == nil || t.done {
 		return
 	}
+	if t.expect > 0 && t.written != t.expect {
+		// 短读：这一份不完整，进缓存会让后来的请求拿到少字节的响应。
+		t.s.log.Debug("片段字节数与区间不符", "dataset", t.dataset, "key", t.key,
+			"want", t.expect, "got", t.written)
+		t.abort()
+		return
+	}
 	w := t.w
 	t.w = nil
 	t.done = true
 
-	etag, lastModified := t.meta()
-	if err := w.Close(cache.Metadata{ETag: etag, LastModified: lastModified}); err != nil {
+	if err := w.Close(t.meta()); err != nil {
 		t.s.logCacheWriteFailure(t.dataset, t.key, "close", err)
 	}
 }

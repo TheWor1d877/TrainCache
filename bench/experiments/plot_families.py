@@ -455,7 +455,7 @@ def plot_gateway(rows):
     ):
         data = _collect(rows, metric, lambda r: "", _arm, lambda r: "all")
         _render(data, fname,
-                t("网关族：四个臂的耗时与回源量", "gateway: makespan and source bytes by arm"),
+                t("网关族：三个臂的耗时与回源量", "gateway: makespan and source bytes by arm"),
                 ylabel, t("网关臂", "gateway arm"), x_order=xs,
                 series_order=["all"], colors={g: "#1f5f9e" for g in xs},
                 color_by="x", show_legend=False)

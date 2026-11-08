@@ -395,6 +395,10 @@ def cond_to_env(cond: dict) -> dict[str, str]:
         env["TRAINCACHE_EVICT_POLICY"] = str(cache["evict_policy"])
         # 缓存容量的唯一注入点：ρ 只在这里变成字节数，被测侧不认识 ρ。
         env["TRAINCACHE_CACHE_CAPACITY_BYTES"] = str(cache_bytes(cond))
+    else:
+        # 缓存关掉时也要显式下发 0：不下发的话装置会按缺省 ρ=4 给 1GiB，
+        # 「agent 块缓存关」这一条就名不副实（网关族 G0 臂踩过这个坑）。
+        env["TRAINCACHE_CACHE_CAPACITY_BYTES"] = "0"
     pf = cond.get("prefetch") or {}
     if cond["group"] in TRAINCACHE_GROUPS:
         if "lookahead" in pf:

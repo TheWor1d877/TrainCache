@@ -188,3 +188,46 @@ func TestObjectMetadataKeepsLastModified(t *testing.T) {
 		t.Fatalf("LastModified = %v, want %v", m.LastModified, lm)
 	}
 }
+
+// TestFragmentKeyLivesUnderFragSubtree 覆盖片段键：dataset 仍是第一段，其后是
+// frag 子树与闭区间；整块键与片段键不在同一个位置，互不覆盖。
+func TestFragmentKeyLivesUnderFragSubtree(t *testing.T) {
+	got := FragmentKey("ds1/blocks/b#0", 0, 2097151)
+	want := "ds1/frag/blocks/b#0/0-2097151"
+	if got != want {
+		t.Fatalf("FragmentKey = %q, want %q", got, want)
+	}
+	if got := FragmentKey("ds1", 10, 19); got != "ds1/frag/10-19" {
+		t.Fatalf("FragmentKey(无斜杠) = %q, want %q", got, "ds1/frag/10-19")
+	}
+}
+
+// TestFragmentMetadataRoundTrip 覆盖片段元数据往返：区间与对象总长落进 .meta
+// 再读回来，命中缓存时网关靠它拼 Content-Range。
+func TestFragmentMetadataRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir, 1<<20, 1<<20)
+	key := FragmentKey("ds1/blocks/b#0", 10, 19)
+	putBlock(t, st, key, []byte("0123456789"), Metadata{
+		ETag:       "etag-1",
+		RangeStart: 10,
+		RangeEnd:   19,
+		ObjectSize: 100,
+	})
+
+	obj, err := st.Lookup(key)
+	if err != nil {
+		t.Fatalf("Lookup = %v, want nil", err)
+	}
+	defer obj.Close()
+	m := obj.Metadata()
+	if m.RangeStart != 10 || m.RangeEnd != 19 {
+		t.Fatalf("区间 = [%d,%d], want [10,19]", m.RangeStart, m.RangeEnd)
+	}
+	if m.ObjectSize != 100 {
+		t.Fatalf("对象总长 = %d, want 100", m.ObjectSize)
+	}
+	if m.Size != 10 {
+		t.Fatalf("片段长度 = %d, want 10", m.Size)
+	}
+}

@@ -75,10 +75,10 @@ FAMILIES = {
         "prefix": "gateway",
         "axis": "gateway_arm × readers",
         "values": {
-            "arm": ["g0", "g1", "g2", "g3"],
+            "arm": ["g0", "g1", "g2"],
             "readers": [cond_mod.MAX_READERS],
         },
-        "cells": 4,
+        "cells": 3,
     },
     "evict": {
         "prefix": "evict",
@@ -304,12 +304,11 @@ def build_compare() -> list[dict]:
 
 
 def build_gateway() -> list[dict]:
-    # G0 无网关无块缓存；G1 只有块缓存；G2 合并+两级缓存；G3 只有合并。
+    # G0 无网关无块缓存；G1 只有块缓存；G2 网关把重复回源压成一份。
     arms = {
         "g0": dict(cache_enabled=False, gateway=False, gateway_cache=False),
         "g1": dict(cache_enabled=True, gateway=False, gateway_cache=False),
         "g2": dict(cache_enabled=True, gateway=True, gateway_cache=True),
-        "g3": dict(cache_enabled=True, gateway=True, gateway_cache=False),
     }
     out = []
     for arm, flags in arms.items():

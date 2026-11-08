@@ -41,7 +41,7 @@ FAMILY_Q = {
 }
 FAMILY_CRITERION = {
     "compare": "4.3 按族的判据「compare·组间胜负」",
-    "gateway": "4.3 按族的判据「gateway·复制读合并」「gateway·臂间比较」",
+    "gateway": "4.3 按族的判据「gateway·网关缓存」「gateway·臂间比较」",
     "evict": "4.3 按族的判据「evict·策略可分辨」「evict·策略不可分辨」",
     "prefetch": "4.3 按族的判据「prefetch·转平」「prefetch·重复字节」",
     "warmup": "4.3 按族的判据「warmup·门控有效」「warmup·门控无价值」「warmup·门控负收益」",
@@ -173,9 +173,9 @@ def verdict_gateway(rows):
         if result:
             facts.append(f"{arm.upper()} 对 {base.upper()} makespan "
                          f"{result[0]} {abs(result[1]):.1f}%")
-    merged = mean_arm("g3", "gateway_merged")
+    merged = mean_arm("g2", "gateway_merged")
     if merged is not None:
-        facts.append(f"G3 合并次数均值 {merged:.0f}")
+        facts.append(f"G2 网关合并次数均值 {merged:.0f}")
     return "；".join(facts) or "样本不足"
 
 
