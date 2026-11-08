@@ -23,6 +23,14 @@
 
 ## [v0.7.1] - 2026-11-08
 
+### Added
+
+- bench 新增进度速查脚本 `bench/scripts/progress.sh`：只读打印测量 Pod 状态、各 Pod 最后一条训练步、已跑完 Pod 的 `RESULT` 行、MinIO eth0 的限速档位、各格 `summary.csv` 的有效轮数与跑分日志尾部。用法见 `docs/4.4-bench-runbook.md` 的查跑分进度一节。
+
+### Fixed
+
+- bench 装置的 Pod 闸门按源站字节地板推导，复制读的族地板乘读端数。4 个读端读同一批分片时源站要出 4 份副本，300 mbit 下传输地板 1310 s，原来的 1800 s 常量闸门会把正常推进的 run 截成 `pod_failed`——2026-11-08 网关族 G0 臂 4 个 Pod 全部 Succeeded 且打印了 RESULT，仍被记成作废。闸门余量进环境变量 `REPLICATION_TIMEOUT_HEADROOM`，默认 2；显式给 `POD_TIMEOUT` 时以显式值为准。网关合并失效那条路径也按 4 份地板给闸门，合并失效由「复制读合并」那条判据判，不误报成超时。装置见 `bench/compare/run_bench.py` 的 `pod_timeout_s`，口径见 `docs/4.2-bench-families.md` 的网关族一节。
+
 ### Removed
 
 - 删除 probes/ 可行性探针装置（探针 A/B/C/D 轨与合成数据脚本），职能已由 bench 九族实验承接。
@@ -30,6 +38,7 @@
 ### Changed
 
 - bench 数据层目录清除 A/C/D 轨历史遗留命名：`track_b/tars` 改为 `dataset/tars`，`track_c` 改为 `tilt`，`track_d` 改为 `train`，结果目录同步改名。已有数据需按新路径迁移或重新生成。
+- 网关族机时从 1.5 h 修正为 4.7 h：G0 与 G1 没有合并，单跑 35 min（实测 2012 s 到 2264 s），G2 与 G3 走网关合并，单跑 11.5 min。全族机时从 54.1 h 修正为 57.3 h。
 
 ## [v0.7.0] - 2026-11-08
 

@@ -391,26 +391,68 @@ POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
 # 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
 # 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
+# 复制读组态的闸门余量：源站要为每个读端各出一份拷贝，字节地板随读端数放大。
+# 2026-11-08 网关族 G0 臂实测 2100 s（地板 1374 s），1800 s 的常量闸门把还在
+# 正常推进的 run 截成了 `pod_failed`。
+REPLICATION_TIMEOUT_HEADROOM = float(os.environ.get("REPLICATION_TIMEOUT_HEADROOM", "2"))
+
+
+def _byte_floor_s(copies: int = 1) -> float | None:
+    """源站字节地板（秒）：数据集字节 × epoch 数 × 拷贝份数 ÷ 有效带宽。
+
+    `copies` 是源站要发出的份数，由调用方按组态给：单读端与分片读是 1 份，
+    复制读是读端数（网关把并发请求合并成一次回源后是 1 份，合并失效时是读端数，
+    闸门按后者给）。
+    """
+    mbit = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
+    if not mbit:
+        return None
+    total = N_TARS * SHARD_SIZE_MB * 1024 * 1024 * EPOCHS * copies
+    return total / (int(mbit.group(1)) * 1e6 / 8)
+
+
+def _replication_copies() -> int:
+    """源站要发出的拷贝份数。
+
+    网关把同一对象键的并发请求合并成一次回源，合并生效时源站只出 1 份；但闸门
+    要覆盖合并失效那条路径——合并失效时源站按读端数出副本，跑分时间是合并生效
+    时的数倍。闸门若按 1 份给，合并失效的 run 会被截成 `pod_failed`，该由
+    「复制读合并」那条判据（源站字节比 4 ± 5%）判的失败会被误报成超时。
+    """
+    if ACCESS_PATTERN == "replicated":
+        return READERS
+    return 1
 
 
 def pod_timeout_s() -> int:
     """等测量 Pod 结束的闸门（秒）。
 
-    倾斜双 Job 的墙钟由字节地板决定：Job B 每 epoch 全量扫一遍，缓存只装得下
-    1/ratio 的数据，所以每个 epoch 都要把 `dataset_bytes` 重新搬一次。@100 mbit、
-    3 epoch × 8 GiB 的地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run
-    截成 `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
-    其余组态的读量由算力下界压着，沿用 `POD_TIMEOUT`；显式给过 `POD_TIMEOUT`
-    时以显式值为准（冒烟场景）。
+    三个来源，优先级从高到低：
+    1. 显式给过 `POD_TIMEOUT` 时以显式值为准（冒烟场景）。
+    2. 倾斜组态：Job B 每 epoch 全量扫一遍，缓存只装得下 1/ratio 的数据，
+       墙钟由字节地板决定，闸门取地板 × 余量。@100 mbit、3 epoch × 8 GiB 的
+       地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run 截成
+       `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
+    3. 其余组态沿用 `POD_TIMEOUT` 常量。复制读的组态是例外：4 个读端读同一批
+       分片，源站要出 4 份拷贝，地板随读端数放大，1800 s 常量会把还在正常推进
+       的 run 截成 `pod_failed`——2026-11-08 网关族 G0 臂实测 2100 s（地板
+       1374 s），就是这么废掉的。
     """
     explicit = os.environ.get("POD_TIMEOUT")
-    if explicit or not TILT:
-        return int(explicit) if explicit else POD_TIMEOUT
-    mbit = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
-    if not mbit:
+    if explicit:
+        return int(explicit)
+    if TILT:
+        floor_s = _byte_floor_s()
+        if floor_s is None:
+            return POD_TIMEOUT
+        return int(floor_s * TILT_TIMEOUT_HEADROOM)
+    copies = _replication_copies()
+    if copies <= 1:
         return POD_TIMEOUT
-    floor_s = (EPOCHS * N_TARS * SHARD_SIZE_MB * 1024 * 1024) / (int(mbit.group(1)) * 1e6 / 8)
-    return int(floor_s * TILT_TIMEOUT_HEADROOM)
+    floor_s = _byte_floor_s(copies)
+    if floor_s is None:
+        return POD_TIMEOUT
+    return int(max(POD_TIMEOUT, floor_s * REPLICATION_TIMEOUT_HEADROOM))
 
 # 命中率口径标注（D25，产物列 hit_rate_basis 显式可见）
 BASIS_TC_OPEN = "open_time_demand_miss_bytes(4.3 命中率:打开时不在本地即未命中)"
@@ -4166,9 +4208,47 @@ def selftest():
                 os.environ[key] = value
         globals()["TILT"], globals()["TC_RATE_EFF"] = saved_tilt, saved_rate
         globals()["N_TARS"] = saved_n_tars
+
+    # ---- 12b) 复制读组态的 Pod 闸门按读端份数放大（2026-11-08 网关族 G0 臂被截断）----
+    saved_multi = {k: globals()[k] for k in
+                   ("READERS", "ACCESS_PATTERN", "GATEWAY_ON", "TC_RATE_EFF")}
+    try:
+        globals()["TC_RATE_EFF"] = "300mbit"
+        globals()["READERS"] = 4
+        globals()["ACCESS_PATTERN"] = "replicated"
+        globals()["GATEWAY_ON"] = False
+        rep_floor = _byte_floor_s(_replication_copies())
+        want = int(max(POD_TIMEOUT, rep_floor * REPLICATION_TIMEOUT_HEADROOM))
+        if pod_timeout_s() != want:
+            raise AssertionError(
+                f"自测：复制读组态的闸门应按 4 份拷贝的字节地板 ×余量"
+                f"（{rep_floor:.0f}s×{REPLICATION_TIMEOUT_HEADROOM}），"
+                f"实得 {pod_timeout_s()}")
+        if pod_timeout_s() <= POD_TIMEOUT:
+            raise AssertionError(
+                "自测：复制读闸门应高于 1800s 常量，否则正常推进的 run 仍会被截成 "
+                "pod_failed")
+        globals()["GATEWAY_ON"] = True
+        if pod_timeout_s() != want:
+            raise AssertionError(
+                f"自测：网关合并失效那条路径也要留够闸门，闸门不能因网关开启而"
+                f"回落，实得 {pod_timeout_s()}")
+        globals()["ACCESS_PATTERN"] = "sharded"
+        globals()["GATEWAY_ON"] = False
+        if pod_timeout_s() != POD_TIMEOUT:
+            raise AssertionError(
+                f"自测：分片读各读端互不相交，源站字节不放大，闸门应保持 "
+                f"POD_TIMEOUT={POD_TIMEOUT}，实得 {pod_timeout_s()}")
+    finally:
+        for key, value in saved_multi.items():
+            globals()[key] = value
     print(f"[selftest] 12) Pod 闸门：非倾斜沿用 {POD_TIMEOUT}s，倾斜按 EPOCHS×N_TARS×"
           f"分片字节 ÷ 带宽推导（本档地板 {floor_s:.0f}s × {TILT_TIMEOUT_HEADROOM:.0f}"
           f"= {int(floor_s * TILT_TIMEOUT_HEADROOM)}s），显式 POD_TIMEOUT 优先")
+    print(f"[selftest] 12b) 复制读闸门：源站按读端份数出副本，4 读端 300mbit 的地板 "
+          f"{rep_floor:.0f}s × {REPLICATION_TIMEOUT_HEADROOM:.0f} = "
+          f"{int(max(POD_TIMEOUT, rep_floor * REPLICATION_TIMEOUT_HEADROOM))}s；"
+          f"网关合并失效那条路径同样留这份闸门，分片读回到 {POD_TIMEOUT}s")
 
     # ---- 13) D23/M5 网关磁盘缓存开关：新列、取值映射、环境变量与透传 ----
     if "gateway_cache" not in CSV_FIELDNAMES:
