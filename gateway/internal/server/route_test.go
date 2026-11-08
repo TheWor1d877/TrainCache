@@ -192,6 +192,27 @@ func TestIsBlockKey(t *testing.T) {
 	}
 }
 
+// TestPassthroughCountsOriginBytes 覆盖直通路径：读了源站的字节要计入 bytes。
+func TestPassthroughCountsOriginBytes(t *testing.T) {
+	const body = "snapshot-v1"
+	s := newTestServer(&fakeOrigin{
+		statFn: func(_ context.Context, key string) (origin.ObjectInfo, error) {
+			return origin.ObjectInfo{Size: int64(len(body)), ETag: "etag-current"}, nil
+		},
+		openFn: func(_ context.Context, key string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(body)), nil
+		},
+	})
+
+	rec := serve(s, http.MethodGet, "/traincache/ds/CURRENT")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := s.obs.Snapshot().Bytes; got != int64(len(body)) {
+		t.Fatalf("bytes = %d, want %d", got, len(body))
+	}
+}
+
 func TestCurrentPassthrough(t *testing.T) {
 	const body = "snapshot-v1"
 	var gotKey string

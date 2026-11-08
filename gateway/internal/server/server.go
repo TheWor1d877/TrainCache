@@ -1446,7 +1446,8 @@ func (s *Server) servePassthrough(w http.ResponseWriter, r *http.Request, key st
 
 	s.setObjectHeaders(w.Header(), info)
 	w.WriteHeader(http.StatusOK)
-	if _, err := io.Copy(w, rc); err != nil {
+	// 直通也读了源站的字节，一并计入 bytes：这条列的口径是「从源站读入的字节」。
+	if _, err := io.Copy(w, &countingReader{r: rc, add: s.obs.Bytes}); err != nil {
 		// 响应已开始，无法改状态码；中途失败按 design 9.1「取数与扇出」只记日志。
 		s.log.Warn("源站响应中断", "dataset", datasetOf(key), "err", err, "err_class", corelog.Classify(err))
 	}

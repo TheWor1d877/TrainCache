@@ -170,6 +170,38 @@ func TestSamplerDedupWindow(t *testing.T) {
 	}
 }
 
+// TestSamplerAggregateSkipsDedup 断言带 aggregate 标记的汇总行不进 60 秒去重:
+// 五个去重维度都不变时,每条都要写出。
+func TestSamplerAggregateSkipsDedup(t *testing.T) {
+	s, now := newTestSampler("test", 1000, 1000, 1, 1)
+	capture := &captureHandler{}
+	log := slog.New(NewSamplingHandler(capture, s)).With(
+		"component", "test",
+		"node", "n1",
+	)
+
+	for i := 0; i < 3; i++ {
+		log.Info("summary", "aggregate", true)
+		*now = now.Add(10 * time.Second)
+	}
+	if got := capture.count(); got != 3 {
+		t.Fatalf("汇总行不应被去重丢弃,got %d 条, want 3", got)
+	}
+	if got := s.Dropped("test", slog.LevelInfo); got != 0 {
+		t.Fatalf("汇总行的丢弃计数 = %d, want 0", got)
+	}
+	if _, ok := recordInt64(capture.last(), "suppressed"); ok {
+		t.Fatal("汇总行不应带 suppressed")
+	}
+
+	// 不带标记的同键行仍按 60 秒窗口去重。
+	log.Info("summary")
+	log.Info("summary")
+	if got := capture.count(); got != 4 {
+		t.Fatalf("普通行窗口内重复应被抑制,got %d 条, want 4", got)
+	}
+}
+
 // TestSamplerZeroRateKeepsWarnError 断言采样率为 0 且令牌桶为空时 Warn/Error 零丢失。
 func TestSamplerZeroRateKeepsWarnError(t *testing.T) {
 	s, _ := newTestSampler("test", 0, 0, 0, 0)

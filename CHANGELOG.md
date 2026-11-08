@@ -31,6 +31,8 @@
 
 ### Fixed
 
+- 网关的 60 秒汇总日志行会被日志采样器的 60 秒去重丢掉：汇总行的五个去重维度（component、消息、节点、任务号、原因）每窗口都一样，窗口内的行直接丢弃。2026-11-08 网关族 G2 臂实测 8 个窗口里有 3 个没落进日志，回源最忙的那个窗口（约 2.1 GB）在其中，`summary.csv` 的 `gateway_gets`、`gateway_merged`、`gateway_bytes` 因此只对了一半。现在带 `aggregate=true` 标记的记录不进 60 秒去重，网关的汇总行带这个标记。契约见 `docs/8.1-design.md` 的级别与采样一节与 `docs/9.1-design.md` 的日志与可观测性一节。
+- 网关的直通路径读了源站的字节却不计入 60 秒汇总的 `bytes` 列，该列的口径是「从源站读入的字节」，直通用的是同一个源站。现在直通也走字节计数。
 - COND 写 `cache.enabled=false` 时装置不下发缓存容量，运行时按缺省 ρ=4 给 agentd 1 GiB：网关族 G0 臂名义上关掉 agent 块缓存，实际跑的是「无网关 + 1 GiB 缓存」，与 G1 塌成同一配置，消融轴失效，源站字节也落不到「4 读端各出一份」这个数。现在 `cache.enabled=false` 显式下发 `TRAINCACHE_CACHE_CAPACITY_BYTES=0`，多读端路径据此改走直读。装置见 `bench/experiments/cond.py` 的 `cond_to_env`。
 - 网关族文档里的源站字节地板从 1310 s 改成 1374 s（300 mbit 下 48 GiB 按字节换算），Pod 闸门取地板 × 2 = 2748 s，与装置自检的数一致。见 `docs/4.2-bench-families.md` 的网关族一节。
 - 缓存容量为 0 的格子（agent 块缓存关掉的那一臂）的 `cache_ratio` 列改写空串：原来按除以 1 算，会落成 4294967296.0 这种没有意义的数。见 `bench/compare/run_bench.py`。
@@ -41,7 +43,7 @@
 
 - 网关族的源站字节模型按实测回填：G0 臂 50.89 GB（4 读端各出 1 份，合计 47.4 GiB），G1 臂 79.6 GB（1 GiB 缓存装不下 4 GiB 工作集，块被淘汰后重新下载，源站字节比「4 份」这个模型值高）。见 `docs/4.2-bench-families.md` 的网关族一节。
 - 网关族减一臂：去掉「网关开、不加网关缓存」那一臂，剩 G0、G1、G2 三格 9 跑。判据改成「G2 对 G0 的源站字节比落在 12 ± 5%」，即 4 读端乘 3 epoch 共 12 份重复压成 1 份。族定义见 `docs/4.2-bench-families.md` 的网关族一节，判据见 `docs/4.3-bench-metrics-and-decisions.md`。
-- 网关族 G2 臂按实测回填：源站出站 4.65 GB、全程 466 s、队列超时与读错误为 0；网关盘上落着 2048 个片段（每个 2 MiB）覆盖整个 4 GiB 工作集，片段拼起来的字节与整块回源的字节 sha256 相同。G0 与 G2 的源站字节比实测 10.93，模型值是 12，差额来自一部分不经网关的源站流量，来源待查。见 `docs/4.2-bench-families.md` 的网关族一节与 `docs/TODO.md`。
+- 网关族 G2 臂按实测回填：两跑全程 466 s 与 491 s、队列超时与读错误为 0；网关盘上落着 2048 个片段（每个 2 MiB）覆盖整个 4 GiB 工作集，片段字节与整块回源字节 sha256 相同，回源次数 2048 与 512 个块乘 4 段对得上。源站出站比网关记的字节多 5% 到 8%，这部分是 Agent 元数据路径直连源站的流量（List、GetETag、Put 按设计不走网关），G0 臂没有 agentd 不产生这项流量。G0 与 G2 的源站字节比按 MinIO 总出站算是 10.93 与 11.32，判据取哪个口径见 `docs/TODO.md`。见 `docs/4.2-bench-families.md` 的网关族一节。
 - bench 数据层目录清除 A/C/D 轨历史遗留命名：`track_b/tars` 改为 `dataset/tars`，`track_c` 改为 `tilt`，`track_d` 改为 `train`，结果目录同步改名。已有数据需按新路径迁移或重新生成。
 
 ## [v0.7.0] - 2026-11-08

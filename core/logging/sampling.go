@@ -170,10 +170,17 @@ func (s *Sampler) filter(r slog.Record, attrs []slog.Attr) (slog.Record, bool) {
 		return r, false
 	}
 	now := s.now()
-	suppressed, ok := s.dedup(dedupKey(r, attrs), now)
-	if !ok {
-		s.recordDrop(level)
-		return r, false
+	// 汇总行带 aggregate 标记:每个窗口都是一条新记录,不进 60 秒去重。
+	// 没有这个标记时,周期汇总的五个去重维度每窗口都一样,窗口内的行会被丢掉;
+	// 采样率与令牌桶对汇总行照常生效。
+	var suppressed int64
+	if !isAggregate(r, attrs) {
+		sup, ok := s.dedup(dedupKey(r, attrs), now)
+		if !ok {
+			s.recordDrop(level)
+			return r, false
+		}
+		suppressed = sup
 	}
 	if !s.take(now) {
 		s.recordDrop(level)
@@ -183,6 +190,39 @@ func (s *Sampler) filter(r slog.Record, attrs []slog.Attr) (slog.Record, bool) {
 		return withSuppressed(r, suppressed), true
 	}
 	return r, true
+}
+
+// isAggregate 判断记录是否带 aggregate=true 标记。值可以是 bool true 或字符串
+// "true";其余取值按不是汇总行处理。
+func isAggregate(r slog.Record, attrs []slog.Attr) bool {
+	found := false
+	var check func(slog.Attr)
+	check = func(a slog.Attr) {
+		a.Value = a.Value.Resolve()
+		if a.Value.Kind() == slog.KindGroup {
+			for _, groupAttr := range a.Value.Group() {
+				check(groupAttr)
+			}
+			return
+		}
+		if a.Key != "aggregate" || found {
+			return
+		}
+		switch a.Value.Kind() {
+		case slog.KindBool:
+			found = a.Value.Bool()
+		case slog.KindString:
+			found = a.Value.String() == "true"
+		}
+	}
+	for _, a := range attrs {
+		check(a)
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		check(a)
+		return true
+	})
+	return found
 }
 
 func (s *Sampler) sample(level slog.Level) bool {

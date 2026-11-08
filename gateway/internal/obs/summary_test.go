@@ -78,8 +78,12 @@ func TestSummaryFields(t *testing.T) {
 		if _, ok := m["window_s"]; !ok {
 			t.Fatal("缺少 window_s 字段")
 		}
-		// 汇总行共十个字段（msg 之外），不多不少。
-		if got, want := len(m)-1, 10; got != want {
+		// 汇总行带 aggregate 标记：采样器的 60 秒去重不丢这行。
+		if got, ok := m["aggregate"].(bool); !ok || !got {
+			t.Fatalf("字段 aggregate = %v, want true", m["aggregate"])
+		}
+		// 汇总行共十一个字段（msg 之外），不多不少。
+		if got, want := len(m)-1, 11; got != want {
 			t.Fatalf("汇总行字段数 = %d, want %d（字段: %v）", got, want, m)
 		}
 	case <-time.After(2 * time.Second):
@@ -119,8 +123,8 @@ func TestSummaryCacheHitZeroOnEmptyWindow(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("空窗口 cache_hit = %d, want 0", got)
 	}
-	if n := len(m) - 1; n != 10 {
-		t.Fatalf("汇总行字段数 = %d, want 10（字段: %v）", n, m)
+	if n := len(m) - 1; n != 11 {
+		t.Fatalf("汇总行字段数 = %d, want 11（字段: %v）", n, m)
 	}
 }
 
