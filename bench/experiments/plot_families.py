@@ -447,15 +447,25 @@ def plot_compare(rows):
             colors=GROUP_COLORS, facet_fmt=_rate_fmt, x_fmt=lambda v: v)
 
 
+def _gateway_source_bytes(row):
+    """判据用的源站字节：G2 取网关记的源站字节（数据面经网关从源站拉到的
+    字节），G0 与 G1 取 MinIO 出站。两边都只算 Get 路径的流量，
+    Agent 元数据路径直连源站的部分不在口径内。"""
+    if _arm(row) == "g2":
+        return _num(row.get("gateway_bytes"))
+    return _num(row.get("origin_egress_bytes"))
+
+
 def plot_gateway(rows):
     xs = sorted({_arm(r) for r in rows})
+    rows = [dict(r, source_bytes=_gateway_source_bytes(r)) for r in rows]
     for metric, fname, ylabel in (
         ("total_makespan", "gateway-makespan", t("全程 makespan (s)", "total makespan (s)")),
-        ("fetch_bytes_run", "gateway-source-bytes", t("回源字节 (B)", "source bytes (B)")),
+        ("source_bytes", "gateway-source-bytes", t("源站字节 (B)", "source bytes (B)")),
     ):
         data = _collect(rows, metric, lambda r: "", _arm, lambda r: "all")
         _render(data, fname,
-                t("网关族：三个臂的耗时与回源量", "gateway: makespan and source bytes by arm"),
+                t("网关族：三个臂的耗时与源站字节", "gateway: makespan and source bytes by arm"),
                 ylabel, t("网关臂", "gateway arm"), x_order=xs,
                 series_order=["all"], colors={g: "#1f5f9e" for g in xs},
                 color_by="x", show_legend=False)
