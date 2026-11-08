@@ -47,11 +47,11 @@
 
 用法(装置内由 train_up.sh / train_verify.sh 调用,一般不需手敲):
   /usr/bin/python3.12 bench/scripts/load_train.py --epochs 10 \
-      --out-dir bench/results/track_d
+      --out-dir bench/results/train
 smoke(自建微型 tar + 本地 http.server):
   /usr/bin/python3.12 bench/scripts/load_train.py \
       --url http://127.0.0.1:9101/shard-%06d.tar --n-tars 2 --epochs 2 \
-      --steps-per-epoch 4 --workers 0 --seed 7 --out-dir /tmp/track_d_smoke
+      --steps-per-epoch 4 --workers 0 --seed 7 --out-dir /tmp/train_smoke
 """
 import argparse
 import json

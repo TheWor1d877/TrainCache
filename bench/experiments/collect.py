@@ -11,7 +11,7 @@
   * 所有边界误差单独报,不静默吞掉。
 
 用法:
-  python3 bench/experiments/collect.py --run-dir bench/results/track_d/<run> \
+  python3 bench/experiments/collect.py --run-dir bench/results/train/<run> \
       --prometheus-url http://127.0.0.1:9090 \
       --namespace traincache --warmup-task warmup-xxx --pod-selector job-name=train-xxx
 

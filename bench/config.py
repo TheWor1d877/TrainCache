@@ -14,10 +14,9 @@ REPO_ROOT = ROOT.parent
 # repo 内不放数据,也不放指向数据层的软链接。CI 用 TRAINCACHE_DATA_ROOT 改到 workspace 内。
 DATA_ROOT = Path(os.environ.get("TRAINCACHE_DATA_ROOT") or (REPO_ROOT.parent / "traincachedata")).resolve()
 DATA_DIR = DATA_ROOT / "bench" / "data"
-# 数据层的目录名是磁盘现状,不随后续命名调整:数据集仍在 track_b/tars 下。
-DATASET_DIR = DATA_DIR / "track_b" / "tars"
-TILT_DIR = DATA_DIR / "track_c"
-TRAIN_DIR = DATA_DIR / "track_d"
+DATASET_DIR = DATA_DIR / "dataset" / "tars"
+TILT_DIR = DATA_DIR / "tilt"
+TRAIN_DIR = DATA_DIR / "train"
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
 # 产物根下按族 ID 分片:results/<族>/<格子>/。族名与 COND 的 family 字段同源,
 # 一个族一个目录,汇总与出图按族各自读自己的目录。

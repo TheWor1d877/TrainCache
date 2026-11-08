@@ -21,6 +21,16 @@
 
 # Changelog正文
 
+## [v0.7.1] - 2026-11-08
+
+### Removed
+
+- 删除 probes/ 可行性探针装置（探针 A/B/C/D 轨与合成数据脚本），职能已由 bench 九族实验承接。
+
+### Changed
+
+- bench 数据层目录清除 A/C/D 轨历史遗留命名：`track_b/tars` 改为 `dataset/tars`，`track_c` 改为 `tilt`，`track_d` 改为 `train`，结果目录同步改名。已有数据需按新路径迁移或重新生成。
+
 ## [v0.7.0] - 2026-11-08
 
 ### Added

@@ -12,7 +12,7 @@
 数据复用 主数据集(32×256MiB≈8GB),源站 MinIO 或本地 nginx;热/全量分片清单
 由 synth_tilt.py 生成(hot-shards.txt / full-shards.txt)。
 
-输出(--out-dir,缺省 bench/results/track_c):
+输出(--out-dir,缺省 bench/results/tilt):
   * run.json          run 级元数据(t_submit/t_first_step/t_last_step/
                       switch_events/phase_policy/args);
   * per_step_a.jsonl  Job A 每步:step, wait_s, step_s, shard, phase, hit;
@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 
 # ---- 常量(口径对齐 config.py)----
-TILT_RESULTS_DIR = config.RESULTS_DIR / "track_c"
+TILT_RESULTS_DIR = config.RESULTS_DIR / "tilt"
 # 主数据集分片字节(用于 selftest 的容量换算);真实容量由环境变量控制
 SHARD_BYTES_DEFAULT = config.DATASET_SHARD_BYTES  # 256MiB
 N_TARS_DEFAULT = config.DATASET_SHARDS           # 32
@@ -514,10 +514,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="tar URL 模板(含一个整数占位),缺省取主数据集 MinIO URL")
     ap.add_argument("--hot-shards", type=Path,
                     default=config.TILT_DIR / "hot-shards.txt",
-                    help="热分片清单文件(缺省 data/track_c/hot-shards.txt)")
+                    help="热分片清单文件(缺省 data/tilt/hot-shards.txt)")
     ap.add_argument("--full-shards", type=Path,
                     default=config.TILT_DIR / "full-shards.txt",
-                    help="全量分片清单文件(缺省 data/track_c/full-shards.txt)")
+                    help="全量分片清单文件(缺省 data/tilt/full-shards.txt)")
     ap.add_argument("--epochs-a", type=int, default=10,
                     help="Job A 循环轮数(缺省 10)")
     ap.add_argument("--epochs-b", type=int, default=3,
@@ -531,7 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--stagger-s", type=float, default=5.0,
                     help="Job B 延迟启动秒数(缺省 5.0,让 A 先建立热集)")
     ap.add_argument("--out-dir", type=Path, default=TILT_RESULTS_DIR,
-                    help="输出目录(缺省 bench/results/track_c)")
+                    help="输出目录(缺省 bench/results/tilt)")
     ap.add_argument("--seed", type=int, default=config.SEED,
                     help=f"随机种子(缺省 {config.SEED})")
     ap.add_argument("--cache-dir", type=Path,
