@@ -11,14 +11,16 @@
 先回答用户的问题，再执行长时间任务。答案第一时间给，不等全部跑完再一起回复，绝不让用户干等。
 
 ## 项目模块地图
-`agent/` : Agent服务化层
-`bench/` : 项目正式的实验装置
-`controller/`控制平面层，k8s Controller实现，CRD资源实现位置
-`core/`  : 核心缓存库，主要实现了路径索引与cas存储层
-`docs/`  : 参考文档
-`hack/`  : CI/CD的相关脚本
-`probes/`: 项目早期用于验证的探针
-`survey/`: 项目早期勘测阶段的实验装置
+`agent/`     : Agent服务化层
+`bench/`     : 项目正式的实验装置
+`checkpoint/`: checkpoint异步sidecar
+`controller/`：控制平面层，k8s Controller实现，CRD资源实现位置
+`core/`      : 核心缓存库，主要实现了路径索引与cas存储层
+`docs/`      : 参考文档
+`gateway`    : S3合并回源网关
+`hack/`      : CI/CD的相关脚本
+`survey/`    : 项目早期勘测阶段的实验装置
+
 
 ## 数据与产物布局
 数据与产物一律实体落 `~/tcd/`（= `~/Project/TrainCache/traincachedata`），repo（`~/tc/` = `~/Project/TrainCache/traincache`）内只存脚本与清单；脚本直接读写 `~/tcd`。
