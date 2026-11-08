@@ -169,6 +169,9 @@ func (l *Logger) emit() {
 		"cache_hit", cacheHit,
 		"bytes", nbytes,
 		"datasets", datasets,
+		// 汇总行带 aggregate 标记，不进日志采样器的 60 秒去重：每个窗口
+		// 都是一条新记录，丢行会让按窗口求和的对账少算。
+		"aggregate", true,
 	)
 }
 

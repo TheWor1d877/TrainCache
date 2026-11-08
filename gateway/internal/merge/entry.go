@@ -43,6 +43,13 @@ type Entry struct {
 	etag         string
 	lastModified time.Time
 
+	// 片段区间：闭区间 [rangeStart, rangeEnd] 与对象总长 rangeTotal。
+	// 整块条目不设 rangeSet，rangeTotal 为 -1 表示总长未知。
+	rangeSet   bool
+	rangeStart int64
+	rangeEnd   int64
+	rangeTotal int64
+
 	released  bool
 	releaseFn func() // 准入槽释放函数；与缓冲一起只调用一次
 
@@ -196,6 +203,35 @@ func (e *Entry) Metadata() (etag string, lastModified time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.etag, e.lastModified
+}
+
+// SetRange 记录片段的闭区间与对象总长。整块条目不调用它。
+//
+// 区间只设置一次；总长未知（-1）时允许后续补上真实值：源站的 206 响应带
+// Content-Range，从那里能拿到对象总长，补写发生在首次写字节之前。
+func (e *Entry) SetRange(start, end, total int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.rangeSet {
+		e.rangeSet = true
+		e.rangeStart = start
+		e.rangeEnd = end
+		e.rangeTotal = total
+		return
+	}
+	if e.rangeTotal < 0 && total >= 0 {
+		e.rangeTotal = total
+	}
+}
+
+// Range 返回片段的闭区间与对象总长。整块条目返回 ok=false。
+func (e *Entry) Range() (start, end, total int64, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.rangeSet {
+		return 0, 0, -1, false
+	}
+	return e.rangeStart, e.rangeEnd, e.rangeTotal, true
 }
 
 // Subscribers 返回当前订阅者数量，供 server 层日志使用（design 9.1「日志与可观测性」）。

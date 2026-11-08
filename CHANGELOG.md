@@ -23,12 +23,27 @@
 
 ## [v0.7.1] - 2026-11-08
 
-### Removed
+### Added
 
-- 删除 probes/ 可行性探针装置（探针 A/B/C/D 轨与合成数据脚本），职能已由 bench 九族实验承接。
+- 网关把带 Range 的块 GET 改成按「键+区间」合并并落盘：同一区间的并发请求合并成一次回源，这一段的字节落进盘上的片段缓存，后来者从盘上读，不再回源。Agent 侧不改，区间边界由块大小算出来，各节点一致。契约见 `docs/9.1-design.md` 的网关 HTTP 契约与盘上布局两节、`docs/9.2-decisions.md` 的 D36 与 D37。
+- bench 新增进度速查脚本 `bench/scripts/progress.sh`：只读打印测量 Pod 状态、各 Pod 最后一条训练步、已跑完 Pod 的 `RESULT` 行、MinIO eth0 的限速档位、各格 `summary.csv` 的有效轮数与跑分日志尾部。用法见 `docs/4.4-bench-runbook.md` 的查跑分进度一节。
+- bench 装置新增「多读端直读」路径：读端数大于 1 且缓存容量显式为 0 时，测量 Pod 不经 agentd 块缓存，经 HTTP 直读 MinIO 桶根的分片，Pod 不挂缓存目录、订单目录与 hook socket。网关族 G0 臂（agent 块缓存关）走这条路径。装置见 `bench/compare/run_bench.py` 的 `_multi_direct` 与 `bench/compare/gateway_multi.py` 的 `_pod_spec`，口径见 `docs/4.2-bench-families.md` 的网关族一节。
+
+### Fixed
+
+- 网关的 60 秒汇总日志行会被日志采样器的 60 秒去重丢掉：汇总行的五个去重维度（component、消息、节点、任务号、原因）每窗口都一样，窗口内的行直接丢弃。2026-11-08 网关族 G2 臂实测 8 个窗口里有 3 个没落进日志，回源最忙的那个窗口（约 2.1 GB）在其中，`summary.csv` 的 `gateway_gets`、`gateway_merged`、`gateway_bytes` 因此只对了一半。现在带 `aggregate=true` 标记的记录不进 60 秒去重，网关的汇总行带这个标记。契约见 `docs/8.1-design.md` 的级别与采样一节与 `docs/9.1-design.md` 的日志与可观测性一节。
+- 网关的直通路径读了源站的字节却不计入 60 秒汇总的 `bytes` 列，该列的口径是「从源站读入的字节」，直通用的是同一个源站。现在直通也走字节计数。
+- COND 写 `cache.enabled=false` 时装置不下发缓存容量，运行时按缺省 ρ=4 给 agentd 1 GiB：网关族 G0 臂名义上关掉 agent 块缓存，实际跑的是「无网关 + 1 GiB 缓存」，与 G1 塌成同一配置，消融轴失效，源站字节也落不到「4 读端各出一份」这个数。现在 `cache.enabled=false` 显式下发 `TRAINCACHE_CACHE_CAPACITY_BYTES=0`，多读端路径据此改走直读。装置见 `bench/experiments/cond.py` 的 `cond_to_env`。
+- 网关族文档里的源站字节地板从 1310 s 改成 1374 s（300 mbit 下 48 GiB 按字节换算），Pod 闸门取地板 × 2 = 2748 s，与装置自检的数一致。见 `docs/4.2-bench-families.md` 的网关族一节。
+- 缓存容量为 0 的格子（agent 块缓存关掉的那一臂）的 `cache_ratio` 列改写空串：原来按除以 1 算，会落成 4294967296.0 这种没有意义的数。见 `bench/compare/run_bench.py`。
+- `bench/compare/traincache/down.sh` 补删多读端路径建的测量 Pod（`app=train-job` 标签）与测量脚本 ConfigMap（`measure-script-*`）。原来只删单读端路径的 Job，多读端的 4 个 Pod 与 ConfigMap 每次跑完都留在命名空间里。见 `bench/compare/traincache/down.sh`。
+- bench 装置的 Pod 闸门按源站字节地板推导，复制读的族地板乘读端数。4 个读端读同一批分片时源站要出 4 份副本，300 mbit 下传输地板 1374 s，原来的 1800 s 常量闸门会把正常推进的 run 截成 `pod_failed`——2026-11-08 网关族 G0 臂 4 个 Pod 全部 Succeeded 且打印了 RESULT，仍被记成作废。闸门余量进环境变量 `REPLICATION_TIMEOUT_HEADROOM`，默认 2；显式给 `POD_TIMEOUT` 时以显式值为准。网关合并失效那条路径也按 4 份地板给闸门，合并失效由「网关缓存」那条判据判，不误报成超时。装置见 `bench/compare/run_bench.py` 的 `pod_timeout_s`，口径见 `docs/4.2-bench-families.md` 的网关族一节。
 
 ### Changed
 
+- 网关族的源站字节模型按实测回填：G0 臂 50.89 GB（4 读端各出 1 份，合计 47.4 GiB），G1 臂 79.6 GB（1 GiB 缓存装不下 4 GiB 工作集，块被淘汰后重新下载，源站字节比「4 份」这个模型值高）。见 `docs/4.2-bench-families.md` 的网关族一节。
+- 网关族减一臂：去掉「网关开、不加网关缓存」那一臂，剩 G0、G1、G2 三格 9 跑。判据改成「G2 对 G0 的源站字节比落在 12 ± 5%」，即 4 读端乘 3 epoch 共 12 份重复压成 1 份。判据的源站字节只算 Get 路径：G2 臂取网关记的源站字节，G0 与 G1 臂取 MinIO 出站，Agent 元数据路径直连源站的流量不在口径内。报告脚本的网关族判定会直接给出这个比值与带内带外，出图的源站字节图按同一口径取数。族定义见 `docs/4.2-bench-families.md` 的网关族一节，判据见 `docs/4.3-bench-metrics-and-decisions.md`。
+- 网关族 G2 臂按实测回填：三跑全程 466 s、348 s 与 491 s、队列超时与读错误为 0；网关盘上落着 2048 个片段（每个 2 MiB）覆盖整个 4 GiB 工作集，片段字节与整块回源字节 sha256 相同，回源次数 2048 与 512 个块乘 4 段对得上。源站出站比网关记的字节多 5% 到 8%，这部分是 Agent 元数据路径直连源站的流量（List、GetETag、Put 按设计不走网关），G0 臂没有 agentd 不产生这项流量。判据按网关记的源站字节算，G0 与 G2 的源站字节比两跑都是 11.95，落在 12 ± 5% 的带内。见 `docs/4.2-bench-families.md` 的网关族一节。
 - bench 数据层目录清除 A/C/D 轨历史遗留命名：`track_b/tars` 改为 `dataset/tars`，`track_c` 改为 `tilt`，`track_d` 改为 `train`，结果目录同步改名。已有数据需按新路径迁移或重新生成。
 
 ## [v0.7.0] - 2026-11-08

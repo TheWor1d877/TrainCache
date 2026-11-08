@@ -301,6 +301,22 @@ if ACCESS_PATTERN not in ("single", "replicated", "sharded"):
     raise SystemExit(f"[cfg] TRAINCACHE_ACCESS_PATTERN 非法（收到 {ACCESS_PATTERN!r}）")
 if (READERS == 1) != (ACCESS_PATTERN == "single"):
     raise SystemExit("[cfg] readers=1 与 access_pattern=single 必须同时成立")
+# 多读端直读：COND 的 cache.enabled=false 时置 1（网关族 G0 臂）。此时测量 Pod
+# 不经 agentd 块缓存，直读源站——agent 缓存关掉的语义。cache.enabled=true 时
+# 走 agentd 块缓存，容量按 ρ 给。
+def _multi_direct(readers: int | None = None, capacity: str | None = None) -> bool:
+    """多读端直读的判定：读端数 > 1 且缓存容量显式为 0。
+
+    容量必须是显式的 0 才算「缓存关掉」：环境变量缺省时装置按 ρ 给容量，
+    那是有缓存的组态，不能按直读处理。
+    """
+    r = READERS if readers is None else readers
+    cap = (os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES", "")
+           if capacity is None else capacity)
+    return r > 1 and str(cap).strip() == "0"
+
+
+MULTI_DIRECT = _multi_direct()
 
 
 def gateway_flag(on=None):
@@ -391,26 +407,68 @@ POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
 # 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
 # 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
+# 复制读组态的闸门余量：源站要为每个读端各出一份拷贝，字节地板随读端数放大。
+# 2026-11-08 网关族 G0 臂实测 2100 s（地板 1374 s），1800 s 的常量闸门把还在
+# 正常推进的 run 截成了 `pod_failed`。
+REPLICATION_TIMEOUT_HEADROOM = float(os.environ.get("REPLICATION_TIMEOUT_HEADROOM", "2"))
+
+
+def _byte_floor_s(copies: int = 1) -> float | None:
+    """源站字节地板（秒）：数据集字节 × epoch 数 × 拷贝份数 ÷ 有效带宽。
+
+    `copies` 是源站要发出的份数，由调用方按组态给：单读端与分片读是 1 份，
+    复制读是读端数（网关把并发请求合并成一次回源后是 1 份，合并失效时是读端数，
+    闸门按后者给）。
+    """
+    mbit = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
+    if not mbit:
+        return None
+    total = N_TARS * SHARD_SIZE_MB * 1024 * 1024 * EPOCHS * copies
+    return total / (int(mbit.group(1)) * 1e6 / 8)
+
+
+def _replication_copies() -> int:
+    """源站要发出的拷贝份数。
+
+    网关把同一对象键的并发请求合并成一次回源，合并生效时源站只出 1 份；但闸门
+    要覆盖合并失效那条路径——合并失效时源站按读端数出副本，跑分时间是合并生效
+    时的数倍。闸门若按 1 份给，合并失效的 run 会被截成 `pod_failed`，该由
+    「网关缓存」那条判据（源站字节比 12 ± 5%）判的失败会被误报成超时。
+    """
+    if ACCESS_PATTERN == "replicated":
+        return READERS
+    return 1
 
 
 def pod_timeout_s() -> int:
     """等测量 Pod 结束的闸门（秒）。
 
-    倾斜双 Job 的墙钟由字节地板决定：Job B 每 epoch 全量扫一遍，缓存只装得下
-    1/ratio 的数据，所以每个 epoch 都要把 `dataset_bytes` 重新搬一次。@100 mbit、
-    3 epoch × 8 GiB 的地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run
-    截成 `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
-    其余组态的读量由算力下界压着，沿用 `POD_TIMEOUT`；显式给过 `POD_TIMEOUT`
-    时以显式值为准（冒烟场景）。
+    三个来源，优先级从高到低：
+    1. 显式给过 `POD_TIMEOUT` 时以显式值为准（冒烟场景）。
+    2. 倾斜组态：Job B 每 epoch 全量扫一遍，缓存只装得下 1/ratio 的数据，
+       墙钟由字节地板决定，闸门取地板 × 余量。@100 mbit、3 epoch × 8 GiB 的
+       地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run 截成
+       `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
+    3. 其余组态沿用 `POD_TIMEOUT` 常量。复制读的组态是例外：4 个读端读同一批
+       分片，源站要出 4 份拷贝，地板随读端数放大，1800 s 常量会把还在正常推进
+       的 run 截成 `pod_failed`——2026-11-08 网关族 G0 臂实测 2100 s（地板
+       1374 s），就是这么废掉的。
     """
     explicit = os.environ.get("POD_TIMEOUT")
-    if explicit or not TILT:
-        return int(explicit) if explicit else POD_TIMEOUT
-    mbit = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
-    if not mbit:
+    if explicit:
+        return int(explicit)
+    if TILT:
+        floor_s = _byte_floor_s()
+        if floor_s is None:
+            return POD_TIMEOUT
+        return int(floor_s * TILT_TIMEOUT_HEADROOM)
+    copies = _replication_copies()
+    if copies <= 1:
         return POD_TIMEOUT
-    floor_s = (EPOCHS * N_TARS * SHARD_SIZE_MB * 1024 * 1024) / (int(mbit.group(1)) * 1e6 / 8)
-    return int(floor_s * TILT_TIMEOUT_HEADROOM)
+    floor_s = _byte_floor_s(copies)
+    if floor_s is None:
+        return POD_TIMEOUT
+    return int(max(POD_TIMEOUT, floor_s * REPLICATION_TIMEOUT_HEADROOM))
 
 # 命中率口径标注（D25，产物列 hit_rate_basis 显式可见）
 BASIS_TC_OPEN = "open_time_demand_miss_bytes(4.3 命中率:打开时不在本地即未命中)"
@@ -955,6 +1013,12 @@ steps = ''' + str(STEPS_PER_EPOCH) + r'''
 batch = ''' + str(BATCH) + r'''
 images_per_tar = ''' + str(IMAGES_PER_TAR) + r'''
 group = os.environ.get("TRAINCACHE_GROUP", "direct")
+# 直读模式：测量 Pod 不经 agentd 块缓存，直接 HTTP 读 MinIO 里的分片。
+# 装置在「agent 块缓存关 + 多读端」时走这条路径，开关由 Pod env 下发
+# （见 gateway_multi._pod_spec）。直读下脚本里所有 agent 侧分支都要绕开：
+# 订单写入、快照覆盖校验、需求未命中字节账都没有对应物。
+_direct_read = os.environ.get("TRAINCACHE_DIRECT_READ", "0") == "1"
+_use_agent = group.startswith("traincache") and not _direct_read
 
 # ---- 6.12 统一轨迹消费（七组态共用一份 trace.json，runner 现场生成并挂载）----
 TRACE_PATH = os.environ.get("TRAINCACHE_TRACE_PATH", "/scripts/trace.json")
@@ -1099,7 +1163,7 @@ def build_measure_reader(group):
     队列里只放字节数 → 常驻内存 O(1)；字节账与旧版一致（逐段累加长度，
     旧版是把整片 bytes 拼起来再取 len，两者总数相同）。
     """
-    if group == "direct":
+    if group == "direct" or MULTI_DIRECT:
         return r'''
 def read_shard(shard, phase):
     """直读 MinIO：分段读整片，只累加长度（不把 256MiB 读回来常驻内存）。"""
@@ -1109,6 +1173,9 @@ def read_shard(shard, phase):
     with counter_lock:
         misses += 1  # 直读无缓存层，全部计回源
         read_bytes_phase[phase] = read_bytes_phase.get(phase, 0) + nbytes
+        # 直读没有缓存层可命中，读到的字节全部是需求未命中（=回源）。
+        # 多读端直读路径靠这一列算命中率：命中率为 0，basis 是 exact_all_miss。
+        demand_miss_phase[phase] = demand_miss_phase.get(phase, 0) + nbytes
     return nbytes
 '''
     elif group in ("juicefs-cold", "juicefs-warm"):
@@ -1424,8 +1491,9 @@ def compute_work():
 # 是响应变量;挤占按热块 present→absent 的转换计数,口径见 4.2 的 COND 契约一节。
 if os.environ.get("TRAINCACHE_TILT", "") == "1":
     import random
-    if not group.startswith("traincache"):
-        raise SystemExit("TILT 只支持 traincache 组,当前 group=" + group)
+    if not _use_agent:
+        raise SystemExit("TILT 只支持走 agentd 的组态,当前 group=" + group
+                         + " direct_read=" + str(_direct_read))
     _n_hot = max(1, round(n_tars * 0.10))
     _hot = list(range(_n_hot))
     _full = list(range(n_tars))
@@ -1655,7 +1723,7 @@ _k_shards = max(1, (_PREFETCH_K_EFF + _chunks_per_shard - 1) // _chunks_per_shar
 
 # 快照覆盖校验(4.4 的校验一节)：epoch_occ 里要用到的分片必须都在 snapshot manifest 里。
 # 缺片时不能当 0 块静默读成 0 字节（字节账与命中率都会被糊弄），本轮直接作废。
-if group.startswith("traincache"):
+if _use_agent:
     try:
         _snap_chk = _load_snapshot()
     except Exception as _e:
@@ -1686,7 +1754,7 @@ for epoch in range(epochs):
         measure_void = True
         break   # 快照缺片：直接落到末尾 RESULT（void=1），不跑空读数
     # TrainCache 组:每个 epoch 按 trace 顺序写消费订单,触发 agentd 阶段切换重预取
-    if group.startswith("traincache"):
+    if _use_agent:
         _hb_epoch[0] = epoch
         if epoch == 0:
             threading.Thread(target=_heartbeat_loop, daemon=True).start()
@@ -1816,7 +1884,7 @@ total_makespan = (t_last_step - t_submit) if t_last_step else 0
 # hit_rate: 这里的 hits/misses 是块级诊断计数(已作废)；traincache 的整轮命中率
 # 由 reconcile_metrics 用 open-time 字节账覆盖；juicefs/fluid/direct 组是分片计数口径(D25 近似)。
 hit_rate = hits / (hits + misses) if (hits + misses) > 0 else 0
-if group.startswith("traincache"):
+if _use_agent:
     _hb_stop.set()
 _res_parts = [
     "startup_makespan=" + str(round(startup_makespan, 3)),
@@ -1839,7 +1907,7 @@ _res_parts = [
 ]
 for _p in ("startup", "steady", "switch"):
     _res_parts.append("read_bytes_" + _p + "=" + str(read_bytes_phase.get(_p, 0)))
-if group.startswith("traincache"):
+if _use_agent or _direct_read:
     for _p in ("startup", "steady", "switch"):
         _res_parts.append("demand_miss_bytes_" + _p + "=" +
                           str(demand_miss_phase.get(_p, 0)))
@@ -2808,12 +2876,14 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
         metrics["warmup_fanout"] = 0
         metrics["warmup_basis"] = ""
     # direct 组直读 MinIO 的分段读法；其余组不走 HTTP 直读，留空。
-    metrics["read_mode"] = READ_MODE_DIRECT if group == "direct" else ""
+    # 多读端直读（agent 块缓存关的那一臂）同样是直读，读法口径一致。
+    direct_read = MULTI_DIRECT or group == "direct"
+    metrics["read_mode"] = READ_MODE_DIRECT if direct_read else ""
     # 源站出站字节（4.3 三笔字节成本）：run 窗口内 MinIO s3 出站累计增量
     metrics["origin_egress_bytes"] = round(origin_egress, 1) \
         if origin_egress is not None else ""
 
-    if group.startswith("traincache"):
+    if group.startswith("traincache") and not direct_read:
         # ---- traincache 组：fetch 字节 run 窗口增量对账（D25 补注）----
         fetch_d, reason_d = counter_delta(base_snap, final_snap)
         read_b = metrics.get("total_read_bytes", 0)
@@ -2918,7 +2988,7 @@ def reconcile_metrics(group, metrics, base_snap, samples, final_snap, boundaries
                       f"capacity_bytes_final={cap_final} dir_last={dir_last} "
                       f"比值 {ratio:.2f}（4.3 缓存峰值与声明容量）", flush=True)
     else:
-        if group == "direct":
+        if direct_read:
             metrics["hit_rate_basis"] = BASIS_DIRECT
         elif group == "juicefs-warm":
             metrics["hit_rate_basis"] = BASIS_JFS_WARM
@@ -3640,8 +3710,10 @@ def write_csv(path, results):
             row["epochs"] = r.get("epochs") or EPOCHS
             row["shuffle"] = r.get("shuffle") or TRACE_SHUFFLE
             row["dataset_bytes"] = dataset_bytes
-            row["cache_ratio"] = round(
-                dataset_bytes / max(1, int(row["cache_bytes"])), 4)
+            # 缓存容量为 0 的格子（agent 块缓存关掉的那一臂）没有配额比可言，
+            # 写空串；除以 1 会得到一个没有意义的巨大数。
+            row["cache_ratio"] = (round(dataset_bytes / int(row["cache_bytes"]), 4)
+                                  if int(row["cache_bytes"]) > 0 else "")
             # 峰值倍率:缓存目录峰值 ÷ 声明容量。声明容量在当前实现下是软上限
             # (淘汰候选集只含被消费过的块,预取写入的块不是候选),峰值可以
             # 超过声明值,这一列把超了多少直接读出来,不靠推算。
@@ -3663,7 +3735,7 @@ def write_csv(path, results):
 def selftest():
     """离线自检：不连集群、不起 Pod、不访问 MinIO。
 
-    查十三件事：
+    查十五件事：
       1. 五组 measure 模板都能编译（模板是拼出来的字符串，语法错要到 Pod 里才炸）；
       2. 模板里的计时只用单调钟——time.time() 只允许出现在纪元对齐的校准点
          （now_epoch 靠它对一次，之后用 perf_counter 推算）；
@@ -3688,6 +3760,9 @@ def selftest():
       13. D23 网关磁盘缓存开关：summary.csv 的 gateway_cache 列位次与取值映射
          1/0、环境变量 TRAINCACHE_GATEWAY_CACHE 的取值口径、透传到 up.sh，
          以及这一列随产物落盘。
+      14. 块级下载时间：直方图解析与 p50/p90 分位数，五列进 summary.csv；
+      15. 多读端直读（agent 块缓存关的那一臂）：判定条件、读法、脚本里的
+         agent 分支是否绕开、字节账与未命中口径，以及 Pod 规格不挂 agentd 的卷。
     """
     print("[selftest] run_bench.py 离线自检（不连集群/不访问 MinIO）")
 
@@ -4166,9 +4241,47 @@ def selftest():
                 os.environ[key] = value
         globals()["TILT"], globals()["TC_RATE_EFF"] = saved_tilt, saved_rate
         globals()["N_TARS"] = saved_n_tars
+
+    # ---- 12b) 复制读组态的 Pod 闸门按读端份数放大（2026-11-08 网关族 G0 臂被截断）----
+    saved_multi = {k: globals()[k] for k in
+                   ("READERS", "ACCESS_PATTERN", "GATEWAY_ON", "TC_RATE_EFF")}
+    try:
+        globals()["TC_RATE_EFF"] = "300mbit"
+        globals()["READERS"] = 4
+        globals()["ACCESS_PATTERN"] = "replicated"
+        globals()["GATEWAY_ON"] = False
+        rep_floor = _byte_floor_s(_replication_copies())
+        want = int(max(POD_TIMEOUT, rep_floor * REPLICATION_TIMEOUT_HEADROOM))
+        if pod_timeout_s() != want:
+            raise AssertionError(
+                f"自测：复制读组态的闸门应按 4 份拷贝的字节地板 ×余量"
+                f"（{rep_floor:.0f}s×{REPLICATION_TIMEOUT_HEADROOM}），"
+                f"实得 {pod_timeout_s()}")
+        if pod_timeout_s() <= POD_TIMEOUT:
+            raise AssertionError(
+                "自测：复制读闸门应高于 1800s 常量，否则正常推进的 run 仍会被截成 "
+                "pod_failed")
+        globals()["GATEWAY_ON"] = True
+        if pod_timeout_s() != want:
+            raise AssertionError(
+                f"自测：网关合并失效那条路径也要留够闸门，闸门不能因网关开启而"
+                f"回落，实得 {pod_timeout_s()}")
+        globals()["ACCESS_PATTERN"] = "sharded"
+        globals()["GATEWAY_ON"] = False
+        if pod_timeout_s() != POD_TIMEOUT:
+            raise AssertionError(
+                f"自测：分片读各读端互不相交，源站字节不放大，闸门应保持 "
+                f"POD_TIMEOUT={POD_TIMEOUT}，实得 {pod_timeout_s()}")
+    finally:
+        for key, value in saved_multi.items():
+            globals()[key] = value
     print(f"[selftest] 12) Pod 闸门：非倾斜沿用 {POD_TIMEOUT}s，倾斜按 EPOCHS×N_TARS×"
           f"分片字节 ÷ 带宽推导（本档地板 {floor_s:.0f}s × {TILT_TIMEOUT_HEADROOM:.0f}"
           f"= {int(floor_s * TILT_TIMEOUT_HEADROOM)}s），显式 POD_TIMEOUT 优先")
+    print(f"[selftest] 12b) 复制读闸门：源站按读端份数出副本，4 读端 300mbit 的地板 "
+          f"{rep_floor:.0f}s × {REPLICATION_TIMEOUT_HEADROOM:.0f} = "
+          f"{int(max(POD_TIMEOUT, rep_floor * REPLICATION_TIMEOUT_HEADROOM))}s；"
+          f"网关合并失效那条路径同样留这份闸门，分片读回到 {POD_TIMEOUT}s")
 
     # ---- 13) D23/M5 网关磁盘缓存开关：新列、取值映射、环境变量与透传 ----
     if "gateway_cache" not in CSV_FIELDNAMES:
@@ -4238,6 +4351,114 @@ def selftest():
     print(f"[selftest] 14) 块级下载时间：直方图解析 count={parsed['count']} "
           f"mean={parsed['mean']:.3f}s p50={parsed['p50']:.3f}s "
           f"p90={parsed['p90']:.3f}s，五列随 summary.csv 落盘")
+    # ---- 15) 多读端直读（agent 块缓存关的那一臂）：判定、读法、脚本分支、Pod 规格 ----
+    saved_md = globals()["MULTI_DIRECT"]
+    saved_readers = globals()["READERS"]
+    saved_cap = os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES")
+    saved_run = {k: globals()[k] for k in ("EPOCHS", "STEPS_PER_EPOCH", "N_TARS")}
+    trace_path2 = None
+    try:
+        globals()["READERS"] = 4
+        if not _multi_direct(readers=4, capacity="0"):
+            raise AssertionError("自测：4 读端 + 缓存容量 0 应判为多读端直读")
+        if _multi_direct(readers=4, capacity="1073741824"):
+            raise AssertionError("自测：缓存容量非 0 时不该判为多读端直读")
+        if _multi_direct(readers=4, capacity=""):
+            raise AssertionError("自测：缓存容量缺省时不该判为多读端直读")
+        if _multi_direct(readers=1, capacity="0"):
+            raise AssertionError("自测：单读端不该判为多读端直读")
+        globals()["MULTI_DIRECT"] = True
+
+        src = build_measure_script("traincache-cold")
+        compile(src, "<measure:multi-direct>", "exec")
+        if "http_stream_bytes(url)" not in src:
+            raise AssertionError("自测：多读端直读没有走直读读法")
+        for gone in ("def _write_order(", "def _load_snapshot(",
+                     "def _heartbeat_loop("):
+            if gone in src:
+                raise AssertionError(f"自测：多读端直读的脚本里不该出现 agent 侧函数 {gone}")
+        # agent 侧的调用点必须都在 _use_agent 的判断里；倾斜分支是另一处入口，
+        # 它在 _use_agent 为假时直接 SystemExit，作用等价。
+        tree = ast.parse(src)
+        guarded = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            dump = ast.dump(node.test)
+            if "_use_agent" not in dump and "TRAINCACHE_TILT" not in dump:
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    guarded.add(id(sub))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in ("_write_order", "_load_snapshot")
+                    and id(node) not in guarded):
+                raise AssertionError(
+                    f"自测：{node.func.id} 的调用点没有在 _use_agent 的判断里")
+
+        # 离线跑一遍直读主循环：假 HTTP 读，验字节账与未命中口径
+        fake_http = ("def http_stream_bytes(url):\n"
+                     "    return " + str(fake_bytes) + "\n")
+        globals()["EPOCHS"] = 2
+        globals()["STEPS_PER_EPOCH"] = 4
+        globals()["N_TARS"] = 2
+        trace2 = build_run_trace()
+        fd, trace_path2 = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(trace2, f)
+        direct_metrics, _ = _run_measure(
+            fake_http + build_measure_reader("traincache-cold"),
+            {"TRAINCACHE_GROUP": "traincache-cold",
+             "TRAINCACHE_DIRECT_READ": "1",
+             "TRAINCACHE_TRACE_PATH": trace_path2,
+             "TRAINCACHE_JOB_CREATED_AT": "",
+             "COMPUTE_MS": "1", "READ_WORKERS": "2",
+             "READ_QUEUE_DEPTH": "2", "READ_TIMEOUT_S": "10"})
+        if direct_metrics["measure_void"]:
+            raise AssertionError(f"自测：直读主循环不该作废 {direct_metrics}")
+        miss_total = sum(direct_metrics["demand_miss_bytes_" + p]
+                         for p in ("startup", "steady", "switch"))
+        if (direct_metrics["total_read_bytes"] <= 0
+                or miss_total != direct_metrics["total_read_bytes"]):
+            raise AssertionError(
+                f"自测：直读没有缓存层，未命中字节账应等于读字节账 {direct_metrics}")
+        if direct_metrics["misses"] != direct_metrics["reads"]:
+            raise AssertionError("自测：直读的每次读都应计一次回源")
+
+        # Pod 规格：直读这一臂不挂 agentd 的缓存目录、订单目录与 hook socket
+        import gateway_multi
+        spec = gateway_multi._pod_spec(
+            sys.modules[__name__], "traincache-cold", "train-job-0",
+            "measure-script-00", 0, 4, 0.0, 0.0, "traincache")
+        vol_names = {v["name"] for v in spec["spec"]["volumes"]}
+        env_names = {e["name"] for e in spec["spec"]["containers"][0]["env"]}
+        if vol_names != {"script"}:
+            raise AssertionError(f"自测：直读 Pod 不该挂 agentd 的卷 {vol_names}")
+        if "TRAINCACHE_DIRECT_READ" not in env_names:
+            raise AssertionError("自测：直读 Pod 缺 TRAINCACHE_DIRECT_READ")
+        if "POD_UID" in env_names or "TRAINCACHE_HOOK_SOCK" in env_names:
+            raise AssertionError("自测：直读 Pod 不该带 agentd 的 env")
+        globals()["MULTI_DIRECT"] = False
+        spec2 = gateway_multi._pod_spec(
+            sys.modules[__name__], "traincache-cold", "train-job-0",
+            "measure-script-00", 0, 4, 0.0, 0.0, "traincache")
+        vol_names2 = {v["name"] for v in spec2["spec"]["volumes"]}
+        if not {"cache-root", "orders-dir", "hook-dir", "ordersrc"} <= vol_names2:
+            raise AssertionError(f"自测：走 agentd 的 Pod 该挂缓存与订单卷 {vol_names2}")
+    finally:
+        globals()["MULTI_DIRECT"] = saved_md
+        globals()["READERS"] = saved_readers
+        globals().update(saved_run)
+        if saved_cap is None:
+            os.environ.pop("TRAINCACHE_CACHE_CAPACITY_BYTES", None)
+        else:
+            os.environ["TRAINCACHE_CACHE_CAPACITY_BYTES"] = saved_cap
+        if trace_path2 and os.path.exists(trace_path2):
+            os.unlink(trace_path2)
+    print("[selftest] 15) 多读端直读：4 读端 + 容量 0 才判直读；读法是 HTTP 直读，"
+          "脚本里没有 agent 侧的订单与快照函数；未命中字节账等于读字节账；"
+          "直读 Pod 只挂脚本卷并带 TRAINCACHE_DIRECT_READ")
     print("run_bench selftest: PASS")
 
 

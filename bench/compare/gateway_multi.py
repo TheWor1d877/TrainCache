@@ -84,40 +84,67 @@ def ensure_configmap(rb, group: str, run_id: str, script: str,
 
 def _pod_spec(rb, group, pod_name, cm_name, pod_index, readers, start_at,
               t_submit, ns):
-    """traincache-cold 的多读端 Pod 规格。与单读端同一份 measure 脚本。"""
-    container = {
-        "name": "train",
-        "image": rb.TRAIN_IMAGE,
-        "imagePullPolicy": "IfNotPresent",
-        "command": ["python3", "/scripts/measure.py"],
-        "env": [
-            {"name": "TRAINCACHE_JOB_CREATED_AT", "value": str(t_submit)},
-            {"name": "TRAINCACHE_GROUP", "value": group},
-            {"name": "TRAINCACHE_TRACE_PATH",
-             "value": f"/scripts/trace-{pod_index}.json"},
-            {"name": "COMPUTE_MS", "value": str(rb.COMPUTE_MS)},
-            {"name": "READ_WORKERS", "value": str(rb.READ_WORKERS)},
-            {"name": "READ_QUEUE_DEPTH", "value": str(rb.READ_QUEUE_DEPTH)},
-            {"name": "READ_TIMEOUT_S", "value": str(rb.READ_TIMEOUT_S)},
-            {"name": "TRAINCACHE_START_AT", "value": str(start_at)},
-            {"name": "TRAINCACHE_POD_INDEX", "value": str(pod_index)},
-            {"name": "TRAINCACHE_READERS", "value": str(readers)},
+    """traincache-cold 的多读端 Pod 规格。与单读端同一份 measure 脚本。
+
+    直读模式（agent 块缓存关的那一臂）：测量 Pod 不挂 agentd 的缓存目录、
+    订单目录与 hook socket，读法是 HTTP 直读 MinIO。挂上去也没用，但会让
+    「这一臂没经过 agentd」在 Pod 规格上看不出来。
+    """
+    direct = bool(getattr(rb, "MULTI_DIRECT", False))
+    env = [
+        {"name": "TRAINCACHE_JOB_CREATED_AT", "value": str(t_submit)},
+        {"name": "TRAINCACHE_GROUP", "value": group},
+        {"name": "TRAINCACHE_TRACE_PATH",
+         "value": f"/scripts/trace-{pod_index}.json"},
+        {"name": "COMPUTE_MS", "value": str(rb.COMPUTE_MS)},
+        {"name": "READ_WORKERS", "value": str(rb.READ_WORKERS)},
+        {"name": "READ_QUEUE_DEPTH", "value": str(rb.READ_QUEUE_DEPTH)},
+        {"name": "READ_TIMEOUT_S", "value": str(rb.READ_TIMEOUT_S)},
+        {"name": "TRAINCACHE_START_AT", "value": str(start_at)},
+        {"name": "TRAINCACHE_POD_INDEX", "value": str(pod_index)},
+        {"name": "TRAINCACHE_READERS", "value": str(readers)},
+        {"name": "TRAINCACHE_DATASET", "value": rb.DATASET_NAME},
+        {"name": "TRAINCACHE_CHUNK_SIZE", "value": str(rb.CHUNK_SIZE)},
+        {"name": "TRAINCACHE_PREFETCH_K", "value": str(rb.PREFETCH_K)},
+    ]
+    volume_mounts = [{"name": "script", "mountPath": "/scripts", "readOnly": True}]
+    volumes = [{"name": "script", "configMap": {"name": cm_name}}]
+    if direct:
+        env.append({"name": "TRAINCACHE_DIRECT_READ", "value": "1"})
+    else:
+        env += [
             {"name": "POD_UID", "valueFrom": {"fieldRef":
                                               {"fieldPath": "metadata.uid"}}},
-            {"name": "TRAINCACHE_DATASET", "value": rb.DATASET_NAME},
-            {"name": "TRAINCACHE_CHUNK_SIZE", "value": str(rb.CHUNK_SIZE)},
-            {"name": "TRAINCACHE_PREFETCH_K", "value": str(rb.PREFETCH_K)},
             {"name": "TRAINCACHE_HOOK_SOCK", "value": "/run/tc-hook/agent.sock"},
-        ],
-        "volumeMounts": [
-            {"name": "script", "mountPath": "/scripts", "readOnly": True},
+        ]
+        volume_mounts += [
             {"name": "cache-root", "mountPath": "/var/cache/traincache",
              "readOnly": True},
             {"name": "orders-dir", "mountPath": "/run/traincache/orders"},
             {"name": "hook-dir", "mountPath": "/run/tc-hook"},
             {"name": "ordersrc", "mountPath": "/app/ordersrc.py",
              "subPath": "ordersrc.py"},
-        ],
+        ]
+        volumes += [
+            {"name": "cache-root",
+             "hostPath": {"path": "/var/cache/traincache",
+                          "type": "Directory"}},
+            {"name": "orders-dir",
+             "hostPath": {"path": "/run/traincache/orders",
+                          "type": "DirectoryOrCreate"}},
+            {"name": "hook-dir",
+             "hostPath": {"path": "/run/traincache",
+                          "type": "DirectoryOrCreate"}},
+            {"name": "ordersrc",
+             "configMap": {"name": "traincache-ordersrc"}},
+        ]
+    container = {
+        "name": "train",
+        "image": rb.TRAIN_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["python3", "/scripts/measure.py"],
+        "env": env,
+        "volumeMounts": volume_mounts,
         "resources": {"requests": {"cpu": "500m", "memory": "1Gi"},
                       "limits": {"cpu": "2", "memory": "4Gi"}},
     }
@@ -129,20 +156,7 @@ def _pod_spec(rb, group, pod_name, cm_name, pod_index, readers, start_at,
         "spec": {
             "restartPolicy": "Never",
             "containers": [container],
-            "volumes": [
-                {"name": "script", "configMap": {"name": cm_name}},
-                {"name": "cache-root",
-                 "hostPath": {"path": "/var/cache/traincache",
-                              "type": "Directory"}},
-                {"name": "orders-dir",
-                 "hostPath": {"path": "/run/traincache/orders",
-                              "type": "DirectoryOrCreate"}},
-                {"name": "hook-dir",
-                 "hostPath": {"path": "/run/traincache",
-                              "type": "DirectoryOrCreate"}},
-                {"name": "ordersrc",
-                 "configMap": {"name": "traincache-ordersrc"}},
-            ],
+            "volumes": volumes,
         },
     }
     # 一节点一读端：同节点会共用一个 agentd，合并被进程内去重吃掉。关闭时整段
@@ -270,9 +284,14 @@ def aggregate(pod_logs: dict[str, str]) -> dict | None:
     out["compute_actual_ms"] = max(num(kv, "compute_actual_ms")
                                    for kv in parsed.values())
     rb_read = out["total_read_bytes"]
-    rb_miss = sum(out[f"demand_miss_bytes_{p}"]
-                  for p in ("startup", "steady", "switch"))
-    out["hit_rate"] = round(max(0.0, 1.0 - rb_miss / rb_read), 4) if rb_read else ""
+    # 需求未命中字节账缺失时不硬算：按 0 算会得出命中率 1，与事实相反。
+    has_miss = all(("demand_miss_bytes_startup" in kv) for kv in parsed.values())
+    if has_miss and rb_read:
+        rb_miss = sum(out[f"demand_miss_bytes_{p}"]
+                      for p in ("startup", "steady", "switch"))
+        out["hit_rate"] = round(max(0.0, 1.0 - rb_miss / rb_read), 4)
+    else:
+        out["hit_rate"] = ""
     out["hit_rate_diag"] = out["hit_rate"]
     out["measure_void"] = max(int(num(kv, "void")) for kv in parsed.values())
     out["snapshot_missing"] = max(int(num(kv, "snapshot_missing"))
@@ -303,8 +322,12 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
     import threading
     trace = json.loads(trace_json)
     results = []
+    # 直读这一臂（agent 块缓存关）不经 agentd：agentd 的复位、计数与缓存目录
+    # 都没有对应物，只保留源站出站字节这一条账。
+    direct = bool(getattr(rb, "MULTI_DIRECT", False))
     rb.cold_reset()
-    rb.reset_traincache_agent()
+    if not direct:
+        rb.reset_traincache_agent()
     ok, _, _ = rb.group_up(group)
     if not ok:
         return rb.stamp_rows(
@@ -318,29 +341,38 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
               f"gateway={int(rb.GATEWAY_ON)}\n{'='*60}", flush=True)
         if rep:
             rb.rep_cold_reset(group)
-            rb.reset_traincache_agent()
+            if not direct:
+                rb.reset_traincache_agent()
         if rb.GATEWAY_ON:
             restart_gateway(rb)
 
-        base_snap = rb.fetch_snapshot()
-        cache_base = rb.cache_counter_snapshot()
-        guard_base = rb.eviction_guard_snapshot()
-        origin_base = rb.minio_egress_snapshot()
-        samples = [base_snap] if base_snap else []
-        dir_peaks = []
-        stop = threading.Event()
+        if direct:
+            base_snap = cache_base = guard_base = None
+            origin_base = rb.minio_egress_snapshot()
+            samples = []
+            dir_peaks = []
+            stop = threading.Event()
+            th = None
+        else:
+            base_snap = rb.fetch_snapshot()
+            cache_base = rb.cache_counter_snapshot()
+            guard_base = rb.eviction_guard_snapshot()
+            origin_base = rb.minio_egress_snapshot()
+            samples = [base_snap] if base_snap else []
+            dir_peaks = []
+            stop = threading.Event()
 
-        def _sample():
-            while not stop.wait(rb.SAMPLE_INTERVAL_S):
-                snap = rb.fetch_snapshot()
-                if stop.is_set():
-                    break
-                if snap is not None:
-                    samples.append(snap)
-                dir_peaks.append(rb.blocks_dir_peak_bytes())
+            def _sample():
+                while not stop.wait(rb.SAMPLE_INTERVAL_S):
+                    snap = rb.fetch_snapshot()
+                    if stop.is_set():
+                        break
+                    if snap is not None:
+                        samples.append(snap)
+                    dir_peaks.append(rb.blocks_dir_peak_bytes())
 
-        th = threading.Thread(target=_sample, daemon=True)
-        th.start()
+            th = threading.Thread(target=_sample, daemon=True)
+            th.start()
 
         t_submit = time.time()
         start_at = t_submit + START_DELAY_S
@@ -371,7 +403,8 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
             logs_by_pod[name] = logs
             success = success and ok
         stop.set()
-        th.join(timeout=10)
+        if th is not None:
+            th.join(timeout=10)
         origin_final = rb.minio_egress_snapshot()
 
         if not success:
@@ -399,9 +432,12 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
             "readers": rb.READERS, "access_pattern": rb.ACCESS_PATTERN,
         })
 
-        final_snap = rb.fetch_snapshot()
-        cache_final = rb.cache_counter_snapshot()
-        guard_final = rb.eviction_guard_snapshot()
+        if direct:
+            final_snap = cache_final = guard_final = None
+        else:
+            final_snap = rb.fetch_snapshot()
+            cache_final = rb.cache_counter_snapshot()
+            guard_final = rb.eviction_guard_snapshot()
         ready_ts = max(ready.values()) if ready else None
         if ready_ts is not None:
             metrics["t_pod_ready_s"] = round(ready_ts - t_submit, 3)

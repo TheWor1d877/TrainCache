@@ -21,6 +21,11 @@ import plot_families as pf  # noqa: E402
 OUT = config.RESULTS_DIR / "report" / "index.html"
 FIG_ROOT = config.RESULTS_DIR / "figures"
 BASELINES = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm"]
+
+# 网关缓存判据（docs/4.3 按族的判据「gateway·网关缓存」）：G2 对 G0 的源站
+# 字节比落在 12 ± 5%。模型值 12 是 4 个读端乘 3 epoch 共 12 份重复压成 1 份。
+SOURCE_RATIO_TARGET = 12.0
+SOURCE_RATIO_BAND = 0.05
 FAMILY_CN = {
     "compare": "对照族", "gateway": "网关族", "evict": "淘汰策略族",
     "prefetch": "预取参数族", "warmup": "预热族", "switch": "阶段切换族",
@@ -41,7 +46,7 @@ FAMILY_Q = {
 }
 FAMILY_CRITERION = {
     "compare": "4.3 按族的判据「compare·组间胜负」",
-    "gateway": "4.3 按族的判据「gateway·复制读合并」「gateway·臂间比较」",
+    "gateway": "4.3 按族的判据「gateway·网关缓存」「gateway·臂间比较」",
     "evict": "4.3 按族的判据「evict·策略可分辨」「evict·策略不可分辨」",
     "prefetch": "4.3 按族的判据「prefetch·转平」「prefetch·重复字节」",
     "warmup": "4.3 按族的判据「warmup·门控有效」「warmup·门控无价值」「warmup·门控负收益」",
@@ -173,9 +178,21 @@ def verdict_gateway(rows):
         if result:
             facts.append(f"{arm.upper()} 对 {base.upper()} makespan "
                          f"{result[0]} {abs(result[1]):.1f}%")
-    merged = mean_arm("g3", "gateway_merged")
+    # 网关缓存判据：G2 对 G0 的源站字节比落在 12 ± 5%。
+    # G2 侧取网关记的源站字节（数据面经网关从源站拉到的字节），
+    # G0 侧取 MinIO 出站（直读，没有 agentd，不含元数据流量），
+    # 两边都只算 Get 路径的流量。
+    g2_bytes = mean_arm("g2", "gateway_bytes")
+    g0_bytes = mean_arm("g0", "origin_egress_bytes")
+    if g2_bytes and g0_bytes:
+        ratio = g0_bytes / g2_bytes
+        low = SOURCE_RATIO_TARGET * (1 - SOURCE_RATIO_BAND)
+        high = SOURCE_RATIO_TARGET * (1 + SOURCE_RATIO_BAND)
+        where = "落在带内" if low <= ratio <= high else "越界"
+        facts.append(f"G2 对 G0 源站字节比 {ratio:.2f}（带 {low:.2f}–{high:.2f}，{where}）")
+    merged = mean_arm("g2", "gateway_merged")
     if merged is not None:
-        facts.append(f"G3 合并次数均值 {merged:.0f}")
+        facts.append(f"G2 网关合并次数均值 {merged:.0f}")
     return "；".join(facts) or "样本不足"
 
 
