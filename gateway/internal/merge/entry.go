@@ -55,6 +55,9 @@ type Entry struct {
 
 	cancel        func() // 拉取协程的取消函数，由 SetCancel 注入
 	cancelPending bool   // 订阅者在 Pump 启动前就已全部离开
+
+	// onFinish 在条目标记结束前回调一次，可为 nil。
+	onFinish func(error)
 }
 
 // newEntry 由 Registry 在持锁时调用。
@@ -105,6 +108,26 @@ func (e *Entry) TrySubscribe() (*Sub, bool) {
 	return s, true
 }
 
+// SetOnFinish 注册条目结束前的回调，至多触发一次。回调在条目向订阅者广播
+// 结束状态之前调用：调用方用它落「条目结束」日志，日志因此先于客户端收到
+// 最后一个字节，不依赖两个协程的调度顺序。
+func (e *Entry) SetOnFinish(fn func(error)) {
+	e.mu.Lock()
+	e.onFinish = fn
+	e.mu.Unlock()
+}
+
+// notifyFinish 取出并清空 onFinish 回调，在锁外调用。
+func (e *Entry) notifyFinish(err error) {
+	e.mu.Lock()
+	fn := e.onFinish
+	e.onFinish = nil
+	e.mu.Unlock()
+	if fn != nil {
+		fn(err)
+	}
+}
+
 // Pump 从 src 读到 EOF 并写入环形缓冲，结束时调用 Finish。
 // 返回的错误与传给 Finish 的错误相同（design 9.1「取数与扇出」；M4 不变量 6）。
 // 读 IO 在锁外进行，只有写入缓冲与广播状态在锁内。
@@ -122,6 +145,7 @@ func (e *Entry) Pump(ctx context.Context, src io.Reader) error {
 		if err == nil {
 			err = context.Canceled
 		}
+		e.notifyFinish(err)
 		e.Finish(err)
 		return err
 	}
@@ -147,6 +171,7 @@ func (e *Entry) Pump(ctx context.Context, src io.Reader) error {
 		}
 	}
 
+	e.notifyFinish(pumpErr)
 	e.Finish(pumpErr)
 	return pumpErr
 }
