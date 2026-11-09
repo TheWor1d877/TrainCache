@@ -37,6 +37,13 @@ def median(values: list[float]) -> float:
     return float(np.median(np.asarray(values, dtype=float)))
 
 
+def p99(values: list[float]) -> float:
+    """返回 P99。空列表返回 0.0。"""
+    if not values:
+        return 0.0
+    return float(np.percentile(np.asarray(values, dtype=float), 99))
+
+
 def bootstrap_ci(values: list[float], iters: int = 10000, alpha: float = 0.05,
                  seed: int | None = None) -> tuple[float, float]:
     """返回 (low, high) 置信区间。
@@ -130,6 +137,12 @@ def selftest() -> None:
     assert mean([5.0]) == 5.0
     assert mean([1.0, 2.0, 3.0]) == 2.0
     assert mean([1.0, 2.0, 3.0, 4.0]) == 2.5
+
+    # p99:空列表退化;单点;长尾分布贴近上界
+    assert p99([]) == 0.0
+    assert p99([7.0]) == 7.0
+    tail = list(range(1, 100)) + [100000.0]
+    assert p99(tail) > 900.0
 
     # bootstrap_ci 单点退化
     lo, hi = bootstrap_ci([42.0])
