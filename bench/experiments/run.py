@@ -15,6 +15,9 @@
   6. 采集:collect.py --run-dir <run_dir>
   7. 写 lock.json(lock.py)
 任一步失败:写 VOID 标记,返回目录路径(不抛异常)。
+
+探针旁路:运行参数设 TRAINTRACE_PROBE=1 时,步骤 5 前拉起 traintrace、产物写进
+同一个 run 目录,负载结束 SIGINT 收尾。探针开关不进 COND。
 """
 import argparse
 import csv
@@ -32,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cond as cond_mod  # noqa: E402
 import lock as lock_mod  # noqa: E402
+import probe as probe_mod  # noqa: E402
 import recovery as recovery_mod  # noqa: E402
 import stats as stats_mod  # noqa: E402
 
@@ -447,7 +451,13 @@ def run_once(cond: dict, run_id: str, reps_dir: Path) -> Path:
     td_cmd = ([PY, str(LOAD_TRAIN)] + td_args
               + ["--n-tars", str(cond["dataset"]["shards"]),
                  "--out-dir", str(run_dir)])
-    rc, out, err = _run_cmd(td_cmd, env=base_env)
+    # 探针在冷态与 tc 之后、负载之前拉起,避免把冷态 I/O 计进来;负载结束即收尾。
+    probe = probe_mod.start_probe(run_dir, base_env)
+    try:
+        rc, out, err = _run_cmd(td_cmd, env=base_env)
+    finally:
+        if probe is not None:
+            probe.stop()
     if rc != 0:
         reason = f"load_train 失败(rc={rc}): {err.strip()[:500]}"
         _write_void(run_dir, reason)

@@ -59,7 +59,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32); __type(value, struct dev_val);
-	__uint(max_entries, 1);
+	__uint(max_entries, 8);
 } watch_dev SEC(".maps");
 
 /* ---- M3 maps ---- */
@@ -103,9 +103,13 @@ static __always_inline void bump_cnt(void *map)
 }
 static __always_inline int dev_is_watched(__u32 dev)
 {
-	__u32 zero = 0;
-	struct dev_val *v = bpf_map_lookup_elem(&watch_dev, &zero);
-	return v && v->encoded_dev == dev;
+	/* 同一块盘的设备号有两个:块层上报整盘,文件系统上报分区。两者都收。 */
+	for (__u32 i = 0; i < 8; i++) {
+		struct dev_val *v = bpf_map_lookup_elem(&watch_dev, &i);
+		if (v && v->encoded_dev && v->encoded_dev == dev)
+			return 1;
+	}
+	return 0;
 }
 static __always_inline __u8 rw_dim(char c)
 {

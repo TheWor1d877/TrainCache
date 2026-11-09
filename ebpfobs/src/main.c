@@ -305,6 +305,52 @@ static void dev_name_from_raw(__u32 raw, char *out, size_t n)
 
 static const char *rw_name(__u8 rw) { return rw == 0 ? "read" : rw == 1 ? "write" : "other"; }
 
+/* ---- 设备过滤集合 ---- */
+/* 同一块盘有两个设备号:块层上报整盘(nvme0n1),文件系统上报分区(nvme0n1p2)。
+ * 给分区时补上它的整盘,给整盘时补上它的各分区,两侧的事件都收进同一个集合。 */
+static __u32 g_watch_devs[8];
+static int g_watch_dev_nr;
+static double g_elapsed_s;   /* 本轮实际采集时长,常驻模式由起止 epoch 差得出 */
+
+static int read_dev_no(const char *path, __u32 *raw)
+{
+	FILE *f = fopen(path, "r");
+	int major, minor;
+	if (!f) return -1;
+	if (fscanf(f, "%d:%d", &major, &minor) != 2) { fclose(f); return -1; }
+	fclose(f);
+	*raw = ((__u32)major << 20) | (__u32)minor;
+	return 0;
+}
+
+static int collect_watch_devs(__u32 raw)
+{
+	char nm[64], base[256], p[PATH_MAX];
+	g_watch_dev_nr = 0;
+	g_watch_devs[g_watch_dev_nr++] = raw;
+	dev_name_from_raw(raw, nm, sizeof(nm));
+	snprintf(base, sizeof(base), "/sys/class/block/%s", nm);
+
+	__u32 praw;
+	snprintf(p, sizeof(p), "%s/../dev", base);
+	if (read_dev_no(p, &praw) == 0 && praw != raw && g_watch_dev_nr < 8)
+		g_watch_devs[g_watch_dev_nr++] = praw;
+
+	DIR *d = opendir(base);
+	if (d) {
+		struct dirent *de;
+		while ((de = readdir(d)) && g_watch_dev_nr < 8) {
+			if (de->d_name[0] == '.') continue;
+			snprintf(p, sizeof(p), "%s/%s/dev", base, de->d_name);
+			__u32 r;
+			if (read_dev_no(p, &r) == 0 && r != raw)
+				g_watch_devs[g_watch_dev_nr++] = r;
+		}
+		closedir(d);
+	}
+	return g_watch_dev_nr;
+}
+
 /* ---- cgroup 过滤集合 ---- */
 static int cgroup_id_from_path(const char *path, __u64 *id)
 {
@@ -475,8 +521,8 @@ static void write_metrics(const char *dir, const char *json_name, const char *de
 	if (!f) { fprintf(stderr, "无法写 %s: %s\n", path, strerror(errno)); return; }
 
 	fprintf(f, "{\n");
-	fprintf(f, "  \"run\": { \"start_epoch_ns\": %llu, \"uptime_epoch_offset_ns\": %llu, \"dev\": \"%s\", \"duration_s\": %d, \"ringbuf_dropped\": %llu, \"rq_start_evicted\": %llu },\n",
-		(unsigned long long)start_epoch_ns, (unsigned long long)offset_ns, dev_name, cfg->duration, (unsigned long long)dropped, (unsigned long long)g_rq_evicted);
+	fprintf(f, "  \"run\": { \"start_epoch_ns\": %llu, \"uptime_epoch_offset_ns\": %llu, \"dev\": \"%s\", \"duration_s\": %.3f, \"ringbuf_dropped\": %llu, \"rq_start_evicted\": %llu },\n",
+		(unsigned long long)start_epoch_ns, (unsigned long long)offset_ns, dev_name, g_elapsed_s, (unsigned long long)dropped, (unsigned long long)g_rq_evicted);
 
 	/* block_io */
 	fprintf(f, "  \"block_io\": { \"by_dev_rw\": {\n");
@@ -538,10 +584,10 @@ static void write_metrics(const char *dir, const char *json_name, const char *de
 	printf("指标已写出: %s\n", path);
 }
 
-static void print_summary(struct config *cfg, __u64 dropped)
+static void print_summary(__u64 dropped)
 {
-	printf("\n=== 摘要 (%ds, filemap 事件 %d, 丢事件 %llu, 配对表淘汰 %llu) ===\n",
-	       cfg->duration, g_events_nr, (unsigned long long)dropped, (unsigned long long)g_rq_evicted);
+	printf("\n=== 摘要 (%.1fs, filemap 事件 %d, 丢事件 %llu, 配对表淘汰 %llu) ===\n",
+	       g_elapsed_s, g_events_nr, (unsigned long long)dropped, (unsigned long long)g_rq_evicted);
 	printf("  疑似预读归因偏移 %llu（只标不改记）\n", (unsigned long long)g_attr_offset);
 	if (!g_filemap_complete)
 		printf("  注意: ringbuf 丢事件 %llu，filemap 段不完整\n", (unsigned long long)dropped);
@@ -592,9 +638,14 @@ static void write_manifest(const char *dir, struct config *cfg, const char *dev_
 	fprintf(f, "  \"start_epoch_ns\": %llu,\n", (unsigned long long)start_epoch_ns);
 	fprintf(f, "  \"end_epoch_ns\": %llu,\n", (unsigned long long)end_epoch_ns);
 	fprintf(f, "  \"uptime_epoch_offset_ns\": %llu,\n", (unsigned long long)offset_ns);
-	fprintf(f, "  \"duration_s\": %d,\n", cfg->duration);
+	fprintf(f, "  \"duration_s\": %.3f,\n", g_elapsed_s);
+	fprintf(f, "  \"duration_configured_s\": %d,\n", cfg->duration);
 	fprintf(f, "  \"dev\": \"%s\",\n", dev_name);
 	fprintf(f, "  \"raw_dev\": \"0x%x\",\n", raw_dev);
+	fprintf(f, "  \"watch_devs\": [");
+	for (int i = 0; i < g_watch_dev_nr; i++)
+		fprintf(f, "%s\"0x%x\"", i ? ", " : "", g_watch_devs[i]);
+	fprintf(f, "],\n");
 	fprintf(f, "  \"poll_interval_s\": %d,\n", cfg->poll_interval);
 	fprintf(f, "  \"cgroups\": [");
 	for (int i = 0; i < cfg->n_cgroups; i++)
@@ -671,10 +722,13 @@ int main(int argc, char **argv)
 	if (traintrace_bpf__load(skel)) { fprintf(stderr, "skeleton load 失败\n"); goto out; }
 
 	{
-		__u32 zero = 0;
-		struct dev_val dv = { .encoded_dev = raw_dev };
-		if (bpf_map_update_elem(bpf_map__fd(skel->maps.watch_dev), &zero, &dv, BPF_ANY)) {
-			fprintf(stderr, "写 watch_dev 失败\n"); goto out;
+		collect_watch_devs(raw_dev);
+		for (int i = 0; i < g_watch_dev_nr; i++) {
+			__u32 key = i;
+			struct dev_val dv = { .encoded_dev = g_watch_devs[i] };
+			if (bpf_map_update_elem(bpf_map__fd(skel->maps.watch_dev), &key, &dv, BPF_ANY)) {
+				fprintf(stderr, "写 watch_dev 失败\n"); goto out;
+			}
 		}
 	}
 	populate_watch_cgroup(skel, &cfg);
@@ -720,9 +774,10 @@ int main(int argc, char **argv)
 	__u64 dropped = read_rb_drop(skel, ncpu);
 	g_filemap_complete = dropped == 0;
 	g_rq_evicted = read_rq_evicted(skel, ncpu);
+	g_elapsed_s = (double)(end_epoch_ns - start_epoch_ns) / 1e9;
 	write_metrics(out_dir, cfg.json_name, dev_name, &cfg, start_epoch_ns, offset_ns, dropped);
 	write_manifest(out_dir, &cfg, dev_name, raw_dev, start_epoch_ns, end_epoch_ns, offset_ns, dropped);
-	print_summary(&cfg, dropped);
+	print_summary(dropped);
 
 out:
 	ring_buffer__free(rb);
