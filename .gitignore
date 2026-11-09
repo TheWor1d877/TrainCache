@@ -18,3 +18,6 @@ __pycache__/
 
 # 探针运行时缓存(Agent 落盘模拟目录)
 probes/.cache/
+
+# install脚本
+install.yaml

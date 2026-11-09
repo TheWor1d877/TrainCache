@@ -21,12 +21,6 @@
 
 # Changelog正文
 
-## 未发布
-
-### Fixed
-
-- 网关的「条目结束」日志改在条目向订阅者广播结束状态之前落：这行日志原先由后台拉取协程在条目结束后补写，客户端拿到响应时它可能还没写出，事后核对日志与统计日志行数都读到随机结果。日志里的 `subs` 字段原先在条目结束后读，取值在 0 与 1 之间摇摆，现在固定为这条数据服务的客户端数。
-
 ## [v0.8.0] - 2026-11-09
 
 ### Added
@@ -34,6 +28,10 @@
 - 新增 `traintrace`，单个静态二进制 eBPF 观测工具（源码在 `ebpfobs/`，产物 `ebpfobs/build/traintrace`）。它在被观测机器上采三类数：块 I/O 延迟直方图、major fault 次数与耗时、filemap 预读的进缓存页与被消费页。产物是 `metrics.json` 与 `manifest.json`，可拷到目标机直接跑，机器上不装 libbpf、不需要 Python。工具只读，不改动被观测进程、文件与缓存盘。参数与读法见 `docs/11.1-eBPF-tool-interfaces.md`、`docs/11.2-eBPF-tool-user-manual.md`。
 - bench 接入 `traintrace`：`bench/experiments/probe.py` 负责拉起与 SIGINT 收尾，train 形态由 `bench/experiments/run.py` 在负载步骤前调用，环境变量 `TRAINTRACE_PROBE`、`TRAINTRACE_BIN`、`TRAINTRACE_DEV`、`TRAINTRACE_CGROUP`、`TRAINTRACE_PID` 控制开关与过滤范围。dataset 形态另有 `bench/experiments/probe_dataset.py`，跑 COND 时可挂节点内探针。接入方式见 `docs/11.3-eBPF-bench-integration.md`。
 - bench 新增探针开销对账：`bench/experiments/probe_overhead.py` 出两遍 `wait_s` P99 差值（主口径，单位 ms），并用 `total_fetch_bytes` 与 `hit_ratio_steady` 两列不变量判定两遍可比，两列超出容差时输出「不可比」，差值作废。dataset 形态用 `--form dataset`。
+
+### Fixed
+
+- 网关的「条目结束」日志改在条目向订阅者广播结束状态之前落：这行日志原先由后台拉取协程在条目结束后补写，客户端拿到响应时它可能还没写出，事后核对日志与统计日志行数都读到随机结果。日志里的 `subs` 字段原先在条目结束后读，取值在 0 与 1 之间摇摆，现在固定为这条数据服务的客户端数。
 
 ## [v0.7.1] - 2026-11-08
 
