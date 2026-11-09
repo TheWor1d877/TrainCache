@@ -8,6 +8,13 @@ load 侧不改,统计全在这里补。
 交叉核对用 metrics.csv 的 full_makespan_s 差值与全轮 median_stall 差值。
 不变量用 total_fetch_bytes 与 hit_ratio_steady:探针只读,这两项两遍之间应当
 基本一致;变了说明两遍不可比,开销数据作废。
+
+两种形态各有一套产物落点:
+  train   形态:--off/--on 给 run 目录,逐步记录在目录下的 per_step_*.jsonl,
+                不变量两列在 metrics.csv(collect.py 写的)。
+  dataset 形态:--off/--on 给格子目录,逐步记录在 runs/*/per_step_*.jsonl,
+                不变量两列在 summary.csv:回源字节列叫 fetch_bytes_run,
+                命中率列也叫 hit_ratio_steady。
 """
 import argparse
 import csv
@@ -17,6 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stats as stats_mod  # noqa: E402
+
+PROBE_SUBDIR = "probe"
 
 
 def load_records(run_dir: Path) -> list[dict]:
@@ -75,6 +84,56 @@ def summarize(run_dir: Path) -> dict:
         "total_fetch_bytes": _num(metrics.get("total_fetch_bytes")),
         "hit_ratio_steady": _num(metrics.get("hit_ratio_steady")),
         "probe_metrics_present": probe_metrics.is_file(),
+    }
+
+
+def read_summary_csv(cell: Path) -> list[dict]:
+    """读格子目录下的 summary.csv 全部行(dataset 形态的产物)。"""
+    path = Path(cell) / "summary.csv"
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def _mean(values: list[float]) -> float | None:
+    return stats_mod.mean(values) if values else None
+
+
+def summarize_dataset(cell: Path) -> dict:
+    """dataset 形态一格子的摘要。
+
+    逐步记录在 runs/*/per_step_*.jsonl,不变量两列在 summary.csv:回源字节列
+    叫 fetch_bytes_run,命中率列也叫 hit_ratio_steady。多轮 rep 取均值。
+    """
+    cell = Path(cell)
+    recs: list[dict] = []
+    for run_dir in sorted((cell / "runs").glob("*")):
+        if run_dir.is_dir():
+            recs.extend(load_records(run_dir))
+    meas = [r for r in recs if not r.get("warmup")]
+    waits = [float(r.get("wait_s") or 0.0) for r in meas]
+    rows = read_summary_csv(cell)
+    ok = [r for r in rows
+          if str(r.get("void", "")).strip().lower() not in ("true", "1")]
+
+    def column(name: str) -> list[float]:
+        vals = [_num(r.get(name)) for r in ok]
+        return [v for v in vals if v is not None]
+
+    probe_metrics = sorted((cell / PROBE_SUBDIR).glob("rep-*/metrics.json"))
+    return {
+        "run_dir": str(cell),
+        "n_reps": len(rows),
+        "n_steps_total": len(recs),
+        "n_steps_measured": len(meas),
+        "wait_s_p99_ms": stats_mod.p99(waits) * 1000.0 if waits else None,
+        "wait_s_mean_ms": stats_mod.mean(waits) * 1000.0 if waits else None,
+        "median_stall": stats_mod.median([stall(r) for r in meas]) if meas else None,
+        "full_makespan_s": _mean(column("total_makespan")),
+        "total_fetch_bytes": _mean(column("fetch_bytes_run")),
+        "hit_ratio_steady": _mean(column("hit_ratio_steady")),
+        "probe_metrics_present": bool(probe_metrics),
     }
 
 
@@ -167,6 +226,30 @@ def _write_mock_run(run_dir: Path, waits: list[float], step_s: float,
         writer.writerow(row)
 
 
+def _write_mock_cell(cell: Path, waits: list[float], step_s: float,
+                     fetch_bytes: float, hit_ratio: float, with_probe: bool) -> None:
+    """造一个 dataset 形态的 mock 格子:runs/<group>-r00/ + summary.csv。"""
+    run_dir = cell / "runs" / "mock-r00"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with (run_dir / "per_step_1_w1.jsonl").open("w", encoding="utf-8") as f:
+        for i, w in enumerate(waits):
+            f.write(json.dumps({"epoch": 0, "step_in_epoch": i, "global_step": i,
+                                 "warmup": False, "phase": "steady",
+                                 "wait_s": w, "step_s": step_s}) + "\n")
+    fields = ["group", "rep", "void", "total_makespan", "fetch_bytes_run",
+              "hit_ratio_steady"]
+    row = {"group": "mock", "rep": 0, "void": "false", "total_makespan": 10.0,
+           "fetch_bytes_run": fetch_bytes, "hit_ratio_steady": hit_ratio}
+    with (cell / "summary.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(row)
+    if with_probe:
+        probe_dir = cell / PROBE_SUBDIR / "rep-00"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        (probe_dir / "metrics.json").write_text("{}\n", encoding="utf-8")
+
+
 def selftest() -> None:
     import tempfile
 
@@ -199,14 +282,37 @@ def selftest() -> None:
         missing = compare(summarize(off_dir), summarize(on_dir), fetch_tol_pct=1.0, hit_tol=0.02)
         assert missing["comparable"] is None
 
+        # dataset 形态:两列取自 summary.csv,逐步记录取自 runs/*
+        cell_off = root / "cell-off"
+        cell_on = root / "cell-on"
+        _write_mock_cell(cell_off, [0.1] * 100, 0.2, 1000.0, 0.5, with_probe=False)
+        _write_mock_cell(cell_on, [0.1] * 99 + [0.3], 0.2, 1000.0, 0.5, with_probe=True)
+        d_off = summarize_dataset(cell_off)
+        d_on = summarize_dataset(cell_on)
+        assert d_off["n_steps_measured"] == 100
+        assert d_on["probe_metrics_present"] is True
+        assert d_off["total_fetch_bytes"] == 1000.0
+        assert d_on["hit_ratio_steady"] == 0.5
+        d_res = compare(d_off, d_on, fetch_tol_pct=1.0, hit_tol=0.02)
+        assert d_res["comparable"] is True
+        assert d_res["wait_s_p99_delta_ms"] > 0
+
+        # dataset 形态:回源字节越界 → 判定不可比
+        _write_mock_cell(cell_on, [0.1] * 100, 0.2, 2000.0, 0.5, with_probe=True)
+        d_bad = compare(summarize_dataset(cell_off), summarize_dataset(cell_on),
+                        fetch_tol_pct=1.0, hit_tol=0.02)
+        assert d_bad["comparable"] is False
+
     print("probe_overhead selftest: PASS")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="探针开销对账:开/关两遍 run 目录 → wait_s P99 差值 + 不变量校验")
-    ap.add_argument("--off", type=Path, help="没挂探针那遍的 run 目录")
-    ap.add_argument("--on", type=Path, help="挂了探针那遍的 run 目录")
+        description="探针开销对账:开/关两遍产物 → wait_s P99 差值 + 不变量校验")
+    ap.add_argument("--form", choices=["train", "dataset"], default="train",
+                    help="产物形态:train 看 run 目录,dataset 看格子目录")
+    ap.add_argument("--off", type=Path, help="没挂探针那遍的产物目录")
+    ap.add_argument("--on", type=Path, help="挂了探针那遍的产物目录")
     ap.add_argument("--out", type=Path, help="结果 JSON 路径(缺省打印到终端)")
     ap.add_argument("--fetch-tol-pct", type=float, default=1.0,
                     help="total_fetch_bytes 相对差容差(%%)")
@@ -221,11 +327,12 @@ def main() -> None:
     if not args.off or not args.on:
         ap.error("需要 --off 与 --on(或用 --selftest 跑自检)")
 
-    off = summarize(args.off)
-    on = summarize(args.on)
+    summarize_fn = summarize_dataset if args.form == "dataset" else summarize
+    off = summarize_fn(args.off)
+    on = summarize_fn(args.on)
     result = compare(off, on, args.fetch_tol_pct, args.hit_tol)
     print_report(off, on, result)
-    payload = {"off": off, "on": on, **result}
+    payload = {"form": args.form, "off": off, "on": on, **result}
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
