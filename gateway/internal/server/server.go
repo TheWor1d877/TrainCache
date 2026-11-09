@@ -691,14 +691,18 @@ func (s *Server) serveFragmentWithSub(w http.ResponseWriter, r *http.Request, ke
 // pumpRange 是片段条目的拉取协程：带 Range 从源站取这一段，写进环形缓冲，
 // 同一批字节写进盘上的片段缓存。
 func (s *Server) pumpRange(e *merge.Entry, key, dataset, fragKey string, start, end int64, started time.Time) {
+	// 「条目结束」在条目广播结束之前落：日志先于客户端收到最后一个字节。
+	e.SetOnFinish(func(err error) {
+		s.logEntryEnd(e, dataset, key, started, err, fromOrigin)
+	})
 	pumpCtx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 	e.SetCancel(cancel)
 
 	rc, err := s.origin.OpenRange(pumpCtx, key, start, end)
 	if err != nil {
-		e.Finish(err)
 		s.logEntryEnd(e, dataset, key, started, err, fromOrigin)
+		e.Finish(err)
 		return
 	}
 	defer rc.Close()
@@ -737,7 +741,6 @@ func (s *Server) pumpRange(e *merge.Entry, key, dataset, fragKey string, start, 
 	}
 
 	err = e.Pump(pumpCtx, reader)
-	s.logEntryEnd(e, dataset, key, started, err, fromOrigin)
 	if err != nil && !errors.Is(err, context.Canceled) && e.Written() > 0 {
 		resp := minio.ToErrorResponse(err)
 		s.log.Warn("源站失败",
@@ -1008,14 +1011,18 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, dataset string)
 //
 // 开关打开时，同一批字节也写进 BeginPut 打开的 .tmp（design 9.1「盘上布局与配额淘汰」）。
 func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
+	// 「条目结束」在条目广播结束之前落：日志先于客户端收到最后一个字节。
+	e.SetOnFinish(func(err error) {
+		s.logEntryEnd(e, dataset, key, start, err, fromOrigin)
+	})
 	pumpCtx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 	e.SetCancel(cancel)
 
 	rc, err := s.origin.Open(pumpCtx, key)
 	if err != nil {
-		e.Finish(err)
 		s.logEntryEnd(e, dataset, key, start, err, fromOrigin)
+		e.Finish(err)
 		return
 	}
 	defer rc.Close()
@@ -1045,7 +1052,6 @@ func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 	}
 
 	err = e.Pump(pumpCtx, reader)
-	s.logEntryEnd(e, dataset, key, start, err, fromOrigin)
 	if err != nil && !errors.Is(err, context.Canceled) && e.Written() > 0 {
 		// 写响应体后才失败：状态码已发出，只记录源站失败（design 9.1「取数与扇出」）。
 		resp := minio.ToErrorResponse(err)
@@ -1062,13 +1068,16 @@ func (s *Server) pump(e *merge.Entry, key, dataset string, start time.Time) {
 // pumpCache 是读盘条目的拉取协程：把盘上的字节读进环形缓冲，结束后关闭文件。
 // 与回源共用同一个扇出路径（9.2 D34）。
 func (s *Server) pumpCache(e *merge.Entry, key, dataset string, start time.Time, obj *cache.Object) {
+	// 「条目结束」在条目广播结束之前落：日志先于客户端收到最后一个字节。
+	e.SetOnFinish(func(err error) {
+		s.logEntryEnd(e, dataset, key, start, err, fromCache)
+	})
 	pumpCtx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 	e.SetCancel(cancel)
 
-	err := e.Pump(pumpCtx, obj)
+	_ = e.Pump(pumpCtx, obj)
 	_ = obj.Close()
-	s.logEntryEnd(e, dataset, key, start, err, fromCache)
 }
 
 func (s *Server) logEntryEnd(e *merge.Entry, dataset, key string, start time.Time, err error, from string) {

@@ -220,6 +220,31 @@ while true; do
   sleep 10
 done
 
+# ---- 6.2 等 PVC 与 fuse Pod 就绪 ----
+# Dataset phase=Bound 早于 PVC 建出与 fuse Pod Ready。这时建测量 Pod 会撞
+# FailedScheduling(PVC jfs-demo not found)或挂卷 255,首格首跑作废。
+# 先等 PVC 存在,再等 fuse Pod Ready,都到齐才放行(实测 fluid-cold 踩过)。
+PVC_READY=0
+for i in $(seq 1 120); do
+  if kubectl -n "$NS" get pvc jfs-demo >/dev/null 2>&1; then
+    PVC_READY=1
+    break
+  fi
+  if [ "$i" = "120" ]; then
+    log_group "$GROUP" "等待 pvc/jfs-demo 超时(600s)" >&2
+    exit 1
+  fi
+  sleep 5
+done
+log_group "$GROUP" "pvc/jfs-demo 就绪"
+if ! kubectl -n "$NS" wait --for=condition=Ready pod \
+  -l role=juicefs-fuse,fluid.io/dataset-id=fluid-jfs-demo --timeout=300s >/dev/null 2>&1; then
+  log_group "$GROUP" "fuse Pod 未就绪(300s)" >&2
+  kubectl get pods -n "$NS" -o wide 2>/dev/null | grep -E 'jfs-demo|NAME' >&2 || true
+  exit 1
+fi
+log_group "$GROUP" "fuse Pod 就绪"
+
 # ---- 6.5. 数据导入:从 MinIO bench-b/shard-*.tar 同步到 Fluid JuiceFS(幂等)----
 # Dataset Bound 后 JuiceFS 文件系统已格式化,但为空;需把 shard 数据导入。
 FLUID_IMPORT_YAML=$(cat <<EOF
