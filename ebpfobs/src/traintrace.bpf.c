@@ -45,6 +45,18 @@ struct {
 } blk_hist SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32); __type(value, __u64);
+	__uint(max_entries, 1);
+} blk_issue_cnt SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32); __type(value, __u64);
+	__uint(max_entries, 1);
+} blk_complete_cnt SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32); __type(value, struct dev_val);
 	__uint(max_entries, 1);
@@ -82,6 +94,13 @@ struct {
 } watch_cgroup SEC(".maps");
 
 /* ---- M2 块延迟 ---- */
+static __always_inline void bump_cnt(void *map)
+{
+	__u32 z = 0;
+	__u64 *p = bpf_map_lookup_elem(map, &z);
+	if (p)
+		__sync_fetch_and_add(p, 1);
+}
 static __always_inline int dev_is_watched(__u32 dev)
 {
 	__u32 zero = 0;
@@ -102,6 +121,7 @@ int do_blk_issue(struct blk_issue_raw *ctx)
 {
 	if (!dev_is_watched(ctx->dev))
 		return 0;
+	bump_cnt(&blk_issue_cnt);
 	struct rq_key k = { .dev = ctx->dev, .sector = ctx->sector };
 	__u64 ts = bpf_ktime_get_ns();
 	bpf_map_update_elem(&rq_start, &k, &ts, BPF_ANY);
@@ -117,6 +137,7 @@ int do_blk_complete(struct blk_complete_raw *ctx)
 	__u64 *start = bpf_map_lookup_elem(&rq_start, &k);
 	if (!start)
 		return 0;
+	bump_cnt(&blk_complete_cnt);
 	__u64 dt = bpf_ktime_get_ns() - *start;
 	bpf_map_delete_elem(&rq_start, &k);
 	struct blk_key hk = { .dev = ctx->dev, .rw = rw_dim(ctx->rwbs[0]), .bucket = lat_bucket(dt) };

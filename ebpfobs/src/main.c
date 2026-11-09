@@ -147,9 +147,20 @@ static __u64 iset_intersect(const struct iset *a, const struct iset *b)
 	return t;
 }
 
-struct ra_group { __u32 dev; __u64 ino; struct iset added, consumed; };
+struct aival { __u64 lo, hi; __u32 pid; };
+struct ra_group { __u32 dev; __u64 ino; struct iset added, consumed; struct aival *av; int an, acap; };
 static struct ra_group *g_groups;
 static int g_groups_nr, g_groups_cap;
+
+/* ---- M6 归因与异常 ---- */
+static __u64 g_attr_offset;      /* 疑似预读归因偏移：缺页消费者与进缓存发起者 pid 不符 */
+static __u64 g_rq_evicted;       /* rq_start 推导淘汰数 = issue − complete命中 − 残留 */
+static int g_filemap_complete = 1;
+static struct bpf_link *g_links[16];
+static int g_link_nr;
+static char g_attach_fail[16][64];
+static int g_attach_fail_nr;
+static int g_probes_attached;
 
 static struct ra_group *group_get(__u32 dev, __u64 ino)
 {
@@ -166,6 +177,15 @@ static struct ra_group *group_get(__u32 dev, __u64 ino)
 	return g;
 }
 
+static void group_add_pid(struct ra_group *g, __u64 lo, __u64 hi, __u32 pid)
+{
+	if (g->an == g->acap) {
+		g->acap = g->acap ? g->acap * 2 : 64;
+		g->av = realloc(g->av, g->acap * sizeof(*g->av));
+	}
+	g->av[g->an++] = (struct aival){ lo, hi, pid };
+}
+
 static void pair_readahead(void)
 {
 	for (int i = 0; i < g_events_nr; i++) {
@@ -174,10 +194,30 @@ static void pair_readahead(void)
 		if (e->kind == EV_ADD) {
 			__u64 pages = (__u64)1 << e->order;
 			iset_add(&g->added, e->index, e->index + pages - 1);
+			group_add_pid(g, e->index, e->index + pages - 1, e->pid);
 		} else if (e->kind == EV_FAULT) {
 			iset_add(&g->consumed, e->index, e->index);
 		} else if (e->kind == EV_GETP) {
 			iset_add(&g->consumed, e->index, e->last_index);
+		}
+	}
+}
+
+/* 缺页消费者与该页进缓存发起者 pid 不符的，标为疑似预读归因偏移，只标不改记。
+ * 块侧是直方图无逐事件发起者，归因按 filemap 进缓存与缺页两类事件的 pid 比对。 */
+static void attribute_faults(void)
+{
+	for (int i = 0; i < g_events_nr; i++) {
+		struct tev *e = &g_events[i];
+		if (e->kind != EV_FAULT)
+			continue;
+		struct ra_group *g = group_get(e->dev, e->ino);
+		for (int k = 0; k < g->an; k++) {
+			if (g->av[k].lo <= e->index && e->index <= g->av[k].hi) {
+				if (g->av[k].pid != e->pid)
+					g_attr_offset++;
+				break;
+			}
 		}
 	}
 }
@@ -208,6 +248,9 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 		} else { usage(argv[0]); return -1; }
 	}
 	if (!cfg->dev) { fprintf(stderr, "错误: --dev 必填\n"); usage(argv[0]); return -1; }
+	if (cfg->n_cgroups == 0 && cfg->n_pids == 0) {
+		fprintf(stderr, "错误: --cgroup 与 --pid 至少给一个\n"); usage(argv[0]); return -1;
+	}
 	return 0;
 }
 
@@ -357,6 +400,58 @@ static __u64 read_rb_drop(struct traintrace_bpf *skel, int ncpu)
 	return sum;
 }
 
+static __u64 percpu_sum(int fd, int ncpu)
+{
+	__u32 z = 0;
+	__u64 *vals = calloc(ncpu, sizeof(__u64));
+	__u64 sum = 0;
+	if (bpf_map_lookup_elem(fd, &z, vals) == 0)
+		for (int c = 0; c < ncpu; c++) sum += vals[c];
+	free(vals);
+	return sum;
+}
+
+/* 内核不暴露 LRU 逐 map 淘汰计数，按 issue − complete命中 − 残留 推导：
+ * 插进 rq_start 却既没配对删除、收尾也不在表里的请求，就是被淘汰没计进直方图的。 */
+static __u64 read_rq_evicted(struct traintrace_bpf *skel, int ncpu)
+{
+	__u64 issues = percpu_sum(bpf_map__fd(skel->maps.blk_issue_cnt), ncpu);
+	__u64 completes = percpu_sum(bpf_map__fd(skel->maps.blk_complete_cnt), ncpu);
+	int fd = bpf_map__fd(skel->maps.rq_start);
+	struct rq_key key, next;
+	__u64 remaining = 0;
+	bool have = bpf_map_get_next_key(fd, NULL, &key) == 0;
+	while (have) {
+		remaining++;
+		bool hn = bpf_map_get_next_key(fd, &key, &next) == 0;
+		if (!hn) break;
+		key = next;
+	}
+	__u64 gone = issues > completes + remaining ? issues - completes - remaining : 0;
+	return gone;
+}
+
+/* 逐程序 attach，单个失败记程序名继续，不中断其余探针。 */
+static void attach_probes(struct traintrace_bpf *skel)
+{
+	struct bpf_program *prog;
+	bpf_object__for_each_program(prog, skel->obj) {
+		const char *name = bpf_program__name(prog);
+		struct bpf_link *link = bpf_program__attach(prog);
+		if (!link) {
+			fprintf(stderr, "探针 %s attach 失败: %s\n", name, strerror(errno));
+			if (g_attach_fail_nr < 16)
+				snprintf(g_attach_fail[g_attach_fail_nr++], 64, "%s", name);
+			continue;
+		}
+		if (g_link_nr < 16)
+			g_links[g_link_nr++] = link;
+		else
+			bpf_link__destroy(link);
+		g_probes_attached++;
+	}
+}
+
 static void read_comm(__u32 pid, char *out, size_t n)
 {
 	char p[64];
@@ -380,8 +475,8 @@ static void write_metrics(const char *dir, const char *json_name, const char *de
 	if (!f) { fprintf(stderr, "无法写 %s: %s\n", path, strerror(errno)); return; }
 
 	fprintf(f, "{\n");
-	fprintf(f, "  \"run\": { \"start_epoch_ns\": %llu, \"uptime_epoch_offset_ns\": %llu, \"dev\": \"%s\", \"duration_s\": %d, \"ringbuf_dropped\": %llu },\n",
-		(unsigned long long)start_epoch_ns, (unsigned long long)offset_ns, dev_name, cfg->duration, (unsigned long long)dropped);
+	fprintf(f, "  \"run\": { \"start_epoch_ns\": %llu, \"uptime_epoch_offset_ns\": %llu, \"dev\": \"%s\", \"duration_s\": %d, \"ringbuf_dropped\": %llu, \"rq_start_evicted\": %llu },\n",
+		(unsigned long long)start_epoch_ns, (unsigned long long)offset_ns, dev_name, cfg->duration, (unsigned long long)dropped, (unsigned long long)g_rq_evicted);
 
 	/* block_io */
 	fprintf(f, "  \"block_io\": { \"by_dev_rw\": {\n");
@@ -410,7 +505,8 @@ static void write_metrics(const char *dir, const char *json_name, const char *de
 	fprintf(f, "\n  } },\n");
 
 	/* major_fault */
-	fprintf(f, "  \"major_fault\": { \"readahead_agnostic\": true, \"by_cgroup_pid\": {\n");
+	fprintf(f, "  \"major_fault\": { \"readahead_agnostic\": true, \"readahead_attribution_offset\": %llu, \"by_cgroup_pid\": {\n",
+		(unsigned long long)g_attr_offset);
 	for (int i = 0; i < g_fault_nr; i++) {
 		char comm[32];
 		read_comm(g_fault[i].pid, comm, sizeof(comm));
@@ -422,7 +518,8 @@ static void write_metrics(const char *dir, const char *json_name, const char *de
 	fprintf(f, "  } },\n");
 
 	/* readahead */
-	fprintf(f, "  \"readahead\": { \"by_dev_ino\": {\n");
+	fprintf(f, "  \"readahead\": { \"complete\": %s, \"by_dev_ino\": {\n",
+		g_filemap_complete ? "true" : "false");
 	for (int i = 0; i < g_groups_nr; i++) {
 		struct ra_group *g = &g_groups[i];
 		__u64 added = iset_total(&g->added);
@@ -443,8 +540,13 @@ static void write_metrics(const char *dir, const char *json_name, const char *de
 
 static void print_summary(struct config *cfg, __u64 dropped)
 {
-	printf("\n=== 摘要 (%ds, filemap 事件 %d, 丢事件 %llu) ===\n",
-	       cfg->duration, g_events_nr, (unsigned long long)dropped);
+	printf("\n=== 摘要 (%ds, filemap 事件 %d, 丢事件 %llu, 配对表淘汰 %llu) ===\n",
+	       cfg->duration, g_events_nr, (unsigned long long)dropped, (unsigned long long)g_rq_evicted);
+	printf("  疑似预读归因偏移 %llu（只标不改记）\n", (unsigned long long)g_attr_offset);
+	if (!g_filemap_complete)
+		printf("  注意: ringbuf 丢事件 %llu，filemap 段不完整\n", (unsigned long long)dropped);
+	for (int i = 0; i < g_attach_fail_nr; i++)
+		printf("  注意: 探针 %s attach 失败，该类未出数\n", g_attach_fail[i]);
 	for (int i = 0; i < g_fault_nr; i++) {
 		char comm[32]; read_comm(g_fault[i].pid, comm, sizeof(comm));
 		printf("  major fault pid=%u comm=%s count=%llu mean=%.1fus\n",
@@ -461,6 +563,76 @@ static void print_summary(struct config *cfg, __u64 dropped)
 		       (unsigned long long)consumed, (unsigned long long)invalid,
 		       added ? (double)invalid / added * 100.0 : 0);
 	}
+}
+
+/* 背靠背取时钟偏移：先读 /proc/uptime 首项，紧接 clock_gettime(CLOCK_REALTIME)，
+ * offset = epoch_ns − uptime_ns，事件 nsecs + offset 换算成 epoch。 */
+static void sample_clock_offset(__u64 *offset_ns, __u64 *epoch_ns)
+{
+	struct timespec rt;
+	double secs = 0;
+	FILE *up = fopen("/proc/uptime", "r");
+	if (up) { if (fscanf(up, "%lf", &secs) != 1) secs = 0; }
+	clock_gettime(CLOCK_REALTIME, &rt);
+	if (up) fclose(up);
+	*epoch_ns = (__u64)rt.tv_sec * 1000000000ULL + rt.tv_nsec;
+	*offset_ns = *epoch_ns - (__u64)(secs * 1e9);
+}
+
+static void write_manifest(const char *dir, struct config *cfg, const char *dev_name,
+			   __u32 raw_dev, __u64 start_epoch_ns, __u64 end_epoch_ns,
+			   __u64 offset_ns, __u64 dropped)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/manifest.json", dir);
+	FILE *f = fopen(path, "w");
+	if (!f) { fprintf(stderr, "无法写 %s: %s\n", path, strerror(errno)); return; }
+	fprintf(f, "{\n");
+	fprintf(f, "  \"tool\": \"traintrace\",\n");
+	fprintf(f, "  \"start_epoch_ns\": %llu,\n", (unsigned long long)start_epoch_ns);
+	fprintf(f, "  \"end_epoch_ns\": %llu,\n", (unsigned long long)end_epoch_ns);
+	fprintf(f, "  \"uptime_epoch_offset_ns\": %llu,\n", (unsigned long long)offset_ns);
+	fprintf(f, "  \"duration_s\": %d,\n", cfg->duration);
+	fprintf(f, "  \"dev\": \"%s\",\n", dev_name);
+	fprintf(f, "  \"raw_dev\": \"0x%x\",\n", raw_dev);
+	fprintf(f, "  \"poll_interval_s\": %d,\n", cfg->poll_interval);
+	fprintf(f, "  \"cgroups\": [");
+	for (int i = 0; i < cfg->n_cgroups; i++)
+		fprintf(f, "%s\"%s\"", i ? ", " : "", cfg->cgroups[i]);
+	fprintf(f, "],\n");
+	fprintf(f, "  \"pids\": [");
+	for (int i = 0; i < cfg->n_pids; i++)
+		fprintf(f, "%s%d", i ? ", " : "", cfg->pids[i]);
+	fprintf(f, "],\n");
+	fprintf(f, "  \"ringbuf_dropped\": %llu,\n", (unsigned long long)dropped);
+	fprintf(f, "  \"rq_start_evicted\": %llu,\n", (unsigned long long)g_rq_evicted);
+	fprintf(f, "  \"filemap_complete\": %s,\n", g_filemap_complete ? "true" : "false");
+	fprintf(f, "  \"probes_attached\": %d,\n", g_probes_attached);
+	fprintf(f, "  \"attach_failures\": [");
+	for (int i = 0; i < g_attach_fail_nr; i++)
+		fprintf(f, "%s\"%s\"", i ? ", " : "", g_attach_fail[i]);
+	fprintf(f, "],\n");
+	fprintf(f, "  \"metrics_file\": \"%s\"\n", cfg->json_name);
+	fprintf(f, "}\n");
+	fclose(f);
+	printf("manifest 已写出: %s\n", path);
+}
+
+/* --verbose 下每周期一个快照文件，记累计头部数字供看走势 */
+static void write_snapshot(const char *dir, int seq, __u64 epoch_ns)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/snapshots/snapshot-%04d.json", dir, seq);
+	FILE *f = fopen(path, "w");
+	if (!f) return;
+	__u64 pairs = 0, faults = 0;
+	for (int i = 0; i < g_hist_nr; i++) pairs += g_hist[i].count;
+	for (int i = 0; i < g_fault_nr; i++) faults += g_fault[i].cnt;
+	fprintf(f, "{ \"seq\": %d, \"epoch_ns\": %llu, \"block_pairs_total\": %llu, "
+		   "\"major_fault_total\": %llu, \"filemap_events\": %d }\n",
+		seq, (unsigned long long)epoch_ns, (unsigned long long)pairs,
+		(unsigned long long)faults, g_events_nr);
+	fclose(f);
 }
 
 int main(int argc, char **argv)
@@ -484,17 +656,15 @@ int main(int argc, char **argv)
 	if (mkdir(out_dir, 0755) && errno != EEXIST) {
 		fprintf(stderr, "无法创建目录 %s: %s\n", out_dir, strerror(errno)); return 1;
 	}
-
-	{
-		struct timespec rt;
-		FILE *up = fopen("/proc/uptime", "r");
-		double secs = 0;
-		if (up) { if (fscanf(up, "%lf", &secs) != 1) secs = 0; fclose(up); }
-		clock_gettime(CLOCK_REALTIME, &rt);
-		__u64 epoch_ns = (__u64)rt.tv_sec * 1000000000ULL + rt.tv_nsec;
-		offset_ns = epoch_ns - (__u64)(secs * 1e9);
-		start_epoch_ns = epoch_ns;
+	if (cfg.verbose) {
+		char snap[512];
+		snprintf(snap, sizeof(snap), "%s/snapshots", out_dir);
+		if (mkdir(snap, 0755) && errno != EEXIST) {
+			fprintf(stderr, "无法创建目录 %s: %s\n", snap, strerror(errno)); return 1;
+		}
 	}
+
+	sample_clock_offset(&offset_ns, &start_epoch_ns);
 
 	skel = traintrace_bpf__open();
 	if (!skel) { fprintf(stderr, "skeleton open 失败\n"); return 1; }
@@ -509,11 +679,11 @@ int main(int argc, char **argv)
 	}
 	populate_watch_cgroup(skel, &cfg);
 
-	if (traintrace_bpf__attach(skel)) { fprintf(stderr, "skeleton attach 失败\n"); goto out; }
+	attach_probes(skel);
 
 	int ncpu = libbpf_num_possible_cpus();
-	printf("探针装载成功 (dev=%s raw=0x%x, ncpu=%d, cgroup 过滤项=%d)\n",
-	       dev_name, raw_dev, ncpu, cfg.n_cgroups + cfg.n_pids);
+	printf("探针装载成功 (dev=%s raw=0x%x, ncpu=%d, cgroup 过滤项=%d, attach 成功=%d 失败=%d)\n",
+	       dev_name, raw_dev, ncpu, cfg.n_cgroups + cfg.n_pids, g_probes_attached, g_attach_fail_nr);
 
 	rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL);
 	if (!rb) { fprintf(stderr, "ring_buffer 创建失败\n"); goto out; }
@@ -521,6 +691,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_sigint);
 	time_t end = time(NULL) + cfg.duration;
 	time_t last_drain = time(NULL);
+	int snap_seq = 0;
 	while (!g_stop && (cfg.duration == 0 || time(NULL) < end)) {
 		ring_buffer__poll(rb, 200);
 		time_t now = time(NULL);
@@ -528,22 +699,39 @@ int main(int argc, char **argv)
 			drain_blk_hist(skel, ncpu);
 			drain_fault_agg(skel);
 			last_drain = now;
+			if (cfg.verbose) {
+				struct timespec rt;
+				clock_gettime(CLOCK_REALTIME, &rt);
+				write_snapshot(out_dir, snap_seq++,
+					(__u64)rt.tv_sec * 1000000000ULL + rt.tv_nsec);
+			}
 		}
 	}
 	ring_buffer__poll(rb, 0);
 	drain_blk_hist(skel, ncpu);
 	drain_fault_agg(skel);
 
+	struct timespec rt_end;
+	clock_gettime(CLOCK_REALTIME, &rt_end);
+	__u64 end_epoch_ns = (__u64)rt_end.tv_sec * 1000000000ULL + rt_end.tv_nsec;
+
 	pair_readahead();
+	attribute_faults();
 	__u64 dropped = read_rb_drop(skel, ncpu);
+	g_filemap_complete = dropped == 0;
+	g_rq_evicted = read_rq_evicted(skel, ncpu);
 	write_metrics(out_dir, cfg.json_name, dev_name, &cfg, start_epoch_ns, offset_ns, dropped);
+	write_manifest(out_dir, &cfg, dev_name, raw_dev, start_epoch_ns, end_epoch_ns, offset_ns, dropped);
 	print_summary(&cfg, dropped);
 
 out:
 	ring_buffer__free(rb);
+	for (int i = 0; i < g_link_nr; i++) bpf_link__destroy(g_links[i]);
 	traintrace_bpf__destroy(skel);
 	free(g_hist); free(g_fault); free(g_events);
-	for (int i = 0; i < g_groups_nr; i++) { free(g_groups[i].added.v); free(g_groups[i].consumed.v); }
+	for (int i = 0; i < g_groups_nr; i++) {
+		free(g_groups[i].added.v); free(g_groups[i].consumed.v); free(g_groups[i].av);
+	}
 	free(g_groups);
 	return 0;
 }
