@@ -20,12 +20,12 @@ resources:
 # so no tag or digest is ever hand-edited in the per-component manifests.
 images:
   - name: ghcr.io/thewor1d877/traincache/controller-manager
-    newTag: dev
+    digest: sha256:83379abea8b056c3e57706e885188ca86667eeed6c8be722b327d295da5f3483
   - name: ghcr.io/thewor1d877/traincache/webhook
-    newTag: dev
+    digest: sha256:62c6d54852eb5361ba1aad7a1e73322ef3647c7c6c526d912706b880d7242c3a
   - name: ghcr.io/thewor1d877/traincache/kube-scheduler
-    newTag: dev
+    digest: sha256:190f3fe5c524beab4373ddeba4c41903b5d716a7f34785a6df645624aa85c9bd
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
-    newTag: dev
+    digest: sha256:7d9ec161688f62c1d122cc3757fb296109b536bbb772f21acb4ee099ed3dff3c
   - name: ghcr.io/thewor1d877/traincache/traincache-gateway
-    newTag: dev
+    digest: sha256:66ed74ee3b1bc540c79c758389b61b7fdb555916229e36ca7af34a0c6c4cbbc0

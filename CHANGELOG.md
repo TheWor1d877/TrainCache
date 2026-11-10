@@ -21,6 +21,23 @@
 
 # Changelog正文
 
+## 未发布
+
+### Added
+
+- bench 作废哨兵 `bench/scripts/void_watch.sh <结果目录> [空闲秒数]`：结果目录里一出现新的 `void` 行就退出并打印格名与原因，不必等整组跑完；到空闲秒数没有新数据以退出码 3 退出。
+- 测量体读失败的现场留档：读负载报出的 `ERROR` 行落到 `<格>/runs/<组>-r<轮>/measure_errors.log`。此前测量 Pod 随复位删除，作废行只剩 `read_errors` 计数，查不到是哪一步读错。
+
+### Changed
+
+- 测量用的控制面镜像版本由 `controller/deploy` 清单里的发布摘要钉住（本轮钉到 v0.8.0 的六个镜像，含 checkpoint 侧车）。`bench/scripts/ctrl_up.sh` 的镜像源码指纹门禁与放行开关 `TRAINCACHE_ALLOW_STALE_IMAGE` 删除：热集群里每次跑分都要重建五个 dev 镜像并重导，而跑分真正要的是「跑的是哪个发布版」，摘要已经写明。
+- traincache 组逐轮复位的顺序：agentd 复位（挂起、清订单与块缓存、恢复）挪到清节点缓存之前，清节点缓存改成最多 3 轮「删—判空—等 10s」，并在判空通过后等 5s 复查一次。上一轮在途的预取会在清空之后继续落盘，原判空把这种落盘当成冷态不成立，整格直接作废；只加重试会在持续写入的间隙里侥幸通过，冷读口径会假，所以补复查。
+
+### Fixed
+
+- fluid 组起组竞态：Dataset 标成 Bound 早于 PVC 建出与 fuse Pod 就绪，首格首跑的测量 Pod 一建出来就挂卷失败。现在先给 worker 节点预打 fluid 标签让 fuse 起起来，再等 PVC 与 fuse 就绪。
+- fluid 组拆组静默失败：清 MinIO 桶里 `fluid-demo/` 前缀用的控制面凭证没有删权，报错被吞掉，桶里留下上一轮的 4 GB 数据，下次 format 报存储非空、整组起不来。改用 MinIO Pod 内的 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` 清这一处前缀。
+
 ## [v0.8.0] - 2026-11-09
 
 ### Added

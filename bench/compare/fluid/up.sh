@@ -237,6 +237,11 @@ for i in $(seq 1 120); do
   sleep 5
 done
 log_group "$GROUP" "pvc/jfs-demo 就绪"
+# fuse DaemonSet 只在带 fluid.io/f-fluid-jfs-demo=true 标签的节点起 Pod,标签由
+# 调度器在测量 Pod 落节点时才补;全新命名空间里没有任何 Pod 挂 PVC,干等永远
+# 等不到。给全部 worker 节点预打标签让 fuse 先起(空闲 fuse 不影响测量)。
+kubectl label nodes -l '!node-role.kubernetes.io/control-plane' \
+  fluid.io/f-fluid-jfs-demo=true --overwrite >/dev/null
 if ! kubectl -n "$NS" wait --for=condition=Ready pod \
   -l role=juicefs-fuse,fluid.io/dataset-id=fluid-jfs-demo --timeout=300s >/dev/null 2>&1; then
   log_group "$GROUP" "fuse Pod 未就绪(300s)" >&2
