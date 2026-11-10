@@ -13,4 +13,4 @@ metadata:
     app.kubernetes.io/name: traincache-webhook
     app.kubernetes.io/part-of: traincache
 data:
-  checkpointImage: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+  checkpointImage: ghcr.io/thewor1d877/traincache/traincache-checkpointd@sha256:bdf13452c99df4bce4fd8d325566a7dd60fd49419f6bf02fd7271722f5c2e6a9

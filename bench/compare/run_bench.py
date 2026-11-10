@@ -636,21 +636,39 @@ def _clear_node_caches(tag):
     四条都在容器内用 sh -c 展开 glob，删除范围严格限定在目录内容本身。
     """
     for node in KIND_WORKER_NODES:
-        for cmd in _node_cache_reset_cmds(node):
-            rc, _out, err = run_cmd(cmd, timeout=30)
-            if rc != 0:
-                # 清缓存失败必须看得见：块缓存没清 = 冷读口径不成立
-                print(f"[{tag}] WARNING: 节点 {node} 清缓存失败(rc={rc}): "
-                      f"{' '.join(cmd)} {err[:200]}", flush=True)
         # 清后判空：hostPath 不随 Pod 删除消失，有残留就终止本轮。
-        check = _node_cache_check_cmd(node)
-        rc, out, err = run_cmd(check, timeout=30)
-        if rc != 0:
-            raise SystemExit(
-                f"[{tag}] 节点 {node} 缓存检查失败(rc={rc}): {err[:200]}，"
-                f"无法确认冷态，退出")
-        leftover = out.strip()
-        if leftover:
+        # 上一轮测量的在途预取会在删除之后继续落盘（tmp-range-* 与块分片目录），
+        # 删完立刻判空会把这种落盘误判成"冷态不成立"，整格退出。给它三次机会，
+        # 每次先等 10s 让在途写入结束再重删重判。
+        for attempt in range(3):
+            for cmd in _node_cache_reset_cmds(node):
+                rc, _out, err = run_cmd(cmd, timeout=30)
+                if rc != 0:
+                    # 清缓存失败必须看得见：块缓存没清 = 冷读口径不成立
+                    print(f"[{tag}] WARNING: 节点 {node} 清缓存失败(rc={rc}): "
+                          f"{' '.join(cmd)} {err[:200]}", flush=True)
+            check = _node_cache_check_cmd(node)
+            rc, out, err = run_cmd(check, timeout=30)
+            if rc != 0:
+                raise SystemExit(
+                    f"[{tag}] 节点 {node} 缓存检查失败(rc={rc}): {err[:200]}，"
+                    f"无法确认冷态，退出")
+            leftover = out.strip()
+            if not leftover:
+                # 判空可能落在写入间隙里侥幸通过：等 5s 复查一次，真有活着的写入者
+                # （未挂起的 agentd、还在回写的 FUSE）就必须看得见，不能带着残余起跑。
+                time.sleep(5)
+                rc2, out2, _ = run_cmd(check, timeout=30)
+                if rc2 == 0 and out2.strip():
+                    raise SystemExit(
+                        f"[{tag}] 节点 {node} 清空后 5s 内又出现写入: "
+                        f"{out2.strip()[:300]}，冷态不成立，退出")
+                break
+            if attempt < 2:
+                print(f"[{tag}] 节点 {node} 清后仍有 {len(leftover.splitlines())} 项残留"
+                      f"（在途写入落盘），10s 后重删重试({attempt + 1}/3)", flush=True)
+                time.sleep(10)
+        else:
             raise SystemExit(
                 f"[{tag}] 节点 {node} 缓存未清空，仍有残留: {leftover[:300]}，退出")
     _drop_host_page_caches(tag)
@@ -2792,6 +2810,12 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         n_steps += len(records)
+    # 测量体的 ERROR 行是 read_error 作废的唯一现场（Pod 随复位删除）。
+    # 不落盘就只能作废重跑，查不出是读路径哪一环报错。
+    err_lines = [ln for ln in logs.splitlines() if ln.startswith("ERROR ")]
+    if err_lines:
+        with (run_dir / "measure_errors.log").open("w", encoding="utf-8") as f:
+            f.write("\n".join(err_lines) + "\n")
     _rate = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
     cond_name = (COND_NAME_OVERRIDE or
                  _cond_name_for_cell(RHO, [group],
@@ -3188,10 +3212,11 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         # 4.3 三笔字节成本：预热前 fetch 计数基线（只有 traincache-warm 用，见下方 group_up 前）
         pre_up_snap = None
         if reuse:
-            if rep:
-                rep_cold_reset(group)
+            # 控制面跨 rep 复用，也必须逐 rep 复位 agentd。
+            # 顺序要求：复位在清节点缓存之前。复位会把 agentd 挂起再清空订单与块缓存，
+            # 上一轮遗留的在途预取若还活着，就会在清空后继续落盘（tmp-range-* 与块
+            # 分片目录），判空把这种落盘误判成冷态不成立，整格退出。
             if is_tc:
-                # 控制面跨 rep 复用，也必须逐 rep 复位 agentd
                 try:
                     reset_traincache_agent()
                 except (SystemExit, Exception) as exc:
@@ -3202,6 +3227,8 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                                     "warmup_seconds": group_warmup,
                                     "trace_sha256": trace_sha})
                     break
+            if rep:
+                rep_cold_reset(group)
             warmup_seconds = group_warmup
             warmup_basis = group_warmup_basis
         else:
