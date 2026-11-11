@@ -674,6 +674,15 @@ def _clear_node_caches(tag):
     _drop_host_page_caches(tag)
 
 
+def _agentd_has_residual_state():
+    """任一 agent 节点的订单 ring 或块缓存目录非空。空目录返回 False。"""
+    for node in KIND_WORKER_NODES:
+        rc, out, _err = run_cmd(_agent_state_check_cmd(node), timeout=30)
+        if rc == 0 and out.strip():
+            return True
+    return False
+
+
 def cold_reset():
     print("[cold_reset] 清理训练 Pod 与缓存(保留 Redis 与控制面)...")
     for ns in set(GROUP_NS.values()):
@@ -681,6 +690,13 @@ def cold_reset():
         # agentd 重启后立刻回放 `/run/traincache/orders` 并写 `tmp-*`，
         # 与下面的清缓存判空打架，冷态复位随机会失败。
         kubectl(["delete", "pods", "-l", "app=train-job", "--grace-period=0", "--force"], namespace=ns, timeout=60)
+    # 残留订单 ring 的危害在 agentd 挂起/重启时兑现：回放旧订单持续预取落盘
+    # （2026-11-11 早上 rho4-100 pod_failed 后连续污染 5 个格）。有残留就先做
+    # 完整复位（挂起→清订单与块缓存→恢复），让清缓存判空面对的是无写入者状态。
+    # 无残留（对照族、首格）零开销跳过。
+    if _agentd_has_residual_state():
+        print("[cold_reset] 检测到残留订单/块缓存，先完整复位 agentd", flush=True)
+        reset_traincache_agent()
     _clear_node_caches("cold_reset")
     time.sleep(5)
 
@@ -2786,6 +2802,34 @@ def parse_step_records(logs, tag="[STEP]"):
     return records
 
 
+def capture_pod_failure_artifacts(out_csv, group, rep, pod_name, ns, logs):
+    """Pod 失败/超时时抓现场：容器退出码与 previous 日志落到 runs 目录。
+
+    2026-11-11 rho4-100 rep0 的教训：容器反复重启且 `kubectl logs` 为空，
+    退出码没人记，Pod 一删根因就没了。previous 日志与 restartCount/
+    lastState.terminated 是重启类失败仅有的现场，必须在删 Pod 前抓。
+    """
+    rc, state, _err = kubectl(
+        ["get", "pod", pod_name, "-o", "jsonpath={range .status.containerStatuses[*]}"
+         "{.name} restarts={.restartCount} "
+         "lastExit={.lastState.terminated.exitCode} "
+         "lastReason={.lastState.terminated.reason}{end}"],
+        namespace=ns, timeout=30)
+    rc2, prev, _err2 = kubectl(
+        ["logs", pod_name, "--previous", "--tail=500"], namespace=ns, timeout=30)
+    text = (f"container_state: {state.strip() or '(抓不到)'}\n\n"
+            f"--- tail logs ---\n{logs}\n\n--- previous logs ---\n"
+            f"{prev if rc2 == 0 else f'(logs --previous rc={rc2})'}\n")
+    print(f"[debug] container 状态: {state.strip() or '(抓不到)'}", flush=True)
+    try:
+        run_dir = out_csv.parent / "runs" / f"{group}-r{rep:02d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "pod_failed.log").write_text(text, encoding="utf-8")
+        print(f"[debug] 失败现场已落 {run_dir / 'pod_failed.log'}", flush=True)
+    except OSError as exc:
+        print(f"[debug] WARNING: 失败现场落盘失败: {exc}", flush=True)
+
+
 def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
     """把逐步 stall 与切换事件写成 recovery.py 能直接吃的 run 目录。
 
@@ -3358,6 +3402,13 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                                    "--sort-by=.lastTimestamp"], namespace=ns, timeout=30)
             print(f"[debug] events:\n{evts[:1500]}")
             print(f"[debug] logs:\n{logs[:1500]}")
+            capture_pod_failure_artifacts(out_csv, group, rep, pod_name, ns, logs)
+            # 失败的测量 Pod 必须在这里删掉：下一 rep 的顺序是先 agent_reset 后
+            # rep_reset（删测量 Pod），活着的 reader 会让 agent_reset 判"存在
+            # reader"中止整组，残留订单再污染后续所有格的 cold_reset 判空
+            # （2026-11-11 rho4-100 的连锁失败）。
+            kubectl(["delete", "pod", pod_name, "--force", "--grace-period=0"],
+                    namespace=ns, timeout=60)
             results.append({"group": group, "rep": rep, "void": True,
                             "reason": "pod_failed", "warmup_seconds": warmup_seconds,
                             "trace_sha256": trace_sha,
