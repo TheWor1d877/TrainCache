@@ -1399,9 +1399,17 @@ def read_shard(shard, phase):
         with counter_lock:
             read_bytes_phase[phase] = read_bytes_phase.get(phase, 0) + size
         blk = os.path.join(CACHE_ROOT, fp[:2], fp + ".blk")
-        # 命中:直接读本地缓存
+        # 命中:直接读本地缓存。块可能在 exists 与 open 之间被 agentd 淘汰
+        # (rho>=4 缓存小于数据集、淘汰活跃),FileNotFoundError 按缺块处理,
+        # 不让它冒泡成 read_error 作废整轮(2026-11-10 晚 4 次 read_error 的根因)。
+        got = None
         if os.path.exists(blk):
-            nbytes += read_file_bytes(blk)
+            try:
+                got = read_file_bytes(blk)
+            except FileNotFoundError:
+                got = None
+        if got is not None:
+            nbytes += got
             n_hits += 1
             _hook_advance(name, chunk_idx)
         else:
@@ -1415,8 +1423,14 @@ def read_shard(shard, phase):
             deadline = time.perf_counter() + 180
             while not os.path.exists(blk) and time.perf_counter() < deadline:
                 time.sleep(0.025)
+            got2 = None
             if os.path.exists(blk):
-                nbytes += read_file_bytes(blk)
+                try:
+                    got2 = read_file_bytes(blk)
+                except FileNotFoundError:
+                    got2 = None
+            if got2 is not None:
+                nbytes += got2
                 n_hits += 1
                 _hook_advance(name, chunk_idx)
             else:
@@ -2065,6 +2079,10 @@ def create_measure_pod(group, run_id, trace_json):
         "image": image,
         "imagePullPolicy": "IfNotPresent",
         "env": [
+            # 测量体日志即时流式输出:崩溃 traceback 与库输出不因块缓冲丢失,
+            # Pod 失败时 kubectl logs/--previous 才抓得到现场(脚本自身 print 已 flush,
+            # 这是兜底)。
+            {"name": "PYTHONUNBUFFERED", "value": "1"},
             # 任务清单 #6:统一下发 t_submit,删掉 juicefs-warm 的 "0" 特判
             {"name": "TRAINCACHE_JOB_CREATED_AT", "value": str(t_submit)},
             {"name": "TRAINCACHE_GROUP", "value": group},

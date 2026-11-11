@@ -323,14 +323,26 @@ def cmd_family(family: str, args) -> None:
     picked = select(load_conds(conds_dir), family, args)
     if not picked:
         raise SystemExit(f"{family}: 没有匹配的格子（conds-dir={conds_dir}）")
+    force = getattr(args, "force", False)
     if args.dry_run:
         for cond in picked:
-            print(plan_line(cond, reps_of(cond, args.reps)))
+            reps = reps_of(cond, args.reps)
+            tag = "  （已完成，将跳过）" if not force and grid_done(cond, reps) else ""
+            print(plan_line(cond, reps) + tag)
         return
     failed = []
+    skipped = 0
     for cond in picked:
-        if not execute(cond, reps_of(cond, args.reps), conds_dir):
+        reps = reps_of(cond, args.reps)
+        if not force and grid_done(cond, reps):
+            print(f"[skip] {cond['family']}/{cond['name']} 有效采样≥{reps}，已完成",
+                  flush=True)
+            skipped += 1
+            continue
+        if not execute(cond, reps, conds_dir):
             failed.append(cond["name"])
+    if skipped:
+        print(f"[skip] 共跳过 {skipped} 个已完成格（--force 可强制重跑）", flush=True)
     if failed:
         raise SystemExit(f"失败 {len(failed)} 格: {' '.join(failed)}")
 
@@ -347,6 +359,8 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
                         help="覆盖 COND 的 sampling.reps（缺省用 COND 值）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印计划表，不拉子进程、不碰集群")
+    parser.add_argument("--force", action="store_true",
+                        help="已完成格也重跑（默认按 summary.csv 有效行数跳过）")
     parser.add_argument("--conds-dir", type=Path, default=None,
                         help="COND 目录（默认 bench/experiments/conds）")
 
