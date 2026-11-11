@@ -32,11 +32,13 @@
 
 - 测量用的控制面镜像版本由 `controller/deploy` 清单里的发布摘要钉住（本轮钉到 v0.8.0 的六个镜像，含 checkpoint 侧车）。`bench/scripts/ctrl_up.sh` 的镜像源码指纹门禁与放行开关 `TRAINCACHE_ALLOW_STALE_IMAGE` 删除：热集群里每次跑分都要重建五个 dev 镜像并重导，而跑分真正要的是「跑的是哪个发布版」，摘要已经写明。
 - traincache 组逐轮复位的顺序：agentd 复位（挂起、清订单与块缓存、恢复）挪到清节点缓存之前，清节点缓存改成最多 3 轮「删—判空—等 10s」，并在判空通过后等 5s 复查一次。上一轮在途的预取会在清空之后继续落盘，原判空把这种落盘当成冷态不成立，整格直接作废；只加重试会在持续写入的间隙里侥幸通过，冷读口径会假，所以补复查。
+- `python3 bench/run.py <族>` 默认跳过已完成格子：按格子 `summary.csv` 的有效行数（`void` 列非真）≥ COND 的 `sampling.reps` 判完成，`--dry-run` 在完成格后标「已完成，将跳过」。新增 `--force` 让已完成格也重跑。此前 `cmd_family` 逐格执行不判完成，补跑部分格要靠 `--rho/--rate` 逐格手筛，78 个 COND 逐格手敲不现实。装置见 `bench/run.py` 的 `cmd_family` 与 `grid_done`。
 
 ### Fixed
 
 - 组入口 `cold_reset` 清缓存前补完整复位：删除训练 Pod 后检测各 agent 节点的订单 ring 与块缓存，有残留先做 agentd 复位（挂起→清订单与块缓存→恢复）再清节点缓存。2026-11-11 早上 rho4-100 整格失败后，残留订单让 agentd 回放旧订单持续预取落盘，后面 5 个格的 `cold_reset` 判空全部失败；逐轮复位只覆盖 rep 循环，组入口这一处此前没有保护。
-- 测量 Pod 失败/超时时先抓现场再删 Pod：容器重启次数、`lastState.terminated` 退出码与 `logs --previous` 落到 `<格>/runs/<组>-r<轮>/pod_failed.log`。此前失败分支只记 void 行，Pod 留到下一轮 agent_reset 才被间接发现，重启类失败（容器反复重启且日志为空）的根因随 Pod 删除一起消失。
+- 测量 Pod 失败/超时时先抓现场再删 Pod：容器重启次数、`lastState.terminated` 退出码与 `logs --previous` 落到 `<格>/runs/<组>-r<轮>/pod_failed.log`。此前失败分支只记 void 行，Pod 留到下一轮 agent_reset 才被间接发现，重启类失败（容器反复重启且日志为空）的根因随 Pod 删除一起消失。测量 Pod 同时下发 `PYTHONUNBUFFERED=1`，崩溃 traceback 与库输出不因块缓冲丢失，`logs --previous` 才抓得到。
+- traincache 组读路径的淘汰竞态：块在 `os.path.exists` 判在位与 `open` 读取之间被 agentd 淘汰时，`read_file_bytes` 抛 `FileNotFoundError`，原先直接冒泡成 `read_error` 作废整轮。rho≥4 缓存小于数据集、淘汰活跃，2026-11-10 晚 4 次 `read_error` 作废（分布在 100/300/1000mbit 三档）都由此触发。现在两处读块都捕获 `FileNotFoundError` 按缺块处理，走等待预取与超时回源兜底，字节账与 demand_miss 口径不变；其它读异常仍照旧冒泡。装置见 `bench/compare/run_bench.py` 的 `read_shard`。
 
 - fluid 组起组竞态：Dataset 标成 Bound 早于 PVC 建出与 fuse Pod 就绪，首格首跑的测量 Pod 一建出来就挂卷失败。现在先给 worker 节点预打 fluid 标签让 fuse 起起来，再等 PVC 与 fuse 就绪。
 - fluid 组拆组静默失败：清 MinIO 桶里 `fluid-demo/` 前缀用的控制面凭证没有删权，报错被吞掉，桶里留下上一轮的 4 GB 数据，下次 format 报存储非空、整组起不来。改用 MinIO Pod 内的 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` 清这一处前缀。
