@@ -50,7 +50,7 @@
 位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，21 个配置项。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`。
 
 - `cacheCapacityBytes`，环境变量 `TRAINCACHE_CACHE_CAPACITY_BYTES`，默认 `"0"`，Agent 与 manager 读取，改完重启 Agent 与 manager。
-  本地缓存字节上限，必须 `>=0`。`0` 关闭字节维度，只按磁盘水位（80% 触发、90% 紧急）淘汰；填字节数（1GiB = `"1073741824"`）后，字节占用先到阈值就先淘汰。manager 只用它算 `K_cache`，算式是 `floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`。
+  本地缓存字节上限，必须 `>=0`。`0` 关闭字节维度，只按磁盘水位（80% 触发、90% 紧急）淘汰；填字节数（1GiB = `"1073741824"`）后，字节占用先到阈值就先淘汰。manager 只用它算 `K_cache`，算式是 `floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`。Agent 还用它做订单预取降级判据：容量大于 0 且订单数据集总字节超过容量时，该订单的首批与邻域预取都不入队，只保留按需回源。
 - `prefetchLookahead`，环境变量 `TRAINCACHE_PREFETCH_LOOKAHEAD`，默认 `"16"`，Agent 读取，改完重启 Agent。
   节点侧游标之后持续预取的块数。调大提前量，预热流量和缓存占用随之增加。启动窗口块数落在 WarmupTask 的 `podDetails[].k`，算式是 `clamp(min(W_i, K_window, K_cache), 1, W_i)`。
 - `evictPolicy`，环境变量 `TRAINCACHE_EVICT_POLICY`，默认 `"heat"`，Agent 读取，改完重启 Agent。

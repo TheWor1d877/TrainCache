@@ -184,8 +184,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// M9 阶段跟踪器(窗口 K 取 lookahead)。
 	ag.phase = newPhaseTracker(lookahead)
 	ag.Prefetch = NewPrefetchManager(obj, cs, ag.Fetcher, ag.Metrics)
-	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen) // D49:各 dataset 预取器的本地命中/读回打开
-	ag.Prefetch.SetLogAggregator(ag.LogAgg)   // 8.1 §4.2:逐块下载计入 60s 汇总
+	ag.Prefetch.SetCacheCapacityBytes(cfg.CacheCapacityBytes) // 订单预取降级判据(字节维度)
+	ag.Prefetch.SetSelfOpenGuard(ag.selfOpen)                 // D49:各 dataset 预取器的本地命中/读回打开
+	ag.Prefetch.SetLogAggregator(ag.LogAgg)                   // 8.1 §4.2:逐块下载计入 60s 汇总
 	// R1/R2(设计《快照与回收》):快照跟随周期 + 读者登记器(grace = 2*刷新周期,
 	// 与 core ReaderGrace 默认口径一致)。Follow/心跳由 StartBackground 注入 ctx 后启动。
 	interval := cfg.indexRefreshInterval()
@@ -306,6 +307,11 @@ type PrefetchManager struct {
 	baseCtx context.Context // 预取器调度生命周期(Close 取消)
 	cancel  context.CancelFunc
 
+	// cacheCapacityBytes 是节点缓存容量字节维度上限(TRAINCACHE_CACHE_CAPACITY_BYTES;
+	// 装配期经 SetCacheCapacityBytes 注入,m.mu 保护)。ForOrder 用它与订单数据集总字节
+	// 比较,决定是否把该订单预取降级为按需;0 = 字节维度未启用,不降级。
+	cacheCapacityBytes int64
+
 	mu      sync.Mutex
 	bundles map[string]*datasetBundle
 
@@ -400,6 +406,14 @@ func (m *PrefetchManager) SetSelfOpenGuard(g *prefetch.SelfOpenGuard) {
 func (m *PrefetchManager) SetLogAggregator(a *logagg.Aggregator) {
 	m.mu.Lock()
 	m.logAgg = a
+	m.mu.Unlock()
+}
+
+// SetCacheCapacityBytes 注入缓存容量字节上限(TRAINCACHE_CACHE_CAPACITY_BYTES;装配期
+// 调用一次)。ForOrder 按它判断订单是否降级为按需预取;0 = 字节维度未启用。
+func (m *PrefetchManager) SetCacheCapacityBytes(n int64) {
+	m.mu.Lock()
+	m.cacheCapacityBytes = n
 	m.mu.Unlock()
 }
 
@@ -842,10 +856,11 @@ func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 
 // ForOrder 是订单入口(发现转发 goroutine 内串行调用;ctx = 发现循环 ctx):取/建 bundle
 // (订单前缀 hint 随构造装入,先于 Follow 首轮检查,D60)→ 只加载订单 chunks 涉及的前缀
-// 分片(LoadPrefixes,不整包下载;经 measureLoadPrefixes 打索引线指标)→ 首个订单启动
-// 调度(Start;之后订单只走 OnStageSwitch)→ OnStageSwitch 安装新阶段(旧阶段降级/在途/
-// ETA 均在预取器内部处理,svc 只记日志)→ 新订单 t_touch 刷新(设计《回收与磁盘淘汰》任务 4;仅订单成功
-// 安装后)。返回索引加载或阶段切换错误(调用方记日志、不中断发现循环)。
+// 分片(LoadPrefixes,不整包下载;经 measureLoadPrefixes 打索引线指标)→ 缓存压力判据
+// (容量 > 0 且数据集总字节超容量时降级为按需预取)→ 首个订单启动调度(Start;之后订单只走
+// OnStageSwitch)→ OnStageSwitch 安装新阶段(旧阶段降级/在途/ETA 均在预取器内部处理,svc 只记
+// 日志)→ 新订单 t_touch 刷新(设计《回收与磁盘淘汰》任务 4;仅订单成功安装后)。返回索引加载或
+// 阶段切换错误(调用方记日志、不中断发现循环)。
 func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o ordersource.ConsumeOrder) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -858,6 +873,27 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	if err := m.measureLoadPrefixes(ctx, o.Dataset, b.catalog, prefixes); err != nil {
 		return err
 	}
+
+	// 缓存压力判据:容量 > 0 且订单数据集总字节超过容量时,该订单预取降级为按需——
+	// 首批 K 置 0,预取器同时关闭邻域窗口;read_miss 钩子触发的按需回源不受影响。
+	// 容量为 0 表示字节维度未启用,维持现状。
+	m.mu.Lock()
+	capacity := m.cacheCapacityBytes
+	m.mu.Unlock()
+	demandOnly := false
+	if capacity > 0 {
+		if total := orderTotalBytes(ctx, b.catalog, o.Chunks); total > capacity {
+			demandOnly = true
+			o.PrefetchChunks = 0
+			slog.Info("orders: 缓存容量小于数据集总字节,预取降级为按需回源",
+				"dataset", o.Dataset,
+				"stage_id", o.StageID,
+				"dataset_bytes", total,
+				"capacity_bytes", capacity,
+			)
+		}
+	}
+	b.prefetcher.SetDemandOnly(demandOnly)
 
 	// M9:启动/切换窗口 K 取本订单的 ConsumeOrder.PrefetchChunks(与预取器同口径
 	// 截断到订单块数),按 dataset 记录;未注入 K 的 dataset 回退缺省 lookahead。
@@ -906,6 +942,26 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 		"eta_seconds", eta.Seconds(),
 	)
 	return nil
+}
+
+// orderTotalBytes 累加订单 chunks 的数据集总字节:ref 去重后逐个索引 Lookup 取
+// Entry.Size 求和。Lookup 未命中/出错的块跳过——低估只会漏判降级,不会把容量
+// 足够的订单误降级。
+func orderTotalBytes(ctx context.Context, cat *index.Catalog, chunks []ordersource.ChunkRef) int64 {
+	seen := make(map[ordersource.ChunkRef]bool, len(chunks))
+	var total int64
+	for _, ref := range chunks {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		e, ok, err := cat.Lookup(ctx, ref.Path, ref.Chunk)
+		if err != nil || !ok {
+			continue
+		}
+		total += e.Size
+	}
+	return total
 }
 
 // PreheatScope 结一个显式预热的下载作用域(D62):派生自预取管理器自身的 ctx,所以 Agent
