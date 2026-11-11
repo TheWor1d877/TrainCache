@@ -130,6 +130,10 @@ D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
   COMPARE_SWITCH_WINDOW_S epoch 切换重预取的归因窗口（默认 60s）
   PROMETHEUS_URL         非空则 fetch 对账走 Prometheus，否则 kubectl raw 抓 agentd
   POD_TIMEOUT            单轮 Pod 超时（默认 1800s）
+  TRAINCACHE_STARTUP_WATCHDOG_S  启动看门狗（默认 120s，0 关闭）：Running 后
+                         无 [calib] 判启动挂起提前失败
+  TRAINCACHE_STALL_WATCHDOG_S  无进展看门狗（默认 180s，0 关闭）：[calib] 后
+                         日志与 agent 回源字节双判据均无进展判中途冻结提前失败
   TRAINCACHE_GATEWAY_CACHE  网关磁盘缓存开关（D23）："1" 开、"0" 关，透传到
                          up.sh → ctrl_up.sh，patch 进 ConfigMap
                          traincache-config 的 gatewayCache（"1"→true、
@@ -409,6 +413,12 @@ POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
 # POD_TIMEOUT（30min）才失败；健康 Pod 1s 内就出 [calib]，120s 窗口不会误伤。
 # 设 0 关闭。环境变量 TRAINCACHE_STARTUP_WATCHDOG_S。
 STARTUP_WATCHDOG_S = float(os.environ.get("TRAINCACHE_STARTUP_WATCHDOG_S", "120"))
+# 中途冻结看门狗：[calib] 之后进程被节点运行时冻住时，启动看门狗已撤防，只能干等
+# POD_TIMEOUT（30min）。这里按「日志长度」与「agent 回源字节」双判据检测进展：
+# 健康 Pod 长读等待（至 READ_TIMEOUT_S）可能无新日志、纯命中窗口回源字节可能停涨，
+# 单判据都会误杀；两路同时静默 STALL_WATCHDOG_S 才判冻结。只在有第二判据
+# （traincache 组态的 fetch 采样）时启用。设 0 关闭。环境变量 TRAINCACHE_STALL_WATCHDOG_S。
+STALL_WATCHDOG_S = float(os.environ.get("TRAINCACHE_STALL_WATCHDOG_S", "180"))
 # 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
 # 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
@@ -2179,13 +2189,20 @@ def create_measure_pod(group, run_id, trace_json):
     return pod_name, t_submit
 
 
-def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5):
+def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5,
+                      progress_probe=None):
     # 超时闸门用单调钟：wall clock 被 NTP 校正拽一下会让"等 Pod 完成"提前结束
     # （误判失败）或拖长。它不是测量量，但同样不能跳。
     start = time.monotonic()
     last_tick = 0.0
     t_running = None
     calib_seen = False
+    # 无进展看门狗的状态：last_progress 只在两路判据之一动起来时刷新。
+    # last_log_len/last_probe 记上一次读到的值；读失败（None）不覆盖旧值，
+    # 路径恢复后仍能与冻结前的值比出变化。
+    last_progress = None
+    last_log_len = None
+    last_probe = None
     while time.monotonic() - start < timeout:
         # 相位与日志都经 kubelet/API 路径，节点容器运行时冻结时会挂死或返回空。
         # 挂死抛的 TimeoutExpired 不能冒泡（caller 无 try/except，会整组崩）；返回空
@@ -2216,10 +2233,39 @@ def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5)
                 logs = ""
             if "[calib]" in logs:
                 calib_seen = True
+                last_progress = time.monotonic()
             elif time.monotonic() - t_running >= STARTUP_WATCHDOG_S:
                 print(f"[watchdog] {pod_name} Running {STARTUP_WATCHDOG_S:.0f}s 仍无 "
                       f"[calib]，判启动挂起，提前失败抓现场", flush=True)
                 return False, logs
+        # 无进展看门狗：[calib] 之后启动看门狗撤防，中途冻结改由这里接。日志长度
+        # 与 agent 回源字节任一在动就算有进展；两路同时静默 STALL_WATCHDOG_S 判冻结。
+        # 只在调用方给了第二判据（traincache 组态）时启用：没有回源采样时单靠日志
+        # 分不清「进程冻住」与「日志路径坏了但进程在跑」，宁可不判。
+        if STALL_WATCHDOG_S > 0 and calib_seen and progress_probe is not None:
+            logs_now = ""
+            try:
+                rc, logs_now, _ = kubectl(["logs", pod_name], namespace=ns, timeout=30)
+            except (subprocess.TimeoutExpired, OSError):
+                logs_now = ""
+            log_len = len(logs_now) if logs_now else None
+            try:
+                probe = progress_probe()
+            except Exception:
+                probe = None
+            now = time.monotonic()
+            if log_len is not None and log_len != last_log_len:
+                last_progress = now
+            if probe is not None and probe != last_probe:
+                last_progress = now
+            if log_len is not None:
+                last_log_len = log_len
+            if probe is not None:
+                last_probe = probe
+            if now - last_progress >= STALL_WATCHDOG_S:
+                print(f"[watchdog] {pod_name} {STALL_WATCHDOG_S:.0f}s 日志与回源字节均无"
+                      f"进展，判中途冻结，提前失败抓现场", flush=True)
+                return False, logs_now
         if on_tick is not None and time.monotonic() - last_tick >= tick_s:
             last_tick = time.monotonic()
             try:
@@ -3426,8 +3472,15 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 if ts is not None:
                     ready_seen["ts"] = ts
 
+        # 无进展看门狗的第二判据：复用采样线程已采的 fetch 快照，取最新回源字节
+        # 总量。冻结节点上采样读不到新值，计数停涨；不额外发请求。非 traincache
+        # 组态没有 fetch 采样，不传判据，看门狗不启用。
+        def _progress_probe():
+            return samples[-1]["total"] if samples else None
+
         success, logs = wait_pod_complete(ns, pod_name, timeout=pod_timeout_s(),
-                                          on_tick=_tick, tick_s=5)
+                                          on_tick=_tick, tick_s=5,
+                                          progress_probe=_progress_probe if is_tc else None)
         stop_sample.set()
         if sample_thread is not None:
             sample_thread.join(timeout=SAMPLE_JOIN_TIMEOUT_S)
