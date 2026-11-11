@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- 组入口 `cold_reset` 清缓存前补完整复位：删除训练 Pod 后检测各 agent 节点的订单 ring 与块缓存，有残留先做 agentd 复位（挂起→清订单与块缓存→恢复）再清节点缓存。2026-11-11 早上 rho4-100 整格失败后，残留订单让 agentd 回放旧订单持续预取落盘，后面 5 个格的 `cold_reset` 判空全部失败；逐轮复位只覆盖 rep 循环，组入口这一处此前没有保护。
+- 测量 Pod 失败/超时时先抓现场再删 Pod：容器重启次数、`lastState.terminated` 退出码与 `logs --previous` 落到 `<格>/runs/<组>-r<轮>/pod_failed.log`。此前失败分支只记 void 行，Pod 留到下一轮 agent_reset 才被间接发现，重启类失败（容器反复重启且日志为空）的根因随 Pod 删除一起消失。
+
 - fluid 组起组竞态：Dataset 标成 Bound 早于 PVC 建出与 fuse Pod 就绪，首格首跑的测量 Pod 一建出来就挂卷失败。现在先给 worker 节点预打 fluid 标签让 fuse 起起来，再等 PVC 与 fuse 就绪。
 - fluid 组拆组静默失败：清 MinIO 桶里 `fluid-demo/` 前缀用的控制面凭证没有删权，报错被吞掉，桶里留下上一轮的 4 GB 数据，下次 format 报存储非空、整组起不来。改用 MinIO Pod 内的 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` 清这一处前缀。
 
