@@ -404,6 +404,11 @@ AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
 AGENTD_CLEAN_TIMEOUT_S = 60  # 等 degraded=0 且 fetch 计数停增
 
 POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
+# 启动看门狗：测量 Pod Running 后这么久还没打出 [calib] 就判启动挂起、提前失败。
+# 节点容器运行时层间歇冻结时容器 Started 但进程不动、日志全空，原先要等满
+# POD_TIMEOUT（30min）才失败；健康 Pod 1s 内就出 [calib]，120s 窗口不会误伤。
+# 设 0 关闭。环境变量 TRAINCACHE_STARTUP_WATCHDOG_S。
+STARTUP_WATCHDOG_S = float(os.environ.get("TRAINCACHE_STARTUP_WATCHDOG_S", "120"))
 # 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
 # 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
@@ -2179,12 +2184,28 @@ def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5)
     # （误判失败）或拖长。它不是测量量，但同样不能跳。
     start = time.monotonic()
     last_tick = 0.0
+    t_running = None
+    calib_seen = False
     while time.monotonic() - start < timeout:
         rc, out, _ = kubectl(["get", "pod", pod_name, "-o", "jsonpath={.status.phase}"], namespace=ns)
         phase = out.strip()
         if phase in ("Succeeded", "Failed"):
             rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
             return phase == "Succeeded", logs
+        # 启动看门狗：Running 后 STARTUP_WATCHDOG_S 内没出 [calib] 判启动挂起，
+        # 提前失败走 pod_failed 分支抓现场删 Pod，不等满 POD_TIMEOUT。[calib] 是
+        # 测量体第一行输出，健康 Pod 1s 内就有；一旦出现就不再查日志。
+        if STARTUP_WATCHDOG_S > 0 and phase == "Running" and not calib_seen:
+            now = time.monotonic()
+            if t_running is None:
+                t_running = now
+            rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=30)
+            if "[calib]" in logs:
+                calib_seen = True
+            elif now - t_running >= STARTUP_WATCHDOG_S:
+                print(f"[watchdog] {pod_name} Running {STARTUP_WATCHDOG_S:.0f}s 仍无 "
+                      f"[calib]，判启动挂起，提前失败抓现场", flush=True)
+                return False, logs
         if on_tick is not None and time.monotonic() - last_tick >= tick_s:
             last_tick = time.monotonic()
             try:
