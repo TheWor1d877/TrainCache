@@ -398,7 +398,7 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
                     if ts is not None:
                         ready[n] = ts
             ok, logs = rb.wait_pod_complete(ns, name,
-                                            timeout=rb.pod_timeout_s(),
+                                            timeout=rb.pod_timeout_s(group),
                                             on_tick=_tick, tick_s=5)
             logs_by_pod[name] = logs
             success = success and ok

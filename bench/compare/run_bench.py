@@ -129,7 +129,10 @@ D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
                          6.15 异步预取参数（200/2/2/300）
   COMPARE_SWITCH_WINDOW_S epoch 切换重预取的归因窗口（默认 60s）
   PROMETHEUS_URL         非空则 fetch 对账走 Prometheus，否则 kubectl raw 抓 agentd
-  POD_TIMEOUT            单轮 Pod 超时（默认 1800s）
+  POD_TIMEOUT            单轮 Pod 超时（默认 1800s）；显式给值时优先于一切推导闸门
+  TRAINCACHE_TIMEOUT_HEADROOM  traincache 组态（traincache-cold/warm）的闸门余量
+                         （默认 4）：闸门取 max(POD_TIMEOUT, 字节地板×余量)，
+                         与 TILT_TIMEOUT_HEADROOM 同款口径
   TRAINCACHE_STARTUP_WATCHDOG_S  启动看门狗（默认 120s，0 关闭）：Running 后
                          无 [calib] 判启动挂起提前失败
   TRAINCACHE_STALL_WATCHDOG_S  无进展看门狗（默认 180s，0 关闭）：[calib] 后
@@ -426,6 +429,11 @@ TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
 # 2026-11-08 网关族 G0 臂实测 2100 s（地板 1374 s），1800 s 的常量闸门把还在
 # 正常推进的 run 截成了 `pod_failed`。
 REPLICATION_TIMEOUT_HEADROOM = float(os.environ.get("REPLICATION_TIMEOUT_HEADROOM", "2"))
+# traincache 组态（traincache-cold/warm）的闸门余量：低带宽档字节地板本身就超
+# 1800 s 常量。2026-11-11 traincache-cold rho8-100 实测 epoch 时长 582/647 s，
+# 3 epoch 全程约 1990 s（地板 1030 s），常量闸门把还在正常推进的 run 截成
+# `pod_failed`，曾被误判为节点冻结。4 倍覆盖预取放大还有余（最慢实测约 1.94×地板）。
+TRAINCACHE_TIMEOUT_HEADROOM = float(os.environ.get("TRAINCACHE_TIMEOUT_HEADROOM", "4"))
 
 
 def _byte_floor_s(copies: int = 1) -> float | None:
@@ -455,19 +463,23 @@ def _replication_copies() -> int:
     return 1
 
 
-def pod_timeout_s() -> int:
-    """等测量 Pod 结束的闸门（秒）。
+def pod_timeout_s(group: str = "") -> int:
+    """等测量 Pod 结束的闸门（秒）。`group` 由调用方传当前组态名。
 
-    三个来源，优先级从高到低：
+    来源优先级从高到低：
     1. 显式给过 `POD_TIMEOUT` 时以显式值为准（冒烟场景）。
     2. 倾斜组态：Job B 每 epoch 全量扫一遍，缓存只装得下 1/ratio 的数据，
        墙钟由字节地板决定，闸门取地板 × 余量。@100 mbit、3 epoch × 8 GiB 的
        地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run 截成
        `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
-    3. 其余组态沿用 `POD_TIMEOUT` 常量。复制读的组态是例外：4 个读端读同一批
-       分片，源站要出 4 份拷贝，地板随读端数放大，1800 s 常量会把还在正常推进
-       的 run 截成 `pod_failed`——2026-11-08 网关族 G0 臂实测 2100 s（地板
-       1374 s），就是这么废掉的。
+    3. 复制读的组态：4 个读端读同一批分片，源站要出 4 份拷贝，地板随读端数
+       放大，1800 s 常量会把还在正常推进的 run 截成 `pod_failed`——
+       2026-11-08 网关族 G0 臂实测 2100 s（地板 1374 s），就是这么废掉的。
+    4. traincache 组态（traincache-cold/warm）：低带宽档字节地板本身就超
+       1800 s 常量，闸门取 max(常量, 地板 × 余量)。rho8-100 实测全程约
+       1990 s（地板 1030 s），常量闸门把正常推进的 run 截成 `pod_failed`，
+       曾被误判为节点冻结。
+    5. 其余组态沿用 `POD_TIMEOUT` 常量。
     """
     explicit = os.environ.get("POD_TIMEOUT")
     if explicit:
@@ -479,6 +491,11 @@ def pod_timeout_s() -> int:
         return int(floor_s * TILT_TIMEOUT_HEADROOM)
     copies = _replication_copies()
     if copies <= 1:
+        if group.startswith("traincache"):
+            floor_s = _byte_floor_s()
+            if floor_s is not None:
+                return int(max(POD_TIMEOUT,
+                               floor_s * TRAINCACHE_TIMEOUT_HEADROOM))
         return POD_TIMEOUT
     floor_s = _byte_floor_s(copies)
     if floor_s is None:
@@ -2273,7 +2290,15 @@ def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5,
             except Exception as exc:  # 采样失败不影响跑分本身
                 print(f"[tick] 采样失败: {exc}", flush=True)
         time.sleep(5)
-    return False, ""
+    # 外层超时也要真读一次日志再返回：此前这里直接返回空串，失败分支与
+    # capture_pod_failure_artifacts 把空串原样落盘，「失败时日志全空」是这条
+    # 路径的产物，不是进程冻结的证据（rho8-100 的诊断曾被它误导）。读不到
+    # （超时/路径坏）才返回空串。Succeeded/Failed 与看门狗的返回路径不动。
+    try:
+        rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        logs = ""
+    return False, logs
 
 
 def pod_ready_epoch(ns, pod_name):
@@ -3478,7 +3503,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         def _progress_probe():
             return samples[-1]["total"] if samples else None
 
-        success, logs = wait_pod_complete(ns, pod_name, timeout=pod_timeout_s(),
+        success, logs = wait_pod_complete(ns, pod_name, timeout=pod_timeout_s(group),
                                           on_tick=_tick, tick_s=5,
                                           progress_probe=_progress_probe if is_tc else None)
         stop_sample.set()
@@ -4466,6 +4491,55 @@ def selftest():
           f"{rep_floor:.0f}s × {REPLICATION_TIMEOUT_HEADROOM:.0f} = "
           f"{int(max(POD_TIMEOUT, rep_floor * REPLICATION_TIMEOUT_HEADROOM))}s；"
           f"网关合并失效那条路径同样留这份闸门，分片读回到 {POD_TIMEOUT}s")
+
+    # ---- 12c) traincache 组态的 Pod 闸门按字节地板推导（rho8-100 被 1800s 截断）----
+    saved_tc = {k: globals()[k] for k in ("TILT", "TC_RATE_EFF", "READERS",
+                                          "ACCESS_PATTERN", "N_TARS")}
+    saved_tc_env = os.environ.get("POD_TIMEOUT")
+    os.environ.pop("POD_TIMEOUT", None)
+    try:
+        globals()["TILT"] = False
+        globals()["READERS"] = 1
+        globals()["ACCESS_PATTERN"] = "single"
+        globals()["N_TARS"] = 16         # 对照族固定 4 GiB 数据集
+        # 慢格：100mbit、3 epoch × 4 GiB，地板 1030s，实测全程约 1990s
+        globals()["TC_RATE_EFF"] = "100mbit"
+        tc_floor = _byte_floor_s()
+        want = int(max(POD_TIMEOUT, tc_floor * TRAINCACHE_TIMEOUT_HEADROOM))
+        for g in ("traincache-cold", "traincache-warm"):
+            if pod_timeout_s(g) != want:
+                raise AssertionError(
+                    f"自测：traincache 闸门应是 max(常量, 地板×余量)"
+                    f"（{tc_floor:.0f}s×{TRAINCACHE_TIMEOUT_HEADROOM}），"
+                    f"{g} 实得 {pod_timeout_s(g)}")
+        if want <= 1990:
+            raise AssertionError(
+                "自测：traincache 慢格闸门应高于实测全程约 1990s，"
+                "否则正常推进的 run 仍会被截成 pod_failed")
+        if pod_timeout_s("direct") != POD_TIMEOUT:
+            raise AssertionError("自测：非 traincache 组态的闸门不应受影响")
+        # 快格：1000mbit 地板×余量低于常量，闸门回到常量，行为不变
+        globals()["TC_RATE_EFF"] = "1000mbit"
+        if pod_timeout_s("traincache-cold") != POD_TIMEOUT:
+            raise AssertionError(
+                f"自测：快格地板×余量低于常量时闸门应保持 POD_TIMEOUT="
+                f"{POD_TIMEOUT}，实得 {pod_timeout_s('traincache-cold')}")
+        # 显式 POD_TIMEOUT 仍最优先
+        os.environ["POD_TIMEOUT"] = "600"
+        globals()["TC_RATE_EFF"] = "100mbit"
+        if pod_timeout_s("traincache-cold") != 600:
+            raise AssertionError("自测：显式给过 POD_TIMEOUT 应以显式值为准")
+    finally:
+        for key, value in saved_tc.items():
+            globals()[key] = value
+        if saved_tc_env is None:
+            os.environ.pop("POD_TIMEOUT", None)
+        else:
+            os.environ["POD_TIMEOUT"] = saved_tc_env
+    print(f"[selftest] 12c) traincache 闸门：100mbit 慢格地板 {tc_floor:.0f}s × "
+          f"{TRAINCACHE_TIMEOUT_HEADROOM:.0f} = {want}s（> 实测全程约 1990s），"
+          f"1000mbit 快格回到 {POD_TIMEOUT}s，显式 POD_TIMEOUT 优先，"
+          f"非 traincache 组态不受影响")
 
     # ---- 13) D23/M5 网关磁盘缓存开关：新列、取值映射、环境变量与透传 ----
     if "gateway_cache" not in CSV_FIELDNAMES:
