@@ -2187,22 +2187,36 @@ def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5)
     t_running = None
     calib_seen = False
     while time.monotonic() - start < timeout:
-        rc, out, _ = kubectl(["get", "pod", pod_name, "-o", "jsonpath={.status.phase}"], namespace=ns)
-        phase = out.strip()
+        # 相位与日志都经 kubelet/API 路径，节点容器运行时冻结时会挂死或返回空。
+        # 挂死抛的 TimeoutExpired 不能冒泡（caller 无 try/except，会整组崩）；返回空
+        # 也不能让看门狗静默跳过。两路都包起来，看门狗计时不依赖这条路径可用。
+        try:
+            rc, out, _ = kubectl(["get", "pod", pod_name, "-o", "jsonpath={.status.phase}"],
+                                 namespace=ns, timeout=30)
+            phase = out.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            phase = ""
         if phase in ("Succeeded", "Failed"):
-            rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
+            try:
+                rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
+            except (subprocess.TimeoutExpired, OSError):
+                logs = ""
             return phase == "Succeeded", logs
-        # 启动看门狗：Running 后 STARTUP_WATCHDOG_S 内没出 [calib] 判启动挂起，
-        # 提前失败走 pod_failed 分支抓现场删 Pod，不等满 POD_TIMEOUT。[calib] 是
-        # 测量体第一行输出，健康 Pod 1s 内就有；一旦出现就不再查日志。
-        if STARTUP_WATCHDOG_S > 0 and phase == "Running" and not calib_seen:
-            now = time.monotonic()
-            if t_running is None:
-                t_running = now
-            rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=30)
+        if phase == "Running" and t_running is None:
+            t_running = time.monotonic()
+        # 启动看门狗：首见 Running 起计时，STARTUP_WATCHDOG_S 内没出 [calib] 判启动
+        # 挂起，提前失败走 pod_failed 分支抓现场删 Pod，不等满 POD_TIMEOUT。[calib]
+        # 是测量体第一行输出，健康 Pod 1s 内就有；一旦出现就不再查日志。计时独立于
+        # 后续相位/日志读取是否降级——冻结节点读不出日志也要能判挂起。
+        if STARTUP_WATCHDOG_S > 0 and t_running is not None and not calib_seen:
+            logs = ""
+            try:
+                rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=30)
+            except (subprocess.TimeoutExpired, OSError):
+                logs = ""
             if "[calib]" in logs:
                 calib_seen = True
-            elif now - t_running >= STARTUP_WATCHDOG_S:
+            elif time.monotonic() - t_running >= STARTUP_WATCHDOG_S:
                 print(f"[watchdog] {pod_name} Running {STARTUP_WATCHDOG_S:.0f}s 仍无 "
                       f"[calib]，判启动挂起，提前失败抓现场", flush=True)
                 return False, logs
