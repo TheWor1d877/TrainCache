@@ -23,6 +23,8 @@
 
 ## 未发布
 
+## [v0.8.2] - 2026-11-11
+
 ### Added
 
 - bench 作废哨兵 `bench/scripts/void_watch.sh <结果目录> [空闲秒数]`：结果目录里一出现新的 `void` 行就退出并打印格名与原因，不必等整组跑完；到空闲秒数没有新数据以退出码 3 退出。
@@ -36,6 +38,7 @@
 
 ### Fixed
 
+- 缓存容量小于订单数据集总字节时，该订单的预取降级为按需回源：阶段首批与邻域预取都不入队，块只在 read_miss 钩子触发按需回源或显式预热时下载。此前固定 16 块前瞻把消费前就被淘汰的块提前取回，同一块回源两次，冷态训练反而慢于直读（rho4-100 档慢 64%，issue #49）。判据随每份订单重算：`TRAINCACHE_CACHE_CAPACITY_BYTES` 大于 0 且订单块去重后的数据集总字节超过容量才降级，容量为 0 维持原预取，容量回升后的订单恢复预取。降级时 agentd 输出一条 Info 日志，带 `dataset_bytes` 与 `capacity_bytes`。裁决见 `docs/6.2-decisions.md` D69。
 - 组入口 `cold_reset` 清缓存前补完整复位：删除训练 Pod 后检测各 agent 节点的订单 ring 与块缓存，有残留先做 agentd 复位（挂起→清订单与块缓存→恢复）再清节点缓存。2026-11-11 早上 rho4-100 整格失败后，残留订单让 agentd 回放旧订单持续预取落盘，后面 5 个格的 `cold_reset` 判空全部失败；逐轮复位只覆盖 rep 循环，组入口这一处此前没有保护。
 - 测量 Pod 失败/超时时先抓现场再删 Pod：容器重启次数、`lastState.terminated` 退出码与 `logs --previous` 落到 `<格>/runs/<组>-r<轮>/pod_failed.log`。此前失败分支只记 void 行，Pod 留到下一轮 agent_reset 才被间接发现，重启类失败（容器反复重启且日志为空）的根因随 Pod 删除一起消失。测量 Pod 同时下发 `PYTHONUNBUFFERED=1`，崩溃 traceback 与库输出不因块缓冲丢失，`logs --previous` 才抓得到。
 - traincache 组读路径的淘汰竞态：块在 `os.path.exists` 判在位与 `open` 读取之间被 agentd 淘汰时，`read_file_bytes` 抛 `FileNotFoundError`，原先直接冒泡成 `read_error` 作废整轮。rho≥4 缓存小于数据集、淘汰活跃，2026-11-10 晚 4 次 `read_error` 作废（分布在 100/300/1000mbit 三档）都由此触发。现在两处读块都捕获 `FileNotFoundError` 按缺块处理，走等待预取与超时回源兜底，字节账与 demand_miss 口径不变；其它读异常仍照旧冒泡。装置见 `bench/compare/run_bench.py` 的 `read_shard`。

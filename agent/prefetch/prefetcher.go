@@ -244,14 +244,17 @@ type PersistentPrefetcher struct {
 	grab func(ctx context.Context, dataset string, ref ChunkRef) (size int64, ready bool)
 
 	mu      sync.Mutex
-	started bool                   // Start 已调用(幂等)
-	runDone chan struct{}          // 调度协程退出信号(Start 内创建;测试等待用)
-	stage   *stageState            // 当前阶段(nil = 尚无订单)
-	dataset string                 // 最近一次 OnStageSwitch 的 dataset(P0 入队快照用;mu 保护)
-	queues  [numPriorities][]*task // P0..P3 FIFO 分片数组
-	pending map[pendingKey]*task   // D45 去重表:覆盖 P0–P3 队列与运行中 task(mu 保护)
-	wake    chan struct{}          // 调度协程唤醒信号(缓冲 1,入队时非阻塞投递)
-	results chan taskResult        // 抓取结果回投调度协程通道(New 内创建,非阻塞投递)
+	started bool          // Start 已调用(幂等)
+	runDone chan struct{} // 调度协程退出信号(Start 内创建;测试等待用)
+	stage   *stageState   // 当前阶段(nil = 尚无订单)
+	dataset string        // 最近一次 OnStageSwitch 的 dataset(P0 入队快照用;mu 保护)
+	// demandOnly 置位时阶段首批(P1)与邻域窗口(P2)都不入队,只保留 P0 按需/预热
+	// 入口(svc 在缓存容量小于订单数据集总字节时置位;mu 保护)。
+	demandOnly bool
+	queues     [numPriorities][]*task // P0..P3 FIFO 分片数组
+	pending    map[pendingKey]*task   // D45 去重表:覆盖 P0–P3 队列与运行中 task(mu 保护)
+	wake       chan struct{}          // 调度协程唤醒信号(缓冲 1,入队时非阻塞投递)
+	results    chan taskResult        // 抓取结果回投调度协程通道(New 内创建,非阻塞投递)
 
 	// 吞吐 EMA(ETA 用;mu 保护):bytes/s,0 = 无历史。
 	ema   float64
@@ -372,6 +375,15 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 	return true
 }
 
+// SetDemandOnly 置位/解除按需模式:置位后 OnStageSwitch 不装阶段首批(P1),
+// ensureWindowLocked 不开放邻域窗口(P2),P0 入口(EnqueueP0Demand/EnqueueP0 系列)
+// 不受影响。svc 按订单比较缓存容量与数据集总字节后调用;并发安全。
+func (p *PersistentPrefetcher) SetDemandOnly(on bool) {
+	p.mu.Lock()
+	p.demandOnly = on
+	p.mu.Unlock()
+}
+
 // OnStageSwitch 阶段切换:旧阶段 cursor 之后未消费块降级 P3(在途请求不取消);
 // 新阶段开头 K 块(K = 新 ConsumeOrder.prefetch_chunks)作为 P1 高优先级入队,剩余块转
 // P2 邻域预取;返回"切换时刻到新窗口就绪"的预估时间,供 Agent 上报
@@ -395,7 +407,11 @@ func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOr
 	}
 
 	// 2) 新阶段:K 块以 P1 入队;K == 0 时邻域窗口立即开放(ensureWindowLocked)。
+	// 按需模式下 K 强制 0 且邻域窗口不开放,阶段切换只做降级与游标簿记。
 	st := newStage(next)
+	if p.demandOnly {
+		st.k = 0
+	}
 	p.stage = st
 	p.dataset = next.Dataset // P0 入队快照的 dataset 来源(仅更新,不影响旧阶段在途)
 	for i := 0; i < st.k; i++ {
@@ -622,11 +638,12 @@ func (p *PersistentPrefetcher) estimateETA(ctx context.Context, st *stageState, 
 
 // ensureWindowLocked 补齐当前阶段的 P2 邻域窗口(设计《预取主循环》《持续预取与阶段切换》):起点 =
 // max(已入队水位, cursor)+1,终点 = min(cursor+lookahead, len-1);阶段首批未全部处理完
-// (kDone < k)时不开放邻域(设计《持续预取与阶段切换》"K 块就绪后剩余块转 P2")。幂等:水位单调不回退,
+// (kDone < k)时不开放邻域(设计《持续预取与阶段切换》"K 块就绪后剩余块转 P2");按需模式
+// (SetDemandOnly)下同样不开放。幂等:水位单调不回退,
 // cursor 跳跃(advance 大幅前进)时途经位置视为已消费、不再入队。
 func (p *PersistentPrefetcher) ensureWindowLocked() {
 	st := p.stage
-	if st == nil || st.kDone < st.k {
+	if st == nil || st.kDone < st.k || p.demandOnly {
 		return
 	}
 	start := st.schedTo
