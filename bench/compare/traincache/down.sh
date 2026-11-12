@@ -45,4 +45,11 @@ done
 log_group "$GROUP" "configmap/measure-script-* 已删除"
 
 log_group "$GROUP" "namespace/$NS 工作负载已清理"
+
+# 拆 MinIO egress 限速,与 tc_apply.sh 对称(幂等)。qdisc 挂在 MinIO Pod 的 netns 上,
+# cold_reset 不重启 MinIO,down 不拆会把本格档位残留到组间读 MinIO 的路径(快照发布、
+# 探针、下一组起组前的检查)。残留档位曾把 MinIO 限到近零导致快照读不动。
+bash "$BENCH_ROOT/scripts/tc_teardown.sh" --target minio 2>/dev/null || true
+log_group "$GROUP" "MinIO eth0 限速已拆(tc_teardown)"
+
 log_group "$GROUP" "down 完成:控制面与 MinIO 桶 $MINIO_BUCKET 数据保留"

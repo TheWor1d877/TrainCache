@@ -10,8 +10,8 @@
 ### Added
 - `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
 
-- bench 装置重排为九族实验：97 个 COND，入口 `python3 bench/run.py <族>`，`python3 bench/run.py status` 打印各族完成格子数。新增出图脚本 `bench/experiments/plot_families.py`（11 张图，输出中英两套 PNG 与聚合 CSV）与报告页 `bench/experiments/report.py`（首屏决策表加逐族结论）。混沌族新增节点丢失档 `bench/chaos/inject/node_loss.sh`。装置说明见 `docs/4.1-bench-apparatus.md` 到 `docs/4.4-bench-runbook.md`。
-- 门控新增两条前置放行条件与一条最小放行条件：数据集总字节小于缓存容量的 5% 时直接放行（原因 `dataset_too_small`）；Agent 上报吞吐超过网络带宽上限的 0.8 倍时直接放行（原因 `bandwidth_fast_enough`）；任一预热节点对某 Pod 上报过非零 ready 块数时放行（原因 `min_progress_any_node`）。带宽上限进 ConfigMap `traincache-config` 的 `gateNetworkBandwidthBytes`，默认 `"0"`（不启用带宽判断），环境变量 `TRAINCACHE_GATE_NETWORK_BANDWIDTH`。契约见 `docs/7.2-decisions.md` D50、`docs/7.1-design.md`。
+- bench 装置重排为九族实验：97 个 COND，入口 `python3 bench/run.py <族>`
+
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
 
@@ -21,25 +21,24 @@
 
 # Changelog正文
 
-## 未发布
-
-## [v0.8.1] - 2026-11-11
+## [v0.8.1] - 2026-11-12
 
 ### Added
 
-- bench 作废哨兵 `bench/scripts/void_watch.sh <结果目录> [空闲秒数]`：结果目录出现新 `void` 行即退出并打印格名与原因，空闲超时以退出码 3 退出。
+- bench 作废哨兵 `bench/scripts/void_watch.sh`：结果目录出现新 `void` 行即退出报格名与原因。
 
 ### Changed
 
-- `python3 bench/run.py <族>` 按格子有效行数（`void` 列非真）≥ `sampling.reps` 跳过已完成格，`--dry-run` 标「将跳过」，`--force` 强制重跑。
-- 测量控制面镜像由 `controller/deploy` 清单的发布摘要钉住（本轮 v0.8.0）；`ctrl_up.sh` 的源码指纹门禁与放行开关 `TRAINCACHE_ALLOW_STALE_IMAGE` 删除。
+- `bench/run.py <族>` 按有效行数跳过已完成格，`--force` 强制重跑。
+- 测量控制面镜像由 `controller/deploy` 清单的发布摘要钉住，删除源码指纹门禁与 `TRAINCACHE_ALLOW_STALE_IMAGE`。
 
 ### Fixed
 
-- 缓存容量小于订单数据集总字节时，该订单预取降级为按需回源：阶段首批与邻域预取不入队，块只在 read_miss 或显式预热时下载。此前固定 16 块前瞻把消费前已被淘汰的块提前取回，同一块回源两次，冷态训练反慢于直读（rho4-100 慢 64%，issue #49）。判据随每份订单重算：`TRAINCACHE_CACHE_CAPACITY_BYTES` 大于 0 且订单去重后总字节超容量才降级，容量为 0 维持原预取、回升后恢复。裁决 `docs/6.2-decisions.md` D69。
-- traincache 组 Pod 闸门改 max(`POD_TIMEOUT`, 字节地板 × 余量)，余量 `TRAINCACHE_TIMEOUT_HEADROOM` 默认 4：1800s 常量曾把正常跑完约 1990s 的 rho8-100 run 截成 `pod_failed`。配套两道看门狗提前失败抓现场——Running 后 120s 无 `[calib]` 判启动挂起（`TRAINCACHE_STARTUP_WATCHDOG_S`），测量期日志长度与回源字节双判据静默 180s 判中途冻结（`TRAINCACHE_STALL_WATCHDOG_S`），设 0 关闭。
-- 测量 Pod 失败/超时先抓现场再删：重启次数、退出码、`logs --previous` 落 `pod_failed.log`，读负载 `ERROR` 行落 `measure_errors.log`；外层超时返回前真读一次日志，不再落空串。
-- 组入口 `cold_reset` 清缓存前检测订单 ring 与块缓存残留，有残留先复位 agentd 再清，避免旧订单回放污染后续格冷态；读路径容忍块淘汰竞态，`exists` 与 `open` 之间块被淘汰按缺块处理走等待与回源，不再冒泡成 `read_error` 作废整轮。
+- 缓存容量小于订单数据集总字节时预取降级为按需回源，冷态训练不再反慢于直读（issue #49，`TRAINCACHE_CACHE_CAPACITY_BYTES`，裁决 D69）。
+- traincache 组 Pod 闸门改字节地板 × 余量（`TRAINCACHE_TIMEOUT_HEADROOM`），不再把正常跑完的慢格截成 `pod_failed`；配套启动与中途冻结两道看门狗（`TRAINCACHE_STARTUP_WATCHDOG_S`、`TRAINCACHE_STALL_WATCHDOG_S`）。
+- 测量 Pod 失败/超时先抓现场再删，落 `pod_failed.log` 与 `measure_errors.log`，外层超时不再落空日志。
+- 组入口冷态复位先清残留订单再清缓存，读路径容忍块淘汰竞态，不再误作废整轮。
+- bench `--rate` 裸数字统一按 mbit 解释、组收尾拆 MinIO 限速，不再把源站限到近零导致整轮作废。
 
 ## [v0.8.0] - 2026-11-09
 
