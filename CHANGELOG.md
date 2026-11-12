@@ -23,32 +23,23 @@
 
 ## 未发布
 
-## [v0.8.2] - 2026-11-11
+## [v0.8.1] - 2026-11-11
 
 ### Added
 
-- bench 作废哨兵 `bench/scripts/void_watch.sh <结果目录> [空闲秒数]`：结果目录里一出现新的 `void` 行就退出并打印格名与原因，不必等整组跑完；到空闲秒数没有新数据以退出码 3 退出。
-- 测量体读失败的现场留档：读负载报出的 `ERROR` 行落到 `<格>/runs/<组>-r<轮>/measure_errors.log`。此前测量 Pod 随复位删除，作废行只剩 `read_errors` 计数，查不到是哪一步读错。
+- bench 作废哨兵 `bench/scripts/void_watch.sh <结果目录> [空闲秒数]`：结果目录出现新 `void` 行即退出并打印格名与原因，空闲超时以退出码 3 退出。
 
 ### Changed
 
-- 测量用的控制面镜像版本由 `controller/deploy` 清单里的发布摘要钉住（本轮钉到 v0.8.0 的六个镜像，含 checkpoint 侧车）。`bench/scripts/ctrl_up.sh` 的镜像源码指纹门禁与放行开关 `TRAINCACHE_ALLOW_STALE_IMAGE` 删除：热集群里每次跑分都要重建五个 dev 镜像并重导，而跑分真正要的是「跑的是哪个发布版」，摘要已经写明。
-- traincache 组逐轮复位的顺序：agentd 复位（挂起、清订单与块缓存、恢复）挪到清节点缓存之前，清节点缓存改成最多 3 轮「删—判空—等 10s」，并在判空通过后等 5s 复查一次。上一轮在途的预取会在清空之后继续落盘，原判空把这种落盘当成冷态不成立，整格直接作废；只加重试会在持续写入的间隙里侥幸通过，冷读口径会假，所以补复查。
-- `python3 bench/run.py <族>` 默认跳过已完成格子：按格子 `summary.csv` 的有效行数（`void` 列非真）≥ COND 的 `sampling.reps` 判完成，`--dry-run` 在完成格后标「已完成，将跳过」。新增 `--force` 让已完成格也重跑。此前 `cmd_family` 逐格执行不判完成，补跑部分格要靠 `--rho/--rate` 逐格手筛，78 个 COND 逐格手敲不现实。装置见 `bench/run.py` 的 `cmd_family` 与 `grid_done`。
+- `python3 bench/run.py <族>` 按格子有效行数（`void` 列非真）≥ `sampling.reps` 跳过已完成格，`--dry-run` 标「将跳过」，`--force` 强制重跑。
+- 测量控制面镜像由 `controller/deploy` 清单的发布摘要钉住（本轮 v0.8.0）；`ctrl_up.sh` 的源码指纹门禁与放行开关 `TRAINCACHE_ALLOW_STALE_IMAGE` 删除。
 
 ### Fixed
 
-- 缓存容量小于订单数据集总字节时，该订单的预取降级为按需回源：阶段首批与邻域预取都不入队，块只在 read_miss 钩子触发按需回源或显式预热时下载。此前固定 16 块前瞻把消费前就被淘汰的块提前取回，同一块回源两次，冷态训练反而慢于直读（rho4-100 档慢 64%，issue #49）。判据随每份订单重算：`TRAINCACHE_CACHE_CAPACITY_BYTES` 大于 0 且订单块去重后的数据集总字节超过容量才降级，容量为 0 维持原预取，容量回升后的订单恢复预取。降级时 agentd 输出一条 Info 日志，带 `dataset_bytes` 与 `capacity_bytes`。裁决见 `docs/6.2-decisions.md` D69。
-- 组入口 `cold_reset` 清缓存前补完整复位：删除训练 Pod 后检测各 agent 节点的订单 ring 与块缓存，有残留先做 agentd 复位（挂起→清订单与块缓存→恢复）再清节点缓存。2026-11-11 早上 rho4-100 整格失败后，残留订单让 agentd 回放旧订单持续预取落盘，后面 5 个格的 `cold_reset` 判空全部失败；逐轮复位只覆盖 rep 循环，组入口这一处此前没有保护。
-- 测量 Pod 失败/超时时先抓现场再删 Pod：容器重启次数、`lastState.terminated` 退出码与 `logs --previous` 落到 `<格>/runs/<组>-r<轮>/pod_failed.log`。此前失败分支只记 void 行，Pod 留到下一轮 agent_reset 才被间接发现，重启类失败（容器反复重启且日志为空）的根因随 Pod 删除一起消失。测量 Pod 同时下发 `PYTHONUNBUFFERED=1`，崩溃 traceback 与库输出不因块缓冲丢失，`logs --previous` 才抓得到。
-- traincache 组读路径的淘汰竞态：块在 `os.path.exists` 判在位与 `open` 读取之间被 agentd 淘汰时，`read_file_bytes` 抛 `FileNotFoundError`，原先直接冒泡成 `read_error` 作废整轮。rho≥4 缓存小于数据集、淘汰活跃，2026-11-10 晚 4 次 `read_error` 作废（分布在 100/300/1000mbit 三档）都由此触发。现在两处读块都捕获 `FileNotFoundError` 按缺块处理，走等待预取与超时回源兜底，字节账与 demand_miss 口径不变；其它读异常仍照旧冒泡。装置见 `bench/compare/run_bench.py` 的 `read_shard`。
-- 测量 Pod 启动看门狗：Pod 首次 Running 后 120s 内没打出第一行 `[calib]` 就判启动挂起、提前失败走 pod_failed 抓现场删 Pod，不再等满 `POD_TIMEOUT`（30min）。节点容器运行时层间歇冻结时容器 Started 但进程不动、日志全空（2026-11-11 rho4-100 在 worker3 复现），健康 Pod 1s 内就出 `[calib]`，窗口不会误伤正常测量。相位与日志读取都经 kubelet 路径，冻结时会挂死或返回空：看门狗把这两路读取包进 `try/except`，计时从首见 Running 起独立累加，日志抓不到按无 `[calib]` 计——挂死不再抛未捕获超时整组崩，相位降级也不再静默跳过看门狗等满外闸门。环境变量 `TRAINCACHE_STARTUP_WATCHDOG_S`（设 0 关闭）。装置见 `bench/compare/run_bench.py` 的 `wait_pod_complete`。
-- 测量 Pod 无进展看门狗：`[calib]` 之后进程被节点运行时冻住（中途冻结）时启动看门狗已撤防，此前只能干等 `POD_TIMEOUT`（30min；2026-11-11 rho8-100 三轮在 worker4 全冻，整格作废）。现在测量期间日志长度与 agent 回源字节总量任一在动就算有进展，两路同时静默 180s 判中途冻结、提前失败抓现场删 Pod。双判据防误杀：健康 Pod 长读等待可能无新日志、纯命中窗口回源字节可能停涨，单判据都会冤枉；日志路径坏了但回源在涨也不杀。只在 traincache 组态启用（回源字节复用已有 fetch 采样，不额外发请求），其它组态没有第二判据，维持外层超时。环境变量 `TRAINCACHE_STALL_WATCHDOG_S`（设 0 关闭）。装置见 `bench/compare/run_bench.py` 的 `wait_pod_complete`。
-- traincache 组态的 Pod 闸门改按字节地板 × 余量推导：traincache-cold/warm 此前落到 1800s 常量，而 100mbit 档 3 epoch 的字节地板就有 1030s，rho8-100 实测 epoch 时长 582/647s、正常跑完全程约 1990s，常量闸门把还在正常推进的 run 截成 `pod_failed`（连续 5 轮，曾被误判为节点冻结）。现在与倾斜/复制读组态同款口径，闸门取 max(`POD_TIMEOUT`, 地板 × 余量)，余量默认 4（最慢实测约 1.94× 地板，4 倍覆盖预取放大还有余），环境变量 `TRAINCACHE_TIMEOUT_HEADROOM`；显式给 `POD_TIMEOUT` 时仍以显式值为准，快格（地板 × 余量低于常量）行为不变。装置见 `bench/compare/run_bench.py` 的 `pod_timeout_s`（调用方传组态名），口径见 `docs/4.4-bench-runbook.md` 的「训练 Pod 正常跑完却被记成 pod_failed」一节。
-- 等测量 Pod 的外层超时路径返回前真读一次日志：此前超时直接返回空串，失败分支与 `capture_pod_failure_artifacts` 把空串原样落进 `pod_failed.log`，「失败时日志全空」是这条路径的产物、不是冻结证据，rho8-100 的诊断曾被它误导。现在超时到点先 `kubectl logs` 读一次（上限 120s），读到的日志随失败返回落盘，读不到（超时/路径坏）才返回空串；Succeeded/Failed 与两个看门狗的返回路径不变。装置见 `bench/compare/run_bench.py` 的 `wait_pod_complete`。
-
-- fluid 组起组竞态：Dataset 标成 Bound 早于 PVC 建出与 fuse Pod 就绪，首格首跑的测量 Pod 一建出来就挂卷失败。现在先给 worker 节点预打 fluid 标签让 fuse 起起来，再等 PVC 与 fuse 就绪。
-- fluid 组拆组静默失败：清 MinIO 桶里 `fluid-demo/` 前缀用的控制面凭证没有删权，报错被吞掉，桶里留下上一轮的 4 GB 数据，下次 format 报存储非空、整组起不来。改用 MinIO Pod 内的 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` 清这一处前缀。
+- 缓存容量小于订单数据集总字节时，该订单预取降级为按需回源：阶段首批与邻域预取不入队，块只在 read_miss 或显式预热时下载。此前固定 16 块前瞻把消费前已被淘汰的块提前取回，同一块回源两次，冷态训练反慢于直读（rho4-100 慢 64%，issue #49）。判据随每份订单重算：`TRAINCACHE_CACHE_CAPACITY_BYTES` 大于 0 且订单去重后总字节超容量才降级，容量为 0 维持原预取、回升后恢复。裁决 `docs/6.2-decisions.md` D69。
+- traincache 组 Pod 闸门改 max(`POD_TIMEOUT`, 字节地板 × 余量)，余量 `TRAINCACHE_TIMEOUT_HEADROOM` 默认 4：1800s 常量曾把正常跑完约 1990s 的 rho8-100 run 截成 `pod_failed`。配套两道看门狗提前失败抓现场——Running 后 120s 无 `[calib]` 判启动挂起（`TRAINCACHE_STARTUP_WATCHDOG_S`），测量期日志长度与回源字节双判据静默 180s 判中途冻结（`TRAINCACHE_STALL_WATCHDOG_S`），设 0 关闭。
+- 测量 Pod 失败/超时先抓现场再删：重启次数、退出码、`logs --previous` 落 `pod_failed.log`，读负载 `ERROR` 行落 `measure_errors.log`；外层超时返回前真读一次日志，不再落空串。
+- 组入口 `cold_reset` 清缓存前检测订单 ring 与块缓存残留，有残留先复位 agentd 再清，避免旧订单回放污染后续格冷态；读路径容忍块淘汰竞态，`exists` 与 `open` 之间块被淘汰按缺块处理走等待与回源，不再冒泡成 `read_error` 作废整轮。
 
 ## [v0.8.0] - 2026-11-09
 
