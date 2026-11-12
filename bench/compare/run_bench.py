@@ -3234,6 +3234,17 @@ def measure_void_reason(metrics):
 # ---------------------------------------------------------------------------
 # rho 选组：按 rho 过滤、rep 复用控制面、status 列、Fluid 替补
 # ---------------------------------------------------------------------------
+def normalize_rate_str(rate):
+    """裸数字补 mbit;带单位写法原样返回。
+
+    tc 把不带单位的裸数字按字节/秒解释(1000→约1KB/s),runner 侧却按 mbit 算
+    字节地板与格名。tc_apply 只认带单位写法,裸数字会告警后原样交给 tc,把
+    MinIO egress 限到近零、快照读不动整轮作废。这里在透传给 up.sh 前统一补单位。
+    """
+    s = str(rate).strip()
+    return s + "mbit" if re.fullmatch(r"\d+(\.\d+)?", s) else s
+
+
 def tc_cell(rate_str=None):
     """把带宽格落到具体参数：(rate_mbit, burst)。
 
@@ -4176,6 +4187,12 @@ def selftest():
         got_r, got_burst = tc_cell(f"{r}mbit")
         if got_r != r or got_burst != bench_config.burst_for_rate(r):
             raise AssertionError(f"自测：带宽格推导不对 @{r} → burst={got_burst}")
+    # 裸数字补 mbit:tc 把裸数字按字节/秒解释,不补单位会把 MinIO 限到近零。
+    for raw, want in (("1000", "1000mbit"), ("300", "300mbit"),
+                      ("1000mbit", "1000mbit"), ("20ms", "20ms")):
+        if normalize_rate_str(raw) != want:
+            raise AssertionError(f"自测：rate 归一不对 {raw!r} → "
+                                 f"{normalize_rate_str(raw)!r}（期望 {want!r}）")
     if hasattr(bench_config, "jitter_enabled"):
         raise AssertionError("自测：config.jitter_enabled 应已撤除（抖动轴不在协议里）")
     all_void = [{"void": True}, {"void": True}]
@@ -4189,7 +4206,7 @@ def selftest():
         raise AssertionError("自测：替补标记没落到行上")
     print(f"[selftest] 6) 选组：1000 档七组态全跑（ρ=4 {four_pick}、ρ=8 {eight_pick}），"
           f"100 档只跑 {low_pick}（越界剔除 {low_mix_drop}）；status ok/void、"
-          f"带宽 burst 推导、替补全废判据均自洽")
+          f"带宽 burst 推导、rate 裸数字补 mbit、替补全废判据均自洽")
 
     # ---- 7) D23 网关开关：新列、取值映射与透传 ----
     if CSV_FIELDNAMES[:5] != ["group", "rho", "family", "load", "gateway"]:
@@ -4772,7 +4789,8 @@ def main():
         return
 
     global TC_RATE_EFF
-    TC_RATE_EFF = args.rate if args.rate is not None else bench_config.TC_RATE
+    TC_RATE_EFF = normalize_rate_str(
+        args.rate if args.rate is not None else bench_config.TC_RATE)
     reps = args.reps
     if reps != bench_config.REPS:
         print(f"[warn] --reps={reps} 不等于规定值 {bench_config.REPS}；"
