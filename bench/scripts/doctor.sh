@@ -322,7 +322,7 @@ EXP_RAW="$(expected_capacity_bytes)"
 EXP_CAP="$(printf '%s\n' "$EXP_RAW" | sed -n 1p)"
 EXP_SRC="$(printf '%s\n' "$EXP_RAW" | sed -n 2p)"
 # 预取提前量与淘汰策略的期望值：环境变量 > COND(prefetch.lookahead /
-# cache.evict_policy) > 缺省(32、heat)。输出三行：lookahead、evict_policy、来源。
+# cache.evict_policy) > 清单默认(16、heat)。输出三行：lookahead、evict_policy、来源。
 expected_agent_knobs() {
     "$PY" - "$ROOT/experiments" <<'PYEOF'
 import os
@@ -349,7 +349,7 @@ if os.environ.get("TRAINCACHE_PREFETCH_LOOKAHEAD"):
 if os.environ.get("TRAINCACHE_EVICT_POLICY"):
     ep = os.environ["TRAINCACHE_EVICT_POLICY"].strip().lower()
     src = "env"
-print(la if la is not None else 32)
+print(la if la is not None else 16)
 print(ep if ep is not None else "heat")
 print(src)
 PYEOF

@@ -41,7 +41,7 @@
   ],
   "notes": "chaos 族格子；fault=tamper_block，rho=8.0，rate=1000；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
-    "lookahead": 32,
+    "lookahead": 16,
     "fanout": 1
   }
 }

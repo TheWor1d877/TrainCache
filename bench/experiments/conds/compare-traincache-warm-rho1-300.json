@@ -42,7 +42,7 @@
   ],
   "notes": "compare 族格子；group=traincache-warm，rho=1.0，rate=300；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
-    "lookahead": 32,
+    "lookahead": 16,
     "fanout": 1
   }
 }

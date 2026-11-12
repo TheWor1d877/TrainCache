@@ -504,13 +504,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			}
 		}
 
-		// #38: 至少有一个 agent 上报非零 ready → 提前放行
-		if evaluation.Decision.State == gate.Hold && hasMinProgress(evaluation.Pods) {
-			log.Info("gate early release: min progress met (#38)")
-			evaluation.Decision.State = gate.Released
-			evaluation.Decision.Reason = "min_progress_any_node"
-		}
-
 		logGateDecision(log, taskKey, evaluation)
 		if evaluation.Decision.State == gate.Hold {
 			r.Metrics.ObserveGateTask(taskKey, metrics.GateHold, r.now())

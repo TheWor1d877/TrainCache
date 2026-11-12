@@ -693,32 +693,6 @@ func podScoreSnapshot(
 	return nodeScores
 }
 
-// hasMinProgress 检查是否至少有一个 assigned node 对某个 Pod 达到最小就绪块数
-// max(1, K/20)（K 取该 Pod 的启动窗口块数，整数除法）。满足返回 true 表示门控
-// 不该继续等 gateThreshold,直接放行。
-//
-// 对应 #38 最小放行条件,下限口径见 docs/7.1-design.md《门控与放行》与 D50:
-// 只等一块等于门控没有生效,预热刚开头训练就进了启动窗口;取二十分之一后,
-// agent 注册正常时几秒内满足,注册慢的情形仍由超时上限兜底。
-//
-// 注意:GWAA handoff 场景下 rival 刚接手也会触发此条件(rival 已达到下限但没追
-// 上 threshold)。这是设计中的 trade-off——优先覆盖"等了白等"的场景,
-// handoff 场景下的提前放行接受为可接受的副作用。
-func hasMinProgress(pods []gate.PodGateState) bool {
-	for _, pod := range pods {
-		required := pod.K / 20
-		if required < 1 {
-			required = 1
-		}
-		for _, node := range pod.AssignedNodes {
-			if pod.ReadyByNode[node] >= required {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // 门控前置跳过的原因串。命中哪个子条件就返回哪个原因，
 // 日志的 reason 字段与 status.gateDecision.reason 都取这个值。
 const (

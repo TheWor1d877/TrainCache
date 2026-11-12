@@ -42,7 +42,7 @@
   ],
   "notes": "multiconsumer 族格子；hot_ratio=0.10，placement=同节点 2 读端（TRAINCACHE_ANTI_AFFINITY=0），rho=4，rate=1000，readers=2；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
-    "lookahead": 32,
+    "lookahead": 16,
     "fanout": 1
   },
   "trace": {

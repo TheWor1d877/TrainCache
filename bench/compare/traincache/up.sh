@@ -389,6 +389,32 @@ EOF
     fi
     sleep 2
   done
+
+  # ---- 预热节点回传:训练 Pod 必须与预热节点共置 ----
+  # 预热在组拉起阶段(训练 Pod 创建之前)完成,落点是 GWAA 选定的预热节点。
+  # 训练 Pod 若被调度到别的节点,warm 组暖好的块读不到,控制器只能把整窗预热
+  # 撤回重做。这里按 juicefs 的 [MOUNT_NODE] 同一格式回传节点名,由
+  # run_bench.py 造 Pod 时钉 nodeSelector。
+  # 取值优先 status.podNodeReadiness[].nodeName(预热节点),为空时回退 status.assignment。
+  WARM_NODES="$(kubectl -n "$NS" get warmuptask compare-task \
+    -o jsonpath='{range .status.podNodeReadiness[*]}{.nodeName}{"\n"}{end}' 2>/dev/null || true)"
+  if [ -z "$(printf '%s' "$WARM_NODES" | tr -d '[:space:]')" ]; then
+    WARM_NODES="$(kubectl -n "$NS" get warmuptask compare-task \
+      -o jsonpath='{.status.assignment}' 2>/dev/null || true)"
+  fi
+  # 去空行去重:回退路径可能是列表形态,节点名只含字母数字与 . -
+  WARM_NODES="$(printf '%s\n' "$WARM_NODES" | tr -c 'A-Za-z0-9._-' '\n' | awk 'NF && !seen[$0]++')"
+  WARM_NODE_CNT="$(printf '%s\n' "$WARM_NODES" | awk 'NF' | wc -l)"
+  if [ "$WARM_NODE_CNT" -eq 0 ]; then
+    log_group "$GROUP" "WARNING: WarmupTask 状态里读不到预热节点,训练 Pod 可能落在冷节点" >&2
+  else
+    WARM_NODE="$(printf '%s\n' "$WARM_NODES" | awk 'NF {print; exit}')"
+    if [ "$WARM_NODE_CNT" -gt 1 ]; then
+      log_group "$GROUP" "提示: 预热节点有 $WARM_NODE_CNT 个,只钉第一个($WARM_NODE)"
+    fi
+    log_group "$GROUP" "预热节点=$WARM_NODE(训练 Pod 将共置)"
+    echo "[WARM_NODE] $WARM_NODE"
+  fi
 fi
 
 log_group "$GROUP" "up 完成:DataSet Ready,gate=$GATE_MODE,预热时长=${WARM_SECONDS}s"

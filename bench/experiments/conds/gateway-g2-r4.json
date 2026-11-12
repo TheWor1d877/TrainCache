@@ -42,7 +42,7 @@
   ],
   "notes": "gateway 族格子；arm=g2，rate=300，rho=4，readers=4，pattern=replicated；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
-    "lookahead": 32,
+    "lookahead": 16,
     "fanout": 1
   }
 }

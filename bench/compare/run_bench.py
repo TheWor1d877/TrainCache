@@ -123,8 +123,8 @@ D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
                          cold 组用 0 作 bench 哨兵，跳过 WarmupTask；省略 k
                          时由 Controller 自动计算，不属于 bench 口径
   TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4.1 的参数总表一节；D21 对照跑分统一 16）。
-                         agent 侧 lookahead 缺省取 max(16, 一个分片的块数)，
-                         缺省分片 256MiB/块 8MiB 下是 32 块（docs/4.1）。
+                         agent 侧 lookahead 统一 16 块（D21）：8MiB 下
+                         窗口 16×8MiB=128MiB≈缓存 1/8，无退化，不需重标度。
   COMPUTE_MS/READ_WORKERS/READ_QUEUE_DEPTH/READ_TIMEOUT_S
                          6.15 异步预取参数（200/2/2/300）
   COMPARE_SWITCH_WINDOW_S epoch 切换重预取的归因窗口（默认 60s）
@@ -252,8 +252,6 @@ SHARD_SIZE_MB = int(os.environ.get("SHARD_SIZE_MB", "256"))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "8388608"))
 # 分段读粒度：测量脚本按此长度 read()，只累加长度、不保留字节。
 READ_SEGMENT_BYTES = 8 << 20
-# 一个分片的块数（缺省 256MiB ÷ 8MiB = 32）：agent 侧提前量的缺省取它。
-SHARD_BLOCKS = max(1, (SHARD_SIZE_MB * 1024 * 1024) // CHUNK_SIZE)
 # 缓存容量缺省按 rho 查表（rho=4 时 4GiB/4=1GiB）；apply_rho() 逐格重算。
 CACHE_BYTES = int(os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES",
                                  str(RO_PRESETS[RHO])))
@@ -264,7 +262,8 @@ def dataset_block_count() -> int:
 
     这是 warmup_k 的上界：k 的单位是块，不是分片。
     """
-    return max(1, N_TARS * SHARD_BLOCKS)
+    blocks_per_shard = max(1, (SHARD_SIZE_MB * 1024 * 1024) // CHUNK_SIZE)
+    return max(1, N_TARS * blocks_per_shard)
 
 
 def warmup_k_for(cache_bytes: int, block_count: int = 0) -> int:
@@ -286,11 +285,9 @@ WARMUP_K = warmup_k_for(CACHE_BYTES, dataset_block_count())
 # 16×8MiB=128MiB≈缓存 1/8，无退化）；旧默认 8 与 D21 不符，改为 16。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # Agent 侧持续预取窗口。pareto2 的自变量是它，训练侧消费窗口 PREFETCH_K
-# 保持 16 不动（docs/4.1 的参数总表一节：两个旋钮）。缺省取
-# max(PREFETCH_K, 一个分片的块数)：预取至少领先一个消费单位，
-# 缺省分片 256MiB/块 8MiB 下是 32 块（docs/4.1 参数总表、4.2 族总表）。
+# 保持 16 不动（docs/4.1 的参数总表一节：两个旋钮）。缺省跟随 PREFETCH_K。
 AGENT_PREFETCH_K = int(os.environ.get(
-    "TRAINCACHE_PREFETCH_LOOKAHEAD", str(max(PREFETCH_K, SHARD_BLOCKS))))
+    "TRAINCACHE_PREFETCH_LOOKAHEAD", str(PREFETCH_K)))
 # 预热节点数(D26):对照链路固定 1 份(与 juicefs/fluid 的 warm 组对齐,docs/4.1),
 # scheduler 按就绪度选落点;s3-access 节点数只作上限
 PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "1"))
@@ -976,16 +973,22 @@ def build_run_trace():
 
 # JuiceFS mount Pod 所在节点，由 group_up 从 up.sh 输出回收；空=未起组。
 JFS_MOUNT_NODE = ""
+# traincache-warm 的预热节点，由 group_up 从 up.sh 的 [WARM_NODE] 回收；
+# 空=本轮没拿到节点，训练 Pod 不钉节点(会落到调度器自选节点，可能是冷节点)。
+WARM_NODE = ""
 
 
 def group_up(group):
-    """起组，并回收 up.sh 回传的两个装置事实：预热时长与 JuiceFS 挂载节点。
+    """起组，并回收 up.sh 回传的装置事实：预热时长、JuiceFS 挂载节点、traincache 预热节点。
 
     JFS_MOUNT_NODE：CE 单机缓存只落在 mount Pod 所在节点，测量 Pod 必须共置，
     否则 warm 组暖好的块在另一台节点读不到（见 docs/4.2 的对照族一节 的 juicefs 共置一条）。
+    WARM_NODE：traincache 的预热在组拉起阶段完成，训练 Pod 同样必须与预热节点共置。
     """
-    global JFS_MOUNT_NODE
+    global JFS_MOUNT_NODE, WARM_NODE
     JFS_MOUNT_NODE = ""
+    # 每次开跑前复位，避免上一格(上一组/上一 rep)的预热节点残留下来钉错节点
+    WARM_NODE = ""
     print(f"[up] {group}...")
     env = os.environ.copy()
     env["N_TARS"] = str(N_TARS)
@@ -1046,11 +1049,17 @@ def group_up(group):
         m = re.search(r"\[MOUNT_NODE\]\s+(\S+)", line)
         if m:
             JFS_MOUNT_NODE = m.group(1)
+            continue
+        m = re.search(r"\[WARM_NODE\]\s+(\S+)", line)
+        if m:
+            WARM_NODE = m.group(1)
     if group.startswith("juicefs") and not JFS_MOUNT_NODE:
         print(f"[up] {group} 失败:up.sh 未回传 [MOUNT_NODE],无法共置", flush=True)
         return False, 0.0, warmup_basis
     if JFS_MOUNT_NODE:
         print(f"[up] {group} 挂载节点={JFS_MOUNT_NODE}(测量 Pod 将共置)")
+    if WARM_NODE:
+        print(f"[up] {group} 预热节点={WARM_NODE}(训练 Pod 将共置)")
     # direct / juicefs-cold / fluid-cold / traincache-cold 默认 0.0
     print(f"[up] {group} 预热时长={warmup_seconds}s (basis={warmup_basis})")
     return True, warmup_seconds, warmup_basis
@@ -2185,6 +2194,14 @@ def create_measure_pod(group, run_id, trace_json):
     # 才是读得到的；cold 同节点，warm/cold 差值才是同一台节点上的比较。
     if group in ("juicefs-cold", "juicefs-warm") and JFS_MOUNT_NODE:
         pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": JFS_MOUNT_NODE}
+    # traincache-warm 的预热在组拉起阶段完成，暖好的块只在预热节点上：
+    # 训练 Pod 不钉到该节点就会被调度到别处冷读，整窗预热白做(控制器只能撤回重做)。
+    if group == "traincache-warm":
+        if WARM_NODE:
+            pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": WARM_NODE}
+        else:
+            print("[train-job] WARNING: 未拿到预热节点([WARM_NODE] 为空)，本轮 Pod "
+                  "不钉节点，可能落在冷节点", flush=True)
     # 任务清单 #5:traincache-warm 组走 traincache-scheduler + webhook gate
     # traincache-cold 不走 WarmupTask(bench 冷启动哨兵),普通调度
     # fig1 对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
