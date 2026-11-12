@@ -29,8 +29,8 @@
     "warmup_seconds": 0
   },
   "prefetch": {
-    "lookahead": 16,
-    "fanout": 2
+    "lookahead": 32,
+    "fanout": 1
   },
   "sampling": {
     "reps": 3

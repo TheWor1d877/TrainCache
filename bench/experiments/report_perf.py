@@ -91,7 +91,8 @@ def _mock_summary(rng, group, rho, rate, rep):
         "total_makespan": round(total, 2),
         "stall_ratio": round(min(0.6, (1 - hit) * 0.35 * rate_f / 3), 4),
         "stall_p90": round(rng.uniform(0.5, 4) * rate_f / 3, 3),
-        "queue_timeouts": 0, "read_errors": 0,
+        "queue_timeouts": int(max(0, round((rate_f - 2) * 1.6 * rho / 4 * rng.uniform(0.5, 1.5)))),
+        "read_errors": 0,
         "hit_rate": round(hit, 4),
         "source_saving_ratio": round(hit * rng.uniform(0.95, 1.0), 4),
         "total_read_bytes": read_bytes,
@@ -172,8 +173,13 @@ def _mock_series(rng, scenario, t0, dur):
             rate_b *= 3
         fb[reason][0] += 5 * rate_b
         return fb[reason][0]
-    for reason in fb:
-        add("fetch_bytes", lambda t, r=reason: fetch_fn(t, r), {"reason": reason})
+
+    # 三个 reason 各自一条曲线；不能复用 add()，否则同名查询互相覆盖。
+    q["fetch_bytes"] = {"series": [
+        {"metric": {"reason": reason},
+         "values": [[t0 + t, round(fetch_fn(t, reason), 4)] for t in ts
+                    if not (interrupt < t < resume)]}
+        for reason in fb]}
     add("fetch_inflight_bytes", lambda t: 3e7 * (1 + 0.5 * math.sin(t / 30)))
     hits = [0]
 
@@ -435,9 +441,9 @@ def fig_makespan_grid(data):
     for i, group in enumerate(("traincache-cold", "traincache-warm")):
         cells = _cells(data, group)
         rates = RATES if group.endswith("cold") else WARM_RATES
-        grids.append({"left": 60 + i * 0, "right": 24, "top": 42 + i * 210, "height": 150})
-        xaxes.append(_x("ρ（缓存/数据集）", [str(r) for r in RHOS], gridIndex=i))
-        yaxes.append(_y("全程 makespan (s)", gridIndex=i))
+        grids.append({"left": "7%", "right": "7%", "top": 46 + i * 210, "height": 148})
+        xaxes.append(_x("ρ（缓存容量 / 数据集）", [str(r) for r in RHOS], gridIndex=i))
+        yaxes.append(_y("全程耗时 (s)", gridIndex=i))
         for rate in rates:
             vals = []
             for rho in RHOS:
@@ -445,8 +451,8 @@ def fig_makespan_grid(data):
                 vals.append(round(_avg(c["reps"], "total_makespan"), 1) if c else None)
             series.append(_s(f"{rate}mbit", vals, RATE_COLORS[rate], "line",
                              xAxisIndex=i, yAxisIndex=i))
-    return fig("makespan-grid", "全程 makespan：带宽 × 缓存比",
-               "cold 三档带宽、warm 两档；每点 3 rep 均值。ρ=缓存容量/数据集大小。",
+    return fig("makespan-grid", "全程耗时随带宽与缓存容量比的变化",
+               "每个数据点为 3 次重复的均值；上图为冷缓存（三档带宽），下图为预热（两档带宽）；ρ 为缓存容量与数据集大小之比。",
                _opt(grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     legend=_legend()), h=480)
 
@@ -456,7 +462,7 @@ def fig_source_saving(data):
     for i, group in enumerate(("traincache-cold", "traincache-warm")):
         cells = _cells(data, group)
         rates = RATES if group.endswith("cold") else WARM_RATES
-        grids.append({"left": 60, "right": 24, "top": 42 + i * 210, "height": 150})
+        grids.append({"left": "7%", "right": "7%", "top": 46 + i * 210, "height": 148})
         xaxes.append(_x("ρ", [str(r) for r in RHOS], gridIndex=i))
         yaxes.append(_y("源站节省率", gridIndex=i, max=1))
         for rate in rates:
@@ -466,8 +472,8 @@ def fig_source_saving(data):
                 vals.append(round(_avg(c["reps"], "source_saving_ratio"), 4) if c else None)
             series.append(_s(f"{rate}mbit", vals, RATE_COLORS[rate], "line",
                              xAxisIndex=i, yAxisIndex=i))
-    return fig("source-saving", "源站节省率：1 − agent 回源字节 / 训练侧读字节",
-               "D25 对账口径；cold 节省来自块级命中，warm 来自预热。",
+    return fig("source-saving", "源站节省率随缓存容量比的变化",
+               "节省率 = 1 − agent 回源字节 / 训练侧读字节（D25 对账口径）；上图冷缓存，下图预热；冷缓存的节省来自块级命中，预热的节省来自预热阶段。",
                _opt(grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     legend=_legend()), h=480)
 
@@ -478,7 +484,7 @@ def fig_stall_struct(data):
                ("queue_timeouts", "队列超时次数")]
     grids, xaxes, yaxes, series = [], [], [], []
     for i, (key, label) in enumerate(metrics):
-        grids.append({"left": 60 + i * 340, "width": 280, "top": 42, "height": 220})
+        grids.append({"left": 60 + i * 340, "width": 280, "top": 60, "height": 198})
         xaxes.append(_x("ρ", [str(r) for r in RHOS], gridIndex=i))
         yaxes.append(_y(label, gridIndex=i))
         for rate in RATES:
@@ -488,8 +494,8 @@ def fig_stall_struct(data):
                 vals.append(round(_avg(c["reps"], key), 4) if c else None)
             series.append(_s(f"{rate}mbit", vals, RATE_COLORS[rate], "line",
                              xAxisIndex=i, yAxisIndex=i))
-    return fig("stall-struct", "等待结构：占比、长尾与队列超时（cold）",
-               "占比回答普遍性，p90 回答长尾，超时回答准入档位是否咬人；三图同 ρ 轴。",
+    return fig("stall-struct", "冷缓存场景等待结构：等待占比、长尾分位与队列超时",
+               "三幅子图共用 ρ 轴：占比刻画等待的普遍性，p90 刻画长尾，队列超时次数刻画准入控制的触发条件。",
                _opt(grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     legend=_legend()), h=320)
 
@@ -501,7 +507,7 @@ def fig_hit_triple(data):
             ("block_hit_rate_diag", "block 诊断口径", C["orange"])]
     for i, group in enumerate(("traincache-cold", "traincache-warm")):
         cells = _cells(data, group)
-        grids.append({"left": 60, "right": 24, "top": 42 + i * 210, "height": 150})
+        grids.append({"left": "7%", "right": "7%", "top": 46 + i * 210, "height": 148})
         xaxes.append(_x("ρ", [str(r) for r in RHOS], gridIndex=i))
         yaxes.append(_y("命中率（steady，跨带宽均值）", gridIndex=i, max=1))
         for key, label, color in keys:
@@ -512,8 +518,8 @@ def fig_hit_triple(data):
                 vv = [v for v in vv if v is not None]
                 vals.append(round(sum(vv) / len(vv), 4) if vv else None)
             series.append(_s(label, vals, color, "line", xAxisIndex=i, yAxisIndex=i))
-    return fig("hit-triple", "命中率三口径对照",
-               "demand 是训练侧真实等待口径；agent gauge 与 block 诊断偏高属口径差，不是数据错误。",
+    return fig("hit-triple", "缓存命中率的三种口径对照",
+               "demand 为训练侧真实等待口径（打开时不在本地即计未命中）；agent gauge 与 block 诊断为装置自报口径，系统性偏高属口径差异，非数据错误。",
                _opt(grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     legend=_legend()), h=480)
 
@@ -523,7 +529,7 @@ def fig_phase_bytes(data):
     phases = [("startup", "启动"), ("steady", "稳态"), ("switch", "切换")]
     grids, xaxes, yaxes, series = [], [], [], []
     for i, (ph, label) in enumerate(phases):
-        grids.append({"left": 60 + i * 340, "width": 280, "top": 42, "height": 220})
+        grids.append({"left": 60 + i * 340, "width": 280, "top": 60, "height": 198})
         xaxes.append(_x("ρ", [str(r) for r in RHOS], gridIndex=i))
         yaxes.append(_y(f"{label}读字节 (MB)", gridIndex=i))
         for rate in RATES:
@@ -540,8 +546,8 @@ def fig_phase_bytes(data):
                              stack=f"r{rate}", xAxisIndex=i, yAxisIndex=i))
             series.append(_s(f"{rate} 回源", miss_v, "#d9b8c4", "bar",
                              stack=f"r{rate}", xAxisIndex=i, yAxisIndex=i))
-    return fig("phase-bytes", "三相位字节流向：本地命中 vs 回源（cold）",
-               "每相位读字节拆成本地命中与 demand miss 两段；切换相位的回源占比是切换代价的直接证据。",
+    return fig("phase-bytes", "冷缓存场景三相位字节流向分解",
+               "各相位读字节拆分为本地命中与 demand miss 两部分；切换相位的回源占比直接反映切换代价。",
                _opt(grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     legend=_legend()), h=320)
 
@@ -558,11 +564,13 @@ def fig_cache_pressure(data):
         series.append(_s(f"{rate}mbit 峰值/容量", peak, RATE_COLORS[rate], "line"))
         series.append(_s(f"{rate}mbit 淘汰块数", evict, RATE_COLORS[rate], "bar",
                          yAxisIndex=1, opacity=0.35))
-    return fig("cache-pressure", "缓存压力：峰值占用比与淘汰块数（cold）",
-               "峰值/容量>1 说明淘汰在发生；淘汰块数随 ρ 的变化回答容量是不是瓶颈。",
-               _opt(xAxis=_x("ρ", [str(r) for r in RHOS]),
-                    yAxis=[_y("峰值 / 容量"), _y("淘汰块数", splitLine={"show": False})],
-                    series=series, legend=_legend()), h=380)
+    return fig("cache-pressure", "冷缓存场景缓存压力：峰值占用比与淘汰块数",
+               "峰值与容量之比大于 1 表示运行期确实发生淘汰；淘汰块数随 ρ 的走势用于判断容量是否为瓶颈。",
+               _opt(grid={"left": "8%", "right": 76, "top": 76, "bottom": 56},
+                    xAxis=_x("ρ", [str(r) for r in RHOS]),
+                    yAxis=[_y("峰值 / 容量"), _y("淘汰块数", nameGap=16, splitLine={"show": False})],
+                    series=series, legend=_legend(),
+                    tooltip={"trigger": "axis", "confine": True}), h=400)
 
 
 def fig_prefetch_efficacy(data):
@@ -574,10 +582,11 @@ def fig_prefetch_efficacy(data):
         demand.append(_fmt_mb(sum(_avg(c["reps"], "demand_miss_bytes_steady") or 0 for c in cs) / len(cs)))
         p50.append(round(sum(_avg(c["reps"], "prefetch_task_duration_p50_s") or 0 for c in cs) / len(cs), 3))
         p90.append(round(sum(_avg(c["reps"], "prefetch_task_duration_p90_s") or 0 for c in cs) / len(cs), 3))
-    return fig("prefetch-efficacy", "预取有效性（warm）：预取字节 vs 稳态 demand miss",
-               "预取字节远大于 demand miss 说明预取跑在需求前面；任务时长 p50/p90 在右轴。",
-               _opt(xAxis=_x("ρ", [str(r) for r in RHOS]),
-                    yAxis=[_y("字节 (MB)"), _y("任务时长 (s)", splitLine={"show": False})],
+    return fig("prefetch-efficacy", "预热场景预取有效性：预取字节与稳态 demand miss",
+               "预取字节显著高于 demand miss 表示预取领先于需求发生；任务时长 p50/p90 读右轴。",
+               _opt(grid={"left": "8%", "right": 76, "top": 76, "bottom": 56},
+                    xAxis=_x("ρ", [str(r) for r in RHOS]),
+                    yAxis=[_y("字节 (MB)"), _y("任务时长 (s)", nameGap=16, splitLine={"show": False})],
                     series=[_s("预取字节", prefetch, C["purple"]),
                             _s("稳态 demand miss", demand, C["orange"]),
                             _s("任务时长 p50", p50, C["teal"], "line", yAxisIndex=1),
@@ -599,8 +608,8 @@ def fig_warm_cost(data):
             warmup.append(round(_avg(wc["reps"], "warmup_seconds"), 1))
             saving.append(round(_avg(cc["reps"], "startup_makespan")
                                 - _avg(wc["reps"], "startup_makespan"), 1))
-    return fig("warm-cost", "预热成本收益（warm）：预热时长 vs 启动节省",
-               "节省=同格 cold 启动 makespan − warm 启动 makespan；柱高于线才划算。",
+    return fig("warm-cost", "预热成本与收益：预热时长与启动耗时节省",
+               "节省 = 同格冷启动启动耗时 − 预热启动耗时；柱高低于折线时预热不划算。",
                _opt(xAxis=_x("格", cats, axisLabel={"rotate": 35}),
                     yAxis=_y("秒"),
                     series=[_s("预热时长", warmup, C["orange"]),
@@ -654,8 +663,8 @@ def fig_timeline_sm(data, group, fid, title):
                            "showSymbol": False, "lineStyle": {"width": 1.2, "color": C["blue"]},
                            "xAxisIndex": i, "yAxisIndex": i,
                            "markArea": {"silent": True, "data": _phase_areas(steps)}})
-    note = ("每小格一条 wait_s 曲线（代表 rep），底色=相位：橙=启动、蓝=稳态、粉=切换。"
-            "小倍数共 ρ 轴布局，切换尖峰的高度差即带宽代价。")
+    note = ("每格一条代表 rep 的逐步等待曲线，底色为相位（橙：启动，蓝：稳态，粉：切换）；"
+            "小倍数按 ρ 排列，切换尖峰的高度差即带宽代价。")
     return fig(fid, title, note,
                _opt(title=titles, grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     tooltip={"trigger": "axis", "confine": True}),
@@ -681,7 +690,7 @@ def fig_shard_heatmap(data):
                       "gridIndex": i, "name": "step", "nameLocation": "middle", "nameGap": 26,
                       "axisLabel": {"color": C["mut"], "fontSize": 9}})
         yaxes.append({"type": "category", "data": [str(s) for s in range(16)],
-                      "gridIndex": i, "name": "shard", "axisLabel": {"color": C["mut"], "fontSize": 9}})
+                      "gridIndex": i, "axisLabel": {"color": C["mut"], "fontSize": 9}})
         series.append({"type": "heatmap", "xAxisIndex": i, "yAxisIndex": i,
                        "data": [[b, sh, n] for (b, sh), n in sorted(counts.items())],
                        "itemStyle": {"borderColor": "#fff", "borderWidth": 0.5}})
@@ -690,30 +699,38 @@ def fig_shard_heatmap(data):
               "textStyle": {"color": C["mut"], "fontSize": 10},
               "inRange": {"color": ["#eef4fd", "#3b6fd4", "#1d3f7a"]},
               "seriesIndex": [0, 1, 2]}]
-    return fig("shard-heatmap", "分片访问热力图（ρ4 三个代表格）",
-               "x=步（8 步一桶）、y=分片号；per-epoch shuffle 使每 epoch 访问顺序重排，切换后集中重访问清晰可见。",
+    return fig("shard-heatmap", "分片访问热力图（ρ = 4，三个带宽档）",
+               "横轴为训练步（每 8 步聚合为一格），纵轴为分片号；per-epoch shuffle 使每个 epoch 的访问顺序重排，切换后的集中重访问清晰可见。",
                _opt(title=titles, grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     visualMap=vmaps, tooltip={"show": False}), h=340)
 
 
 def fig_recovery_summary(data):
-    pts = []
+    cats, per = [], {r: [] for r in RATES}
     for c in data["cells"]:
+        # 冷/预热同 ρ 同带宽的格名会重复，必须带分组前缀，否则散点挤到同一类目上
+        g = "冷" if c["group"].endswith("cold") else "预热"
+        key = f"{g}·ρ{c['rho']}/{c['rate']}"
+        cats.append(key)
         for ev in c["recovery"]:
             t = ev.get("recovery_time_s")
             if t is None:
                 continue
-            pts.append({"value": [f"ρ{c['rho']}/{c['rate']}", t],
-                        "itemStyle": {"color": RATE_COLORS.get(c["rate"], C["blue"])},
-                        "symbol": "triangle" if ev.get("censored") else "circle",
-                        "symbolSize": 9, "_censored": bool(ev.get("censored"))})
-    cats = [f"ρ{c['rho']}/{c['rate']}" for c in data["cells"]]
-    return fig("recovery-summary", "切换恢复时长全格分布",
-               "每点一次 epoch 切换（recovery.json 口径：切换时刻→回落点）；三角=删失（未回落到阈值内）。",
-               _opt(xAxis=_x("格", cats, axisLabel={"rotate": 45, "fontSize": 9}),
+            per.setdefault(c["rate"], []).append(
+                {"value": [key, t],
+                 "symbol": "triangle" if ev.get("censored") else "circle",
+                 "symbolSize": 9})
+    series = [{"name": f"{r}mbit", "type": "scatter", "data": pts,
+               "itemStyle": {"color": RATE_COLORS.get(r, C["blue"])}, "symbolSize": 9}
+              for r, pts in per.items() if pts]
+    return fig("recovery-summary", "epoch 切换恢复时长分布",
+               "每个点对应一次 epoch 切换（recovery.json 口径：切换时刻至回落点）；三角形为删失样本"
+               "（未回落到阈值内）；横轴按冷缓存、预热分组排列，颜色区分带宽档。",
+               _opt(grid={"left": "8%", "right": "6%", "top": 56, "bottom": 96},
+                    xAxis=_x("实验格", cats, axisLabel={"rotate": 45, "fontSize": 9, "interval": 0}),
                     yAxis=_y("恢复时长 (s)"),
-                    series=[{"type": "scatter", "data": pts}],
-                    tooltip={"trigger": "item", "confine": True}), h=380)
+                    series=series, legend=_legend(),
+                    tooltip={"trigger": "item", "confine": True}), h=440)
 
 
 # ---- 数据质量 ----
@@ -725,8 +742,8 @@ def fig_d25_residual(data):
         cats.append(c["name"].removeprefix("compare-traincache-"))
         vals.append(round((d or 0) / 1e6, 2))
         colors.append(C["teal"] if abs(d or 0) < 0.02 * 1.1e10 else C["rose"])
-    return fig("d25-residual", "D25 对账残差：MinIO 出站 − agent 回源",
-               "残差应接近 0；超 2% 读字节的格标红。这是测量装置自身的误差台账，不是系统行为。",
+    return fig("d25-residual", "源站出站字节与 agent 回源的 D25 对账残差",
+               "残差应接近 0；超过 2% 读字节的实验格标红。该图是测量装置自身的误差台账，不反映系统行为。",
                _opt(xAxis=_x("格", cats, axisLabel={"rotate": 45, "fontSize": 9}),
                     yAxis=_y("残差 (MB)"),
                     series=[{"type": "bar", "data": [
@@ -740,8 +757,8 @@ def fig_sampling_quality(data):
     gaps = [round(_avg(c["reps"], "sample_max_gap_s") or 0, 1) for c in data["cells"]]
     voids = [sum(1 for r in c["reps"] if str(r.get("void")).lower() == "true")
              for c in data["cells"]]
-    return fig("sampling-quality", "采样质量台账：最大采样间隔与 void 计数",
-               "间隔应接近采样周期 5s；虚线=1.5×周期。void 计数非零的格已在重跑清单处理。",
+    return fig("sampling-quality", "采样质量：最大采样间隔与 void 记录数",
+               "间隔应接近 5s 采样周期，虚线为 1.5 倍周期；void 计数非零的实验格已列入重跑清单。",
                _opt(xAxis=_x("格", cats, axisLabel={"rotate": 45, "fontSize": 9}),
                     yAxis=[_y("最大间隔 (s)"), _y("void 数", splitLine={"show": False})],
                     series=[_s("sample_max_gap", gaps, C["blue"], "bar",
@@ -810,42 +827,49 @@ def fig_e2e_bars(data):
     cn = {"checkpoint-resume": "checkpoint 续跑", "checkpoint-version": "数据版本切换",
           "dual-restart": "双重重启"}
     cats = [cn.get(s, s) for s in scs]
-    figs = [
-        fig("e2e-makespan", "e2e：各场景全程 makespan", "两阶段合计，2 rep 均值。",
-            _opt(xAxis=_x("场景", cats), yAxis=_y("makespan (s)"),
-                 series=[_s("makespan", mk, C["blue"])]), h=300),
-        fig("e2e-recovery", "e2e：各场景恢复时长", "中断→恢复出步；场景动作耗时含在内。",
-            _opt(xAxis=_x("场景", cats), yAxis=_y("恢复时长 (s)"),
-                 series=[_s("恢复时长", rec, C["orange"])]), h=300),
-        fig("e2e-fetch-errors", "e2e：恢复窗口回源请求错误数", "判据读恢复窗口；非零即缺陷。",
-            _opt(xAxis=_x("场景", cats), yAxis=_y("错误数"),
-                 series=[_s("错误数", err, C["rose"])]), h=300),
-    ]
-    return figs
+    return [fig("e2e-makespan-recovery", "端到端场景：全程耗时与恢复时长",
+                f"柱为两阶段合计的全程耗时（2 次重复均值，读左轴），折线为中断至恢复出步的恢复时长（读右轴）；"
+                f"恢复窗口内源站请求错误数三个场景合计 {sum(err)} 次，未单列成图。",
+                _opt(grid={"left": "7%", "right": "7%", "top": 78, "bottom": 56},
+                     xAxis=_x("场景", cats),
+                     yAxis=[_y("全程耗时 (s)"), _y("恢复时长 (s)", splitLine={"show": False})],
+                     series=[_s("全程耗时", mk, C["blue"]),
+                             _s("恢复时长", rec, C["orange"], "line", yAxisIndex=1,
+                                showSymbol=True, symbolSize=8)],
+                     legend=_legend(), tooltip={"trigger": "axis", "confine": True}), h=380)]
 
 
 def fig_e2e_overview(data, e, idx):
     rep = e["reps"][0]
     series_map, t0 = _norm_series(rep)
     interrupt, resume = rep.get("interrupt", 270), rep.get("resume", 295)
+    def _ser(name, label, color, kind="line"):
+        """series_map[name] 是 [{labels, points}] 列表；每个实体拆成一条曲线。"""
+        for s in series_map.get(name, []):
+            tag = next((str(v) for k, v in s["labels"].items()
+                        if k in ("reason", "item", "pod") and v), "")
+            yield (f"{label}:{tag}" if tag else label, s["points"], color, kind)
+
     rows = [
         ("训练侧 wait (s)", [("", _steps_timed(rep["steps"]), C["blue"], "line")]),
-        ("预取队列/lead (块)", [("queue_depth", series_map.get("prefetch_queue_depth", []), C["purple"], "line"),
-                              ("lead_blocks", series_map.get("prefetch_lead_blocks", []), C["teal"], "line")]),
-        ("淘汰速率 (块/s)", [("evict", series_map.get("evict_blocks", []), C["rose"], "rate")]),
-        ("回源速率 (MB/s)", [(s["labels"].get("reason", "?"), s["points"], co, "rate")
-                           for s, co in zip(series_map.get("fetch_bytes", []),
-                                            (C["blue"], C["purple"], C["orange"]))]),
-        ("缓存占用/命中率", [("disk_usage", series_map.get("disk_usage_ratio", []), C["teal"], "line"),
-                          ("hit_ratio", series_map.get("cache_hit_ratio", []), C["blue"], "line")]),
-        ("MinIO 出站 (MB/s)", [("sent", series_map.get("minio_sent_bytes", []), C["orange"], "rate")]),
+        ("预取队列/lead (块)", list(_ser("prefetch_queue_depth", "queue_depth", C["purple"]))
+                            + list(_ser("prefetch_lead_blocks", "lead_blocks", C["teal"]))),
+        ("淘汰速率 (块/s)", list(_ser("evict_blocks", "evict", C["rose"], "rate"))),
+        ("回源速率 (MB/s)", list(_ser("fetch_bytes", "fetch", C["blue"], "rate"))),
+        ("缓存占用/命中率", list(_ser("disk_usage_ratio", "disk_usage", C["teal"]))
+                          + list(_ser("cache_hit_ratio", "hit_ratio", C["blue"]))),
+        ("MinIO 出站 (MB/s)", list(_ser("minio_sent_bytes", "sent", C["orange"], "rate"))),
     ]
+    _pal = (C["blue"], C["purple"], C["orange"], C["teal"], C["rose"])
+    for i, row in enumerate(rows):
+        rows[i] = (row[0], [(n, p, _pal[j % len(_pal)] if n.startswith("fetch:") else c, k)
+                            for j, (n, p, c, k) in enumerate(row[1])])
     grids, xaxes, yaxes, series, titles = [], [], [], [], []
     n = len(rows)
     for i, (label, ss) in enumerate(rows):
-        top = 6 + i * 14.5
-        grids.append({"left": 70, "right": 30, "top": f"{top}%", "height": "10.5%"})
-        titles.append({"text": label, "left": 70, "top": f"{top - 3.2}%",
+        top = 6 + i * 15.2
+        grids.append({"left": 70, "right": 30, "top": f"{top}%", "height": "9.8%"})
+        titles.append({"text": label, "left": 70, "top": f"{top - 4.3}%",
                        "textStyle": {"fontSize": 11, "color": C["mut"], "fontWeight": 600}})
         xaxes.append({"type": "value", "gridIndex": i, "min": 0,
                       "axisLabel": {"show": i == n - 1, "color": C["mut"], "fontSize": 10},
@@ -867,9 +891,9 @@ def fig_e2e_overview(data, e, idx):
                                         "label": {"show": i == 0, "fontSize": 9},
                                         "data": [{"xAxis": interrupt, "name": "中断"},
                                                  {"xAxis": resume, "name": "恢复"}]}})
-    return fig(f"e2e-overview-{idx}", f"e2e 系统行为总览：{e['scenario']}（代表轮）",
-               "六层共轴：训练侧等待 / 预取 / 淘汰 / 回源 / 缓存 / 源站出站；虚线=中断与恢复时刻，"
-               "断档=进程中断窗口。计数器已求差为速率，拖动底部滑尺缩放。",
+    return fig(f"e2e-overview-{idx}", f"端到端系统行为总览：{e['scenario']}（代表轮次）",
+               "六个层面共用时间轴：训练侧等待、预取队列与 lead、淘汰速率、回源速率、缓存占用与命中率、源站出站；"
+               "虚线为中断与恢复时刻，断档为进程中断窗口；计数器已做差分转为速率，底部滑尺可缩放。",
                _opt(title=titles, grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     axisPointer={"link": [{"xAxisIndex": "all"}]},
                     dataZoom=[{"type": "slider", "xAxisIndex": list(range(n)),
@@ -886,7 +910,7 @@ def fig_e2e_zoom(data):
         smap, _ = _norm_series(rep)
         interrupt, resume = rep.get("interrupt", 270), rep.get("resume", 295)
         lo, hi = interrupt - 60, resume + 120
-        grids.append({"left": 70, "right": 30, "top": 40 + i * 150, "height": 100})
+        grids.append({"left": 86, "right": 70, "top": 40 + i * 150, "height": 100})
         titles.append({"text": e["scenario"], "left": 70, "top": 18 + i * 150,
                        "textStyle": {"fontSize": 12, "color": C["mut"], "fontWeight": 600}})
         xaxes.append({"type": "value", "gridIndex": i, "min": lo, "max": hi,
@@ -911,8 +935,8 @@ def fig_e2e_zoom(data):
                            "data": q[0]["points"], "showSymbol": False,
                            "lineStyle": {"width": 1.5, "color": C["purple"], "type": "dashed"},
                            "xAxisIndex": i, "yAxisIndex": i})
-    return fig("e2e-zoom", "中断→恢复放大窗（三场景）",
-               "粉底=中断窗口；demand 回源速率的尖峰与预取队列的重建过程逐点可读，恢复判据的直接证据。",
+    return fig("e2e-zoom", "中断与恢复窗口的放大视图（三个场景）",
+               "横轴截取中断前 60s 至恢复后 120s；粉色底纹为中断窗口；demand 回源速率的尖峰与预取队列的重建过程逐点可读，是恢复判据的直接证据。",
                _opt(title=titles, grid=grids, xAxis=xaxes, yAxis=yaxes, series=series,
                     legend=_legend()), h=520)
 
@@ -928,30 +952,44 @@ def _norm_family(name, rows):
     for r in rows:
         cond = str(r.get("cond") or r.get("_cell") or "")
         d = dict(r)
+        # cond 解析出的键优先；解析不到时沿用行里已有的键（mock 行直接给键），最后退回 cond。
+        def keep(key, val):
+            if val not in (None, "") or not d.get(key):
+                d[key] = val
+
         if name == "gateway":
             m = re.search(r"gateway-(g\d)", cond)
-            d["arm"] = m.group(1) if m else cond
-            d["source_bytes"] = _f(r, "origin_egress_bytes") or _f(r, "fetch_bytes_run")
+            keep("arm", m.group(1) if m else cond)
+            d["source_bytes"] = (d.get("source_bytes")
+                                 or _f(r, "origin_egress_bytes") or _f(r, "fetch_bytes_run"))
         elif name == "evict":
             m = re.search(r"evict-(\w+)", cond)
-            d["policy"] = m.group(1) if m else cond
+            keep("policy", m.group(1) if m else cond)
         elif name == "prefetch":
-            d["lookahead"] = _f(r, "prefetch_lookahead")
-            d["fanout"] = _f(r, "prefetch_fanout")
+            d["lookahead"] = _f(r, "prefetch_lookahead") or d.get("lookahead")
+            d["fanout"] = _f(r, "prefetch_fanout") or d.get("fanout")
         elif name == "warmup":
             m = re.search(r"warmup-(\w+)-w(\d+)", cond)
-            d["gate"], d["window"] = (m.group(1), int(m.group(2))) if m else ("", 0)
+            if m:
+                d["gate"], d["window"] = m.group(1), int(m.group(2))
+            else:
+                keep("gate", d.get("gate") or cond)
+                d["window"] = d.get("window") or 0
         elif name == "switch":
             m = re.search(r"switch-(.+?)-rho", cond)
-            d["scenario"] = m.group(1) if m else cond
+            keep("scenario", m.group(1) if m else cond)
             d["recovery_time_s"] = _f(r, "e2e_recovery_time_s") or _f(r, "recovery_time_s")
         elif name == "multiconsumer":
             m = re.search(r"multi-hot(\d+)-(\w+)", cond)
-            d["hot"] = f"{m.group(1)}%" if m else cond
-            d["placement"] = m.group(2) if m else ""
+            keep("hot", f"{m.group(1)}%" if m else cond)
+            keep("placement", m.group(2) if m else "")
         elif name == "rangepar":
             m = re.search(r"rangepar-(l\d)-par-(\w+)", cond)
-            d["level"], d["par"] = (m.group(1), m.group(2)) if m else (cond, "")
+            if m:
+                d["level"], d["par"] = m.group(1), m.group(2)
+            else:
+                keep("level", cond)
+                keep("par", d.get("par") or "")
         d["rho"] = _f(r, "rho")
         out.append(d)
     return out
@@ -989,34 +1027,83 @@ def fig_families(data):
     def rows(name):
         return _norm_family(name, fam.get(name, []))
 
+    def col(rws, xk, yk, scale=1.0):
+        """按 xk 分组取 yk 均值，返回（类目列表，数值列表）。"""
+        xs = sorted({str(x.get(xk)) for x in rws})
+        vals = []
+        for xv in xs:
+            vv = [_f(x, yk) for x in rws if str(x.get(xk)) == xv]
+            vv = [v for v in vv if v is not None]
+            vals.append(round(sum(vv) / len(vv) * scale, 3) if vv else None)
+        return xs, vals
+
     if fam.get("gateway"):
         r = rows("gateway")
-        figs.append(_fam_bar("gateway-makespan", "网关族：三臂全程 makespan",
-                             "g0=无网关，g1/g2=网关两档；源站字节见下图。", r, "arm",
-                             "total_makespan", ylabel="makespan (s)"))
-        figs.append(_fam_bar("gateway-source-bytes", "网关族：三臂源站字节",
-                             "合并回源的效果直接体现在源站出站字节上。", r, "arm",
-                             "source_bytes", ylabel="字节"))
+        arms, mk = col(r, "arm", "total_makespan")
+        _, egress = col(r, "arm", "source_bytes", 1e-9)
+        figs.append(fig("gateway-overview", "网关族：三档网关配置的全程耗时与源站出站字节",
+                        "柱为全程耗时（读左轴），折线为源站出站字节（读右轴）；g0 为无网关基线，"
+                        "g1、g2 为两级合并回源配置。",
+                        _opt(grid={"left": "7%", "right": "7%", "top": 78, "bottom": 52},
+                             xAxis=_x("网关配置", arms),
+                             yAxis=[_y("全程耗时 (s)"), _y("源站出站 (GB)", splitLine={"show": False})],
+                             series=[_s("全程耗时", mk, C["blue"]),
+                                     _s("源站出站", egress, C["orange"], "line", yAxisIndex=1,
+                                        showSymbol=True, symbolSize=8)],
+                             legend=_legend(), tooltip={"trigger": "axis", "confine": True}), h=360))
     if fam.get("evict"):
         r = rows("evict")
-        figs.append(_fam_bar("evict-makespan", "淘汰族：三算法全程 makespan",
-                             "heat/lru/lfu 在 ρ 两端的表现。", r, "policy",
-                             "total_makespan", "rho", "makespan (s)"))
-        figs.append(_fam_bar("evict-hot", "淘汰族：热块被挤出次数",
-                             "热块被挤出=淘汰算法误伤正在用的数据。", r, "policy",
-                             "b_evictions_of_hot", "rho", "次数"))
+        rhos = sorted({_f(x, "rho") for x in r if _f(x, "rho") is not None})
+        policies = sorted({str(x.get("policy")) for x in r})
+        series = []
+        for j, p in enumerate(policies):
+            vals = []
+            for rho in rhos:
+                vv = [_f(x, "total_makespan") for x in r
+                      if str(x.get("policy")) == p and _f(x, "rho") == rho]
+                vv = [v for v in vv if v is not None]
+                vals.append(round(sum(vv) / len(vv), 1) if vv else None)
+            series.append(_s(p, vals, list(RATE_COLORS.values())[j % 3], "line",
+                             showSymbol=True, symbolSize=7))
+        figs.append(fig("evict-makespan", "淘汰族：三种淘汰算法的全程耗时随缓存容量比的变化",
+                        "三条曲线分别为 heat、LRU、LFU；ρ 由 1 增至 8 时缓存不再是瓶颈，算法间的差异应随之收窄。",
+                        _opt(grid={"left": "8%", "right": "8%", "top": 70, "bottom": 52},
+                             xAxis=_x("ρ", [f"{v:g}" for v in rhos]),
+                             yAxis=_y("全程耗时 (s)"), series=series, legend=_legend(),
+                             tooltip={"trigger": "axis", "confine": True}), h=340))
+        rhos_axis = sorted({str(_f(x, "rho")) for x in r if _f(x, "rho") is not None})
+        hot_series = []
+        for j, rho in enumerate(rhos_axis):
+            vals = []
+            for p in policies:
+                vv = [_f(x, "b_evictions_of_hot") for x in r
+                      if str(x.get("policy")) == p and str(_f(x, "rho")) == rho]
+                vv = [v for v in vv if v is not None]
+                vals.append(round(sum(vv) / len(vv), 1) if vv else None)
+            hot_series.append(_s(f"ρ={rho}", vals, list(RATE_COLORS.values())[j % 3]))
+        figs.append(fig("evict-hot", "淘汰族：热块被挤出次数",
+                        "热块被挤出意味着淘汰算法误伤正在使用的数据；数值越低越好，按淘汰算法分组、ρ 分色。",
+                        _opt(grid={"left": "8%", "right": "8%", "top": 70, "bottom": 52},
+                             xAxis=_x("淘汰算法", policies), yAxis=_y("被挤出次数"),
+                             series=hot_series, legend=_legend(),
+                             tooltip={"trigger": "axis", "confine": True}), h=320))
     if fam.get("prefetch"):
         r = rows("prefetch")
         las = sorted({_f(x, "lookahead") for x in r if _f(x, "lookahead") is not None})
         fans = sorted({_f(x, "fanout") for x in r if _f(x, "fanout") is not None})
         rhos = sorted({_f(x, "rho") for x in r if _f(x, "rho") is not None})
         grids, xaxes, yaxes, series, titles = [], [], [], [], []
+        ncol = max(1, len(rhos))
+        gw = (100 - 12) / ncol - 4
         for i, rho in enumerate(rhos):
-            grids.append({"left": 60 + i * 340, "width": 280, "top": 42, "height": 200})
-            titles.append({"text": f"ρ={rho:g}", "left": 60 + i * 340, "top": 20,
+            left = 7 + i * (gw + 4)
+            grids.append({"left": f"{left}%", "width": f"{gw}%", "top": 84, "height": 188})
+            titles.append({"text": f"ρ={rho:g}", "left": f"{left}%", "top": 44,
                            "textStyle": {"fontSize": 12, "color": C["mut"], "fontWeight": 600}})
             xaxes.append(_x("lookahead（块）", [str(int(v)) for v in las], gridIndex=i))
-            yaxes.append(_y("makespan (s)", gridIndex=i))
+            yaxes.append({"type": "value", "gridIndex": i,
+                          "axisLabel": {"color": C["mut"], "fontSize": 10},
+                          "splitLine": {"lineStyle": {"color": C["grid"]}}})
             for j, fan in enumerate(fans):
                 vals = []
                 for la in las:
@@ -1028,47 +1115,82 @@ def fig_families(data):
                 series.append(_s(f"fanout={fan:g}", vals,
                                  list(RATE_COLORS.values())[j % 3], "line",
                                  xAxisIndex=i, yAxisIndex=i))
-        figs.append(fig("prefetch-lookahead", "预取族：窗口 × fanout 对全程耗时的影响",
-                        "ρ 分面；窗口越大预取越超前，fanout 决定并行回源度。",
+        figs.append(fig("prefetch-lookahead", "预取族：预取窗口与 fanout 对全程耗时的影响",
+                        "纵轴为全程耗时（s），按 ρ 分面；预取窗口越大预取越超前，fanout 决定并行回源的并发度。",
                         _opt(title=titles, grid=grids, xAxis=xaxes, yAxis=yaxes,
                              series=series, legend=_legend()), h=320))
     if fam.get("warmup"):
         r = rows("warmup")
-        figs.append(_fam_bar("warmup-startup", "预热族：窗口 × 门控对启动耗时的影响",
-                             "gated=门控放行后出步，free=自由读；窗口越长启动越慢但稳态越稳。",
-                             r, "window", "startup_makespan", "gate", "启动 makespan (s)"))
+        figs.append(_fam_bar("warmup-startup", "预热族：预热窗口与门控策略对启动耗时的影响",
+                             "gated 为门控放行后出步，free 为自由读取；窗口越长启动越慢，稳态越稳定。",
+                             r, "window", "startup_makespan", "gate", "启动耗时 (s)"))
     if fam.get("switch"):
         r = rows("switch")
-        figs.append(_fam_bar("switch-recovery", "切换族：各访问模式的恢复时长",
-                             "fixed/per-epoch/curriculum/curriculum-narrow 四种消费顺序。",
-                             r, "scenario", "recovery_time_s", ylabel="恢复时长 (s)"))
+        cats, rec = col(r, "scenario", "recovery_time_s")
+        figs.append(fig("switch-recovery", "切换族：四种访问顺序的恢复时长",
+                        "横轴为恢复时长，纵轴为访问顺序（fixed、per-epoch、curriculum、curriculum-narrow）。",
+                        _opt(grid={"left": "22%", "right": "10%", "top": 56, "bottom": 56},
+                             xAxis={"type": "value", "name": "恢复时长 (s)", "nameLocation": "middle",
+                                    "nameGap": 30, "axisLabel": {"color": C["mut"]},
+                                    "splitLine": {"lineStyle": {"color": C["grid"]}}},
+                             yAxis={"type": "category", "data": cats,
+                                    "axisLabel": {"color": C["mut"]}, "axisTick": {"show": False},
+                                    "axisLine": {"show": False}},
+                             series=[_s("恢复时长", rec, C["teal"])],
+                             tooltip={"trigger": "axis", "confine": True}), h=320))
     if fam.get("multiconsumer"):
         r = rows("multiconsumer")
-        figs.append(_fam_bar("multi-hit", "多消费者族：热比例 × 放置的命中率",
-                             "spread=读端分散各节点，colocated=集中。", r, "hot",
-                             "hit_rate", "placement", "命中率"))
-        figs.append(_fam_bar("multi-makespan", "多消费者族：热比例 × 放置的全程耗时",
-                             "热点集中时放置策略决定缓存是否被重复占用。", r, "hot",
-                             "total_makespan", "placement", "makespan (s)"))
+        for x in r:
+            x["_k"] = f"{x.get('hot')}·{x.get('placement')}"
+        cats, hit = col(r, "_k", "hit_rate")
+        _, mk = col(r, "_k", "total_makespan")
+        figs.append(fig("multi-overview", "多消费者族：热比例与放置策略对命中率、全程耗时的影响",
+                        "柱为 steady 命中率（读左轴），折线为全程耗时（读右轴）；spread 表示读端分散至各节点，"
+                        "colocated 表示集中放置；横轴为热数据比例与放置方式的组合。",
+                        _opt(grid={"left": "7%", "right": "7%", "top": 78, "bottom": 56},
+                             xAxis=_x("热比例·放置方式", cats),
+                             yAxis=[_y("命中率", max=1), _y("全程耗时 (s)", splitLine={"show": False})],
+                             series=[_s("命中率", hit, C["teal"]),
+                                     _s("全程耗时", mk, C["orange"], "line", yAxisIndex=1,
+                                        showSymbol=True, symbolSize=8)],
+                             legend=_legend(), tooltip={"trigger": "axis", "confine": True}), h=360))
     if fam.get("rangepar"):
         r = rows("rangepar")
-        figs.append(_fam_bar("rangepar-makespan", "并行 Range 族：各限速档开关对比",
-                             "tbf 是聚合限速，并行 Range 不省 makespan——本族验证该装置约束。",
-                             r, "level", "total_makespan", "par", "makespan (s)"))
-        levels = sorted({x.get("level") for x in r})
-        speedup = []
+        levels = sorted({str(x.get("level")) for x in r})
+        pars = sorted({str(x.get("par")) for x in r})
+        series, speedup = [], []
+        for j, p in enumerate(pars):
+            vals = []
+            for lv in levels:
+                vv = [_f(x, "total_makespan") for x in r
+                      if str(x.get("level")) == lv and str(x.get("par")) == p]
+                vv = [v for v in vv if v is not None]
+                vals.append(round(sum(vv) / len(vv), 1) if vv else None)
+            series.append(_s(f"并行 {p}", vals,
+                             C["blue"] if p == "off" else C["teal"]))
         for lv in levels:
             off = [_f(x, "total_makespan") for x in r
-                   if x.get("level") == lv and x.get("par") == "off"]
+                   if str(x.get("level")) == lv and str(x.get("par")) == "off"]
             on = [_f(x, "total_makespan") for x in r
-                  if x.get("level") == lv and x.get("par") == "on"]
+                  if str(x.get("level")) == lv and str(x.get("par")) == "on"]
             off = [v for v in off if v]; on = [v for v in on if v]
             speedup.append(round(sum(off) / len(off) / (sum(on) / len(on)), 3)
                            if off and on else None)
-        figs.append(fig("rangepar-speedup", "并行 Range 族：加速比",
-                        "off/on 的 makespan 比值；≈1 验证聚合限速下并行不省时间。",
-                        _opt(xAxis=_x("限速档", levels), yAxis=_y("加速比"),
-                             series=[_s("off/on", speedup, C["teal"])]), h=320))
+        series.append(_s("加速比（off/on）", speedup, C["orange"], "line", yAxisIndex=1,
+                         showSymbol=True, symbolSize=8,
+                         markLine={"silent": True, "symbol": "none",
+                                   "lineStyle": {"type": "dashed", "color": C["mut"]},
+                                   "label": {"fontSize": 10, "formatter": "1.0"},
+                                   "data": [{"yAxis": 1.0}]}))
+        figs.append(fig("rangepar-overview", "并行 Range 族：限速档位下并行开关的耗时与加速比",
+                        "柱为全程耗时（读左轴，off/on 两档），折线为 off/on 的加速比（读右轴），虚线为 1.0；"
+                        "tbf 为聚合限速，加速比接近 1 说明并行 Range 不改变总耗时。",
+                        _opt(grid={"left": "7%", "right": "7%", "top": 78, "bottom": 56},
+                             xAxis=_x("限速档位", levels),
+                             yAxis=[_y("全程耗时 (s)"),
+                                    _y("加速比", splitLine={"show": False}, min=0, max=1.5)],
+                             series=series, legend=_legend(),
+                             tooltip={"trigger": "axis", "confine": True}), h=360))
     if fam.get("chaos"):
         r = fam["chaos"]
         faults = sorted({x["fault"] for x in r})
@@ -1086,8 +1208,8 @@ def fig_families(data):
                         for f in faults]
                 series.append(_s(status, vals, color, "bar", stack="s",
                                  xAxisIndex=i, yAxisIndex=i))
-        figs.append(fig("chaos-results", "混沌族：各故障判定结果",
-                        "PASS/FAIL 按轮计数；判据数值化见 docs/4.7。",
+        figs.append(fig("chaos-results", "混沌族：各故障注入场景的判定结果",
+                        "PASS/FAIL 按轮次计数，判定标准见 docs/4.7。",
                         _opt(title=titles, grid=grids, xAxis=xaxes, yAxis=yaxes,
                              series=series, legend=_legend()), h=320))
     return figs
@@ -1174,9 +1296,9 @@ def build_sections(data):
         fig_prefetch_efficacy(data), fig_warm_cost(data)]))
     secs.append(("timeline", "二、系统行为按时间展开", [
         fig_timeline_sm(data, "traincache-cold", "timeline-cold",
-                        "cold 逐步时间线小倍数（15 格）"),
+                        "冷缓存场景逐步等待时间线（15 格）"),
         fig_timeline_sm(data, "traincache-warm", "timeline-warm",
-                        "warm 逐步时间线小倍数（10 格）"),
+                        "预热场景逐步等待时间线（10 格）"),
         fig_shard_heatmap(data), fig_recovery_summary(data)]))
     secs.append(("quality", "三、数据质量", [
         fig_d25_residual(data), fig_sampling_quality(data)]))

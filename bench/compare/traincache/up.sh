@@ -293,10 +293,10 @@ if [ "$WARMUP_K" = "0" ]; then
   echo "[WARMUP_SECONDS] 0"  # run_bench.py 解析此行
   echo "[WARMUP_BASIS] cold"
 else
-  # fanout 固定 2(D26):先给两个节点预热,scheduler 按就绪度选落点;
-  # 节点数只作上限校验,不够 2 个直接中止
+  # fanout 缺省 1(D26):一份预热与 juicefs/fluid 的 warm 组对齐(docs/4.1),
+  # scheduler 按就绪度选落点;节点数只作上限校验,不够 fanout 个直接中止
   S3_NODE_CNT=$(kubectl get nodes -l traincache.io/s3-access=true --no-headers 2>/dev/null | wc -l)
-  PREHEAT_FANOUT="${TRAINCACHE_PREHEAT_FANOUT:-2}"
+  PREHEAT_FANOUT="${TRAINCACHE_PREHEAT_FANOUT:-1}"
   PREHEAT_FANOUT_MIN="${TRAINCACHE_PREHEAT_FANOUT_MIN:-1}"
   if [ "$S3_NODE_CNT" -lt "$PREHEAT_FANOUT" ]; then
     log_group "$GROUP" "错误: s3-access 节点数 $S3_NODE_CNT 少于 fanout $PREHEAT_FANOUT" >&2

@@ -44,9 +44,9 @@ HASH_ANNOTATION="traincache.io/deploy-hash"
 CAPACITY_BYTES="${TRAINCACHE_CACHE_CAPACITY_BYTES:-1073741824}"
 STARTUP_WINDOW_BYTES="536870912"
 MAX_FILL_FRACTION="0.125"
-# 与 controller/deploy/agent/configmap.yaml 的默认值一致:独立调用(不带 COND)时
-# 这两项就停在清单默认,不额外触发滚动重启。
-PREFETCH_LOOKAHEAD="${TRAINCACHE_PREFETCH_LOOKAHEAD:-16}"
+# 提前量缺省 32 = 一个分片的块数(256MiB÷8MiB,docs/4.1 参数总表);与清单默认
+# 16 不同,apply 会盖回清单值,所以这一项总会 patch 一次。淘汰策略仍与清单一致。
+PREFETCH_LOOKAHEAD="${TRAINCACHE_PREFETCH_LOOKAHEAD:-32}"
 EVICT_POLICY="${TRAINCACHE_EVICT_POLICY:-heat}"
 # Range 并行开关:每个块是否拆成 4 条 Range GET 并行取。取值来自环境变量,
 # 与 controller/deploy/agent/configmap.yaml 的默认值一致;独立调用时停在清单默认,

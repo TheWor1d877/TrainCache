@@ -50,7 +50,7 @@
   ],
   "notes": "switch 族格子；scenario=curriculum，rho=8.0，rate=1000，shuffle=curriculum；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
-    "lookahead": 16,
-    "fanout": 2
+    "lookahead": 32,
+    "fanout": 1
   }
 }

@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"traincache/agent/logagg"
@@ -266,12 +265,6 @@ type PersistentPrefetcher struct {
 	// (不会出现后写 Set 覆盖为旧值)。
 	fetchInflightMu sync.Mutex
 	fetchInflight   int64
-
-	// warmupDone 标记是否已离开 warmup 阶段。agent 启动时置 false,第一次训练进程
-	// 通过 OnConsumeSideAdvance 消费块后置 true。warmup 阶段 P0 块走 AdmissionReading
-	// (占满 MaxTasks),之后退回 AdmissionSpeculative (半额 specTasks)。
-	// 消费钩子与下载协程并发读写,用 atomic。
-	warmupDone atomic.Bool
 }
 
 // New 构造持久预取器(设计《预取主循环》冻结签名)。cat/f/cs/m 分别提供索引查找、下载编排、
@@ -322,9 +315,6 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 	if err := ctx.Err(); err != nil {
 		return false
 	}
-	// 第一次训练进程消费块 → warmup 阶段结束,P0 块退回 AdmissionSpeculative。
-	// 幂等:多次调用无副作用。
-	p.warmupDone.Store(true)
 	var (
 		report  bool
 		leads   int64
@@ -467,7 +457,8 @@ func (p *PersistentPrefetcher) EnqueueP0ScopedTask(ctx, work context.Context, ta
 }
 
 // EnqueueP0Demand 是 demand(按需补块)的 P0 入队入口:语义与 EnqueueP0 完全一致
-// (严格最高优先级、在途不取消、完成仍经 OnP0Done),仅把回源 reason 标为 demand。
+// (严格最高优先级、在途不取消、完成仍经 OnP0Done),区别有两点:回源 reason 标为
+// demand(下载走读准入,D70),块插到 P0 队首、排在任何已排队的预热块之前(D71)。
 // 复用同一队列与 pending 去重表,不改变冻结的 pending 语义。
 func (p *PersistentPrefetcher) EnqueueP0Demand(ctx context.Context, refs []ChunkRef) error {
 	return p.enqueueP0(ctx, refs, metrics.FetchReasonDemand, nil, "")
@@ -482,7 +473,16 @@ func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, r
 	}
 	p.mu.Lock()
 	dataset := p.dataset
-	for _, r := range refs {
+	// D71:需求补块插到 P0 队首,排在任何已排队(含同一批)的预热块之前;显式预热照旧
+	// 按到达顺序追加到队尾。逆序插入,使同一批补块出队时仍保持入参顺序。
+	order := refs
+	if reason == metrics.FetchReasonDemand {
+		order = make([]ChunkRef, len(refs))
+		for i, r := range refs {
+			order[len(refs)-1-i] = r
+		}
+	}
+	for _, r := range order {
 		p.enqueueLocked(&task{idx: -1, ref: r, dataset: dataset, p0: true, reason: reason, taskID: taskID, ctx: work}, priP0)
 	}
 	p.mu.Unlock()
@@ -495,6 +495,12 @@ func (t *task) fetchReason() string {
 		return metrics.FetchReasonPrefetch
 	}
 	return t.reason
+}
+
+// isDemand 报告本 task 是否由需求读补块触发(回源 reason = demand):D70 据此选在读
+// 准入档位,D71 据此把块插到 P0 队首。
+func (t *task) isDemand() bool {
+	return t.reason == metrics.FetchReasonDemand
 }
 
 // Status 返回当前状态快照(设计《预取主循环》冻结):阶段标识、纯消费位点(consume 所在块)、
@@ -663,10 +669,11 @@ func (p *PersistentPrefetcher) ensureWindowLocked() {
 }
 
 // enqueueLocked 经 D45 pending 去重表入队并唤醒调度协程(wake 缓冲 1;已有待处理信号
-// 时不再投递)。action 语义:"enqueue" = 新任务已追加;"promote"/"ignore" = 去重表已
-// 处理(骨架阶段 enqueueDedupLocked 恒返回 "enqueue",保持既有行为)。
+// 时不再投递)。action 语义:"enqueue" = 新任务已入队;"promote"/"ignore" = 去重表已
+// 处理。新任务默认追加到队尾;需求补块(D71)插到队首,与 enqueueDedupLocked 的提升
+// 路径同一判定,保证需求补块不会排到已排队的预热块之后。
 func (p *PersistentPrefetcher) enqueueLocked(t *task, pri int) {
-	// 去重提升不重置起点;骨架阶段这里只记录首次入队参数。
+	// 去重提升不重置起点;这里只记录首次入队参数。
 	if t.start.IsZero() {
 		t.start = p.now()
 	}
@@ -674,11 +681,20 @@ func (p *PersistentPrefetcher) enqueueLocked(t *task, pri int) {
 	if action := p.enqueueDedupLocked(t, pri); action != "enqueue" {
 		return
 	}
-	p.queues[pri] = append(p.queues[pri], t)
+	if t.isDemand() {
+		p.prependQueueLocked(pri, t)
+	} else {
+		p.queues[pri] = append(p.queues[pri], t)
+	}
 	select {
 	case p.wake <- struct{}{}:
 	default:
 	}
+}
+
+// prependQueueLocked 把 task 插到指定优先级队首(D71 需求补块插队;调用方持 p.mu)。
+func (p *PersistentPrefetcher) prependQueueLocked(pri int, t *task) {
+	p.queues[pri] = append([]*task{t}, p.queues[pri]...)
 }
 
 // popTaskLocked 按严格优先级(P0>P1>P2>P3)出队,同级 FIFO;全空返回 (nil, 0)。
@@ -830,11 +846,11 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 		return entrySize, false, errors.New("prefetch: dataset 未绑定(尚无 ConsumeOrder),无法构造下载键")
 	}
 	reason := t.fetchReason()
+	// 准入档位与队列档位是两条独立的轴(设计《预取主循环》;D70):只有需求补块走在读
+	// 准入(全场额度、不让路),显式预热与邻域预取一律走预铺准入(半额额度,在读有在途
+	// 时让路)。训练进程有没有开始消费不改变分档,预热任务刚下发时也只拿一半额度。
 	adm := fetch.AdmissionSpeculative
-	if reason == metrics.FetchReasonDemand || (t.p0 && !p.warmupDone.Load()) {
-		// Demand 读补块走在读,不受半额约束;
-		// warmup 阶段的 P0 预热块也走在读,占满 MaxTasks(此时 Pod 尚未调度,
-		// 没有在读请求在途,半额保护多余)。
+	if t.isDemand() {
 		adm = fetch.AdmissionReading
 	}
 	p.reportFetchStart(t.dataset)

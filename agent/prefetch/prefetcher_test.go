@@ -1318,6 +1318,84 @@ func TestEnqueueP0PriorityPreemptsP1AndP2(t *testing.T) {
 	})
 }
 
+// TestEnqueueP0DemandJumpsAheadOfPreheat:D71——需求补块插到 P0 队首,显式预热按到达
+// 顺序追加队尾;去重提升路径同口径,已排队的邻域块被需求补块提升时插到队首,不能排在
+// 已排队的预热块后面。白盒出队断言,不依赖调度时序。
+func TestEnqueueP0DemandJumpsAheadOfPreheat(t *testing.T) {
+	ctx := context.Background()
+
+	// 子场景 1:同一批补块整体插到队首,批内保持入参顺序。
+	t.Run("新入队", func(t *testing.T) {
+		p := New(nil, nil, nil, nil, Config{})
+		preheat := []ChunkRef{{Path: "warm-00.tar"}, {Path: "warm-01.tar"}}
+		if err := p.EnqueueP0(ctx, preheat); err != nil {
+			t.Fatalf("EnqueueP0: %v", err)
+		}
+		demand := []ChunkRef{{Path: "miss-00.tar"}, {Path: "miss-01.tar"}}
+		if err := p.EnqueueP0Demand(ctx, demand); err != nil {
+			t.Fatalf("EnqueueP0Demand: %v", err)
+		}
+		var got []ChunkRef
+		for {
+			tk, _ := p.popTaskLocked()
+			if tk == nil {
+				break
+			}
+			got = append(got, tk.ref)
+		}
+		if want := slices.Concat(demand, preheat); !slices.Equal(got, want) {
+			t.Fatalf("出队序 = %v, want %v(需求补块应在预热块之前)", got, want)
+		}
+	})
+
+	// 子场景 2:邻域块已排队(P2)且预热块已在 P0 时,需求补块经去重提升插到 P0 队首,
+	// 复用同一 task(不新建),reason 改为 demand。
+	t.Run("去重提升", func(t *testing.T) {
+		p := New(nil, nil, nil, nil, Config{Lookahead: 1})
+		order := orderOf("epoch", refsNamed("nb", 2), 0) // K=0 → 邻域块 0 以 P2 入队
+		if _, err := p.OnStageSwitch(ctx, order); err != nil {
+			t.Fatalf("OnStageSwitch: %v", err)
+		}
+		preheat := []ChunkRef{{Path: "warm-00.tar"}}
+		if err := p.EnqueueP0(ctx, preheat); err != nil {
+			t.Fatalf("EnqueueP0: %v", err)
+		}
+		demand := order.Chunks[0]
+		if err := p.EnqueueP0Demand(ctx, []ChunkRef{demand}); err != nil {
+			t.Fatalf("EnqueueP0Demand: %v", err)
+		}
+
+		p.mu.Lock()
+		pendingLen := len(p.pending)
+		registered := p.pending[blockKey(testDataset, demand)]
+		p.mu.Unlock()
+		if pendingLen != 2 { // 邻域块 + 预热块;需求补块去重到邻域块
+			t.Fatalf("pending 条目数 = %d, want 2(去重未新建 task)", pendingLen)
+		}
+
+		var got []*task
+		for {
+			tk, _ := p.popTaskLocked()
+			if tk == nil {
+				break
+			}
+			got = append(got, tk)
+		}
+		if len(got) != 2 {
+			t.Fatalf("出队项数 = %d, want 2", len(got))
+		}
+		if got[0] != registered {
+			t.Fatal("第一个出队项应是经提升的同一 task(去重不新建)")
+		}
+		if !got[0].isDemand() || got[0].ref != demand {
+			t.Fatalf("提升后的 task = (%s, demand=%v), want (%s, demand=true)", got[0].ref.Path, got[0].isDemand(), demand.Path)
+		}
+		if got[1].ref != preheat[0] {
+			t.Fatalf("第二个出队项 = %s, want 预热块 %s(需求补块应插到其前面)", got[1].ref.Path, preheat[0].Path)
+		}
+	})
+}
+
 // TestEnqueueP0EmptyAndCanceled:空列表返回 nil 且不入队;ctx 已取消返回 context.Canceled
 // 且不入队(冻结语义)。
 func TestEnqueueP0EmptyAndCanceled(t *testing.T) {

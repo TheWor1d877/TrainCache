@@ -26,29 +26,52 @@ func TestHasMinProgress(t *testing.T) {
 		{
 			name: "all zero ready",
 			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 0}},
+				{Index: 0, K: 512, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 0}},
 			},
 			want: false,
 		},
 		{
-			name: "first pod has ready > 0",
+			// K=512 的下限是 floor(512/20)=25 块。
+			name: "K=512 releases at 25 blocks",
 			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 5}},
+				{Index: 0, K: 512, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 25}},
 			},
 			want: true,
 		},
 		{
-			name: "second pod has ready > 0",
+			name: "K=512 holds at 24 blocks",
 			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 0}},
-				{Index: 1, AssignedNodes: []string{"n2"}, ReadyByNode: map[string]int32{"n2": 1}},
+				{Index: 0, K: 512, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 24}},
+			},
+			want: false,
+		},
+		{
+			// K 小于 20 时 floor(K/20)=0，下限被抬到 1。
+			name: "small K clamps to one block",
+			pods: []gate.PodGateState{
+				{Index: 0, K: 10, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 1}},
+			},
+			want: true,
+		},
+		{
+			name: "K unset clamps to one block",
+			pods: []gate.PodGateState{
+				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 1}},
+			},
+			want: true,
+		},
+		{
+			name: "second pod reaches its own floor",
+			pods: []gate.PodGateState{
+				{Index: 0, K: 512, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 0}},
+				{Index: 1, K: 512, AssignedNodes: []string{"n2"}, ReadyByNode: map[string]int32{"n2": 25}},
 			},
 			want: true,
 		},
 		{
 			name: "no assigned nodes",
 			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: nil, ReadyByNode: nil},
+				{Index: 0, K: 512, AssignedNodes: nil, ReadyByNode: nil},
 			},
 			want: false,
 		},

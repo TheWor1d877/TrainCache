@@ -123,8 +123,8 @@ D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
                          cold 组用 0 作 bench 哨兵，跳过 WarmupTask；省略 k
                          时由 Controller 自动计算，不属于 bench 口径
   TRAINCACHE_PREFETCH_K  训练侧消费窗口块数（默认 16，docs/4.1 的参数总表一节；D21 对照跑分统一 16）。
-                         agent 侧 lookahead 统一 16 块（D21）：8MiB 下
-                         窗口 16×8MiB=128MiB≈缓存 1/8，无退化，不需重标度。
+                         agent 侧 lookahead 缺省取 max(16, 一个分片的块数)，
+                         缺省分片 256MiB/块 8MiB 下是 32 块（docs/4.1）。
   COMPUTE_MS/READ_WORKERS/READ_QUEUE_DEPTH/READ_TIMEOUT_S
                          6.15 异步预取参数（200/2/2/300）
   COMPARE_SWITCH_WINDOW_S epoch 切换重预取的归因窗口（默认 60s）
@@ -252,6 +252,8 @@ SHARD_SIZE_MB = int(os.environ.get("SHARD_SIZE_MB", "256"))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "8388608"))
 # 分段读粒度：测量脚本按此长度 read()，只累加长度、不保留字节。
 READ_SEGMENT_BYTES = 8 << 20
+# 一个分片的块数（缺省 256MiB ÷ 8MiB = 32）：agent 侧提前量的缺省取它。
+SHARD_BLOCKS = max(1, (SHARD_SIZE_MB * 1024 * 1024) // CHUNK_SIZE)
 # 缓存容量缺省按 rho 查表（rho=4 时 4GiB/4=1GiB）；apply_rho() 逐格重算。
 CACHE_BYTES = int(os.environ.get("TRAINCACHE_CACHE_CAPACITY_BYTES",
                                  str(RO_PRESETS[RHO])))
@@ -262,8 +264,7 @@ def dataset_block_count() -> int:
 
     这是 warmup_k 的上界：k 的单位是块，不是分片。
     """
-    blocks_per_shard = max(1, (SHARD_SIZE_MB * 1024 * 1024) // CHUNK_SIZE)
-    return max(1, N_TARS * blocks_per_shard)
+    return max(1, N_TARS * SHARD_BLOCKS)
 
 
 def warmup_k_for(cache_bytes: int, block_count: int = 0) -> int:
@@ -285,11 +286,14 @@ WARMUP_K = warmup_k_for(CACHE_BYTES, dataset_block_count())
 # 16×8MiB=128MiB≈缓存 1/8，无退化）；旧默认 8 与 D21 不符，改为 16。
 PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # Agent 侧持续预取窗口。pareto2 的自变量是它，训练侧消费窗口 PREFETCH_K
-# 保持 16 不动（docs/4.1 的参数总表一节：两个旋钮）。缺省跟随 PREFETCH_K。
+# 保持 16 不动（docs/4.1 的参数总表一节：两个旋钮）。缺省取
+# max(PREFETCH_K, 一个分片的块数)：预取至少领先一个消费单位，
+# 缺省分片 256MiB/块 8MiB 下是 32 块（docs/4.1 参数总表、4.2 族总表）。
 AGENT_PREFETCH_K = int(os.environ.get(
-    "TRAINCACHE_PREFETCH_LOOKAHEAD", str(PREFETCH_K)))
-# 预热节点数(D26):对照链路固定 2,scheduler 按就绪度选落点;s3-access 节点数只作上限
-PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "2"))
+    "TRAINCACHE_PREFETCH_LOOKAHEAD", str(max(PREFETCH_K, SHARD_BLOCKS))))
+# 预热节点数(D26):对照链路固定 1 份(与 juicefs/fluid 的 warm 组对齐,docs/4.1),
+# scheduler 按就绪度选落点;s3-access 节点数只作上限
+PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "1"))
 PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
 # fig1/fig3 的自变量：门控开关与数据源。gated 是默认形态；free 去掉
 # SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（4.2 的预热族一节）。
@@ -3941,7 +3945,7 @@ def write_csv(path, results):
             row["cache_peak_ratio"] = (
                 round(int(peak_bytes) / max(1, int(row["cache_bytes"])), 4)
                 if peak_bytes not in (None, "") else "")
-            row["prefetch_lookahead"] = r.get("prefetch_lookahead") or PREFETCH_K
+            row["prefetch_lookahead"] = r.get("prefetch_lookahead") or AGENT_PREFETCH_K
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
             row["gateway"] = gateway_flag()

@@ -8,7 +8,7 @@ package prefetch
 //   - 同一 blockKey 任一时刻至多一个 task;
 //   - task 成功或终止后移除键,失败重试期间保留;
 //   - 入队语义:键不存在 → 入队;已存在且未开始 → 按最高优先级提升(不新建 task);
-//     已在运行 → 忽略。
+//     需求补块的提升按插队处理(D71:提升到 P0 队首);已在运行 → 忽略。
 
 import (
 	"traincache/agent/ordersource"
@@ -57,10 +57,22 @@ func (p *PersistentPrefetcher) enqueueDedupLocked(t *task, priority int) string 
 			existing.idx = t.idx
 			existing.dataset = t.dataset
 		}
-		if priority < existing.pri {
+		// D71:需求补块按插队处理——已排队任务一律移到 P0 队首,不能让需求补块排在
+		// 已排队的预热块之后;该 task 从此服务需求读,回源 reason 改为 demand
+		// (D70 的在读准入与回源指标口径随之生效)。非需求请求维持原语义:只有更高
+		// 优先级才提升,且追加到目标队列队尾。
+		demand, wasDemand := t.isDemand(), existing.isDemand()
+		if demand {
+			existing.reason = t.reason
+		}
+		if (demand && !wasDemand) || priority < existing.pri {
 			p.removeQueuedLocked(existing)
 			existing.pri = priority
-			p.queues[priority] = append(p.queues[priority], existing)
+			if demand {
+				p.prependQueueLocked(priority, existing)
+			} else {
+				p.queues[priority] = append(p.queues[priority], existing)
+			}
 		}
 		if t.p0 {
 			// P0 请求去重到已有 task:该 task 完成时仍需 OnP0Done(预热 total/completed
