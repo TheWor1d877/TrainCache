@@ -734,8 +734,11 @@ def _run_e2e_once(cond: dict, run_id: str, reps_dir: Path,
     print(f"[{run_id}] 阶段二完成(续跑到第 {cond['workload']['epochs']} 个 epoch)")
 
     # ---- 采集 ----
-    rc, out, err = _run_cmd([PY, str(COLLECT_PY), "--run-dir", str(run_dir)],
-                            env=env2)
+    collect_cmd = [PY, str(COLLECT_PY), "--run-dir", str(run_dir)]
+    if os.environ.get("PROMETHEUS_URL", "").strip():
+        collect_cmd += ["--prometheus-url", os.environ["PROMETHEUS_URL"].strip(),
+                        "--dump-series"]
+    rc, out, err = _run_cmd(collect_cmd, env=env2)
     if rc != 0:
         reason = f"collect 失败(rc={rc}): {err.strip()[:500]}"
         _write_void(run_dir, reason)

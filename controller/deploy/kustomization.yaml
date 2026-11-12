@@ -26,6 +26,6 @@ images:
   - name: ghcr.io/thewor1d877/traincache/kube-scheduler
     digest: sha256:190f3fe5c524beab4373ddeba4c41903b5d716a7f34785a6df645624aa85c9bd
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
-    digest: sha256:7d9ec161688f62c1d122cc3757fb296109b536bbb772f21acb4ee099ed3dff3c
+    newTag: dev
   - name: ghcr.io/thewor1d877/traincache/traincache-gateway
     digest: sha256:66ed74ee3b1bc540c79c758389b61b7fdb555916229e36ca7af34a0c6c4cbbc0

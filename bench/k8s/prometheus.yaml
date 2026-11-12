@@ -1,0 +1,119 @@
+# 仅供 e2e 族实测期间临时部署：kubectl apply -f 本文件，跑完 kubectl delete -f 拆除。
+# 序列持久化不依赖 TSDB：collect.py --dump-series 在每轮结束后把原始序列导出到 run_dir/series.json。
+# 镜像需提前导入 kind：docker pull prom/prometheus:v2.53.0 && kind load docker-image prom/prometheus:v2.53.0 --name traincache
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traincache-bench-prometheus
+  namespace: traincache
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traincache-bench-prometheus
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-bench-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traincache-bench-prometheus
+subjects:
+- kind: ServiceAccount
+  name: traincache-bench-prometheus
+  namespace: traincache
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-bench-prometheus
+  namespace: traincache
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+    scrape_configs:
+    - job_name: agentd
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [traincache]
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: traincache-agentd
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: $1:9411
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+    - job_name: minio
+      metrics_path: /minio/v2/metrics/cluster
+      static_configs:
+      - targets: [minio.minio.svc.cluster.local:9000]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-bench-prometheus
+  namespace: traincache
+  labels:
+    app: traincache-bench-prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traincache-bench-prometheus
+  template:
+    metadata:
+      labels:
+        app: traincache-bench-prometheus
+    spec:
+      serviceAccountName: traincache-bench-prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.53.0
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=6h
+        ports:
+        - containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: tsdb
+          mountPath: /prometheus
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 1Gi
+      volumes:
+      - name: config
+        configMap:
+          name: traincache-bench-prometheus
+      - name: tsdb
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traincache-bench-prometheus
+  namespace: traincache
+spec:
+  selector:
+    app: traincache-bench-prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
