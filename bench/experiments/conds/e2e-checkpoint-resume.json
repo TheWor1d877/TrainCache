@@ -41,6 +41,6 @@
   "notes": "e2e 族格子；scenario=checkpoint-resume，rho=4，rate=1000，reps=2，run_min=70；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
     "lookahead": 16,
-    "fanout": 2
+    "fanout": 1
   }
 }

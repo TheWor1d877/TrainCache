@@ -43,7 +43,7 @@
   "notes": "evict 族格子；evict_policy=lru，rho=8.0，rate=1000，load=tilt 热 10%；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
     "lookahead": 16,
-    "fanout": 2
+    "fanout": 1
   },
   "trace": {
     "file": "traces/track-16-per-epoch-ep3.json",

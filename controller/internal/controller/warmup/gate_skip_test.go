@@ -14,59 +14,7 @@ import (
 
 	traincachev1alpha1 "traincache/controller/api/v1alpha1"
 	"traincache/controller/internal/agentclient"
-	"traincache/controller/internal/gate"
 )
-
-func TestHasMinProgress(t *testing.T) {
-	cases := []struct {
-		name string
-		pods []gate.PodGateState
-		want bool
-	}{
-		{
-			name: "all zero ready",
-			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 0}},
-			},
-			want: false,
-		},
-		{
-			name: "first pod has ready > 0",
-			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 5}},
-			},
-			want: true,
-		},
-		{
-			name: "second pod has ready > 0",
-			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: []string{"n1"}, ReadyByNode: map[string]int32{"n1": 0}},
-				{Index: 1, AssignedNodes: []string{"n2"}, ReadyByNode: map[string]int32{"n2": 1}},
-			},
-			want: true,
-		},
-		{
-			name: "no assigned nodes",
-			pods: []gate.PodGateState{
-				{Index: 0, AssignedNodes: nil, ReadyByNode: nil},
-			},
-			want: false,
-		},
-		{
-			name: "empty pods",
-			pods: nil,
-			want: false,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := hasMinProgress(c.pods)
-			if got != c.want {
-				t.Errorf("hasMinProgress = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
 
 func TestShouldSkipGate(t *testing.T) {
 	const GiB = int64(1024 * 1024 * 1024)

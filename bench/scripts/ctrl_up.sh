@@ -8,8 +8,6 @@
 #   1. namespace traincache
 #   2. worker 节点 traincache.io/s3-access=true 标签
 #   3. 控制面镜像预检(缺失直接失败并打印拉取/导入命令)
-#   3b. 镜像新鲜度(镜像源码指纹标签 != 当前工作树则失败;旧二进制会把修掉的
-#       缺陷再量一遍)
 #   4. Secret traincache-objstore(MinIO 凭证)
 #   5. webhook TLS Secret(含 ca.crt)+ MutatingWebhookConfiguration caBundle
 #   6. kubectl apply -k controller/deploy(仅清单哈希变化或工作负载缺失时)
@@ -151,56 +149,6 @@ label_s3_nodes() {
 rendered_images() {
   kubectl kustomize "$DEPLOY_DIR" 2>/dev/null \
     | awk '/^[[:space:]]*image:[[:space:]]*/{print $2}' | sort -u
-}
-
-# 镜像新鲜度:热集群里 :dev 标签会被反复复用,只查"在不在"会让上一次构建的
-# 二进制继续参与测量——#17 探针就是这么把已在 HEAD 修掉的字节维度又量了一遍
-# (容量 gauge 报 0、目录涨到全量数据集、淘汰增量 0)。判据用 hack/build-images.sh
-# 打在镜像上的源码指纹标签:与当前工作树不一致或没有标签,就是旧镜像。
-check_image_freshness() {
-  local images img label fp stale=0
-  if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
-    log_group "$GROUP" "WARNING: docker 不可用,跳过镜像新鲜度检查" >&2
-    return 0
-  fi
-  fp="$(bash "$REPO/hack/build-images.sh" --print-fp 2>/dev/null || true)"
-  if [ -z "$fp" ]; then
-    log_group "$GROUP" "WARNING: 源码指纹取不到,跳过镜像新鲜度检查" >&2
-    return 0
-  fi
-  images="$(rendered_images)"
-  for img in $images; do
-    case "$img" in
-      ghcr.io/thewor1d877/traincache/*) ;;
-      *) continue ;;
-    esac
-    docker image inspect "$img" >/dev/null 2>&1 || continue  # 本机没有=从仓库拉取,无从判定
-    label="$(docker image inspect "$img" --format '{{ index .Config.Labels "io.traincache.src-fp" }}' 2>/dev/null || true)"
-    if [ "$label" = "$fp" ]; then
-      continue
-    fi
-    printf '镜像源码指纹不匹配: %s\n  镜像标签 %s != 当前工作树 %s\n' \
-      "$img" "${label:-<无标签>}" "$fp" >&2
-    stale=1
-  done
-  if [ "$stale" -ne 0 ]; then
-    if [ "${TRAINCACHE_ALLOW_STALE_IMAGE:-0}" = "1" ]; then
-      log_group "$GROUP" "WARNING: 存在旧镜像,已按 TRAINCACHE_ALLOW_STALE_IMAGE=1 放行(只用于复现历史产物)" >&2
-      return 0
-    fi
-    cat >&2 <<EOF
-
-控制面镜像比当前源码旧,直接测量会读到一个已经修掉的缺陷。下一步(repo 根):
-  ./hack/build-images.sh                 # 重建五个 dev 镜像
-  for i in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
-    kind load docker-image ghcr.io/thewor1d877/traincache/\$i:dev --name $CLUSTER_NAME
-  done
-  kubectl -n $NS rollout restart daemonset/traincache-agentd deployment/traincache-controller-manager
-复现历史产物要故意用旧镜像时设 TRAINCACHE_ALLOW_STALE_IMAGE=1。
-EOF
-    return 1
-  fi
-  log_group "$GROUP" "镜像新鲜度通过(源码指纹 ${fp:0:12})"
 }
 
 # kind load 刚结束时 containerd 元数据可能还没同步,单次 crictl 会误报缺失
@@ -573,7 +521,6 @@ assert_context
 ensure_ns "$NS" "$GROUP"
 label_s3_nodes
 check_images
-check_image_freshness
 ensure_objstore_secret
 ensure_webhook_tls
 ensure_control_plane

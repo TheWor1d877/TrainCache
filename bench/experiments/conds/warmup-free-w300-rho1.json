@@ -43,7 +43,7 @@
   "notes": "warmup 族格子；gate=free，window_s=300，rho=1.0，rate=1000，effect=free 窗口不生效；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
     "lookahead": 16,
-    "fanout": 2,
+    "fanout": 1,
     "gate": {
       "mode": "free"
     }

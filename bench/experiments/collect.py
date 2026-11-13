@@ -504,6 +504,73 @@ def selftest():
     print("collect selftest: PASS")
 
 
+# e2e 时间线的原始序列导出清单：计数器/直方图一律存原始值，速率由报告侧求差，
+# 避免导出时先 rate 一次把口径焊死。key 即 series.json 里的面板名。
+SERIES_QUERIES = {
+    "fetch_bytes": "traincache_fetch_bytes_total",
+    "fetch_requests": "traincache_fetch_requests_total",
+    "fetch_inflight_bytes": "traincache_fetch_inflight_bytes",
+    "fetch_singleflight_merged": "traincache_fetch_singleflight_merged_total",
+    "evict_blocks": "traincache_evict_blocks_total",
+    "evict_protected_skipped": "traincache_evict_protected_skipped_total",
+    "gc_blocks_removed": "traincache_gc_blocks_removed_total",
+    "gc_sweeps": "traincache_gc_sweeps_total",
+    "cache_hits": "traincache_cache_hits_total",
+    "cache_misses": "traincache_cache_misses_total",
+    "cache_hit_ratio": "traincache_cache_hit_ratio",
+    "cache_capacity_bytes": "traincache_cache_capacity_bytes_total",
+    "disk_usage_ratio": "traincache_disk_usage_ratio",
+    "prefetch_cursor": "traincache_prefetch_cursor",
+    "prefetch_lead_blocks": "traincache_prefetch_lead_blocks",
+    "prefetch_queue_depth": "traincache_prefetch_queue_depth",
+    "prefetch_hit_ratio": "traincache_prefetch_hit_ratio",
+    "prefetch_task_count": "traincache_prefetch_task_duration_seconds_count",
+    "prefetch_task_seconds_sum": "traincache_prefetch_task_duration_seconds_sum",
+    "read_stall_seconds": "traincache_read_stall_seconds",
+    "stage_switch_eta_seconds": "traincache_stage_switch_eta_seconds",
+    "consumption_advance": "traincache_consumption_advance_total",
+    "agent_degraded": "traincache_agent_degraded",
+    "hook_read_miss": "traincache_hook_read_miss_total",
+    "minio_sent_bytes": "minio_s3_traffic_sent_bytes",
+}
+
+
+def dump_series(args, run, row, run_dir):
+    """把 SERIES_QUERIES 全部原始序列按 run 窗口导出到 run_dir/series.json。
+
+    单条查询失败只记 error 不中断：时间线缺一个面板好过整轮没有序列。
+    """
+    t_submit = parse_ts(row.get("t_submit"))
+    t_last = parse_ts(row.get("t_last_step"))
+    if not (args.prometheus_url and t_submit and t_last and t_last > t_submit):
+        print("series: 缺 Prometheus URL 或 run 窗口,跳过导出")
+        return
+    start = t_submit - timedelta(seconds=60)
+    end = t_last + timedelta(seconds=60)
+    queries = {}
+    for name, q in SERIES_QUERIES.items():
+        try:
+            result = prom_query_range(args.prometheus_url, q, start, end,
+                                      args.step_s)
+            queries[name] = {"query": q, "series": result}
+        except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+            queries[name] = {"query": q, "error": str(exc)}
+    payload = {
+        "schema_version": "1",
+        "run_id": run.get("run_id"),
+        "t_submit": fmt_ts(t_submit),
+        "t_last_step": fmt_ts(t_last),
+        "step_s": args.step_s,
+        "queries": queries,
+    }
+    path = run_dir / "series.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n")
+    n_ok = sum(1 for v in queries.values() if "series" in v)
+    n_pts = sum(len(s.get("values", []))
+                for v in queries.values() for s in v.get("series", []))
+    print(f"series: {path} ({n_ok}/{len(queries)} 查询成功, {n_pts} 采样点)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="M1 离线采集:run.json + K8s + Prometheus → metrics.csv")
     ap.add_argument("--run-dir", type=Path, help="run 产物目录(默认读 run.json)")
@@ -523,6 +590,8 @@ def main():
     ap.add_argument("--t-gate-release", help="人工覆盖门控放行时刻(RFC3339)")
     ap.add_argument("--t-startup-ready", help="人工覆盖启动窗口就绪时刻(RFC3339)")
     ap.add_argument("--step-s", type=int, default=5, help="Prometheus range step 秒")
+    ap.add_argument("--dump-series", action="store_true",
+                    help="把全部指标族的原始序列导出到 run_dir/series.json(e2e 时间线用)")
     ap.add_argument("--group", default="traincache", help="无 run.json group 时的回退组名")
     ap.add_argument("--void", action="store_true", help="整轮作废标记")
     ap.add_argument("--selftest", action="store_true", help="运行无网络自检后退出")
@@ -556,6 +625,8 @@ def main():
     }
     (run_dir / "collect.json").write_text(
         json.dumps(detail, ensure_ascii=False, indent=2) + "\n")
+    if args.dump_series:
+        dump_series(args, run, row, run_dir)
     print(f"collect: {out}")
     print(f"  makespan startup={row['startup_makespan_s']}s "
           f"full={row['full_makespan_s']}s "

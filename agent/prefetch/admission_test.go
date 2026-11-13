@@ -64,6 +64,57 @@ func TestDemandBypassesSpeculativeQuota(t *testing.T) {
 	waitForDone(t, p)
 }
 
+// TestPreheatUsesSpeculativeAdmission:显式预热与邻域预取同档,走预铺准入(D70)——
+// 预铺半额任务槽(这里 MaxTasks=2 → 1 槽)被占满后第二块停在门外,训练进程有没有开始
+// 消费都不改变分档;只有需求补块才走在读准入(对照 TestDemandBypassesSpeculativeQuota)。
+func TestPreheatUsesSpeculativeAdmission(t *testing.T) {
+	refs := []ChunkRef{{Path: "warm-00.tar"}, {Path: "warm-01.tar"}}
+	env := newTestEnv(t, []blockSpec{
+		{path: refs[0].Path, chunk: 0, content: "warm-block-0", source: true},
+		{path: refs[1].Path, chunk: 0, content: "warm-block-1", source: true},
+	})
+	env.fetch = fetch.New(env.store, env.cs, fetch.Options{
+		MaxInflightBytes: 1 << 20,
+		MaxTasks:         2,
+		MaxConnsPerHost:  4,
+		MaxRetries:       1,
+	})
+	for _, ref := range refs {
+		env.store.holdKey(expectedBlockKey(testDataset, ref))
+	}
+
+	done := make(chan struct{}, len(refs))
+	p := env.newPrefetcher(Config{Lookahead: 1, OnP0Done: func(ChunkRef, error) { done <- struct{}{} }})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 播种 dataset(D25 键需要),不产生阶段任务。
+	if _, err := p.OnStageSwitch(ctx, ConsumeOrder{Dataset: testDataset, StageID: "preheat-seed"}); err != nil {
+		t.Fatalf("播种 OnStageSwitch: %v", err)
+	}
+	startPrefetcher(t, p, ctx, cancel)
+
+	if err := p.EnqueueP0(ctx, refs); err != nil {
+		t.Fatalf("EnqueueP0: %v", err)
+	}
+	// 预铺额度只放行 1 块,第二个预热块停在半额任务槽之外。
+	waitBlockGets(t, env, 1)
+	time.Sleep(100 * time.Millisecond)
+	if got := blockGets(env.store); len(got) != 1 {
+		t.Fatalf("预热回源并发块数 = %d，want 1（半额任务槽）: %v", len(got), got)
+	}
+
+	for _, ref := range refs {
+		env.store.releaseKey(expectedBlockKey(testDataset, ref))
+	}
+	for range refs {
+		select {
+		case <-done:
+		case <-time.After(testTimeout):
+			t.Fatal("等待预热块完成超时")
+		}
+	}
+}
+
 // waitBlockGets 等待源站数据块 Get 达到 n 个。
 func waitBlockGets(t *testing.T, env *testEnv, n int) {
 	t.Helper()

@@ -129,7 +129,14 @@ D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
                          6.15 异步预取参数（200/2/2/300）
   COMPARE_SWITCH_WINDOW_S epoch 切换重预取的归因窗口（默认 60s）
   PROMETHEUS_URL         非空则 fetch 对账走 Prometheus，否则 kubectl raw 抓 agentd
-  POD_TIMEOUT            单轮 Pod 超时（默认 1800s）
+  POD_TIMEOUT            单轮 Pod 超时（默认 1800s）；显式给值时优先于一切推导闸门
+  TRAINCACHE_TIMEOUT_HEADROOM  traincache 组态（traincache-cold/warm）的闸门余量
+                         （默认 4）：闸门取 max(POD_TIMEOUT, 字节地板×余量)，
+                         与 TILT_TIMEOUT_HEADROOM 同款口径
+  TRAINCACHE_STARTUP_WATCHDOG_S  启动看门狗（默认 120s，0 关闭）：Running 后
+                         无 [calib] 判启动挂起提前失败
+  TRAINCACHE_STALL_WATCHDOG_S  无进展看门狗（默认 180s，0 关闭）：[calib] 后
+                         日志与 agent 回源字节双判据均无进展判中途冻结提前失败
   TRAINCACHE_GATEWAY_CACHE  网关磁盘缓存开关（D23）："1" 开、"0" 关，透传到
                          up.sh → ctrl_up.sh，patch 进 ConfigMap
                          traincache-config 的 gatewayCache（"1"→true、
@@ -281,8 +288,9 @@ PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # 保持 16 不动（docs/4.1 的参数总表一节：两个旋钮）。缺省跟随 PREFETCH_K。
 AGENT_PREFETCH_K = int(os.environ.get(
     "TRAINCACHE_PREFETCH_LOOKAHEAD", str(PREFETCH_K)))
-# 预热节点数(D26):对照链路固定 2,scheduler 按就绪度选落点;s3-access 节点数只作上限
-PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "2"))
+# 预热节点数(D26):对照链路固定 1 份(与 juicefs/fluid 的 warm 组对齐,docs/4.1),
+# scheduler 按就绪度选落点;s3-access 节点数只作上限
+PREHEAT_FANOUT = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT", "1"))
 PREHEAT_FANOUT_MIN = int(os.environ.get("TRAINCACHE_PREHEAT_FANOUT_MIN", "1"))
 # fig1/fig3 的自变量：门控开关与数据源。gated 是默认形态；free 去掉
 # SchedulingGate 与 WarmupTask 等待，只剩预取与服务端逻辑（4.2 的预热族一节）。
@@ -404,6 +412,17 @@ AGENTD_READY_TIMEOUT_S = 180  # 缩回 1 后等全部 agentd Ready
 AGENTD_CLEAN_TIMEOUT_S = 60  # 等 degraded=0 且 fetch 计数停增
 
 POD_TIMEOUT = int(os.environ.get("POD_TIMEOUT", "1800"))
+# 启动看门狗：测量 Pod Running 后这么久还没打出 [calib] 就判启动挂起、提前失败。
+# 节点容器运行时层间歇冻结时容器 Started 但进程不动、日志全空，原先要等满
+# POD_TIMEOUT（30min）才失败；健康 Pod 1s 内就出 [calib]，120s 窗口不会误伤。
+# 设 0 关闭。环境变量 TRAINCACHE_STARTUP_WATCHDOG_S。
+STARTUP_WATCHDOG_S = float(os.environ.get("TRAINCACHE_STARTUP_WATCHDOG_S", "120"))
+# 中途冻结看门狗：[calib] 之后进程被节点运行时冻住时，启动看门狗已撤防，只能干等
+# POD_TIMEOUT（30min）。这里按「日志长度」与「agent 回源字节」双判据检测进展：
+# 健康 Pod 长读等待（至 READ_TIMEOUT_S）可能无新日志、纯命中窗口回源字节可能停涨，
+# 单判据都会误杀；两路同时静默 STALL_WATCHDOG_S 才判冻结。只在有第二判据
+# （traincache 组态的 fetch 采样）时启用。设 0 关闭。环境变量 TRAINCACHE_STALL_WATCHDOG_S。
+STALL_WATCHDOG_S = float(os.environ.get("TRAINCACHE_STALL_WATCHDOG_S", "180"))
 # 倾斜 run 的闸门余量：字节地板之外还有单连接慢启动、demand 补块的排队与 A/B 抢带宽。
 # 逐块轮询已从 0.5 s 降到 25 ms（2026-11-02），不再是余量的来源。
 TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
@@ -411,6 +430,11 @@ TILT_TIMEOUT_HEADROOM = float(os.environ.get("TILT_TIMEOUT_HEADROOM", "4"))
 # 2026-11-08 网关族 G0 臂实测 2100 s（地板 1374 s），1800 s 的常量闸门把还在
 # 正常推进的 run 截成了 `pod_failed`。
 REPLICATION_TIMEOUT_HEADROOM = float(os.environ.get("REPLICATION_TIMEOUT_HEADROOM", "2"))
+# traincache 组态（traincache-cold/warm）的闸门余量：低带宽档字节地板本身就超
+# 1800 s 常量。2026-11-11 traincache-cold rho8-100 实测 epoch 时长 582/647 s，
+# 3 epoch 全程约 1990 s（地板 1030 s），常量闸门把还在正常推进的 run 截成
+# `pod_failed`，曾被误判为节点冻结。4 倍覆盖预取放大还有余（最慢实测约 1.94×地板）。
+TRAINCACHE_TIMEOUT_HEADROOM = float(os.environ.get("TRAINCACHE_TIMEOUT_HEADROOM", "4"))
 
 
 def _byte_floor_s(copies: int = 1) -> float | None:
@@ -440,19 +464,23 @@ def _replication_copies() -> int:
     return 1
 
 
-def pod_timeout_s() -> int:
-    """等测量 Pod 结束的闸门（秒）。
+def pod_timeout_s(group: str = "") -> int:
+    """等测量 Pod 结束的闸门（秒）。`group` 由调用方传当前组态名。
 
-    三个来源，优先级从高到低：
+    来源优先级从高到低：
     1. 显式给过 `POD_TIMEOUT` 时以显式值为准（冒烟场景）。
     2. 倾斜组态：Job B 每 epoch 全量扫一遍，缓存只装得下 1/ratio 的数据，
        墙钟由字节地板决定，闸门取地板 × 余量。@100 mbit、3 epoch × 8 GiB 的
        地板就是 2100 s，1800 s 的常量闸门会把还在正常推进的 run 截成
        `pod_failed`——2026-11-02 的 M5 前置探针就是这么废掉的。
-    3. 其余组态沿用 `POD_TIMEOUT` 常量。复制读的组态是例外：4 个读端读同一批
-       分片，源站要出 4 份拷贝，地板随读端数放大，1800 s 常量会把还在正常推进
-       的 run 截成 `pod_failed`——2026-11-08 网关族 G0 臂实测 2100 s（地板
-       1374 s），就是这么废掉的。
+    3. 复制读的组态：4 个读端读同一批分片，源站要出 4 份拷贝，地板随读端数
+       放大，1800 s 常量会把还在正常推进的 run 截成 `pod_failed`——
+       2026-11-08 网关族 G0 臂实测 2100 s（地板 1374 s），就是这么废掉的。
+    4. traincache 组态（traincache-cold/warm）：低带宽档字节地板本身就超
+       1800 s 常量，闸门取 max(常量, 地板 × 余量)。rho8-100 实测全程约
+       1990 s（地板 1030 s），常量闸门把正常推进的 run 截成 `pod_failed`，
+       曾被误判为节点冻结。
+    5. 其余组态沿用 `POD_TIMEOUT` 常量。
     """
     explicit = os.environ.get("POD_TIMEOUT")
     if explicit:
@@ -464,6 +492,11 @@ def pod_timeout_s() -> int:
         return int(floor_s * TILT_TIMEOUT_HEADROOM)
     copies = _replication_copies()
     if copies <= 1:
+        if group.startswith("traincache"):
+            floor_s = _byte_floor_s()
+            if floor_s is not None:
+                return int(max(POD_TIMEOUT,
+                               floor_s * TRAINCACHE_TIMEOUT_HEADROOM))
         return POD_TIMEOUT
     floor_s = _byte_floor_s(copies)
     if floor_s is None:
@@ -636,24 +669,51 @@ def _clear_node_caches(tag):
     四条都在容器内用 sh -c 展开 glob，删除范围严格限定在目录内容本身。
     """
     for node in KIND_WORKER_NODES:
-        for cmd in _node_cache_reset_cmds(node):
-            rc, _out, err = run_cmd(cmd, timeout=30)
-            if rc != 0:
-                # 清缓存失败必须看得见：块缓存没清 = 冷读口径不成立
-                print(f"[{tag}] WARNING: 节点 {node} 清缓存失败(rc={rc}): "
-                      f"{' '.join(cmd)} {err[:200]}", flush=True)
         # 清后判空：hostPath 不随 Pod 删除消失，有残留就终止本轮。
-        check = _node_cache_check_cmd(node)
-        rc, out, err = run_cmd(check, timeout=30)
-        if rc != 0:
-            raise SystemExit(
-                f"[{tag}] 节点 {node} 缓存检查失败(rc={rc}): {err[:200]}，"
-                f"无法确认冷态，退出")
-        leftover = out.strip()
-        if leftover:
+        # 上一轮测量的在途预取会在删除之后继续落盘（tmp-range-* 与块分片目录），
+        # 删完立刻判空会把这种落盘误判成"冷态不成立"，整格退出。给它三次机会，
+        # 每次先等 10s 让在途写入结束再重删重判。
+        for attempt in range(3):
+            for cmd in _node_cache_reset_cmds(node):
+                rc, _out, err = run_cmd(cmd, timeout=30)
+                if rc != 0:
+                    # 清缓存失败必须看得见：块缓存没清 = 冷读口径不成立
+                    print(f"[{tag}] WARNING: 节点 {node} 清缓存失败(rc={rc}): "
+                          f"{' '.join(cmd)} {err[:200]}", flush=True)
+            check = _node_cache_check_cmd(node)
+            rc, out, err = run_cmd(check, timeout=30)
+            if rc != 0:
+                raise SystemExit(
+                    f"[{tag}] 节点 {node} 缓存检查失败(rc={rc}): {err[:200]}，"
+                    f"无法确认冷态，退出")
+            leftover = out.strip()
+            if not leftover:
+                # 判空可能落在写入间隙里侥幸通过：等 5s 复查一次，真有活着的写入者
+                # （未挂起的 agentd、还在回写的 FUSE）就必须看得见，不能带着残余起跑。
+                time.sleep(5)
+                rc2, out2, _ = run_cmd(check, timeout=30)
+                if rc2 == 0 and out2.strip():
+                    raise SystemExit(
+                        f"[{tag}] 节点 {node} 清空后 5s 内又出现写入: "
+                        f"{out2.strip()[:300]}，冷态不成立，退出")
+                break
+            if attempt < 2:
+                print(f"[{tag}] 节点 {node} 清后仍有 {len(leftover.splitlines())} 项残留"
+                      f"（在途写入落盘），10s 后重删重试({attempt + 1}/3)", flush=True)
+                time.sleep(10)
+        else:
             raise SystemExit(
                 f"[{tag}] 节点 {node} 缓存未清空，仍有残留: {leftover[:300]}，退出")
     _drop_host_page_caches(tag)
+
+
+def _agentd_has_residual_state():
+    """任一 agent 节点的订单 ring 或块缓存目录非空。空目录返回 False。"""
+    for node in KIND_WORKER_NODES:
+        rc, out, _err = run_cmd(_agent_state_check_cmd(node), timeout=30)
+        if rc == 0 and out.strip():
+            return True
+    return False
 
 
 def cold_reset():
@@ -663,6 +723,13 @@ def cold_reset():
         # agentd 重启后立刻回放 `/run/traincache/orders` 并写 `tmp-*`，
         # 与下面的清缓存判空打架，冷态复位随机会失败。
         kubectl(["delete", "pods", "-l", "app=train-job", "--grace-period=0", "--force"], namespace=ns, timeout=60)
+    # 残留订单 ring 的危害在 agentd 挂起/重启时兑现：回放旧订单持续预取落盘
+    # （2026-11-11 早上 rho4-100 pod_failed 后连续污染 5 个格）。有残留就先做
+    # 完整复位（挂起→清订单与块缓存→恢复），让清缓存判空面对的是无写入者状态。
+    # 无残留（对照族、首格）零开销跳过。
+    if _agentd_has_residual_state():
+        print("[cold_reset] 检测到残留订单/块缓存，先完整复位 agentd", flush=True)
+        reset_traincache_agent()
     _clear_node_caches("cold_reset")
     time.sleep(5)
 
@@ -906,16 +973,22 @@ def build_run_trace():
 
 # JuiceFS mount Pod 所在节点，由 group_up 从 up.sh 输出回收；空=未起组。
 JFS_MOUNT_NODE = ""
+# traincache-warm 的预热节点，由 group_up 从 up.sh 的 [WARM_NODE] 回收；
+# 空=本轮没拿到节点，训练 Pod 不钉节点(会落到调度器自选节点，可能是冷节点)。
+WARM_NODE = ""
 
 
 def group_up(group):
-    """起组，并回收 up.sh 回传的两个装置事实：预热时长与 JuiceFS 挂载节点。
+    """起组，并回收 up.sh 回传的装置事实：预热时长、JuiceFS 挂载节点、traincache 预热节点。
 
     JFS_MOUNT_NODE：CE 单机缓存只落在 mount Pod 所在节点，测量 Pod 必须共置，
     否则 warm 组暖好的块在另一台节点读不到（见 docs/4.2 的对照族一节 的 juicefs 共置一条）。
+    WARM_NODE：traincache 的预热在组拉起阶段完成，训练 Pod 同样必须与预热节点共置。
     """
-    global JFS_MOUNT_NODE
+    global JFS_MOUNT_NODE, WARM_NODE
     JFS_MOUNT_NODE = ""
+    # 每次开跑前复位，避免上一格(上一组/上一 rep)的预热节点残留下来钉错节点
+    WARM_NODE = ""
     print(f"[up] {group}...")
     env = os.environ.copy()
     env["N_TARS"] = str(N_TARS)
@@ -976,11 +1049,17 @@ def group_up(group):
         m = re.search(r"\[MOUNT_NODE\]\s+(\S+)", line)
         if m:
             JFS_MOUNT_NODE = m.group(1)
+            continue
+        m = re.search(r"\[WARM_NODE\]\s+(\S+)", line)
+        if m:
+            WARM_NODE = m.group(1)
     if group.startswith("juicefs") and not JFS_MOUNT_NODE:
         print(f"[up] {group} 失败:up.sh 未回传 [MOUNT_NODE],无法共置", flush=True)
         return False, 0.0, warmup_basis
     if JFS_MOUNT_NODE:
         print(f"[up] {group} 挂载节点={JFS_MOUNT_NODE}(测量 Pod 将共置)")
+    if WARM_NODE:
+        print(f"[up] {group} 预热节点={WARM_NODE}(训练 Pod 将共置)")
     # direct / juicefs-cold / fluid-cold / traincache-cold 默认 0.0
     print(f"[up] {group} 预热时长={warmup_seconds}s (basis={warmup_basis})")
     return True, warmup_seconds, warmup_basis
@@ -1365,9 +1444,17 @@ def read_shard(shard, phase):
         with counter_lock:
             read_bytes_phase[phase] = read_bytes_phase.get(phase, 0) + size
         blk = os.path.join(CACHE_ROOT, fp[:2], fp + ".blk")
-        # 命中:直接读本地缓存
+        # 命中:直接读本地缓存。块可能在 exists 与 open 之间被 agentd 淘汰
+        # (rho>=4 缓存小于数据集、淘汰活跃),FileNotFoundError 按缺块处理,
+        # 不让它冒泡成 read_error 作废整轮(2026-11-10 晚 4 次 read_error 的根因)。
+        got = None
         if os.path.exists(blk):
-            nbytes += read_file_bytes(blk)
+            try:
+                got = read_file_bytes(blk)
+            except FileNotFoundError:
+                got = None
+        if got is not None:
+            nbytes += got
             n_hits += 1
             _hook_advance(name, chunk_idx)
         else:
@@ -1381,8 +1468,14 @@ def read_shard(shard, phase):
             deadline = time.perf_counter() + 180
             while not os.path.exists(blk) and time.perf_counter() < deadline:
                 time.sleep(0.025)
+            got2 = None
             if os.path.exists(blk):
-                nbytes += read_file_bytes(blk)
+                try:
+                    got2 = read_file_bytes(blk)
+                except FileNotFoundError:
+                    got2 = None
+            if got2 is not None:
+                nbytes += got2
                 n_hits += 1
                 _hook_advance(name, chunk_idx)
             else:
@@ -2031,6 +2124,10 @@ def create_measure_pod(group, run_id, trace_json):
         "image": image,
         "imagePullPolicy": "IfNotPresent",
         "env": [
+            # 测量体日志即时流式输出:崩溃 traceback 与库输出不因块缓冲丢失,
+            # Pod 失败时 kubectl logs/--previous 才抓得到现场(脚本自身 print 已 flush,
+            # 这是兜底)。
+            {"name": "PYTHONUNBUFFERED", "value": "1"},
             # 任务清单 #6:统一下发 t_submit,删掉 juicefs-warm 的 "0" 特判
             {"name": "TRAINCACHE_JOB_CREATED_AT", "value": str(t_submit)},
             {"name": "TRAINCACHE_GROUP", "value": group},
@@ -2097,6 +2194,14 @@ def create_measure_pod(group, run_id, trace_json):
     # 才是读得到的；cold 同节点，warm/cold 差值才是同一台节点上的比较。
     if group in ("juicefs-cold", "juicefs-warm") and JFS_MOUNT_NODE:
         pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": JFS_MOUNT_NODE}
+    # traincache-warm 的预热在组拉起阶段完成，暖好的块只在预热节点上：
+    # 训练 Pod 不钉到该节点就会被调度到别处冷读，整窗预热白做(控制器只能撤回重做)。
+    if group == "traincache-warm":
+        if WARM_NODE:
+            pod_spec["spec"]["nodeSelector"] = {"kubernetes.io/hostname": WARM_NODE}
+        else:
+            print("[train-job] WARNING: 未拿到预热节点([WARM_NODE] 为空)，本轮 Pod "
+                  "不钉节点，可能落在冷节点", flush=True)
     # 任务清单 #5:traincache-warm 组走 traincache-scheduler + webhook gate
     # traincache-cold 不走 WarmupTask(bench 冷启动哨兵),普通调度
     # fig1 对照组 GATE_MODE=free：预热照做，但 Pod 不带 gate 标签、走默认
@@ -2122,17 +2227,83 @@ def create_measure_pod(group, run_id, trace_json):
     return pod_name, t_submit
 
 
-def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5):
+def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5,
+                      progress_probe=None):
     # 超时闸门用单调钟：wall clock 被 NTP 校正拽一下会让"等 Pod 完成"提前结束
     # （误判失败）或拖长。它不是测量量，但同样不能跳。
     start = time.monotonic()
     last_tick = 0.0
+    t_running = None
+    calib_seen = False
+    # 无进展看门狗的状态：last_progress 只在两路判据之一动起来时刷新。
+    # last_log_len/last_probe 记上一次读到的值；读失败（None）不覆盖旧值，
+    # 路径恢复后仍能与冻结前的值比出变化。
+    last_progress = None
+    last_log_len = None
+    last_probe = None
     while time.monotonic() - start < timeout:
-        rc, out, _ = kubectl(["get", "pod", pod_name, "-o", "jsonpath={.status.phase}"], namespace=ns)
-        phase = out.strip()
+        # 相位与日志都经 kubelet/API 路径，节点容器运行时冻结时会挂死或返回空。
+        # 挂死抛的 TimeoutExpired 不能冒泡（caller 无 try/except，会整组崩）；返回空
+        # 也不能让看门狗静默跳过。两路都包起来，看门狗计时不依赖这条路径可用。
+        try:
+            rc, out, _ = kubectl(["get", "pod", pod_name, "-o", "jsonpath={.status.phase}"],
+                                 namespace=ns, timeout=30)
+            phase = out.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            phase = ""
         if phase in ("Succeeded", "Failed"):
-            rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
+            try:
+                rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
+            except (subprocess.TimeoutExpired, OSError):
+                logs = ""
             return phase == "Succeeded", logs
+        if phase == "Running" and t_running is None:
+            t_running = time.monotonic()
+        # 启动看门狗：首见 Running 起计时，STARTUP_WATCHDOG_S 内没出 [calib] 判启动
+        # 挂起，提前失败走 pod_failed 分支抓现场删 Pod，不等满 POD_TIMEOUT。[calib]
+        # 是测量体第一行输出，健康 Pod 1s 内就有；一旦出现就不再查日志。计时独立于
+        # 后续相位/日志读取是否降级——冻结节点读不出日志也要能判挂起。
+        if STARTUP_WATCHDOG_S > 0 and t_running is not None and not calib_seen:
+            logs = ""
+            try:
+                rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=30)
+            except (subprocess.TimeoutExpired, OSError):
+                logs = ""
+            if "[calib]" in logs:
+                calib_seen = True
+                last_progress = time.monotonic()
+            elif time.monotonic() - t_running >= STARTUP_WATCHDOG_S:
+                print(f"[watchdog] {pod_name} Running {STARTUP_WATCHDOG_S:.0f}s 仍无 "
+                      f"[calib]，判启动挂起，提前失败抓现场", flush=True)
+                return False, logs
+        # 无进展看门狗：[calib] 之后启动看门狗撤防，中途冻结改由这里接。日志长度
+        # 与 agent 回源字节任一在动就算有进展；两路同时静默 STALL_WATCHDOG_S 判冻结。
+        # 只在调用方给了第二判据（traincache 组态）时启用：没有回源采样时单靠日志
+        # 分不清「进程冻住」与「日志路径坏了但进程在跑」，宁可不判。
+        if STALL_WATCHDOG_S > 0 and calib_seen and progress_probe is not None:
+            logs_now = ""
+            try:
+                rc, logs_now, _ = kubectl(["logs", pod_name], namespace=ns, timeout=30)
+            except (subprocess.TimeoutExpired, OSError):
+                logs_now = ""
+            log_len = len(logs_now) if logs_now else None
+            try:
+                probe = progress_probe()
+            except Exception:
+                probe = None
+            now = time.monotonic()
+            if log_len is not None and log_len != last_log_len:
+                last_progress = now
+            if probe is not None and probe != last_probe:
+                last_progress = now
+            if log_len is not None:
+                last_log_len = log_len
+            if probe is not None:
+                last_probe = probe
+            if now - last_progress >= STALL_WATCHDOG_S:
+                print(f"[watchdog] {pod_name} {STALL_WATCHDOG_S:.0f}s 日志与回源字节均无"
+                      f"进展，判中途冻结，提前失败抓现场", flush=True)
+                return False, logs_now
         if on_tick is not None and time.monotonic() - last_tick >= tick_s:
             last_tick = time.monotonic()
             try:
@@ -2140,7 +2311,15 @@ def wait_pod_complete(ns, pod_name, timeout=POD_TIMEOUT, on_tick=None, tick_s=5)
             except Exception as exc:  # 采样失败不影响跑分本身
                 print(f"[tick] 采样失败: {exc}", flush=True)
         time.sleep(5)
-    return False, ""
+    # 外层超时也要真读一次日志再返回：此前这里直接返回空串，失败分支与
+    # capture_pod_failure_artifacts 把空串原样落盘，「失败时日志全空」是这条
+    # 路径的产物，不是进程冻结的证据（rho8-100 的诊断曾被它误导）。读不到
+    # （超时/路径坏）才返回空串。Succeeded/Failed 与看门狗的返回路径不动。
+    try:
+        rc, logs, _ = kubectl(["logs", pod_name], namespace=ns, timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        logs = ""
+    return False, logs
 
 
 def pod_ready_epoch(ns, pod_name):
@@ -2768,6 +2947,34 @@ def parse_step_records(logs, tag="[STEP]"):
     return records
 
 
+def capture_pod_failure_artifacts(out_csv, group, rep, pod_name, ns, logs):
+    """Pod 失败/超时时抓现场：容器退出码与 previous 日志落到 runs 目录。
+
+    2026-11-11 rho4-100 rep0 的教训：容器反复重启且 `kubectl logs` 为空，
+    退出码没人记，Pod 一删根因就没了。previous 日志与 restartCount/
+    lastState.terminated 是重启类失败仅有的现场，必须在删 Pod 前抓。
+    """
+    rc, state, _err = kubectl(
+        ["get", "pod", pod_name, "-o", "jsonpath={range .status.containerStatuses[*]}"
+         "{.name} restarts={.restartCount} "
+         "lastExit={.lastState.terminated.exitCode} "
+         "lastReason={.lastState.terminated.reason}{end}"],
+        namespace=ns, timeout=30)
+    rc2, prev, _err2 = kubectl(
+        ["logs", pod_name, "--previous", "--tail=500"], namespace=ns, timeout=30)
+    text = (f"container_state: {state.strip() or '(抓不到)'}\n\n"
+            f"--- tail logs ---\n{logs}\n\n--- previous logs ---\n"
+            f"{prev if rc2 == 0 else f'(logs --previous rc={rc2})'}\n")
+    print(f"[debug] container 状态: {state.strip() or '(抓不到)'}", flush=True)
+    try:
+        run_dir = out_csv.parent / "runs" / f"{group}-r{rep:02d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "pod_failed.log").write_text(text, encoding="utf-8")
+        print(f"[debug] 失败现场已落 {run_dir / 'pod_failed.log'}", flush=True)
+    except OSError as exc:
+        print(f"[debug] WARNING: 失败现场落盘失败: {exc}", flush=True)
+
+
 def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
     """把逐步 stall 与切换事件写成 recovery.py 能直接吃的 run 目录。
 
@@ -2792,6 +2999,12 @@ def write_run_artifacts(out_csv, group, rep, logs, trace_sha):
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         n_steps += len(records)
+    # 测量体的 ERROR 行是 read_error 作废的唯一现场（Pod 随复位删除）。
+    # 不落盘就只能作废重跑，查不出是读路径哪一环报错。
+    err_lines = [ln for ln in logs.splitlines() if ln.startswith("ERROR ")]
+    if err_lines:
+        with (run_dir / "measure_errors.log").open("w", encoding="utf-8") as f:
+            f.write("\n".join(err_lines) + "\n")
     _rate = re.search(r"(\d+)", str(TC_RATE_EFF or ""))
     cond_name = (COND_NAME_OVERRIDE or
                  _cond_name_for_cell(RHO, [group],
@@ -3042,6 +3255,17 @@ def measure_void_reason(metrics):
 # ---------------------------------------------------------------------------
 # rho 选组：按 rho 过滤、rep 复用控制面、status 列、Fluid 替补
 # ---------------------------------------------------------------------------
+def normalize_rate_str(rate):
+    """裸数字补 mbit;带单位写法原样返回。
+
+    tc 把不带单位的裸数字按字节/秒解释(1000→约1KB/s),runner 侧却按 mbit 算
+    字节地板与格名。tc_apply 只认带单位写法,裸数字会告警后原样交给 tc,把
+    MinIO egress 限到近零、快照读不动整轮作废。这里在透传给 up.sh 前统一补单位。
+    """
+    s = str(rate).strip()
+    return s + "mbit" if re.fullmatch(r"\d+(\.\d+)?", s) else s
+
+
 def tc_cell(rate_str=None):
     """把带宽格落到具体参数：(rate_mbit, burst)。
 
@@ -3188,10 +3412,11 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
         # 4.3 三笔字节成本：预热前 fetch 计数基线（只有 traincache-warm 用，见下方 group_up 前）
         pre_up_snap = None
         if reuse:
-            if rep:
-                rep_cold_reset(group)
+            # 控制面跨 rep 复用，也必须逐 rep 复位 agentd。
+            # 顺序要求：复位在清节点缓存之前。复位会把 agentd 挂起再清空订单与块缓存，
+            # 上一轮遗留的在途预取若还活着，就会在清空后继续落盘（tmp-range-* 与块
+            # 分片目录），判空把这种落盘误判成冷态不成立，整格退出。
             if is_tc:
-                # 控制面跨 rep 复用，也必须逐 rep 复位 agentd
                 try:
                     reset_traincache_agent()
                 except (SystemExit, Exception) as exc:
@@ -3202,6 +3427,8 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                                     "warmup_seconds": group_warmup,
                                     "trace_sha256": trace_sha})
                     break
+            if rep:
+                rep_cold_reset(group)
             warmup_seconds = group_warmup
             warmup_basis = group_warmup_basis
         else:
@@ -3302,8 +3529,15 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 if ts is not None:
                     ready_seen["ts"] = ts
 
-        success, logs = wait_pod_complete(ns, pod_name, timeout=pod_timeout_s(),
-                                          on_tick=_tick, tick_s=5)
+        # 无进展看门狗的第二判据：复用采样线程已采的 fetch 快照，取最新回源字节
+        # 总量。冻结节点上采样读不到新值，计数停涨；不额外发请求。非 traincache
+        # 组态没有 fetch 采样，不传判据，看门狗不启用。
+        def _progress_probe():
+            return samples[-1]["total"] if samples else None
+
+        success, logs = wait_pod_complete(ns, pod_name, timeout=pod_timeout_s(group),
+                                          on_tick=_tick, tick_s=5,
+                                          progress_probe=_progress_probe if is_tc else None)
         stop_sample.set()
         if sample_thread is not None:
             sample_thread.join(timeout=SAMPLE_JOIN_TIMEOUT_S)
@@ -3331,6 +3565,13 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                                    "--sort-by=.lastTimestamp"], namespace=ns, timeout=30)
             print(f"[debug] events:\n{evts[:1500]}")
             print(f"[debug] logs:\n{logs[:1500]}")
+            capture_pod_failure_artifacts(out_csv, group, rep, pod_name, ns, logs)
+            # 失败的测量 Pod 必须在这里删掉：下一 rep 的顺序是先 agent_reset 后
+            # rep_reset（删测量 Pod），活着的 reader 会让 agent_reset 判"存在
+            # reader"中止整组，残留订单再污染后续所有格的 cold_reset 判空
+            # （2026-11-11 rho4-100 的连锁失败）。
+            kubectl(["delete", "pod", pod_name, "--force", "--grace-period=0"],
+                    namespace=ns, timeout=60)
             results.append({"group": group, "rep": rep, "void": True,
                             "reason": "pod_failed", "warmup_seconds": warmup_seconds,
                             "trace_sha256": trace_sha,
@@ -3721,7 +3962,7 @@ def write_csv(path, results):
             row["cache_peak_ratio"] = (
                 round(int(peak_bytes) / max(1, int(row["cache_bytes"])), 4)
                 if peak_bytes not in (None, "") else "")
-            row["prefetch_lookahead"] = r.get("prefetch_lookahead") or PREFETCH_K
+            row["prefetch_lookahead"] = r.get("prefetch_lookahead") or AGENT_PREFETCH_K
             row["evict_policy"] = r.get("evict_policy") or EVICT_POLICY
             row["gate_mode"] = r.get("gate_mode") or GATE_MODE
             row["gateway"] = gateway_flag()
@@ -3967,6 +4208,12 @@ def selftest():
         got_r, got_burst = tc_cell(f"{r}mbit")
         if got_r != r or got_burst != bench_config.burst_for_rate(r):
             raise AssertionError(f"自测：带宽格推导不对 @{r} → burst={got_burst}")
+    # 裸数字补 mbit:tc 把裸数字按字节/秒解释,不补单位会把 MinIO 限到近零。
+    for raw, want in (("1000", "1000mbit"), ("300", "300mbit"),
+                      ("1000mbit", "1000mbit"), ("20ms", "20ms")):
+        if normalize_rate_str(raw) != want:
+            raise AssertionError(f"自测：rate 归一不对 {raw!r} → "
+                                 f"{normalize_rate_str(raw)!r}（期望 {want!r}）")
     if hasattr(bench_config, "jitter_enabled"):
         raise AssertionError("自测：config.jitter_enabled 应已撤除（抖动轴不在协议里）")
     all_void = [{"void": True}, {"void": True}]
@@ -3980,7 +4227,7 @@ def selftest():
         raise AssertionError("自测：替补标记没落到行上")
     print(f"[selftest] 6) 选组：1000 档七组态全跑（ρ=4 {four_pick}、ρ=8 {eight_pick}），"
           f"100 档只跑 {low_pick}（越界剔除 {low_mix_drop}）；status ok/void、"
-          f"带宽 burst 推导、替补全废判据均自洽")
+          f"带宽 burst 推导、rate 裸数字补 mbit、替补全废判据均自洽")
 
     # ---- 7) D23 网关开关：新列、取值映射与透传 ----
     if CSV_FIELDNAMES[:5] != ["group", "rho", "family", "load", "gateway"]:
@@ -4283,6 +4530,55 @@ def selftest():
           f"{int(max(POD_TIMEOUT, rep_floor * REPLICATION_TIMEOUT_HEADROOM))}s；"
           f"网关合并失效那条路径同样留这份闸门，分片读回到 {POD_TIMEOUT}s")
 
+    # ---- 12c) traincache 组态的 Pod 闸门按字节地板推导（rho8-100 被 1800s 截断）----
+    saved_tc = {k: globals()[k] for k in ("TILT", "TC_RATE_EFF", "READERS",
+                                          "ACCESS_PATTERN", "N_TARS")}
+    saved_tc_env = os.environ.get("POD_TIMEOUT")
+    os.environ.pop("POD_TIMEOUT", None)
+    try:
+        globals()["TILT"] = False
+        globals()["READERS"] = 1
+        globals()["ACCESS_PATTERN"] = "single"
+        globals()["N_TARS"] = 16         # 对照族固定 4 GiB 数据集
+        # 慢格：100mbit、3 epoch × 4 GiB，地板 1030s，实测全程约 1990s
+        globals()["TC_RATE_EFF"] = "100mbit"
+        tc_floor = _byte_floor_s()
+        want = int(max(POD_TIMEOUT, tc_floor * TRAINCACHE_TIMEOUT_HEADROOM))
+        for g in ("traincache-cold", "traincache-warm"):
+            if pod_timeout_s(g) != want:
+                raise AssertionError(
+                    f"自测：traincache 闸门应是 max(常量, 地板×余量)"
+                    f"（{tc_floor:.0f}s×{TRAINCACHE_TIMEOUT_HEADROOM}），"
+                    f"{g} 实得 {pod_timeout_s(g)}")
+        if want <= 1990:
+            raise AssertionError(
+                "自测：traincache 慢格闸门应高于实测全程约 1990s，"
+                "否则正常推进的 run 仍会被截成 pod_failed")
+        if pod_timeout_s("direct") != POD_TIMEOUT:
+            raise AssertionError("自测：非 traincache 组态的闸门不应受影响")
+        # 快格：1000mbit 地板×余量低于常量，闸门回到常量，行为不变
+        globals()["TC_RATE_EFF"] = "1000mbit"
+        if pod_timeout_s("traincache-cold") != POD_TIMEOUT:
+            raise AssertionError(
+                f"自测：快格地板×余量低于常量时闸门应保持 POD_TIMEOUT="
+                f"{POD_TIMEOUT}，实得 {pod_timeout_s('traincache-cold')}")
+        # 显式 POD_TIMEOUT 仍最优先
+        os.environ["POD_TIMEOUT"] = "600"
+        globals()["TC_RATE_EFF"] = "100mbit"
+        if pod_timeout_s("traincache-cold") != 600:
+            raise AssertionError("自测：显式给过 POD_TIMEOUT 应以显式值为准")
+    finally:
+        for key, value in saved_tc.items():
+            globals()[key] = value
+        if saved_tc_env is None:
+            os.environ.pop("POD_TIMEOUT", None)
+        else:
+            os.environ["POD_TIMEOUT"] = saved_tc_env
+    print(f"[selftest] 12c) traincache 闸门：100mbit 慢格地板 {tc_floor:.0f}s × "
+          f"{TRAINCACHE_TIMEOUT_HEADROOM:.0f} = {want}s（> 实测全程约 1990s），"
+          f"1000mbit 快格回到 {POD_TIMEOUT}s，显式 POD_TIMEOUT 优先，"
+          f"非 traincache 组态不受影响")
+
     # ---- 13) D23/M5 网关磁盘缓存开关：新列、取值映射、环境变量与透传 ----
     if "gateway_cache" not in CSV_FIELDNAMES:
         raise AssertionError("自测：summary.csv 缺 gateway_cache 列")
@@ -4514,7 +4810,8 @@ def main():
         return
 
     global TC_RATE_EFF
-    TC_RATE_EFF = args.rate if args.rate is not None else bench_config.TC_RATE
+    TC_RATE_EFF = normalize_rate_str(
+        args.rate if args.rate is not None else bench_config.TC_RATE)
     reps = args.reps
     if reps != bench_config.REPS:
         print(f"[warn] --reps={reps} 不等于规定值 {bench_config.REPS}；"

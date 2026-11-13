@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"traincache/agent/logagg"
@@ -244,14 +243,17 @@ type PersistentPrefetcher struct {
 	grab func(ctx context.Context, dataset string, ref ChunkRef) (size int64, ready bool)
 
 	mu      sync.Mutex
-	started bool                   // Start 已调用(幂等)
-	runDone chan struct{}          // 调度协程退出信号(Start 内创建;测试等待用)
-	stage   *stageState            // 当前阶段(nil = 尚无订单)
-	dataset string                 // 最近一次 OnStageSwitch 的 dataset(P0 入队快照用;mu 保护)
-	queues  [numPriorities][]*task // P0..P3 FIFO 分片数组
-	pending map[pendingKey]*task   // D45 去重表:覆盖 P0–P3 队列与运行中 task(mu 保护)
-	wake    chan struct{}          // 调度协程唤醒信号(缓冲 1,入队时非阻塞投递)
-	results chan taskResult        // 抓取结果回投调度协程通道(New 内创建,非阻塞投递)
+	started bool          // Start 已调用(幂等)
+	runDone chan struct{} // 调度协程退出信号(Start 内创建;测试等待用)
+	stage   *stageState   // 当前阶段(nil = 尚无订单)
+	dataset string        // 最近一次 OnStageSwitch 的 dataset(P0 入队快照用;mu 保护)
+	// demandOnly 置位时阶段首批(P1)与邻域窗口(P2)都不入队,只保留 P0 按需/预热
+	// 入口(svc 在缓存容量小于订单数据集总字节时置位;mu 保护)。
+	demandOnly bool
+	queues     [numPriorities][]*task // P0..P3 FIFO 分片数组
+	pending    map[pendingKey]*task   // D45 去重表:覆盖 P0–P3 队列与运行中 task(mu 保护)
+	wake       chan struct{}          // 调度协程唤醒信号(缓冲 1,入队时非阻塞投递)
+	results    chan taskResult        // 抓取结果回投调度协程通道(New 内创建,非阻塞投递)
 
 	// 吞吐 EMA(ETA 用;mu 保护):bytes/s,0 = 无历史。
 	ema   float64
@@ -263,12 +265,6 @@ type PersistentPrefetcher struct {
 	// (不会出现后写 Set 覆盖为旧值)。
 	fetchInflightMu sync.Mutex
 	fetchInflight   int64
-
-	// warmupDone 标记是否已离开 warmup 阶段。agent 启动时置 false,第一次训练进程
-	// 通过 OnConsumeSideAdvance 消费块后置 true。warmup 阶段 P0 块走 AdmissionReading
-	// (占满 MaxTasks),之后退回 AdmissionSpeculative (半额 specTasks)。
-	// 消费钩子与下载协程并发读写,用 atomic。
-	warmupDone atomic.Bool
 }
 
 // New 构造持久预取器(设计《预取主循环》冻结签名)。cat/f/cs/m 分别提供索引查找、下载编排、
@@ -319,9 +315,6 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 	if err := ctx.Err(); err != nil {
 		return false
 	}
-	// 第一次训练进程消费块 → warmup 阶段结束,P0 块退回 AdmissionSpeculative。
-	// 幂等:多次调用无副作用。
-	p.warmupDone.Store(true)
 	var (
 		report  bool
 		leads   int64
@@ -372,6 +365,15 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 	return true
 }
 
+// SetDemandOnly 置位/解除按需模式:置位后 OnStageSwitch 不装阶段首批(P1),
+// ensureWindowLocked 不开放邻域窗口(P2),P0 入口(EnqueueP0Demand/EnqueueP0 系列)
+// 不受影响。svc 按订单比较缓存容量与数据集总字节后调用;并发安全。
+func (p *PersistentPrefetcher) SetDemandOnly(on bool) {
+	p.mu.Lock()
+	p.demandOnly = on
+	p.mu.Unlock()
+}
+
 // OnStageSwitch 阶段切换:旧阶段 cursor 之后未消费块降级 P3(在途请求不取消);
 // 新阶段开头 K 块(K = 新 ConsumeOrder.prefetch_chunks)作为 P1 高优先级入队,剩余块转
 // P2 邻域预取;返回"切换时刻到新窗口就绪"的预估时间,供 Agent 上报
@@ -395,7 +397,11 @@ func (p *PersistentPrefetcher) OnStageSwitch(ctx context.Context, next ConsumeOr
 	}
 
 	// 2) 新阶段:K 块以 P1 入队;K == 0 时邻域窗口立即开放(ensureWindowLocked)。
+	// 按需模式下 K 强制 0 且邻域窗口不开放,阶段切换只做降级与游标簿记。
 	st := newStage(next)
+	if p.demandOnly {
+		st.k = 0
+	}
 	p.stage = st
 	p.dataset = next.Dataset // P0 入队快照的 dataset 来源(仅更新,不影响旧阶段在途)
 	for i := 0; i < st.k; i++ {
@@ -451,7 +457,8 @@ func (p *PersistentPrefetcher) EnqueueP0ScopedTask(ctx, work context.Context, ta
 }
 
 // EnqueueP0Demand 是 demand(按需补块)的 P0 入队入口:语义与 EnqueueP0 完全一致
-// (严格最高优先级、在途不取消、完成仍经 OnP0Done),仅把回源 reason 标为 demand。
+// (严格最高优先级、在途不取消、完成仍经 OnP0Done),区别有两点:回源 reason 标为
+// demand(下载走读准入,D70),块插到 P0 队首、排在任何已排队的预热块之前(D71)。
 // 复用同一队列与 pending 去重表,不改变冻结的 pending 语义。
 func (p *PersistentPrefetcher) EnqueueP0Demand(ctx context.Context, refs []ChunkRef) error {
 	return p.enqueueP0(ctx, refs, metrics.FetchReasonDemand, nil, "")
@@ -466,7 +473,16 @@ func (p *PersistentPrefetcher) enqueueP0(ctx context.Context, refs []ChunkRef, r
 	}
 	p.mu.Lock()
 	dataset := p.dataset
-	for _, r := range refs {
+	// D71:需求补块插到 P0 队首,排在任何已排队(含同一批)的预热块之前;显式预热照旧
+	// 按到达顺序追加到队尾。逆序插入,使同一批补块出队时仍保持入参顺序。
+	order := refs
+	if reason == metrics.FetchReasonDemand {
+		order = make([]ChunkRef, len(refs))
+		for i, r := range refs {
+			order[len(refs)-1-i] = r
+		}
+	}
+	for _, r := range order {
 		p.enqueueLocked(&task{idx: -1, ref: r, dataset: dataset, p0: true, reason: reason, taskID: taskID, ctx: work}, priP0)
 	}
 	p.mu.Unlock()
@@ -479,6 +495,12 @@ func (t *task) fetchReason() string {
 		return metrics.FetchReasonPrefetch
 	}
 	return t.reason
+}
+
+// isDemand 报告本 task 是否由需求读补块触发(回源 reason = demand):D70 据此选在读
+// 准入档位,D71 据此把块插到 P0 队首。
+func (t *task) isDemand() bool {
+	return t.reason == metrics.FetchReasonDemand
 }
 
 // Status 返回当前状态快照(设计《预取主循环》冻结):阶段标识、纯消费位点(consume 所在块)、
@@ -622,11 +644,12 @@ func (p *PersistentPrefetcher) estimateETA(ctx context.Context, st *stageState, 
 
 // ensureWindowLocked 补齐当前阶段的 P2 邻域窗口(设计《预取主循环》《持续预取与阶段切换》):起点 =
 // max(已入队水位, cursor)+1,终点 = min(cursor+lookahead, len-1);阶段首批未全部处理完
-// (kDone < k)时不开放邻域(设计《持续预取与阶段切换》"K 块就绪后剩余块转 P2")。幂等:水位单调不回退,
+// (kDone < k)时不开放邻域(设计《持续预取与阶段切换》"K 块就绪后剩余块转 P2");按需模式
+// (SetDemandOnly)下同样不开放。幂等:水位单调不回退,
 // cursor 跳跃(advance 大幅前进)时途经位置视为已消费、不再入队。
 func (p *PersistentPrefetcher) ensureWindowLocked() {
 	st := p.stage
-	if st == nil || st.kDone < st.k {
+	if st == nil || st.kDone < st.k || p.demandOnly {
 		return
 	}
 	start := st.schedTo
@@ -646,10 +669,11 @@ func (p *PersistentPrefetcher) ensureWindowLocked() {
 }
 
 // enqueueLocked 经 D45 pending 去重表入队并唤醒调度协程(wake 缓冲 1;已有待处理信号
-// 时不再投递)。action 语义:"enqueue" = 新任务已追加;"promote"/"ignore" = 去重表已
-// 处理(骨架阶段 enqueueDedupLocked 恒返回 "enqueue",保持既有行为)。
+// 时不再投递)。action 语义:"enqueue" = 新任务已入队;"promote"/"ignore" = 去重表已
+// 处理。新任务默认追加到队尾;需求补块(D71)插到队首,与 enqueueDedupLocked 的提升
+// 路径同一判定,保证需求补块不会排到已排队的预热块之后。
 func (p *PersistentPrefetcher) enqueueLocked(t *task, pri int) {
-	// 去重提升不重置起点;骨架阶段这里只记录首次入队参数。
+	// 去重提升不重置起点;这里只记录首次入队参数。
 	if t.start.IsZero() {
 		t.start = p.now()
 	}
@@ -657,11 +681,20 @@ func (p *PersistentPrefetcher) enqueueLocked(t *task, pri int) {
 	if action := p.enqueueDedupLocked(t, pri); action != "enqueue" {
 		return
 	}
-	p.queues[pri] = append(p.queues[pri], t)
+	if t.isDemand() {
+		p.prependQueueLocked(pri, t)
+	} else {
+		p.queues[pri] = append(p.queues[pri], t)
+	}
 	select {
 	case p.wake <- struct{}{}:
 	default:
 	}
+}
+
+// prependQueueLocked 把 task 插到指定优先级队首(D71 需求补块插队;调用方持 p.mu)。
+func (p *PersistentPrefetcher) prependQueueLocked(pri int, t *task) {
+	p.queues[pri] = append([]*task{t}, p.queues[pri]...)
 }
 
 // popTaskLocked 按严格优先级(P0>P1>P2>P3)出队,同级 FIFO;全空返回 (nil, 0)。
@@ -813,11 +846,11 @@ func (p *PersistentPrefetcher) grabBlock(ctx context.Context, t *task) (size int
 		return entrySize, false, errors.New("prefetch: dataset 未绑定(尚无 ConsumeOrder),无法构造下载键")
 	}
 	reason := t.fetchReason()
+	// 准入档位与队列档位是两条独立的轴(设计《预取主循环》;D70):只有需求补块走在读
+	// 准入(全场额度、不让路),显式预热与邻域预取一律走预铺准入(半额额度,在读有在途
+	// 时让路)。训练进程有没有开始消费不改变分档,预热任务刚下发时也只拿一半额度。
 	adm := fetch.AdmissionSpeculative
-	if reason == metrics.FetchReasonDemand || (t.p0 && !p.warmupDone.Load()) {
-		// Demand 读补块走在读,不受半额约束;
-		// warmup 阶段的 P0 预热块也走在读,占满 MaxTasks(此时 Pod 尚未调度,
-		// 没有在读请求在途,半额保护多余)。
+	if t.isDemand() {
 		adm = fetch.AdmissionReading
 	}
 	p.reportFetchStart(t.dataset)

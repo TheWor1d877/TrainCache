@@ -51,10 +51,13 @@ kubectl -n "$NS" delete pvc --all --ignore-not-found 2>/dev/null || true
 log_group "$GROUP" "清理 MinIO 与 Redis 残留(确保下次 format 干净)"
 MINIO_POD=$(kubectl -n "$MINIO_NS" get pods -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 if [ -n "$MINIO_POD" ]; then
+  # 凭证从 Pod 内的 MINIO_ROOT_USER/MINIO_ROOT_PASSWORD 取(mc 认 root 凭证);
+  # 外部 _common.sh 的 MINIO_ACCESS_KEY 是控制面凭证,删 bench-b 前缀不一定够权。
+  # 实测:凭 access-key 删不动时静默失败(mc 报错被吞),fluid-demo/ 4GB 残留,
+  # 下次 format 报 storage not empty,worker CrashLoop,整组 up_failed。
   kubectl -n "$MINIO_NS" exec "$MINIO_POD" -- sh -c \
-    "mc alias set myminio http://localhost:9000 $MINIO_ACCESS_KEY $MINIO_SECRET_KEY >/dev/null 2>&1; \
-     mc rm --recursive --force myminio/$MINIO_BUCKET/fluid-demo/ 2>/dev/null; \
-     mc rm --recursive --force myminio/$MINIO_BUCKET/bench-b/fluid-demo/ 2>/dev/null; \
+    "mc alias set myminio http://localhost:9000 \$MINIO_ROOT_USER \$MINIO_ROOT_PASSWORD >/dev/null 2>&1; \
+     mc rm --recursive --force myminio/$MINIO_BUCKET/fluid-demo/ >/dev/null 2>&1; \
      true" >/dev/null 2>&1 || true
 fi
 # 清空 Redis(若 redis pod 还在):JuiceFS 把 volume 元数据存在 Redis,

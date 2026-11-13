@@ -191,7 +191,7 @@ def make_cond(
     pattern: str = "single",
     evict: str = "heat",
     lookahead: int = 16,
-    fanout: int = 2,
+    fanout: int = 1,
     gate: str | None = None,
     warmup: int = 0,
     cache_enabled: bool = True,
@@ -271,7 +271,7 @@ def build_compare() -> list[dict]:
                 name = f"compare-{group}-rho{rho_label(rho)}-{rate}"
                 out.append(make_cond(
                     name=name, family="compare", group=group, rho=rho,
-                    rate=rate, lookahead=16, fanout=2,
+                    rate=rate, lookahead=16, fanout=1,
                     tags=("compare", f"group={group}", f"rate={rate}",
                           f"rho={rho}")
                          + (("baseline",) if group in BASELINES else ()),
@@ -288,7 +288,7 @@ def build_compare() -> list[dict]:
         name = f"compare-traincache-cold-rho{rho_label(rho)}-100"
         out.append(make_cond(
             name=name, family="compare", group="traincache-cold", rho=rho,
-            rate=100, lookahead=16, fanout=2,
+            rate=100, lookahead=16, fanout=1,
             tags=("compare", "group=traincache-cold", "rate=100", f"rho={rho}"),
             notes=_note("compare", group="traincache-cold", rho=rho,
                         rate=100)))
@@ -316,7 +316,7 @@ def build_gateway() -> list[dict]:
         out.append(make_cond(
             name=name, family="gateway", group=DEFAULT_GROUP, rho=4.0,
             rate=300, readers=cond_mod.MAX_READERS, pattern="replicated",
-            lookahead=16, fanout=2,
+            lookahead=16, fanout=1,
             tags=("gateway", f"arm={arm}", "readers=4", "pattern=replicated"),
             notes=_note("gateway", arm=arm, rate=300, rho=4,
                         readers=cond_mod.MAX_READERS, pattern="replicated"),
@@ -331,7 +331,7 @@ def build_evict(trace_ref) -> list[dict]:
             name = f"evict-{policy}-rho{rho_label(rho)}"
             out.append(make_cond(
                 name=name, family="evict", group=DEFAULT_GROUP, load="tilt",
-                rho=rho, rate=1000, evict=policy, lookahead=16, fanout=2,
+                rho=rho, rate=1000, evict=policy, lookahead=16, fanout=1,
                 trace_ref=trace_ref,
                 tags=("evict", f"evict_policy={policy}", f"rho={rho}",
                       "load=tilt"),
@@ -367,7 +367,7 @@ def build_warmup() -> list[dict]:
                 name = f"warmup-{gate}-w{window}-rho{rho_label(rho)}"
                 out.append(make_cond(
                     name=name, family="warmup", group="traincache-warm",
-                    rho=rho, rate=1000, lookahead=16, fanout=2, gate=gate,
+                    rho=rho, rate=1000, lookahead=16, fanout=1, gate=gate,
                     warmup=warmup,
                     tags=("warmup", f"gate={gate}", f"window={window}",
                           f"rho={rho}"),
@@ -394,7 +394,7 @@ def build_switch() -> list[dict]:
             out.append(make_cond(
                 name=name, family="switch", group=DEFAULT_GROUP, rho=rho,
                 rate=1000, shuffle=shuffle, fractions=fractions,
-                lookahead=16, fanout=2,
+                lookahead=16, fanout=1,
                 tags=("switch", f"scenario={scenario}", f"rho={rho}"),
                 notes=_note("switch", scenario=scenario, rho=rho, rate=1000,
                             shuffle=shuffle)))
@@ -408,7 +408,7 @@ def build_chaos() -> list[dict]:
             name = f"chaos-{fault.replace('_', '-')}-rho{rho_label(rho)}"
             out.append(make_cond(
                 name=name, family="chaos", group=DEFAULT_GROUP, rho=rho,
-                rate=1000, lookahead=16, fanout=2,
+                rate=1000, lookahead=16, fanout=1,
                 tags=("chaos", f"fault={fault}", f"rho={rho}"),
                 notes=_note("chaos", fault=fault, rho=rho, rate=1000)))
     return out
@@ -427,7 +427,7 @@ def build_multiconsumer(trace_ref) -> list[dict]:
             out.append(make_cond(
                 name=name, family="multiconsumer", group=DEFAULT_GROUP,
                 load="tilt", rho=4.0, rate=1000, readers=2,
-                pattern="replicated", lookahead=16, fanout=2,
+                pattern="replicated", lookahead=16, fanout=1,
                 trace_ref=trace_ref,
                 tags=("multiconsumer", f"hot={hot:.2f}",
                       f"placement={mode}",
@@ -445,7 +445,7 @@ def build_e2e() -> list[dict]:
         out.append(make_cond(
             name=f"e2e-{scenario}", family="e2e", group=DEFAULT_GROUP,
             load="train", rho=4.0, rate=1000, reps=config.E2E_REPS,
-            lookahead=16, fanout=2,
+            lookahead=16, fanout=1,
             tags=("e2e", f"scenario={scenario}"),
             notes=_note("e2e", scenario=scenario, rho=4, rate=1000,
                         reps=config.E2E_REPS, run_min=70)))

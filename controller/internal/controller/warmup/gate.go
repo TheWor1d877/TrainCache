@@ -693,26 +693,6 @@ func podScoreSnapshot(
 	return nodeScores
 }
 
-// hasMinProgress 检查是否至少有一个 assigned node 上报了非零 ready。
-// 满足返回 true 表示门控不该继续等 gateThreshold,直接放行。
-//
-// 对应 #38 最小放行条件。issue 原文:第一轮 reconcile 全是 0% 和 agent 注册慢
-// 两种场景下,门控 Hold 是浪费——agent 刚上报任何 ready 就放。
-//
-// 注意:GWAA handoff 场景下 rival 刚接手也会触发此条件(rival 有 ready 但没追
-// 上 threshold)。这是 issue 原文设计的 trade-off——优先覆盖"等了白等"的场景,
-// handoff 场景下的提前放行接受为可接受的副作用。
-func hasMinProgress(pods []gate.PodGateState) bool {
-	for _, pod := range pods {
-		for _, node := range pod.AssignedNodes {
-			if pod.ReadyByNode[node] > 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // 门控前置跳过的原因串。命中哪个子条件就返回哪个原因，
 // 日志的 reason 字段与 status.gateDecision.reason 都取这个值。
 const (
