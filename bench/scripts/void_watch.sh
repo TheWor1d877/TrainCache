@@ -65,8 +65,9 @@ PY
       exit 0
     fi
   fi
-  # 4) 驱动本体存活：锚定完整命令行，排除命令行里带启动串的包装 shell
-  if ! pgrep -f "^python3.*${DRIVER}\.py$" >/dev/null; then
+  # 4) 驱动本体存活：锚定完整命令行，排除命令行里带启动串的包装 shell；
+  #    允许 .py 后带 --group 等参数（$ 锚死会把带参驱动误判为消失）
+  if ! pgrep -f "^python3.*${DRIVER}\.py( |$)" >/dev/null; then
     echo "驱动进程 $DRIVER 已消失且日志无正常收尾"
     exit 4
   fi
