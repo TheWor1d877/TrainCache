@@ -22,10 +22,10 @@ images:
   - name: ghcr.io/thewor1d877/traincache/controller-manager
     newTag: dev
   - name: ghcr.io/thewor1d877/traincache/webhook
-    digest: sha256:62c6d54852eb5361ba1aad7a1e73322ef3647c7c6c526d912706b880d7242c3a
+    newTag: dev
   - name: ghcr.io/thewor1d877/traincache/kube-scheduler
-    digest: sha256:190f3fe5c524beab4373ddeba4c41903b5d716a7f34785a6df645624aa85c9bd
+    newTag: dev
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
     newTag: dev
   - name: ghcr.io/thewor1d877/traincache/traincache-gateway
-    digest: sha256:66ed74ee3b1bc540c79c758389b61b7fdb555916229e36ca7af34a0c6c4cbbc0
+    newTag: dev
