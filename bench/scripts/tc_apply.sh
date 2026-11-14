@@ -5,13 +5,11 @@
 # docker0 桥主设备与宿主机 veth 的 host 侧 egress 均被实证否决(见
 # probes/probe_a/tc_setup.sh 顶部记录与 docs/4.1 的回源带宽整形一节)。
 #
-# 用法:tc_apply.sh <rate> <delay> [burst] [--target minio|source-d]
+# 用法:tc_apply.sh <rate> <delay> [burst] [--target minio]
 #        [--per-conn <rate>] [--loss <pct>] [--dry-run] [--self-test] [--help]
-#   minio(默认):kind 内 MinIO Pod 的 eth0 egress —— 既有挂点,行为与改造前一致
+#   minio(默认,唯一挂点):kind 内 MinIO Pod 的 eth0 egress —— 既有挂点,行为与改造前一致
 #                (经节点容器 crictl inspectp 找 Pod sandbox netns 后 nsenter 挂点)。
-#   source-d   :宿主机本地通路(v4 train)—— 独立 nginx 源站容器(名取自 config.py 的
-#                TRAIN_SOURCE_CONTAINER,可被同名环境变量覆盖,便于用一次性容器验收)
-#                的 eth0 egress;训练进程在宿主机、经该容器端口取数,限其出站带宽。
+#                所有负载(含 e2e 训练)都经 MinIO 取数,没有第二个挂点。
 #   --per-conn :单条 TCP 连接的速率上限(如 32mbit)。给出时 qdisc 形态多两层:
 #                根 htb(类给聚合带宽)→ netem(时延/丢包)→ fq(maxrate 给单流
 #                上限,sch_fq 的 maxrate 按流限速)。不给出时形态是根 tbf 直接
@@ -22,8 +20,7 @@
 #                丢包参数拼装 / 旧调用形态解析。
 #   netem 只挂固定 delay,不加抖动:随机时延逐包重抽会把包序打乱,300mbit 档实测把吞吐
 #   从 35.6MB/s 打到 <0.6MB/s(TCPSackRecovery 占已发段的 15%),详见 docs/4.1 的回源带宽整形一节 的限速口径。
-#   缺省值:无档位参数时 minio 取 TC_RATE/TC_DELAY、source-d 取 TRAIN_TC_RATE/
-#           TRAIN_TC_DELAY;latency 固定 50ms(与既有挂点一致)
+#   缺省值:无档位参数时取 TC_RATE/TC_DELAY;latency 固定 50ms(与既有挂点一致)
 #           —— 无参调用行为与改造前一致(make tc-up / cold_reset.sh 依赖此路径)。
 #
 # burst(D31):burst 与 rate 联动,取"约 0.1 秒的传输量"(config.burst_for_rate):
@@ -42,9 +39,6 @@
 #   期望值比,容 ±1%。
 #
 # 幂等:先 del 再 add。Pod/容器重建后 netns 换新,qdisc 随之消失,需重挂。
-# source-d 挂点需要 root:root 直跑 → sudo -n → sudo -S(bench/.sudo-pass,600);
-# 三者皆不可用时回退特权 docker 容器(--net=container:<目标> --cap-add=NET_ADMIN,
-# 镜像取本机已有的 TC_IMAGE,与第一步探针实测形态一致)。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$(cd "$ROOT/.." && pwd)"
@@ -195,8 +189,11 @@ self_test() {
   expect_eq "旧形态 burst(缺省按 rate 推导)" "3750k" "$(burst_of "$out")"
   out="$(bash "$SELF" --dry-run 2>&1)" || fail "无参调用形态执行失败"
   expect_eq "无参调用 burst(config 缺省 rate=100mbit)" "1250k" "$(burst_of "$out")"
-  out="$(bash "$SELF" 100mbit 20ms --target source-d --dry-run 2>&1)" || fail "--target source-d 形态执行失败"
-  pass "--target source-d 形态可解析"
+  if bash "$SELF" 100mbit 20ms --target source-d --dry-run >/dev/null 2>&1; then
+    fail "--target source-d 仍被接受(本地源站挂点没撤净)"
+  else
+    pass "--target source-d 被拒绝"
+  fi
   out="$(bash "$SELF" 100mbit 20ms --target minio --dry-run 2>&1)" || fail "--target minio 形态执行失败"
   pass "--target minio 形态可解析"
 
@@ -210,15 +207,14 @@ self_test() {
 
 usage() {
   cat <<'EOF'
-用法: tc_apply.sh <rate> <delay> [burst] [--target minio|source-d]
+用法: tc_apply.sh <rate> <delay> [burst] [--target minio]
                  [--per-conn <rate>] [--loss <pct>] [--dry-run] [--self-test]
-  <rate>    限速值(如 100mbit / 300mbit);缺省:minio=TC_RATE,source-d=TRAIN_TC_RATE
-  <delay>   延迟值(如 20ms / 10ms);缺省:minio=TC_DELAY,source-d=TRAIN_TC_DELAY
+  <rate>    限速值(如 100mbit / 300mbit);缺省:TC_RATE
+  <delay>   延迟值(如 20ms / 10ms);缺省:TC_DELAY
   [burst]   tbf 突发桶;缺省按 rate 推导(config.burst_for_rate,约 0.1 秒传输量:
             100mbit→1250k、300mbit→3750k、1000mbit→12500k;k 按 1024 解析);
             显式给值以显式为准;rate 解析不出 mbit 时退回 TC_BURST 并告警
-  --target minio     默认;kind 内 MinIO Pod 的 eth0 egress(既有行为,不变)
-  --target source-d  v4 train:本地源站容器 TRAIN_SOURCE_CONTAINER 的 eth0 egress
+  --target minio     默认且唯一;kind 内 MinIO Pod 的 eth0 egress(既有行为,不变)
   --per-conn <rate>  单条 TCP 连接的速率上限(如 32mbit)。给出时 qdisc 形态是
                      根 tbf → fq(maxrate) → netem;不给出时是 根 tbf → netem
   --loss <pct>       netem 丢包率(0 到 100 的小数,1 表示 1%);缺省 0
@@ -229,7 +225,6 @@ usage() {
 示例:
   tc_apply.sh 100mbit 20ms                    # 兼容既有调用 → MinIO
   tc_apply.sh 300mbit 10ms 1600k              # 兼容既有调用(显式 burst,值不变)→ MinIO
-  tc_apply.sh 100mbit 20ms --target source-d  # train 本地源站
   tc_apply.sh 1000mbit 20ms --per-conn 32mbit # 单流上限 32mbit,聚合带宽不限
 EOF
 }
@@ -244,7 +239,7 @@ while [ "$#" -gt 0 ]; do
     --dry-run)  DRY_RUN=1; shift ;;
     --self-test) SELF_TEST=1; shift ;;
     --target)
-      [ "$#" -ge 2 ] || { echo "错误:--target 缺值(应为 minio 或 source-d)" >&2; usage >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "错误:--target 缺值(应为 minio)" >&2; usage >&2; exit 2; }
       TARGET="$2"; shift 2 ;;
     --target=*) TARGET="${1#--target=}"; shift ;;
     --per-conn)
@@ -260,8 +255,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$TARGET" in
-  minio|source-d) ;;
-  *) echo "错误:--target 只支持 minio|source-d(收到 '$TARGET')" >&2; usage >&2; exit 2 ;;
+  minio) ;;
+  *) echo "错误:--target 只支持 minio(收到 '$TARGET')" >&2; usage >&2; exit 2 ;;
 esac
 [ "${#POS[@]}" -le 3 ] || { echo "错误:位置参数过多(最多 <rate> <delay> <burst>)" >&2; usage >&2; exit 2; }
 
@@ -282,14 +277,9 @@ fi
 # ---- 自检入口(不碰集群、不碰容器)----
 if [ "$SELF_TEST" = 1 ]; then self_test; exit $?; fi
 
-# ---- 档位解析(无位置参数时按目标取 config 缺省;minio 分支与改造前逐字一致)----
-if [ "$TARGET" = minio ]; then
-  RATE="${POS[0]:-$(CFG TC_RATE)}"
-  DELAY="${POS[1]:-$(CFG TC_DELAY)}"
-else
-  RATE="${POS[0]:-$(CFG TRAIN_TC_RATE)}"
-  DELAY="${POS[1]:-$(CFG TRAIN_TC_DELAY)}"
-fi
+# ---- 档位解析(无位置参数时取 config 缺省;与改造前逐字一致)----
+RATE="${POS[0]:-$(CFG TC_RATE)}"
+DELAY="${POS[1]:-$(CFG TC_DELAY)}"
 
 # ---- burst(D31):显式值优先;缺省按 rate 推导(=0.1 秒的传输量)----
 RATE_MBIT="$(rate_to_mbit "$RATE" || true)"
@@ -306,7 +296,7 @@ else
 fi
 
 if [ "${#POS[@]}" -eq 0 ]; then
-  echo "用法: tc_apply.sh <rate> <delay> [burst] [--target minio|source-d](未给档位参数,按 config 缺省执行:$TARGET rate=$RATE delay=$DELAY burst=$BURST;完整帮助 --help)"
+  echo "用法: tc_apply.sh <rate> <delay> [burst] [--target minio](未给档位参数,按 config 缺省执行:$TARGET rate=$RATE delay=$DELAY burst=$BURST;完整帮助 --help)"
 fi
 for v in "$RATE" "$DELAY" "$BURST"; do
   case "$v" in
@@ -331,22 +321,11 @@ if [ -n "$PER_CONN" ]; then
     "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS" \
     'modprobe sch_fq 2>/dev/null || true' \
     "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate $PER_CONN")"
-  SHAPE_SD="$(printf '%s\n' \
-    'nsenter -t $PID -n tc qdisc add dev eth0 root handle 1: htb default 1' \
-    "nsenter -t \$PID -n tc class add dev eth0 parent 1: classid 1:1 htb rate $RATE ceil $RATE burst $BURST cburst $BURST" \
-    "nsenter -t \$PID -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS" \
-    'modprobe sch_fq 2>/dev/null || true' \
-    "nsenter -t \$PID -n tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate $PER_CONN")"
-  DOCKER_FALLBACK="tc qdisc del dev eth0 root 2>/dev/null || true; tc qdisc add dev eth0 root handle 1: htb default 1 && tc class add dev eth0 parent 1: classid 1:1 htb rate $RATE ceil $RATE burst $BURST cburst $BURST && tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS && (modprobe sch_fq 2>/dev/null || true) && tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate $PER_CONN && tc qdisc show dev eth0"
 else
   QDISC_SHAPE="tbf → netem"
   SHAPE_MINIO="$(printf '%s\n' \
     "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms" \
     "nsenter --net=\"\$NETNS\" tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS")"
-  SHAPE_SD="$(printf '%s\n' \
-    "nsenter -t \$PID -n tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms" \
-    "nsenter -t \$PID -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS")"
-  DOCKER_FALLBACK="tc qdisc del dev eth0 root 2>/dev/null || true; tc qdisc add dev eth0 root handle 1: tbf rate $RATE burst $BURST latency 50ms && tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS && tc qdisc show dev eth0"
 fi
 
 case "$TARGET" in
@@ -406,77 +385,5 @@ echo "--- 已挂载 ---"
 nsenter --net="$NETNS" tc qdisc show dev eth0
 EOF
   echo "提示:换档位直接重跑本脚本;拆除用 tc_teardown.sh"
-  ;;
-# ================= source-d(v4 train:宿主机本地源站容器挂点)=================
-source-d)
-  NAME="${TRAIN_SOURCE_CONTAINER:-$(CFG TRAIN_SOURCE_CONTAINER)}"
-  TC_IMAGE="${TC_IMAGE:-kindest/node:v1.28.15}"   # 本机已有(第一步探针回退实测形态),内含 /usr/sbin/tc
-  if [ "$DRY_RUN" = 1 ]; then
-    echo "[dry-run] target=source-d container=$NAME rate=$RATE delay=$DELAY latency=50ms"
-    echo "[dry-run]   burst=$BURST  ($BURST_SRC)"
-    echo "[dry-run]   netem 生效参数=$NETEM_ARGS"
-    cat <<EOF
-[dry-run] 将执行(本地源站容器 eth0 egress;本次不实际执行):
-[dry-run]   docker inspect -f '{{.State.Pid}}' $NAME   # → PID
-[dry-run]   # 首选通道 root 直跑 / sudo -n / sudo -S(.sudo-pass):
-[dry-run]   nsenter -t \$PID -n tc qdisc del dev eth0 root 2>/dev/null || true
-$(printf '%s\n' "$SHAPE_SD" | sed 's/^/[dry-run]   /')
-[dry-run]   nsenter -t \$PID -n tc qdisc show dev eth0
-[dry-run]   # 回退(无 sudo 权限):特权容器共享目标 netns,镜像 $TC_IMAGE
-[dry-run]   docker run --rm --net=container:$NAME --cap-add=NET_ADMIN --entrypoint /bin/sh $TC_IMAGE -c \\
-[dry-run]     '$(printf '%s' "$DOCKER_FALLBACK")'
-EOF
-    exit 0
-  fi
-  PID=$(docker inspect -f '{{.State.Pid}}' "$NAME" 2>/dev/null) \
-    || { echo "错误:容器 $NAME 不存在(先启动 train源站;一次性容器测试可用环境变量 TRAIN_SOURCE_CONTAINER 覆盖容器名)" >&2; exit 1; }
-  { [ -n "$PID" ] && [ "$PID" != 0 ]; } || { echo "错误:容器 $NAME 不在运行(PID=$PID)" >&2; exit 1; }
-
-  # ---- root 通道探测:root 直跑 > sudo -n > sudo -S(.sudo-pass);皆不可用则 docker 回退 ----
-  ROOT_VIA=""
-  if [ "$(id -u)" -eq 0 ]; then ROOT_VIA="root"
-  elif sudo -n true 2>/dev/null; then ROOT_VIA="sudo -n"
-  elif [ -r "$ROOT/.sudo-pass" ] && printf '%s\n' "$(cat "$ROOT/.sudo-pass")" | sudo -S -p '' true 2>/dev/null; then
-    ROOT_VIA="sudo -S(.sudo-pass)"
-  fi
-  run_root() {
-    case "$ROOT_VIA" in
-      root)      "$@" ;;
-      "sudo -n") sudo -n "$@" ;;
-      *)         printf '%s\n' "$(cat "$ROOT/.sudo-pass")" | sudo -S -p '' "$@" ;;
-    esac
-  }
-  echo "SourceD 容器=$NAME 档位:rate=$RATE delay=$DELAY"
-  echo "burst=$BURST  (推导依据:$BURST_SRC)"
-  echo "qdisc 形态=$QDISC_SHAPE"
-  echo "netem=$NETEM_ARGS"
-  if [ -n "$ROOT_VIA" ]; then
-    run_root nsenter -t "$PID" -n tc qdisc del dev eth0 root 2>/dev/null || true
-    if [ -n "$PER_CONN" ]; then
-      # tbf 不是 classful,挂不了子 qdisc;根换成 htb,类给聚合带宽,netem 给时延,
-      # netem 的 class 下挂 fq maxrate 给单流上限。
-      run_root nsenter -t "$PID" -n tc qdisc add dev eth0 root handle 1: htb default 1 \
-        && run_root nsenter -t "$PID" -n tc class add dev eth0 parent 1: classid 1:1 \
-             htb rate "$RATE" ceil "$RATE" burst "$BURST" cburst "$BURST" \
-        && run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS
-      # sch_fq 可能是可加载模块,内建于内核时 modprobe 失败可忽略;挂 fq 失败才报错
-      run_root modprobe sch_fq 2>/dev/null || true
-      run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 10:1 handle 20: fq maxrate "$PER_CONN"
-    else
-      run_root nsenter -t "$PID" -n tc qdisc add dev eth0 root handle 1: \
-           tbf rate "$RATE" burst "$BURST" latency 50ms \
-        && run_root nsenter -t "$PID" -n tc qdisc add dev eth0 parent 1:1 handle 10: netem $NETEM_ARGS
-    fi
-    echo "--- 已挂载(root 通道:$ROOT_VIA,nsenter 容器 netns)---"
-    run_root nsenter -t "$PID" -n tc qdisc show dev eth0
-  else
-    docker image inspect "$TC_IMAGE" >/dev/null 2>&1 \
-      || { echo "错误:本机无回退镜像 $TC_IMAGE(用 TC_IMAGE= 指定本地已有镜像)" >&2; exit 1; }
-    echo "未取得 root 通道 → 回退特权 docker 容器(镜像 $TC_IMAGE,共享容器 $NAME 的 netns)"
-    docker run --rm --net="container:$NAME" --cap-add=NET_ADMIN --entrypoint /bin/sh "$TC_IMAGE" -c "
-      $DOCKER_FALLBACK" \
-      || { echo "错误:docker 回退挂载失败" >&2; exit 1; }
-  fi
-  echo "提示:换档位直接重跑本脚本;拆除用 tc_teardown.sh --target source-d"
   ;;
 esac

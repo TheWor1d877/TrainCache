@@ -95,8 +95,6 @@ TRAIN_WARMUP = 10                  # 仅 epoch0 前 10 步,口径与探针 C 一
 TRAIN_DIR_ALT = DATA_DIR / "train" / "alt"
 TRAIN_SEED_ALT = 20261016
 TRAIN_RESULTS_DIR = RESULTS_DIR / "train"
-TRAIN_TC_RATE = "100mbit"
-TRAIN_TC_DELAY = "20ms"
 
 # ---- 训练负载打点口径 ----
 TRAIN_SHARD_BYTES = 128 << 20      # 单个 tar 目标字节(2GiB / 16)
