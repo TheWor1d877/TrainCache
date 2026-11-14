@@ -10,8 +10,8 @@
     (core/cas/header.go),concat payload 成 tar 字节流(io.BytesIO,整片
     ~132MiB 进内存可接受);
   * 缺块:发 read_miss hook 帧 → 25ms stat 轮询等 agentd 补块(上限
-    TRAINCACHE_MISS_WAIT_S,默认 180s)→ 超时即本次读失败(不直连对象存储,
-    与生产一致:训练侧只读 hostPath,块没到就是读失败);
+    TRAINCACHE_MISS_WAIT_S,默认 180s)→ 超时即本次读失败(生产上同样是
+    训练读报错);
   * 每读一块发 advance hook 帧;orders 经 ordersrc.py 写 ring,每 epoch 一次
     (stage_id=epoch),心跳线程每 10s 同代际续写(D57)。
 
@@ -158,8 +158,7 @@ def read_shard_bytes(name):
             if payload is not None:
                 STATS["miss_filled"] += 1
             else:
-                # 超时:块没等到,不兜底。训练侧与生产一致——只读 hostPath、
-                # 不直连对象存储;块没到就是本次读失败。
+                # 超时:块没等到,本次读失败。生产上同样是训练读报错。
                 raise IOError(
                     f"块未在 {MISS_WAIT_S}s 内落盘: {name} chunk={chunk_idx}")
         _hook_advance(name, chunk_idx)

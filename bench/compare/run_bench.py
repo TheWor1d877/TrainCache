@@ -1479,11 +1479,8 @@ def read_shard(shard, phase):
                 n_hits += 1
                 _hook_advance(name, chunk_idx)
             else:
-                # 超时:块没等到,不兜底。训练侧与生产一致——只读 hostPath、
-                # 不直连对象存储;块没到就是本次读失败(生产上是训练读报错)。
-                # 旧的 HTTP 回源兜底(装置后门)已删:它的 URL 假设的是桶根整片
-                # tar 的旧布局,且它取的字节不经过 agentd,会让 fetch 字节账
-                # 与 source_saving_ratio 失真。
+                # 超时:块没等到,本次读失败。训练侧与生产一致——只读 hostPath,
+                # 块没到就是读失败(生产上是训练读报错)。
                 n_misses += 1
                 raise RuntimeError(
                     "块未在 180s 内落盘: " + name + " chunk=" + str(chunk_idx))
