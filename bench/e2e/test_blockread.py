@@ -160,13 +160,22 @@ def run_selftest():
             check("A2 缺块轮询补块")
             assert blockread.STATS["miss_filled"] >= 1
 
-            # A3:缺块不补 → 超时走 HTTP 回源兜底。
+            # A3:缺块不补 → 超时读失败(不直连对象存储,与生产一致)。
             e = entries[5]
             blk = cache / e["fp"][:2] / (e["fp"] + ".blk")
+            saved = blk.read_bytes()
             blk.unlink()
             blockread.MISS_WAIT_S = 0.3
-            check("A3 超时回源兜底")
-            assert blockread.STATS["origin"] >= 1
+            try:
+                blockread.opener(blockread.shard_url(SHARD)).read()
+            except IOError as exc:
+                assert "未在" in str(exc), str(exc)
+                print(f"A3 超时读失败(不回源) PASS: {exc}")
+            else:
+                raise AssertionError("A3 超时未抛错:回源兜底仍在")
+            # 块补回来后读路径照常拼回一致。
+            blk.write_bytes(saved)
+            check("A3b 补块后读回一致")
 
             # A4:orders ring 新代际 + 心跳同代际。
             blockread.set_order("0", [SHARD])

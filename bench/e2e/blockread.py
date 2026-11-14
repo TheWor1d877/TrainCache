@@ -10,7 +10,8 @@
     (core/cas/header.go),concat payload 成 tar 字节流(io.BytesIO,整片
     ~132MiB 进内存可接受);
   * 缺块:发 read_miss hook 帧 → 25ms stat 轮询等 agentd 补块(上限
-    TRAINCACHE_MISS_WAIT_S,默认 180s)→ 超时经 HTTP 回源取块对象字节;
+    TRAINCACHE_MISS_WAIT_S,默认 180s)→ 超时即本次读失败(不直连对象存储,
+    与生产一致:训练侧只读 hostPath,块没到就是读失败);
   * 每读一块发 advance hook 帧;orders 经 ordersrc.py 写 ring,每 epoch 一次
     (stage_id=epoch),心跳线程每 10s 同代际续写(D57)。
 
@@ -35,7 +36,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -55,7 +55,7 @@ HEADER_SIZE = 128          # CAS 块头(core/cas/header.go,v1 即最终格式)
 _MAGIC = b"TCBK"
 
 # 块级诊断计数(进程内;worker 各自一份,仅供日志/自测,不参与测量口径)
-STATS = {"local": 0, "miss": 0, "miss_filled": 0, "origin": 0}
+STATS = {"local": 0, "miss": 0, "miss_filled": 0}
 
 _chunk_map = None
 
@@ -135,20 +135,8 @@ def _read_local_block(blk, size):
         return None
 
 
-def _fetch_origin_block(name, chunk_idx, size):
-    """超时兜底:HTTP 取块对象。块对象就是该块 payload(core/publish 的
-    uploadChunk 直传切块字节,无 CAS 头),整对象 GET 即得,无需偏移 Range;
-    键里的 '#' 必须百分号转义,否则被 urllib 当 URL fragment 截掉。"""
-    key = f"{DATASET}/blocks/{name}#{chunk_idx}"
-    url = f"{ENDPOINT}/{BUCKET}/" + urllib.parse.quote(key, safe="/")
-    data = _http_get(url)
-    if len(data) != size:
-        raise IOError(f"回源块 {key} 字节数不符:got {len(data)}, want {size}")
-    return data
-
-
 def read_shard_bytes(name):
-    """按 chunk 序拼回分片 tar 字节:本地命中直读,缺块等 agentd,超时回源。"""
+    """按 chunk 序拼回分片 tar 字节:本地命中直读,缺块等 agentd,超时即读失败。"""
     chunks = load_snapshot().get(name)
     if not chunks:
         raise FileNotFoundError(f"快照里没有分片 {name}(dataset={DATASET})")
@@ -170,8 +158,10 @@ def read_shard_bytes(name):
             if payload is not None:
                 STATS["miss_filled"] += 1
             else:
-                payload = _fetch_origin_block(name, chunk_idx, size)
-                STATS["origin"] += 1
+                # 超时:块没等到,不兜底。训练侧与生产一致——只读 hostPath、
+                # 不直连对象存储;块没到就是本次读失败。
+                raise IOError(
+                    f"块未在 {MISS_WAIT_S}s 内落盘: {name} chunk={chunk_idx}")
         _hook_advance(name, chunk_idx)
         parts.append(payload)
     return b"".join(parts)

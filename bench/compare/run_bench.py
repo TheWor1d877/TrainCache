@@ -1427,13 +1427,13 @@ def _write_order(stage_id="", heartbeat=False):
         print(f"[ordersrc] WARNING: write order failed: {e}", flush=True)
 
 def read_shard(shard, phase):
-    """traincache 读取路径：逐块读本地缓存，缺块等待 agentd 预取，超时兜底回源。
+    """traincache 读取路径：逐块读本地缓存，缺块等 agentd 预取，超时即读失败。
     返回本片字节数（累加各块长度，不把整片拼起来留在内存里）。
     注意：hits/misses 只是块级诊断(block_hit_rate_diag 列)——"块在磁盘存在即
     hit"口径会虚高(agent 运行期悄悄回源补块)，已作废(4.3 D25 命中率口径)；
     正式命中率由 runner 侧用 open-time 的 demand_miss 字节账计算。
     分阶段字节（4.3 命中率）：每个块都计入 read_bytes_phase[phase]；块不存在、走
-    等待/回源分支时另计入 demand_miss_phase[phase]（按块 size 计）。"""
+    等待分支时另计入 demand_miss_phase[phase]（按块 size 计）。"""
     global hits, misses
     name = "shard-" + str(shard).zfill(5) + ".tar"
     chunks = _load_snapshot().get(name, [])
@@ -1479,13 +1479,14 @@ def read_shard(shard, phase):
                 n_hits += 1
                 _hook_advance(name, chunk_idx)
             else:
-                # 超时 fallback:HTTP 回源(agentd 预取未跟上)
-                url = endpoint + "/" + bucket + "/" + name
-                start = chunk_idx * CHUNK_SIZE
-                end = start + size - 1
-                nbytes += len(http_get(url, start, end))
+                # 超时:块没等到,不兜底。训练侧与生产一致——只读 hostPath、
+                # 不直连对象存储;块没到就是本次读失败(生产上是训练读报错)。
+                # 旧的 HTTP 回源兜底(装置后门)已删:它的 URL 假设的是桶根整片
+                # tar 的旧布局,且它取的字节不经过 agentd,会让 fetch 字节账
+                # 与 source_saving_ratio 失真。
                 n_misses += 1
-                _hook_advance(name, chunk_idx)
+                raise RuntimeError(
+                    "块未在 180s 内落盘: " + name + " chunk=" + str(chunk_idx))
     with counter_lock:
         hits += n_hits
         misses += n_misses
