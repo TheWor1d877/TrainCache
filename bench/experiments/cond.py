@@ -51,7 +51,7 @@ V3_FIELDS = {
 }
 
 # 不再写进 COND 的固定量。改这里之前先想清楚：所有历史点会一起变。
-CHUNK_SIZE_BYTES = 8388608
+CHUNK_SIZE_BYTES = 8388608             # bench 实验块粒度 8MiB(生产缺省 64MiB)
 DEFAULTS = {
     "batch": 32,
     "workers": 4,
@@ -202,9 +202,15 @@ def validate_cond(cond: dict) -> list[str]:
         if all(isinstance(ds.get(k), int) and ds.get(k) > 0
                for k in ("shards", "shard_size_bytes")):
             total = ds["shards"] * ds["shard_size_bytes"]
-            if total != config.DATASET_BYTES:
-                errors.append(f"shards×shard_size_bytes={total} 必须等于 "
-                              f"{config.DATASET_BYTES}(4 GiB)")
+            # train 负载读训练数据(16×128 MiB=2 GiB),其余读主数据集(4 GiB)。
+            if load == "train":
+                want = config.TRAIN_N_TARS * config.TRAIN_SHARD_BYTES
+                label = f"{want}(2 GiB,训练数据 16×128 MiB)"
+            else:
+                want = config.DATASET_BYTES
+                label = f"{want}(4 GiB)"
+            if total != want:
+                errors.append(f"shards×shard_size_bytes={total} 必须等于 {label}")
 
     # ---- trace ----
     # 倾斜负载按清单文件消费,清单本身要可复现,所以只有 load=tilt 需要记录。
@@ -490,6 +496,15 @@ def selftest() -> None:
     c = json.loads(json.dumps(good))
     c["dataset"]["shards"] = 15
     assert any("4 GiB" in e for e in validate_cond(c)), validate_cond(c)
+
+    # train 负载读训练数据(16×128 MiB=2 GiB),不是主数据集的 4 GiB
+    c = json.loads(json.dumps(good))
+    c["load"] = "train"
+    c["dataset"] = {"name": "train-e2e", "shards": 16,
+                    "shard_size_bytes": 134217728, "seed": 20261015}
+    assert not validate_cond(c), validate_cond(c)
+    c["dataset"]["shard_size_bytes"] = 268435456  # 误用 4 GiB 主数据集口径
+    assert any("2 GiB" in e for e in validate_cond(c)), validate_cond(c)
 
     # rho 只能取五个值
     c = json.loads(json.dumps(good))

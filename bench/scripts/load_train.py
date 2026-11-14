@@ -336,7 +336,8 @@ def main():
     ap.add_argument("--window-k", type=int, default=config.TRAIN_WINDOW_K,
                     help="启动/切换窗口块数 K(缺省 config.TRAIN_WINDOW_K)")
     ap.add_argument("--chunk-bytes", type=int, default=config.TRAIN_CHUNK_BYTES,
-                    help="DataSet 块粒度,用于 K 块→分片数换算")
+                    help="DataSet 块粒度,用于 K 块→分片数换算"
+                         "(缺省 64Mi 生产粒度;bench 实验显式传 8Mi)")
     ap.add_argument("--shard-bytes", type=int, default=config.TRAIN_SHARD_BYTES,
                     help="单个 tar 的目标字节,用于 K 块→分片数换算")
     ap.add_argument("--out-dir", type=Path, default=config.TRAIN_RESULTS_DIR,

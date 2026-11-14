@@ -4,27 +4,18 @@
 按 COND 的 load 字段选执行体,不看名字前缀:
   dataset → compare/run_bench.py(集群内跑分,由它写 summary.csv)
   tilt    → run_policy.py(倾斜双 Job,淘汰×预取)
-  train   → scripts/load_train.py + collect.py(本文件的冷态→tc→负载→采集→归档流程)
+  train   → e2e 族两阶段流程(集群内训练 Pod 读 agentd 块缓存)
 
-流程(run_once):
-  1. 创建产物目录 reps_dir/<run_id>/
-  2. 冷态:cold_reset.sh
-  3. 挂 tc:tc_apply.sh <rate> <delay>(全部负载含 e2e/train 都挂 MinIO egress)
-  4. 注入 TRAINCACHE_JOB_CREATED_AT = 当前 RFC3339
-  5. 跑负载:load_train.py --out-dir <run_dir> ...
-  6. 采集:collect.py --run-dir <run_dir>
-  7. 写 lock.json(lock.py)
-任一步失败:写 VOID 标记,返回目录路径(不抛异常)。
+train 负载没有宿主机直读路径:agentd 缓存是节点本地盘,只有同节点的 Pod 读得到,
+所以 train 必须带 scenario=* 标签走 e2e 族,否则报错。
 
-e2e 族(场景标签 scenario=*)走集群内完整生产链路,每轮:
+e2e 族每轮:
   冷态复位(agentd 停写→清订单/块缓存→恢复 + cold_reset.sh)→ 挂 tc(MinIO)
   → trainpublish 发块到 MinIO → DataSet CR 就绪 → WarmupTask 预热并等 gate
   Released → 提取 WARM_NODE → 阶段一训练 Pod(trainer 镜像,块读,钉预热节点,
   跑 N epoch 写 checkpoint 中断)→ 场景动作 → 阶段二 Pod(同节点同 checkpoint
   续跑,switch_dataset 切 alt DataSet)→ collect.py(Prometheus 按真实 DataSet 名)。
-
-探针旁路:运行参数设 TRAINTRACE_PROBE=1 时,步骤 5 前拉起 traintrace、产物写进
-同一个 run 目录,负载结束 SIGINT 收尾。探针开关不进 COND。
+任一步失败:写 VOID 标记,返回目录路径(不抛异常)。
 """
 import argparse
 import base64
@@ -48,7 +39,6 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cond as cond_mod  # noqa: E402
 import lock as lock_mod  # noqa: E402
-import probe as probe_mod  # noqa: E402
 import recovery as recovery_mod  # noqa: E402
 import stats as stats_mod  # noqa: E402
 
@@ -60,7 +50,6 @@ import config as bench_config  # noqa: E402
 
 COLD_RESET_SH = SCRIPTS_DIR / "cold_reset.sh"
 TC_APPLY_SH = SCRIPTS_DIR / "tc_apply.sh"
-LOAD_TRAIN = SCRIPTS_DIR / "load_train.py"
 COLLECT_PY = EXPERIMENTS_DIR / "collect.py"
 RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"
 
@@ -95,7 +84,7 @@ E2E_NS = "traincache"
 # 专用快照名:train/tars 与 compare 的 dataset-4gib 是两份数据,不能共用一个
 # MinIO 快照前缀(发布会互相覆盖)。alt 数据独立发一份,阶段二切它。
 E2E_DATASET = os.environ.get("E2E_DATASET", "train-e2e")
-E2E_CHUNK_BYTES = 8388608               # 实验块 8MiB(D20),与 up.sh/COND 同口径
+E2E_CHUNK_BYTES = 8388608               # 本实验块粒度 8MiB(生产缺省 64MiB),与 up.sh/COND 同口径
 E2E_TRAIN_IMAGE = os.environ.get("E2E_TRAIN_IMAGE", "traincache-trainer:dev")
 # Pod 名固定:WarmupTask targetRef 按名匹配,ResolvePodIndex 从 -0 后缀解析 index=0
 E2E_POD_NAME = "e2e-train-0"
@@ -465,95 +454,12 @@ def write_summary(path: Path, rows: list[dict]) -> Path:
     return path
 
 
-def run_once(cond: dict, run_id: str, reps_dir: Path) -> Path:
-    """跑一轮实验,返回本轮产物目录路径。
-
-    任一步失败:写 VOID 标记,记录原因,返回目录路径(不抛异常)。
-    """
-    reps_dir = Path(reps_dir)
-    run_dir = reps_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    # ---- 2. 冷态 ----
-    rc, out, err = _run_cmd(["bash", str(COLD_RESET_SH)])
-    if rc != 0:
-        reason = f"cold_reset 失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-    print(f"[{run_id}] 冷态完成")
-
-    # ---- 3. 挂 tc ----
-    tc_args = cond_mod.cond_to_tc_args(cond)
-    target = _tc_target(cond)
-    tc_cmd = ["bash", str(TC_APPLY_SH)] + tc_args
-    if target:
-        tc_cmd += ["--target", target]
-    rc, out, err = _run_cmd(tc_cmd)
-    if rc != 0:
-        reason = f"tc_apply 失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-    print(f"[{run_id}] tc 已挂载: {' '.join(tc_args)}"
-          f"{' --target ' + target if target else ''}")
-
-    # ---- 4. 注入 TRAINCACHE_JOB_CREATED_AT + 合并 env ----
-    job_created_at = _rfc3339_now()
-    base_env = os.environ.copy()
-    cond_env = cond_mod.cond_to_env(cond)
-    base_env.update(cond_env)
-    base_env["TRAINCACHE_JOB_CREATED_AT"] = job_created_at
-    base_env["TRAINCACHE_RUN_ID"] = run_id
-
-    # ---- 5. 跑负载 ----
-    td_args = cond_mod.cond_to_train_args(cond)
-    td_cmd = ([PY, str(LOAD_TRAIN)] + td_args
-              + ["--n-tars", str(cond["dataset"]["shards"]),
-                 "--out-dir", str(run_dir)])
-    # 探针在冷态与 tc 之后、负载之前拉起,避免把冷态 I/O 计进来;负载结束即收尾。
-    probe = probe_mod.start_probe(run_dir, base_env)
-    try:
-        rc, out, err = _run_cmd(td_cmd, env=base_env)
-    finally:
-        if probe is not None:
-            probe.stop()
-    if rc != 0:
-        reason = f"load_train 失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-    print(f"[{run_id}] 负载完成")
-
-    # ---- 6. 采集 ----
-    collect_cmd = [PY, str(COLLECT_PY), "--run-dir", str(run_dir)]
-    rc, out, err = _run_cmd(collect_cmd, env=base_env)
-    if rc != 0:
-        reason = f"collect 失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-    print(f"[{run_id}] 采集完成 → {run_dir / 'metrics.csv'}")
-
-    # ---- 7. 写 lock.json ----
-    try:
-        lock_mod.write_lock(run_dir / "lock.json")
-        print(f"[{run_id}] lock.json 已写")
-    except Exception as exc:  # noqa: BLE001
-        reason = f"lock 写入失败: {exc}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-
-    return run_dir
-
-
 def run_reps(cond_name: str, reps: int | None = None,
              conds_dir: Path | None = None) -> list[Path]:
     """跑一个 COND;reps=None 取 COND 的 sampling.reps。
 
     按 load 选执行体:dataset 交给 run_bench.py,tilt 交给 run_policy.py,
-    train 走本文件的逐轮流程(每轮前做冷态);e2e 族走两阶段流程。
+    train 走 e2e 族两阶段流程(集群内训练 Pod 读 agentd 块缓存)。
     """
     cond = cond_mod.load_cond(cond_name, conds_dir)
     errors = cond_mod.validate_cond(cond)
@@ -569,7 +475,11 @@ def run_reps(cond_name: str, reps: int | None = None,
         return run_policy.run_reps(cond_name, reps, conds_dir)
     if _e2e_scenario(cond):
         return _run_e2e_cond(cond, reps)
-    return _run_train_cond(cond, reps)
+    if cond.get("load") == "train":
+        raise ValueError(
+            f"COND {cond_name}: train 负载必须带 e2e scenario 标签"
+            "(训练在集群内 Pod 读 agentd 块缓存,没有宿主机直读路径)")
+    raise ValueError(f"COND {cond_name}: 未知 load {cond.get('load')!r}")
 
 
 def _axis_env(cond: dict) -> dict[str, str]:
@@ -603,31 +513,6 @@ def _run_bench_cond(cond: dict, reps: int) -> list[Path]:
     if rc != 0:
         raise SystemExit(f"run_bench 失败(rc={rc}): {err.strip()[:500]}")
     return [root]
-
-
-def _run_train_cond(cond: dict, reps: int) -> list[Path]:
-    """train 负载:逐轮冷态→tc→负载→采集,再汇成 summary.csv。"""
-    cond_name = cond["name"]
-    reps_dir = bench_config.family_results_dir(cond["family"]) / cond_name
-    reps_dir.mkdir(parents=True, exist_ok=True)
-
-    results: list[Path] = []
-    rows: list[dict] = []
-    for i in range(reps):
-        run_id = f"{cond_name}-r{i+1:02d}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-        print(f"\n===== 第 {i+1}/{reps} 轮: {run_id} =====")
-        run_dir = run_once(cond, run_id, reps_dir)
-        results.append(run_dir)
-        rows.append(summarize_run(run_dir, cond, i + 1))
-        void_marker = run_dir / "VOID"
-        if void_marker.exists():
-            print(f"[{run_id}] 本轮作废(VOID),继续下一轮", file=sys.stderr)
-
-    # 汇总层:各轮产物 → summary.csv(任务 2.5)
-    _attach_ci(rows)
-    summary_path = write_summary(reps_dir / "summary.csv", rows)
-    print(f"\n[summary] 已写 {summary_path}({len(rows)} 行)")
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1129,9 +1014,10 @@ def _e2e_run_phase(cond: dict, run_id: str, run_dir: Path, phase: int,
                    extra_args: list[str]) -> tuple[bool, str]:
     """造一个阶段训练 Pod,等完成,日志与产物落 run_dir。返回 (ok, reason)。"""
     n_tars = int(cond["dataset"]["shards"])
-    # --chunk-bytes 必须显式给 8MiB:load_train 用它算 K 块→分片窗口
-    # (window_shards),进而定 switch 的 ready_at;config.TRAIN_CHUNK_BYTES
-    # 缺省 64MiB 与实际块粒度不符会把窗口放大 4×,污染切换段回源口径。
+    # --chunk-bytes 显式给 8MiB:load_train 用它算 K 块→分片窗口
+    # (window_shards),进而定 switch 的 ready_at。config.TRAIN_CHUNK_BYTES
+    # 缺省 64MiB 是生产块粒度;本实验发块用 8MiB,不显式覆盖会把窗口放大 8×,
+    # 污染切换段回源口径。
     train_args = (cond_mod.cond_to_train_args(cond)
                   + ["--n-tars", str(n_tars),
                      "--chunk-bytes", str(E2E_CHUNK_BYTES),
@@ -1438,7 +1324,7 @@ def _run_e2e_cond(cond: dict, reps: int) -> list[Path]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="M2 实验 runner:冷态→tc→负载→采集→归档,重复采样")
+        description="COND 执行体:按 load 分派(dataset/tilt/train e2e),重复采样")
     ap.add_argument("--cond", help="COND 名(conds/<name>.json)")
     ap.add_argument("--reps", type=int, default=None,
                     help="重复次数(缺省取 COND 的 sampling.reps)")

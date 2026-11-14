@@ -98,7 +98,7 @@ TRAIN_RESULTS_DIR = RESULTS_DIR / "train"
 
 # ---- 训练负载打点口径 ----
 TRAIN_SHARD_BYTES = 128 << 20      # 单个 tar 目标字节(2GiB / 16)
-TRAIN_CHUNK_BYTES = 64 << 20       # DataSet.spec.chunkSize
+TRAIN_CHUNK_BYTES = 64 << 20       # 生产缺省块粒度(DataSet.spec.chunkSize);bench 实验显式传 8MiB
 TRAIN_WINDOW_K = 8                 # 启动/切换窗口块数
 TRAIN_BASELINE_STEPS = 20          # 回落基线:切换前 20 步
 TRAIN_CURRICULUM_FRACTIONS = (1.0, 2.0 / 3.0, 1.0 / 3.0)

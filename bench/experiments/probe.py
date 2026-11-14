@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""traintrace 探针编排:load 步骤旁路拉起,load 结束 SIGINT 收尾。
+"""traintrace 探针编排:负载旁路拉起,负载结束 SIGINT 收尾。
 
 开关与过滤集合走运行参数(环境变量),不进 COND。同一个 COND 跑两遍,
 一遍设 TRAINTRACE_PROBE=1 挂探针,一遍不设,两遍产物供 probe_overhead.py 对账。
 traintrace 的 metrics.json/manifest.json 直接落进本次 run 目录,与负载侧指标同目录。
 
 两处起法:
-  * train 形态:负载在宿主上跑,探针在宿主上起(Probe 类),过滤集合走 --pid。
+  * 手动宿主机负载:探针在宿主上起(Probe 类),过滤集合走 --pid。train 负载
+    已改走集群内 e2e Pod,run.py 不再自动挂宿主探针,这起法供手动负载与自检。
   * dataset 形态:测量 Pod 在集群里跑,探针进 Pod 所在节点容器起(NodeProbe 类),
     过滤集合走 Pod 的 cgroup。kind 节点容器的 cgroup 命名空间是私有的,宿主上
     看不到 Pod 的 cgroup 目录树,探针与被观测进程必须同处一个命名空间,

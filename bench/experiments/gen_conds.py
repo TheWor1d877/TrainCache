@@ -42,6 +42,14 @@ DATASET = {
     "shard_size_bytes": config.DATASET_SHARD_BYTES,
     "seed": config.SEED,
 }
+# train 负载读训练数据(16×128 MiB=2 GiB),与主数据集是两份;快照名同
+# run.py 的 E2E_DATASET 缺省值。
+TRAIN_DATASET = {
+    "name": "train-e2e",
+    "shards": config.TRAIN_N_TARS,
+    "shard_size_bytes": config.TRAIN_SHARD_BYTES,
+    "seed": config.TRAIN_SEED,
+}
 
 # 网关镜像取现有 gw COND 里记录的真实 digest；镜像换了用 --gateway-digest 覆盖。
 GATEWAY_IMAGE_DIGEST = (
@@ -215,7 +223,7 @@ def make_cond(
         "family": family,
         "group": group,
         "load": load,
-        "dataset": dict(DATASET),
+        "dataset": dict(TRAIN_DATASET if load == "train" else DATASET),
         "workload": {
             "epochs": config.EPOCHS,
             "shuffle": shuffle,
@@ -254,9 +262,11 @@ def make_cond(
     return cond
 
 
-def _note(family: str, **params) -> str:
+def _note(family: str, *, train: bool = False, **params) -> str:
     body = "，".join(f"{k}={v}" for k, v in params.items())
-    return (f"{family} 族格子；{body}；数据集 16×256 MiB（4 GiB），"
+    dataset = ("训练数据 16×128 MiB（2 GiB）" if train
+               else "数据集 16×256 MiB（4 GiB）")
+    return (f"{family} 族格子；{body}；{dataset}，"
             f"{config.EPOCHS} epoch，rho 只改缓存配额。")
 
 
@@ -447,8 +457,8 @@ def build_e2e() -> list[dict]:
             load="train", rho=4.0, rate=1000, reps=config.E2E_REPS,
             lookahead=16, fanout=1,
             tags=("e2e", f"scenario={scenario}"),
-            notes=_note("e2e", scenario=scenario, rho=4, rate=1000,
-                        reps=config.E2E_REPS, run_min=70)))
+            notes=_note("e2e", train=True, scenario=scenario, rho=4, rate=1000,
+                        reps=config.E2E_REPS)))
     return out
 
 

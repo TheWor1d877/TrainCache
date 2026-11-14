@@ -587,7 +587,8 @@ def main():
     ap.add_argument("--warmup-task", help="WarmupTask 名;非 traincache 组可省略")
     ap.add_argument("--dataset", help="指标里的 dataset 标签(缺省取 run.json)")
     ap.add_argument("--chunk-bytes", type=int, default=64 << 20,
-                    help="块大小,用于 startup bytes 状态估算(缺省 64Mi)")
+                    help="块大小,用于 startup bytes 状态估算(缺省 64Mi 生产粒度;"
+                         "bench 实验显式传 8Mi)")
     ap.add_argument("--t-submit", help="人工覆盖 Job 提交时刻(RFC3339)")
     ap.add_argument("--t-pod-ready", help="人工覆盖 Pod Ready 时刻(RFC3339)")
     ap.add_argument("--t-gate-release", help="人工覆盖门控放行时刻(RFC3339)")

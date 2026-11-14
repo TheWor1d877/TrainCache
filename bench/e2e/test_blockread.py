@@ -34,20 +34,23 @@ BUCKET = "bkt"
 SHARD = "shard-000000.tar"
 
 
-def _source_tar(tmp: Path) -> Path:
+def _source_tar(tmp: Path) -> tuple[Path, bool]:
+    """返回 (tar 路径, 是否合成兜底)。真实 train tar 优先,缺则合成一小份。"""
     for d in (Path.home() / "tcd/bench/data/train",
               Path.home() / "tcd/bench/data/train/tars"):
         real = d / SHARD
         if real.is_file():
-            return real
-    # 兜底:合成一小份(8 张 128px 图),走与正式数据同一合成管线。
+            return real, False
+    # 兜底:合成一份小 tar,走与正式数据同一合成管线。图数要够 C 冒烟每个
+    # epoch 跑满 steps_per_epoch×batch(3×8=24)步,否则数据流提前耗尽、
+    # 中断点写不出、resume 段失败;取 64 张(8 个 batch)留余量。
     sys.path.insert(0, str(REPO / "bench" / "scripts"))
     import io
     import tarfile
     import synth_train
     out = tmp / SHARD
     with tarfile.open(out, "w") as tf:
-        for i in range(8):
+        for i in range(64):
             img = synth_train.synth(0, i, seed=7, size=128, sigma=20)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85)
@@ -55,7 +58,7 @@ def _source_tar(tmp: Path) -> Path:
             ti = tarfile.TarInfo(f"shard-000000_{i:06d}.jpg")
             ti.size = len(data)
             tf.addfile(ti, io.BytesIO(data))
-    return out
+    return out, True
 
 
 def build_fixture(tar_path: Path, root: Path, chunk_size: int, names=(SHARD,)):
@@ -126,10 +129,10 @@ def _env(cache: Path, endpoint: str, orders: Path, chunk_size: int,
 def run_selftest():
     with tempfile.TemporaryDirectory(prefix="tc-blockread-test-") as td:
         root = Path(td)
-        tar = _source_tar(root)
+        tar, synth = _source_tar(root)
         # 真实 tar(~132MiB)用正式块粒度 8MiB;合成兜底小 tar 用 16KiB,
         # 保证切出 ≥6 块供缺块/回源分支取不同块号。
-        chunk_size = 8388608 if tar.stat().st_size > (1 << 20) else 16384
+        chunk_size = 16384 if synth else 8388608
         want = hashlib.sha256(tar.read_bytes()).hexdigest()
         cache, origin, entries = build_fixture(tar, root, chunk_size)
         srv, endpoint = serve(origin)
@@ -184,8 +187,8 @@ def run_smoke(workers=0):
     """C:真实 torch 循环从假缓存块读 tar,跑 interrupt + resume 两段。"""
     with tempfile.TemporaryDirectory(prefix="tc-blockread-smoke-") as td:
         root = Path(td)
-        tar = _source_tar(root)
-        chunk_size = 8388608 if tar.stat().st_size > (1 << 20) else 16384
+        tar, synth = _source_tar(root)
+        chunk_size = 16384 if synth else 8388608
         # wds 按 worker 切分片:多 worker 时给够分片数,避免空 worker 报 empty。
         names = (SHARD, "shard-000001.tar") if workers > 1 else (SHARD,)
         cache, origin, _ = build_fixture(tar, root, chunk_size, names)
