@@ -114,7 +114,7 @@ D30/D32 接线（2026-10-25，rho 口径 2026-11-06）：
                          数据按轨迹顺序恰好过一遍）
   CHUNK_SIZE             实验块大小，默认 8388608（8MiB，4.3 D20 实验块大小取 8 MiB；
                          生产默认 64MiB 不变）
-  DATASET_NAME           TrainCache 快照名，默认 compare-data-8m（4.3 D41 快照与源数据；
+  DATASET_NAME           TrainCache 快照名，默认 dataset-4gib（4.3 D41 快照与源数据；
                          MinIO 内该快照由 trainpublish -chunk-size 8388608
                          发布属后续动作，本脚本只按新名引用）
   TRAINCACHE_CACHE_CAPACITY_BYTES  统一缓存容量，默认 1GiB
@@ -235,10 +235,10 @@ if RHO not in RO_PRESETS:
 # 分片数与 epoch 是固定量（冒烟可用环境变量压小，不随 rho 变）。
 ENV_HAS_N_TARS = "N_TARS" in os.environ
 N_TARS = int(os.environ.get("N_TARS", str(bench_config.DATASET_SHARDS)))
-# TrainCache DataSet/快照名(6.13/Q12：正式实验一律 8MiB 快照 compare-data-8m;
-# DATASET_NAME 环境变量可切换冒烟前缀,如 compare-data-8m-smoke。
+# TrainCache DataSet/快照名(与 COND dataset.name 统一为 dataset-4gib,
+# compare 与九族共用同一前缀,不再各发布一份;DATASET_NAME 环境变量可切换冒烟前缀。
 # 注意:MinIO 里该快照由 trainpublish -chunk-size 8388608 发布属后续动作)
-DATASET_NAME = os.environ.get("DATASET_NAME", "compare-data-8m")
+DATASET_NAME = os.environ.get("DATASET_NAME", "dataset-4gib")
 # 全部格子 3 epoch（COND 的 workload.epochs 同值）；显式 EPOCHS 只给冒烟用。
 EPOCHS = int(os.environ.get("EPOCHS", str(bench_config.EPOCHS)))
 STEPS_PER_EPOCH = int(os.environ.get("STEPS_PER_EPOCH", "400"))   # 6.12：统一 D 轨口径
@@ -1294,7 +1294,7 @@ import urllib.parse, subprocess, socket
 CACHE_ROOT = "/var/cache/traincache/blocks"
 ORDERS_DIR = "/run/traincache/orders"
 POD_UID = os.environ.get("POD_UID", "unknown-pod")
-DATASET = os.environ.get("TRAINCACHE_DATASET", "compare-data-8m")
+DATASET = os.environ.get("TRAINCACHE_DATASET", "dataset-4gib")
 # 6.13/D20：实验块 8MiB（run_bench.py 经 TRAINCACHE_CHUNK_SIZE 下发，勿写死）
 CHUNK_SIZE = int(os.environ.get("TRAINCACHE_CHUNK_SIZE", "8388608"))
 # D21：对照跑分统一 lookahead=16（与 runner 侧 PREFETCH_K 默认值、agent/svc
@@ -1377,7 +1377,7 @@ def _load_snapshot():
     global _chunk_map
     if _chunk_map is not None:
         return _chunk_map
-    ds = os.environ.get("TRAINCACHE_DATASET", "compare-data-8m")
+    ds = os.environ.get("TRAINCACHE_DATASET", "dataset-4gib")
     base = endpoint + "/" + bucket + "/dataset/" + ds
     cur = http_get(base + "/CURRENT").decode().strip().split()[0]
     manifest = json.loads(http_get(base + "/snapshots/" + cur + "/manifest.json"))

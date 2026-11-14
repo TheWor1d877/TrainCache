@@ -576,7 +576,7 @@ for page in s3.get_paginator("list_objects_v2").paginate(
         Bucket=bucket, Prefix="shard-"):
     n += sum(1 for o in page.get("Contents", []) if o["Key"].endswith(".tar"))
 try:
-    s3.head_object(Bucket=bucket, Key="dataset/compare-data-8m/CURRENT")
+    s3.head_object(Bucket=bucket, Key="dataset/dataset-4gib/CURRENT")
     snap = "yes"
 except Exception:  # noqa: BLE001
     snap = "no"
@@ -595,9 +595,9 @@ PY
                     fail "桶 $BUCKET 没有 shard-*.tar"
                 fi
                 if [ "$snap" = "yes" ]; then
-                    pass "快照 dataset/compare-data-8m/CURRENT 在位"
+                    pass "快照 dataset/dataset-4gib/CURRENT 在位"
                 else
-                    warn "快照 dataset/compare-data-8m/CURRENT 缺失(up.sh 会发布)"
+                    warn "快照 dataset/dataset-4gib/CURRENT 缺失(up.sh 会发布)"
                 fi
                 ;;
             *) fail "${bucket_report:-桶检查无输出}" ;;

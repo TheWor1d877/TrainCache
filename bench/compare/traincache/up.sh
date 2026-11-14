@@ -26,10 +26,10 @@ source "$SCRIPT_DIR/../_common.sh"
 GROUP="traincache"
 NS="traincache"
 TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.json}"
-# DataSet/快照名(冒烟或并行实验可指向独立前缀,如 compare-data-smoke;
-# 默认 compare-data-8m——8MiB 块快照,D20/6.13/Q12;旧 64MiB 快照 compare-data
-# 只留作历史产物复现,正式实验不再引用。快照发布本身是后续动作)
-DATASET="${DATASET:-compare-data-8m}"
+# DataSet/快照名(冒烟或并行实验可指向独立前缀,如 dataset-4gib-smoke;
+# 默认 dataset-4gib——与 COND dataset.name 统一,compare 与九族共用同一快照;
+# 旧前缀 compare-data-8m 已废弃。快照发布本身是后续动作)
+DATASET="${DATASET:-dataset-4gib}"
 
 # TrainCache 控制面镜像(允许环境变量覆盖)
 TAG="${TAG:-dev}"

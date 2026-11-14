@@ -37,7 +37,7 @@ source "$BENCH_ROOT/compare/_common.sh"
 
 GROUP="${GROUP:-traincache}"
 NS="${NS:-traincache}"
-DATASET="${DATASET:-compare-data-8m}"
+DATASET="${DATASET:-dataset-4gib}"
 DEPLOY_DIR="$REPO/controller/deploy"
 CRD_DIR="$REPO/controller/config/crd/bases"
 HASH_ANNOTATION="traincache.io/deploy-hash"
