@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -159,6 +160,35 @@ def run_selftest():
             threading.Timer(0.3, lambda: blk.write_bytes(saved)).start()
             check("A2 缺块轮询补块")
             assert blockread.STATS["miss_filled"] >= 1
+
+            # A2b:块落盘后被淘汰器删掉 → 读侧应继续等并重试,不能判失败。
+            # 模拟淘汰竞态:_read_local_block 读到一半时块被删(返回 None),
+            # 随后块被补回;整片读应照常拼回一致。
+            e = entries[7]
+            blk = cache / e["fp"][:2] / (e["fp"] + ".blk")
+            saved = blk.read_bytes()
+            orig_read = blockread._read_local_block
+            state = {"armed": True}
+
+            def _read_with_evict(path, size):
+                payload = orig_read(path, size)
+                if state["armed"] and path == str(blk):
+                    # 第一次读到就把块删掉(淘汰器 danger 轮),读结果作废。
+                    state["armed"] = False
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                    threading.Timer(0.2, lambda: blk.write_bytes(saved)).start()
+                    return None
+                return payload
+
+            blockread._read_local_block = _read_with_evict
+            try:
+                check("A2b 落盘后被淘汰再补回")
+            finally:
+                blockread._read_local_block = orig_read
+            assert state["armed"] is False, "A2b 未触发淘汰竞态分支"
 
             # A3:缺块不补 → 超时读失败。
             e = entries[5]

@@ -1473,19 +1473,24 @@ def read_shard(shard, phase):
             # 生产的 hooklib 每次 open 失败都重发 read_miss(traincache_hook/torch.py
             # 的 miss()),这里同语义:重发由 agentd 的 pending 去重表合并,同一块
             # 不会重复下载。
+            #
+            # 块落盘后可能被淘汰器删掉(rho>=4 缓存小于数据集,淘汰器常驻 danger
+            # 轮按热度升序删,刚下载的块热度 0 排在最前)。exists 与 open 之间
+            # 被删 → FileNotFoundError,块其实落过盘。因此读失败与不存在同等对待:
+            # 继续在窗口内等并重发 read_miss,让 agentd 再补一次。
             deadline = time.perf_counter() + 180
             next_rerequest = time.perf_counter() + MISS_REREQUEST_S
-            while not os.path.exists(blk) and time.perf_counter() < deadline:
+            got2 = None
+            while got2 is None and time.perf_counter() < deadline:
                 if time.perf_counter() >= next_rerequest:
                     _hook_read_miss(name, chunk_idx)
                     next_rerequest = time.perf_counter() + MISS_REREQUEST_S
-                time.sleep(0.025)
-            got2 = None
-            if os.path.exists(blk):
                 try:
                     got2 = read_file_bytes(blk)
                 except FileNotFoundError:
                     got2 = None
+                if got2 is None:
+                    time.sleep(0.025)
             if got2 is not None:
                 nbytes += got2
                 n_hits += 1
@@ -4465,6 +4470,30 @@ def selftest():
                                  "或非倾斜组的预算列没留空")
     print("[selftest] 11) C 轨挤占按 present→absent 转换计数、A 步预算下发与落盘"
           "均自洽；旧的集合差集口径已从模板移除")
+
+    # ---- 11b) 测量模板的等块路径：读失败与不存在同等对待（淘汰竞态）----
+    # 块落盘后可能被淘汰器删掉(rho>=4 淘汰器常驻 danger 轮)。模板里必须把
+    # FileNotFoundError 当成「还没拿到」继续等并重发 read_miss，而不是立刻判
+    # 「180s 未落盘」——否则 rho8 高淘汰格会随机作废(块其实落过盘)。
+    _tc_src = build_measure_script("traincache-cold")
+    if "except FileNotFoundError" not in _tc_src:
+        raise AssertionError("自测：测量模板没把 FileNotFoundError 当缺块处理")
+    if "while got2 is None and time.perf_counter() < deadline" not in _tc_src:
+        raise AssertionError("自测：测量模板的等块循环没把读失败纳入等待条件"
+                             "（块落盘后被淘汰 → 误判 180s 未落盘 → 整格作废）")
+    _tc_tree = ast.parse(_tc_src)
+    _read_shard = next((n for n in ast.walk(_tc_tree)
+                         if isinstance(n, ast.FunctionDef)
+                         and n.name == "read_shard"), None)
+    if _read_shard is None:
+        raise AssertionError("自测：测量模板里找不到 read_shard")
+    _rs_src = ast.get_source_segment(_tc_src, _read_shard) or ""
+    if "read_file_bytes(blk)" not in _rs_src:
+        raise AssertionError("自测：read_shard 的等待循环没有重新读块")
+    if "_hook_read_miss(name, chunk_idx)" not in _rs_src:
+        raise AssertionError("自测：read_shard 的等待循环没有重发 read_miss")
+    print("[selftest] 11b) 测量模板的等块路径把读失败当缺块继续等并重发 read_miss"
+          "（淘汰竞态不再误判 180s 未落盘）")
 
     # ---- 12) 倾斜 run 的 Pod 闸门按字节地板推导（2026-11-02 探针被 1800s 截断）----
     saved = {k: os.environ.get(k) for k in ("POD_TIMEOUT",)}

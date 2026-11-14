@@ -156,6 +156,10 @@ def read_shard_bytes(name):
             _hook_read_miss(name, chunk_idx)
             deadline = time.perf_counter() + MISS_WAIT_S
             next_rerequest = time.perf_counter() + MISS_REREQUEST_S
+            # 块落盘后可能被淘汰器删掉(rho>=4 缓存小于数据集,淘汰器常驻 danger
+            # 轮按热度升序删,刚下载的块热度 0 排在最前)。exists 与 open 之间被删
+            # → 读失败,但块其实落过盘。读失败与不存在同等对待:继续在窗口内等并
+            # 重发 read_miss,让 agentd 再补一次(生产的 hooklib 每次 open 失败都重试)。
             while payload is None and time.perf_counter() < deadline:
                 if time.perf_counter() >= next_rerequest:
                     _hook_read_miss(name, chunk_idx)
