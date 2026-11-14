@@ -64,6 +64,17 @@ PY
       grep '^\[done\]\|失败格:' "$LOG"
       exit 0
     fi
+    # run_bench 单格驱动没有「跳过」行，收尾是「共 N 条记录，M 条作废」
+    if grep -q '^\[done\] 共 .* 条记录' "$LOG"; then
+      if grep -q '0 条作废' "$LOG"; then
+        echo "驱动正常跑完:"
+        grep '^\[done\]' "$LOG"
+        exit 2
+      fi
+      echo "驱动收尾但有作废行:"
+      grep '^\[done\]' "$LOG"
+      exit 0
+    fi
   fi
   # 4) 驱动本体存活：锚定完整命令行，排除命令行里带启动串的包装 shell；
   #    允许 .py 后带 --group 等参数（$ 锚死会把带参驱动误判为消失）；
