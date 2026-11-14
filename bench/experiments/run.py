@@ -1129,8 +1129,12 @@ def _e2e_run_phase(cond: dict, run_id: str, run_dir: Path, phase: int,
                    extra_args: list[str]) -> tuple[bool, str]:
     """造一个阶段训练 Pod,等完成,日志与产物落 run_dir。返回 (ok, reason)。"""
     n_tars = int(cond["dataset"]["shards"])
+    # --chunk-bytes 必须显式给 8MiB:load_train 用它算 K 块→分片窗口
+    # (window_shards),进而定 switch 的 ready_at;config.TRAIN_CHUNK_BYTES
+    # 缺省 64MiB 与实际块粒度不符会把窗口放大 4×,污染切换段回源口径。
     train_args = (cond_mod.cond_to_train_args(cond)
                   + ["--n-tars", str(n_tars),
+                     "--chunk-bytes", str(E2E_CHUNK_BYTES),
                      "--out-dir", "/out", "--checkpoint-dir", "/ckpt"]
                   + extra_args)
     job_created_at = _rfc3339_now()
