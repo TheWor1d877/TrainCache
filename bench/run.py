@@ -345,6 +345,8 @@ def cmd_family(family: str, args) -> None:
         print(f"[skip] 共跳过 {skipped} 个已完成格（--force 可强制重跑）", flush=True)
     if failed:
         raise SystemExit(f"失败 {len(failed)} 格: {' '.join(failed)}")
+    # 收尾标记与 rerun_compare 同形,哨兵 void_watch 靠它判正常跑完(exit 2)
+    print(f"[done] 跳过 {skipped}，失败 0", flush=True)
 
 
 # ---------------------------------------------------------------------------
