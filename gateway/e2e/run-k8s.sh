@@ -16,7 +16,7 @@
 #
 # 用法：
 #   bash gateway/e2e/run-k8s.sh
-#   E2E_KEY='compare-data-8m/blocks/shard-00000.tar#0' bash gateway/e2e/run-k8s.sh
+#   E2E_KEY='dataset-4gib/blocks/shard-00063.tar#15' bash gateway/e2e/run-k8s.sh
 #   TC_E2E_AGENT=1 bash gateway/e2e/run-k8s.sh    # 追加步骤 5（Agent 降级联动）
 #   TC_E2E_CACHE=1 bash gateway/e2e/run-k8s.sh    # 追加磁盘缓存往返步骤（标号 [cache]）
 #
