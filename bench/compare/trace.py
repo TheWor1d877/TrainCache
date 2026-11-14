@@ -5,7 +5,7 @@
 fluid-warm / traincache-cold / traincache-warm)共用一份 trace.json,保证消费顺序
 (分片顺序、seed、每步样本数)逐位一致,否则 makespan 与 stall 不可比。
 
-轨迹语义与 bench/scripts/bench_track_d.py 的 epoch_perm()/stage_of() 逐字对齐
+轨迹语义与 bench/scripts/load_train.py 的 epoch_perm()/stage_of() 逐字对齐
 (docs/4.2 的阶段切换族与 COND 契约两节):
   * fixed:     所有 epoch 用同一个 seed 生成的分片置换;
   * per-epoch: 每个 epoch 用 seed+epoch 生成置换(默认);
@@ -73,7 +73,7 @@ DEFAULT_SUITE_DIR = Path(__file__).resolve().parents[1] / "experiments" / "trace
 
 
 def shard_perm(seed: int, epoch: int, n_tars: int) -> list[int]:
-    """分片级置换:父进程 RNG,种子 = seed + epoch(与 bench_track_d.py 同口径)。"""
+    """分片级置换:父进程 RNG,种子 = seed + epoch(与 load_train.py 同口径)。"""
     perm = list(range(n_tars))
     random.Random(seed + epoch).shuffle(perm)
     return perm
@@ -97,7 +97,7 @@ def stage_shards(n_tars: int, stage: int) -> int:
 
 def epoch_perm(seed: int, epoch: int, epochs: int, n_tars: int,
                shuffle: str) -> tuple[list[int], int]:
-    """该 epoch 的 (分片置换, stage),与 bench_track_d.py 逐字对齐。"""
+    """该 epoch 的 (分片置换, stage),与 load_train.py 逐字对齐。"""
     if shuffle == "fixed":
         return shard_perm(seed, 0, n_tars), 0
     if shuffle == "per-epoch":

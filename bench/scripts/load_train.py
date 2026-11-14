@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """bench train负载器:单 Job 连续 N epoch、每 epoch 换 seed、缓存欠配 50% 的 stall 打点。
 
-与探针 C 权威装置 probes/probe_c/train_multi_epoch.py 对齐(循环结构、每 epoch
-重建 loader、seed 化 shuffle、per-step 打点、wds 1.0.2 语义);差异只在参数来源
-与输出形态:
+循环结构:每 epoch 重建 loader、seed 化 shuffle、per-step 打点(wds 1.0.2 语义)。
 
-  * 参数缺省取 bench/config.py 的 TRAIN_*:--url/--n-tars/--epochs/--seed/
+  * 参数缺省取 bench/config.py 的 TRAIN_*:--n-tars/--epochs/--seed/
     --workers/--batch/--steps-per-epoch/--warmup/--out-dir;
   * 输出 out-dir/per_step_<seed>_w<workers>.jsonl(每步一行:epoch/
     step_in_epoch/global_step/warmup/wait_s/step_s/shard/shards/phase/stage)
@@ -14,12 +12,12 @@
     + out-dir/run.json(run 级边界:t_submit/t_first_step/t_last_step、
     switch_events、phase 口径;M1 新增)。
 
-测量口径(勿改,逐项同 probe_c):
+测量口径(勿改):
   * 每步:t0 = 上一步 compute 结束 → next(batch)=t1 → 1024² matmul×8(单线程)
     =t2;wait=t1-t0、step=t2-t0;epoch 边界不重置时钟(epoch≥1 首步 wait 含
     loader 重建 + worker 重启,切换代价即测量对象);compute 矩阵跨 epoch 复用;
   * 每 epoch 重建 loader:分片置换 = 父进程 random.Random(seed+epoch) 对
-    0..n_tars-1 生成置换,按 --url 模板显式构造 URL 列表(WebDataset
+    0..n_tars-1 生成置换,显式构造 tcblk:// 分片 URL 列表(WebDataset
     (shardshuffle=False) 的读取顺序 = 列表顺序);样本级 .shuffle(100,
     seed=seed+epoch)(wds 1.0.2 实测:有效种子 = 传入值,同 seed 复跑逐位相同);
   * run 边界:t_submit 优先取环境变量 TRAINCACHE_JOB_CREATED_AT(runner 创建
@@ -31,31 +29,24 @@
     (可观测代理),否则截到该 epoch 结束;其余步为 steady。切换窗口的就绪
     时刻同时写进 run.json 的 switch_events,供 M1 采集器对账;
   * epoch 0 前 --warmup 步为 warmup(计入步号、标记排除);epoch 长不足其两倍时
-    截断到 steps_per_epoch//2(同 probe_c,保护微型 smoke 运行);
+    截断到 steps_per_epoch//2(保护微型 smoke 运行);
   * shard 号从样本 __key__ 提取("shard-00003_000000" / "shard-00003/xxx" → 3)。
 
-本文件同时承载 bench verify 的判据函数,供 train_verify.sh 复用,并可在函数级
-直接自测(相对差 5% → PASS、15% → FAIL,阈值 10%):
+数据面(e2e 块读,唯一模式):分片不读 HTTP URL,而是经 bench/e2e/
+blockread.py 从节点本地块缓存拼回 tar 字节流(tcblk:// scheme 注入 webdataset
+gopen);orders/hook 由 blockread 负责,每 epoch 写一次消费序订单(stage_id=
+epoch)并 10s 心跳续写。
 
-  * 主判据(epoch 级聚合对账):epoch_stall_stats / round_stall_stats /
-    compare_epoch_medians —— 两轮 per-epoch median_stall 逐 epoch 相对差
-    ≤ 阈值 且 两轮全轮 median_stall 相对差 ≤ 阈值,判"对上";
-  * 报告项(不参与 verdict):window_curves / compare_window_curves —— 窗口
-    stall 均值曲线逐点相对差。设计裁决:窗口均值被 wait 分布
-    重尾毛刺主导,同一冷启内相邻 epoch 曲线逐点最大相对差已达 37%~56%,低于
-    指标噪声底、无判别力,故降级为报告项(数值仍计算并写入 verify json)。
-
-用法(装置内由 train_up.sh / train_verify.sh 调用,一般不需手敲):
+用法(e2e 族由 bench/experiments/run.py 在训练 Pod 内调用,一般不需手敲):
   /usr/bin/python3.12 bench/scripts/load_train.py --epochs 10 \
       --out-dir bench/results/train
-smoke(自建微型 tar + 本地 http.server):
-  /usr/bin/python3.12 bench/scripts/load_train.py \
-      --url http://127.0.0.1:9101/shard-%06d.tar --n-tars 2 --epochs 2 \
-      --steps-per-epoch 4 --workers 0 --seed 7 --out-dir /tmp/train_smoke
+块读 env(TRAINCACHE_ENDPOINT/BUCKET/DATASET、CACHE_ROOT 等)见 blockread.py;
+本地冒烟见 bench/e2e/test_blockread.py --smoke(造假缓存 + 假 MinIO)。
 """
 import argparse
 import json
 import math
+import multiprocessing
 import os
 import random
 import sys
@@ -68,16 +59,25 @@ import torch
 import webdataset as wds
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# 镜像里 load_train/blockread/config 平铺在 /app(脚本目录本就在 sys.path);
+# 宿主机上 blockread 在 bench/e2e,需显式加入。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
 import config
+import blockread
 
-# ---- 与探针同口径的固定常量(量级校准依据见 probes/config.py 的 PROBE_B_*)----
+blockread.install()
+
+# Python 3.14 把默认 start method 改成 forkserver:局部 collate 不可 pickle,
+# 且全新 worker 进程继承不到 tcblk scheme 注册。改回 fork(3.12 语义),
+# worker 经 fork 继承 opener 注册与快照缓存。
+if "fork" in multiprocessing.get_all_start_methods():
+    multiprocessing.set_start_method("fork", force=True)
+
+# ---- 固定常量(compute 量级与 loader 口径,勿改)----
 COMPUTE_SIZE = 1024        # 1024² matmul 边长(单次≈25ms)
 COMPUTE_ITERS = 8          # ×8 ≈200ms/步(单线程)
-PREFETCH = 2               # WebLoader prefetch_factor(同 PROBE_B_PREFETCH)
-SHUFFLE_BUFFER = 100       # 样本级 shuffle 缓冲(同 probe_c)
-WINDOW = 20                # verify 窗口步数(报告项口径,同第一步)
-VERIFY_TOL = 0.10          # verify 阈值缺省;实际由 train_verify.sh 传
-                           # bench/config.py 的 COLD_VERIFY_TOLERANCE
+PREFETCH = 2               # WebLoader prefetch_factor
+SHUFFLE_BUFFER = 100       # 样本级 shuffle 缓冲
 BASELINE_STEPS = config.TRAIN_BASELINE_STEPS  # 切换回落基线步数(4.3 按族的判据「switch·回落」)
 
 
@@ -88,15 +88,15 @@ def shard_of_key(key: str) -> int:
 
 
 def shard_perm(seed: int, epoch: int, n_tars: int):
-    """分片级置换:父进程 RNG,种子 = seed + epoch(确定性,同 probe_c)。"""
+    """分片级置换:父进程 RNG,种子 = seed + epoch(确定性)。"""
     perm = list(range(n_tars))
     random.Random(seed + epoch).shuffle(perm)
     return perm
 
 
-def build_urls(url_tmpl: str, perm):
-    """按置换显式构造 URL 列表(列表顺序 = wds 读取顺序)。"""
-    return [url_tmpl % i for i in perm]
+def build_urls(perm):
+    """按置换显式构造块读 URL 列表(列表顺序 = wds 读取顺序)。"""
+    return [blockread.shard_url(f"shard-{i:06d}.tar") for i in perm]
 
 
 def utc_now() -> str:
@@ -162,17 +162,17 @@ def repeat_count(stage_count: int, images_per_tar: int, batch: int,
     return max(1, math.ceil(steps_per_epoch * batch / (stage_count * images_per_tar)))
 
 
-def make_loader(url_tmpl, n_tars, workers, batch, seed, epoch, epochs, shuffle,
+def make_loader(n_tars, workers, batch, seed, epoch, epochs, shuffle,
                 fractions, images_per_tar, steps_per_epoch):
-    """重建该 epoch 的 loader;返回 (loader, urls, perm, stage, repeats)。"""
+    """重建该 epoch 的 loader(块读唯一模式);返回 (loader, urls, perm, stage, repeats)。"""
     perm, stage = epoch_perm(seed, epoch, epochs, n_tars, shuffle, fractions)
     repeats = repeat_count(len(perm), images_per_tar, batch, steps_per_epoch)
-    urls = build_urls(url_tmpl, perm) * repeats
+    urls = build_urls(perm) * repeats
     # fixed / curriculum 的 stage 内顺序固定(seed 不随 epoch 变);per-epoch 换 seed。
     shuffle_seed = seed if shuffle in ("fixed", "curriculum") else seed + epoch
 
     def collate(samples):
-        # 与 probe_c 相同的 worker 内解码/转 tensor;带出分片集合供窗口就绪判断
+        # worker 内解码/转 tensor;带出分片集合供窗口就绪判断
         xs = torch.stack([
             torch.from_numpy(np.array(s["jpg"])).float() / 255.0 for s in samples
         ])
@@ -194,176 +194,6 @@ def make_loader(url_tmpl, n_tars, workers, batch, seed, epoch, epochs, shuffle,
 
 def stall(r):
     return r["wait_s"] / r["step_s"] if r["step_s"] > 0 else 0.0
-
-
-def load_records(path):
-    """读 per_step_*.jsonl → 记录列表(train_verify.sh 复用)。"""
-    recs = []
-    for line in Path(path).read_text().splitlines():
-        line = line.strip()
-        if line:
-            recs.append(json.loads(line))
-    return recs
-
-
-def window_curves(records, epochs, steps_per_epoch, window=WINDOW):
-    """每 epoch 一条「窗口 stall 均值」曲线(verify 报告项口径,同第一步)。
-
-    窗口 = [w*window, (w+1)*window) 步(每 epoch 步号从 0 起);值 = 窗口内
-    stall(wait_s/step_s)均值;epoch0 前 warmup 步(记录带 warmup 标记)不计;
-    不足一窗的余数步不入窗(与 probe_c/judge_track_d 同);空窗记 None。
-    """
-    meas = [r for r in records if not r.get("warmup")]
-    n_windows = steps_per_epoch // window
-    curves = []
-    for e in range(epochs):
-        ep = [r for r in meas if r["epoch"] == e]
-        vals = []
-        for w in range(n_windows):
-            lo, hi = w * window, (w + 1) * window
-            vv = [stall(r) for r in ep if lo <= r["step_in_epoch"] < hi]
-            vals.append(float(np.mean(vv)) if vv else None)
-        curves.append(vals)
-    return curves
-
-
-def rel_diff(a, b):
-    """逐点相对差:|a-b| / max(a,b);两侧皆 0 记 0;任一 None → None(缺测)。"""
-    if a is None or b is None:
-        return None
-    m = max(abs(a), abs(b))
-    return 0.0 if m == 0 else abs(a - b) / m
-
-
-def compare_window_curves(curves_a, curves_b, tol=VERIFY_TOL):
-    """[报告项]两轮窗口曲线逐点相对差统计(不参与 verify verdict)。
-
-    设计裁决:窗口均值被 wait 分布重尾毛刺主导,同一冷启内
-    相邻 epoch 的曲线逐点最大相对差已达 37%~56%,低于指标噪声底、无判别力,
-    故降级为报告项;数值(逐点相对差/max_rel_diff)继续写入 verify json,
-    verdict 以 compare_epoch_medians(epoch 级聚合)为准。本函数返回结构不变
-    {tol, per_epoch: [{epoch, curve_a, curve_b, rel_diffs, max_rel_diff}],
-    max_rel_diff, n_points, n_missing, verdict, verdict_label},其中 verdict
-    仅为统计副产品,verify 不再采用。
-    """
-    fail = {"tol": tol, "per_epoch": [], "max_rel_diff": None, "n_points": 0,
-            "n_missing": None, "verdict": "FAIL", "verdict_label": "对不上"}
-    if len(curves_a) != len(curves_b):
-        return dict(fail, note=f"两轮曲线 epoch 数不一致:{len(curves_a)} vs {len(curves_b)}")
-    per_epoch = []
-    max_rel = None
-    n_points = 0
-    n_missing = 0
-    for e, (ca, cb) in enumerate(zip(curves_a, curves_b)):
-        if len(ca) != len(cb):
-            return dict(fail, note=f"epoch {e} 窗口数不一致:{len(ca)} vs {len(cb)}")
-        diffs = []
-        for a, b in zip(ca, cb):
-            d = rel_diff(a, b)
-            diffs.append(d)
-            if d is None:
-                n_missing += 1
-            else:
-                n_points += 1
-                max_rel = d if max_rel is None else max(max_rel, d)
-        per_epoch.append({
-            "epoch": e, "curve_a": ca, "curve_b": cb, "rel_diffs": diffs,
-            "max_rel_diff": max((d for d in diffs if d is not None), default=None)})
-    ok = n_points > 0 and max_rel is not None and max_rel <= tol
-    return {"tol": tol, "per_epoch": per_epoch, "max_rel_diff": max_rel,
-            "n_points": n_points, "n_missing": n_missing,
-            "verdict": "PASS" if ok else "FAIL",
-            "verdict_label": "对上" if ok else "对不上"}
-
-
-def epoch_stall_stats(records, epochs):
-    """逐 epoch stall 统计(epoch 级聚合判据的取数函数)。
-
-    返回 [{epoch, n, median_stall, mean_stall}],epoch 从 0 到 epochs-1;
-    n = 该 epoch 已测步数(epoch0 前 warmup 步不计);n=0 → median/mean = None。
-    """
-    meas = [r for r in records if not r.get("warmup")]
-    out = []
-    for e in range(epochs):
-        vals = [stall(r) for r in meas if r["epoch"] == e]
-        out.append({
-            "epoch": e, "n": len(vals),
-            "median_stall": float(np.median(vals)) if vals else None,
-            "mean_stall": float(np.mean(vals)) if vals else None,
-        })
-    return out
-
-
-def round_stall_stats(records):
-    """全轮 stall 统计:{n, median_stall, mean_stall}。
-
-    全轮 = 该轮全部已测步(warmup 步不计)合并;n=0 → median/mean = None。
-    """
-    vals = [stall(r) for r in records if not r.get("warmup")]
-    return {
-        "n": len(vals),
-        "median_stall": float(np.median(vals)) if vals else None,
-        "mean_stall": float(np.mean(vals)) if vals else None,
-    }
-
-
-def compare_epoch_medians(meds_a, meds_b, round_med_a, round_med_b, tol=VERIFY_TOL):
-    """train verify 主判据(epoch 级聚合对账;窗口逐点对账已降级为报告项)。
-
-    语义:PASS ⇔ ① 两轮 per-epoch median_stall 逐 epoch 相对差全部 ≤ tol,
-    且 ② 两轮全轮 median_stall 相对差 ≤ tol(相对差口径同 rel_diff:
-    |a-b|/max(a,b))。缺轮(任一轮无 per-epoch/全轮 median)、缺 epoch(两轮
-    epoch 数不一致)或任一 epoch 缺测(None)→ FAIL(不判"对上")。
-
-    入参:
-      meds_a/meds_b:两轮逐 epoch median_stall(float/None 列表,经
-        epoch_stall_stats 取);
-      round_med_a/round_med_b:两轮全轮 median_stall(float,经
-        round_stall_stats 取);
-      tol:阈值(缺省 VERIFY_TOL;实际由 train_verify.sh 传 bench/config.py
-        的 COLD_VERIFY_TOLERANCE)。
-    返回:{tol, per_epoch: [{epoch, median_a, median_b, rel_diff}],
-          max_rel_diff(逐 epoch 最大相对差),
-          round_median: {round_a, round_b, rel_diff},
-          verdict(PASS/FAIL), verdict_label(对上/对不上), note(不满足原因)}。
-    """
-    fail = {"tol": tol, "per_epoch": [], "max_rel_diff": None,
-            "round_median": {"round_a": round_med_a, "round_b": round_med_b,
-                             "rel_diff": rel_diff(round_med_a, round_med_b)},
-            "verdict": "FAIL", "verdict_label": "对不上"}
-    if not meds_a or not meds_b:
-        return dict(fail, note="缺轮:任一轮无 per-epoch median_stall 数据")
-    if len(meds_a) != len(meds_b):
-        return dict(fail, note=f"缺 epoch:两轮 epoch 数不一致"
-                               f"({len(meds_a)} vs {len(meds_b)})")
-    if round_med_a is None or round_med_b is None:
-        return dict(fail, note="缺轮:全轮 median_stall 缺测(任一轮无实测步)")
-    per_epoch = []
-    max_rel = None
-    for e, (a, b) in enumerate(zip(meds_a, meds_b)):
-        d = rel_diff(a, b)
-        if d is None:
-            return dict(fail, per_epoch=per_epoch, max_rel_diff=max_rel,
-                        note=f"缺测:epoch {e} 的 median_stall 缺失(该 epoch 无实测步)")
-        per_epoch.append({"epoch": e, "median_a": a, "median_b": b, "rel_diff": d})
-        max_rel = d if max_rel is None else max(max_rel, d)
-    rd = rel_diff(round_med_a, round_med_b)
-    ok = max_rel is not None and max_rel <= tol and rd <= tol
-    out = {"tol": tol, "per_epoch": per_epoch, "max_rel_diff": max_rel,
-           "round_median": {"round_a": round_med_a, "round_b": round_med_b,
-                            "rel_diff": rd},
-           "verdict": "PASS" if ok else "FAIL",
-           "verdict_label": "对上" if ok else "对不上"}
-    if not ok:
-        why = []
-        if max_rel is None or max_rel > tol:
-            why.append(f"逐 epoch 最大相对差 "
-                       f"{'—' if max_rel is None else format(max_rel, '.1%')} > {tol:.0%}")
-        if rd is None or rd > tol:
-            why.append(f"全轮 median 相对差 "
-                       f"{'—' if rd is None else format(rd, '.1%')} > {tol:.0%}")
-        out["note"] = ";".join(why)
-    return out
 
 
 def args_dict(args):
@@ -452,10 +282,9 @@ def switch_baseline(records, n=BASELINE_STEPS):
 def write_meta(meta_path, args, warmup_total, per_step_path, per_epoch, records):
     """epochs_meta.json:epoch 级 meta 汇总(每 epoch 覆盖写,可中途取)。"""
     out = {
-        "track": "D",
         "date": utc_now(),
         "interpreter": sys.executable,
-        "url": args.url,
+        "read_mode": "block",
         "n_tars": args.n_tars,
         "epochs": args.epochs,
         "seed": args.seed,
@@ -481,11 +310,7 @@ def write_meta(meta_path, args, warmup_total, per_step_path, per_epoch, records)
 
 def main():
     ap = argparse.ArgumentParser(
-        description="bench train负载器:单 Job 连续 N epoch、每 epoch 换 seed 的 stall 打点"
-                    "(口径同 probes/probe_c/train_multi_epoch.py)")
-    ap.add_argument("--url", default=config.TRAIN_URL,
-                    help="tar URL 模板,含一个整数占位(缺省 config.TRAIN_URL,"
-                         "形如 http://127.0.0.1:9100/track-d/shard-NNNNNN.tar 的六位数字模板)")
+        description="bench train负载器:单 Job 连续 N epoch、每 epoch 换 seed 的 stall 打点")
     ap.add_argument("--n-tars", type=int, default=config.TRAIN_N_TARS,
                     help="分片总数(缺省 config.TRAIN_N_TARS)")
     ap.add_argument("--epochs", type=int, default=config.TRAIN_EPOCHS,
@@ -535,17 +360,11 @@ def main():
     if args.images_per_tar < 1 or args.window_k < 0 \
             or args.chunk_bytes < 1 or args.shard_bytes < 1:
         ap.error("参数需满足:images-per-tar≥1、window-k≥0、chunk-bytes≥1、shard-bytes≥1")
-    try:
-        probe_url = args.url % (args.n_tars - 1)
-    except (TypeError, ValueError) as e:
-        ap.error(f"--url 需含一个整数占位(如 %06d 形式的模板):{e}")
-    if probe_url == args.url:
-        ap.error("--url 模板未使用占位(所有分片 URL 会相同),需含一个整数占位")
 
     warmup_total = min(args.warmup, args.steps_per_epoch // 2)
     if warmup_total != args.warmup:
-        print(f"警告:warmup 截断为 {warmup_total}(epoch 长 {args.steps_per_epoch},"
-              f"同 probe_c)", file=sys.stderr)
+        print(f"警告:warmup 截断为 {warmup_total}(epoch 长 {args.steps_per_epoch})",
+              file=sys.stderr)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     per_step_path = args.out_dir / f"per_step_{args.seed}_w{args.workers}.jsonl"
@@ -570,10 +389,10 @@ def main():
 
     cond = os.environ.get("TRAINCACHE_COND", "").strip() or None
     run_id = os.environ.get("TRAINCACHE_RUN_ID", "").strip() or (
-        f"{cond or 'track-d'}-s{args.seed}-"
+        f"{cond or 'train'}-s{args.seed}-"
         f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}")
     group = os.environ.get("TRAINCACHE_GROUP", "").strip() or None
-    dataset = os.environ.get("TRAINCACHE_DATASET", "").strip() or "track-d"
+    dataset = os.environ.get("TRAINCACHE_DATASET", "").strip() or "train"
 
     fractions = config.TRAIN_CURRICULUM_FRACTIONS
     startup_window_shards = window_shards(
@@ -583,7 +402,7 @@ def main():
         "run_id": run_id,
         "cond": cond,
         "group": group,
-        "track": "D",
+        "read_mode": "block",
         "dataset": dataset,
         "started_at": started_at,
         "finished_at": None,
@@ -615,13 +434,16 @@ def main():
     write_run_json(run_path, run)
 
     torch.manual_seed(args.seed)
-    # compute 量级校准与 probe_c 一致:单线程 1024² matmul ×8 ≈200ms,跨 epoch 复用
+    # compute 量级:单线程 1024² matmul ×8 ≈200ms/步,矩阵跨 epoch 复用
     torch.set_num_threads(1)
     n = COMPUTE_SIZE
     A = torch.randn(n, n)
     B = torch.randn(n, n)
 
-    print(f"train负载:url={args.url} n_tars={args.n_tars} epochs={args.epochs} "
+    print(f"train负载(块读):dataset={blockread.DATASET} "
+          f"endpoint={blockread.ENDPOINT}/{blockread.BUCKET} "
+          f"cache_root={blockread.CACHE_ROOT} "
+          f"n_tars={args.n_tars} epochs={args.epochs} "
           f"seed={args.seed} workers={args.workers} batch={args.batch} "
           f"steps_per_epoch={args.steps_per_epoch} warmup={warmup_total} "
           f"shuffle={args.shuffle} window_k={args.window_k}")
@@ -675,14 +497,19 @@ def main():
     data_exhausted = False
     prev_stage = None
     interrupted = False
+    # orders 心跳(10s 同代际续写);daemon 线程,中断路径随进程退出。
+    blockread.start_heartbeat()
     with per_step_path.open("a" if args.resume else "w") as fout:
         for epoch in range(start_epoch, args.epochs):
             t_switch_wall = utc_now()  # 切换事件时刻 = 上一 epoch 结束/本 epoch 开始
             t_build = time.perf_counter()
             loader, urls, perm, stage, repeats = make_loader(
-                args.url, args.n_tars, args.workers, args.batch, args.seed, epoch,
+                args.n_tars, args.workers, args.batch, args.seed, epoch,
                 args.epochs, args.shuffle, fractions, args.images_per_tar,
                 args.steps_per_epoch)
+            # 每 epoch 一份消费序订单(stage_id=epoch),先于数据读取下发预取。
+            blockread.set_order(str(epoch),
+                                [blockread.shard_name(u) for u in urls])
             it = iter(loader)
             loader_build_s = time.perf_counter() - t_build
             if t2 is None:
@@ -740,7 +567,7 @@ def main():
                     if t_first_step_run is None:
                         t_first_step_run = t_first_step
                 for _ in range(COMPUTE_ITERS):
-                    _ = A @ B             # 极小 compute 替身(量级校准见探针 config)
+                    _ = A @ B             # 极小 compute 替身(量级见 COMPUTE_SIZE/COMPUTE_ITERS)
                 t2 = time.perf_counter()
                 t_last_step = utc_now()
 
@@ -849,6 +676,7 @@ def main():
                       f"checkpoint → {ckpt_path}", flush=True)
                 return
 
+    blockread.stop_heartbeat()
     run["finished_at"] = utc_now()
     if args.resume:
         # 全程口径：首步取第一段的，末步取本段的；续跑段的首步另记在 run["resume"]。

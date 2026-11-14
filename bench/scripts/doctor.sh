@@ -704,7 +704,7 @@ d_n="$(ls -1 "$TRAIN_DIR"/shard-*.tar 2>/dev/null | wc -l)"
 if [ "$d_n" -gt 0 ]; then
     pass "train shard 数 $d_n: $TRAIN_DIR"
 else
-    warn "train 未生成(track-d-data 会生成)"
+    warn "train 未生成(make bench-up 会生成)"
 fi
 cache_reset_via=""
 cache_reset_node=""

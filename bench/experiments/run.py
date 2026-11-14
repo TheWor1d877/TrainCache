@@ -9,27 +9,40 @@
 流程(run_once):
   1. 创建产物目录 reps_dir/<run_id>/
   2. 冷态:cold_reset.sh
-  3. 挂 tc:tc_apply.sh <rate> <delay> [--target source-d|minio]
+  3. 挂 tc:tc_apply.sh <rate> <delay>(全部负载含 e2e/train 都挂 MinIO egress)
   4. 注入 TRAINCACHE_JOB_CREATED_AT = 当前 RFC3339
   5. 跑负载:load_train.py --out-dir <run_dir> ...
   6. 采集:collect.py --run-dir <run_dir>
   7. 写 lock.json(lock.py)
 任一步失败:写 VOID 标记,返回目录路径(不抛异常)。
 
+e2e 族(场景标签 scenario=*)走集群内完整生产链路,每轮:
+  冷态复位(agentd 停写→清订单/块缓存→恢复 + cold_reset.sh)→ 挂 tc(MinIO)
+  → trainpublish 发块到 MinIO → DataSet CR 就绪 → WarmupTask 预热并等 gate
+  Released → 提取 WARM_NODE → 阶段一训练 Pod(trainer 镜像,块读,钉预热节点,
+  跑 N epoch 写 checkpoint 中断)→ 场景动作 → 阶段二 Pod(同节点同 checkpoint
+  续跑,switch_dataset 切 alt DataSet)→ collect.py(Prometheus 按真实 DataSet 名)。
+
 探针旁路:运行参数设 TRAINTRACE_PROBE=1 时,步骤 5 前拉起 traintrace、产物写进
 同一个 run 目录,负载结束 SIGINT 收尾。探针开关不进 COND。
 """
 import argparse
+import base64
 import csv
+import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 # 同级导入 cond / lock / stats
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,28 +67,63 @@ RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"
 PY = sys.executable  # 与 Makefile 的 $(PY) 同口径(系统 3.12);此处用当前解释器
 
 # ---- e2e 族:两阶段跑分 ----
-# 每个场景只差三处:中断在第几个 epoch、两阶段之间做什么动作、阶段二读哪个
-# 数据版本。其余参数(数据集、epoch 数、带宽、缓存配额)与 COND 相同。
+# 每个场景只差三处:中断在第几个 epoch、两阶段之间做什么动作、阶段二是否切到
+# 另一份训练数据。其余参数(数据集、epoch 数、带宽、缓存配额)与 COND 相同。
 E2E_SCENARIOS = {
     "checkpoint-resume": {
         "interrupt_after_epoch": 1,   # 跑完第 1 个 epoch 写 checkpoint 中断
         "action": None,               # 两阶段之间不动集群
-        "data_version": 1,            # 阶段二仍读版本 1
+        "switch_dataset": False,      # 阶段二仍读基础数据
     },
     "checkpoint-version": {
         "interrupt_after_epoch": 1,
         "action": None,
-        "data_version": 2,            # 阶段二读版本 2(同形状,种子不同)
+        "switch_dataset": True,       # 阶段二切到另一份数据(同形状,种子不同)
     },
     "dual-restart": {
         "interrupt_after_epoch": 1,
         "action": "restart-agentd",   # 训练进程退出后重建 agentd
-        "data_version": 1,
+        "switch_dataset": False,
     },
 }
 E2E_AGENTD_NS = "traincache"
 E2E_AGENTD_LABEL = "app=traincache-agentd"
 E2E_AGENTD_READY_TIMEOUT_S = 300
+
+# ---- e2e 集群链路参数(口径与 compare/traincache/up.sh、run_bench.py 对齐)----
+E2E_NS = "traincache"
+# 专用快照名:train/tars 与 compare 的 dataset-4gib 是两份数据,不能共用一个
+# MinIO 快照前缀(发布会互相覆盖)。alt 数据独立发一份,阶段二切它。
+E2E_DATASET = os.environ.get("E2E_DATASET", "train-e2e")
+E2E_CHUNK_BYTES = 8388608               # 实验块 8MiB(D20),与 up.sh/COND 同口径
+E2E_TRAIN_IMAGE = os.environ.get("E2E_TRAIN_IMAGE", "traincache-trainer:dev")
+# Pod 名固定:WarmupTask targetRef 按名匹配,ResolvePodIndex 从 -0 后缀解析 index=0
+E2E_POD_NAME = "e2e-train-0"
+E2E_WARMUP_NAME = "e2e-task"
+E2E_POD_TIMEOUT_S = int(os.environ.get("E2E_POD_TIMEOUT_S", "1800"))
+E2E_WARMUP_TIMEOUT_S = 900              # up.sh 的 TRAINCACHE_WARMUP_TIMEOUT 同值
+E2E_DATASET_READY_TIMEOUT_S = 180       # up.sh 90×2s 同值
+E2E_GATE_TMAX_DEFAULT = "10m"           # up.sh 全档统一 10m
+E2E_HOST_ROOT = "/var/tmp/traincache-e2e"   # WARM_NODE 上 out/ckpt 的 hostPath 根
+E2E_MINIO_NS = "minio"
+E2E_OBJSTORE_SECRET = "traincache-objstore"
+E2E_AGENTD_PAUSE_KEY = "traincache.io/bench-paused"
+# 冷态要清的节点状态:订单 ring + 块缓存 + 隔离区(与 run_bench 同口径)
+E2E_NODE_STATE_DIRS = ("/run/traincache/orders",
+                       "/var/cache/traincache/blocks",
+                       "/var/cache/traincache/quarantine")
+# 冷态清缓存落在哪些 kind 节点容器上(与 run_bench.py 同缺省,可用环境变量覆盖)
+KIND_WORKER_NODES = [n for n in os.environ.get(
+    "KIND_WORKER_NODES",
+    "traincache-worker,traincache-worker2,traincache-worker3,traincache-worker4"
+).split(",") if n]
+TRAINPUBLISH_BIN = SCRIPTS_DIR / "trainpublish"
+# 训练 Pod 日志里的产物回传段(base64 tar.gz;完成态 Pod 不能 exec/kubectl cp,
+# 日志是唯一不依赖运行中容器的取回通道)
+E2E_ART_BEGIN = "===E2E-ARTIFACTS-BEGIN==="
+E2E_ART_END = "===E2E-ARTIFACTS-END==="
+E2E_CKPT_BEGIN = "===E2E-CKPT-BEGIN==="
+E2E_CKPT_END = "===E2E-CKPT-END==="
 
 # ---- 汇总层产物列(任务 2.5:jsonl/metrics.csv → summary.csv)----
 # 列名与对照装置 compare/run_bench.py 的 summary.csv 同口径,两边产物能直接对账。
@@ -122,17 +170,29 @@ def _write_void(run_dir: Path, reason: str) -> None:
 
 
 def _run_cmd(cmd: list[str], env: dict | None = None,
-             cwd: Path | None = None, timeout: int | None = None) -> tuple[int, str, str]:
+             cwd: Path | None = None, timeout: int | None = None,
+             input_text: str | None = None) -> tuple[int, str, str]:
     """执行命令(shell=False 列表形式),返回 (returncode, stdout, stderr)。"""
     proc = subprocess.run(
         cmd, capture_output=True, text=True, env=env, cwd=str(cwd) if cwd else None,
-        timeout=timeout, check=False)
+        timeout=timeout, check=False, input=input_text)
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _kubectl(args: list[str], ns: str | None = None, timeout: int = 120,
+             input_text: str | None = None) -> tuple[int, str, str]:
+    """kubectl 列表形式调用(口径同 run_bench.kubectl)。"""
+    cmd = ["kubectl"]
+    if ns:
+        cmd += ["-n", ns]
+    cmd += args
+    return _run_cmd(cmd, timeout=timeout, input_text=input_text)
+
+
 def _tc_target(cond: dict) -> str | None:
-    """tc_apply.sh 的 --target:train 负载读宿主机本地源站,其余走 MinIO。"""
-    return "source-d" if cond.get("load") == "train" else None
+    """tc_apply.sh 的 --target:全部负载(含 e2e/train)都经 MinIO 取数,
+    返回 None 即缺省 MinIO egress 挂点;宿主机本地源站挂点已废弃。"""
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -627,13 +687,576 @@ def _e2e_restart_agentd(timeout_s: int = E2E_AGENTD_READY_TIMEOUT_S) -> dict:
             "t_start": t_start, "old_uids": sorted(old_uids)}
 
 
+# ---------------------------------------------------------------------------
+# e2e 族:集群内完整生产链路
+# (trainpublish → DataSet → WarmupTask/gate → 训练 Pod 块读 → checkpoint 两阶段)
+# 控制面 YAML 与节点提取口径照 bench/compare/traincache/up.sh,
+# 训练 Pod 形态照 bench/compare/run_bench.py 的 create_measure_pod。
+# ---------------------------------------------------------------------------
+def _e2e_node_ip() -> str | None:
+    """任取一个节点的 InternalIP(trainpublish 经 nodePort 上传用)。"""
+    rc, out, _ = _kubectl(
+        ["get", "nodes", "-o",
+         'jsonpath={.items[0].status.addresses[?(@.type=="InternalIP")].address}'],
+        timeout=30)
+    if rc != 0 or not out.strip():
+        return None
+    return out.strip().split()[0]
+
+
+def _e2e_minio_pod() -> str | None:
+    rc, out, _ = _kubectl(
+        ["get", "pod", "-l", "app=minio",
+         "-o", "jsonpath={.items[0].metadata.name}"],
+        ns=E2E_MINIO_NS, timeout=30)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def _e2e_mc_cat(minio_pod: str, key: str) -> str | None:
+    rc, out, _ = _kubectl(
+        ["exec", minio_pod, "--", "mc", "cat",
+         f"local/{bench_config.MINIO_BUCKET}/{key}"],
+        ns=E2E_MINIO_NS, timeout=120)
+    return out if rc == 0 else None
+
+
+def _e2e_snapshot_shard_count(dataset: str) -> int:
+    """快照覆盖的 tar 数(口径同 up.sh snapshot_shard_count)。
+
+    manifest 的 shards[] 是 idx 文件(trainpublish 把多个 tar 打进同一个 idx),
+    必须数 idx 里的 distinct path,不能数 manifest 条目。
+    """
+    pod = _e2e_minio_pod()
+    if not pod:
+        return 0
+    cur = (_e2e_mc_cat(pod, f"dataset/{dataset}/CURRENT") or "").split()
+    if not cur:
+        return 0
+    man_text = _e2e_mc_cat(pod, f"dataset/{dataset}/snapshots/{cur[0]}/manifest.json")
+    if not man_text:
+        return 0
+    try:
+        keys = [s["key"] for s in json.loads(man_text).get("shards", [])]
+    except (ValueError, KeyError, TypeError):
+        return 0
+    paths: set[str] = set()
+    dec = json.JSONDecoder()
+    for key in keys:
+        text = _e2e_mc_cat(pod, key) or ""
+        i = 0
+        while i < len(text):
+            while i < len(text) and text[i].isspace():
+                i += 1
+            if i >= len(text):
+                break
+            try:
+                obj, i = dec.raw_decode(text, i)
+            except ValueError:
+                break
+            for e in obj if isinstance(obj, list) else []:
+                if isinstance(e, dict) and e.get("path"):
+                    paths.add(e["path"])
+    return len(paths)
+
+
+def _e2e_publish(dataset: str, tar_dir: Path, n_tars: int) -> tuple[bool, str]:
+    """trainpublish 把本地 tar 发块到 MinIO(参数口径同 up.sh publish_snapshot)。
+
+    快照已覆盖全部分片就跳过发布(数据不可变,跨 rep 复用)。
+    """
+    tars = [tar_dir / f"shard-{i:06d}.tar" for i in range(n_tars)]
+    missing = [p.name for p in tars if not p.is_file()]
+    if missing:
+        return False, (f"{tar_dir} 缺 {len(missing)}/{n_tars} 个分片"
+                       f"(如 {missing[0]});先跑 make -C bench bench-data")
+    pod = _e2e_minio_pod()
+    if not pod:
+        return False, "MinIO Pod 未就绪,无法发布/核对快照"
+    _kubectl(["exec", pod, "--", "mc", "alias", "set", "local",
+              "http://localhost:9000", bench_config.MINIO_ACCESS_KEY,
+              bench_config.MINIO_SECRET_KEY], ns=E2E_MINIO_NS, timeout=60)
+    have = _e2e_snapshot_shard_count(dataset)
+    if have >= n_tars:
+        return True, f"快照已覆盖 {have} 个分片(need {n_tars}),跳过发布"
+
+    if not os.access(TRAINPUBLISH_BIN, os.X_OK):
+        repo_root = BENCH_ROOT.parent
+        if not (repo_root / "core" / "cmd" / "trainpublish").is_dir():
+            return False, f"找不到 trainpublish 源码({repo_root})"
+        print(f"[e2e] 构建 trainpublish → {TRAINPUBLISH_BIN}")
+        env = os.environ.copy()
+        env["PATH"] = env.get("PATH", "") + ":/usr/local/go/bin"
+        rc, _, err = _run_cmd(
+            ["go", "build", "-o", str(TRAINPUBLISH_BIN), "./core/cmd/trainpublish"],
+            env=env, cwd=repo_root, timeout=600)
+        if rc != 0:
+            return False, f"trainpublish 构建失败: {err.strip()[:300]}"
+    node_ip = _e2e_node_ip()
+    if not node_ip:
+        return False, "取不到节点 InternalIP,trainpublish 无法经 nodePort 上传"
+    # work-dir 落数据层(缺省 /tmp 是 tmpfs,全量快照会写爆;口径同 up.sh)
+    work_dir = bench_config.DATA_DIR / "_trainpublish"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [str(TRAINPUBLISH_BIN),
+           "--dataset", dataset,
+           "--endpoint", f"{node_ip}:{bench_config.MINIO_NODEPORT}",
+           "--access-key", bench_config.MINIO_ACCESS_KEY,
+           "--secret-key", bench_config.MINIO_SECRET_KEY,
+           "--bucket", bench_config.MINIO_BUCKET,
+           "--chunk-size", str(E2E_CHUNK_BYTES),
+           "--concurrency", "8",
+           "--work-dir", str(work_dir)] + [str(p) for p in tars]
+    print(f"[e2e] 发布 {n_tars} 个 shard → dataset={dataset} "
+          f"(endpoint={node_ip}:{bench_config.MINIO_NODEPORT})")
+    rc, _, err = _run_cmd(cmd, timeout=1800)
+    if rc != 0:
+        return False, f"trainpublish 失败(rc={rc}): {err.strip()[:500]}"
+    have = _e2e_snapshot_shard_count(dataset)
+    if have < n_tars:
+        return False, f"快照只发布 {have}/{n_tars} 个分片"
+    return True, f"发布完成({have} 个分片)"
+
+
+def _e2e_apply_dataset(name: str, tar_dir: Path, n_tars: int) -> tuple[bool, str]:
+    """apply DataSet CR 并等 Ready(shards 按实际文件大小算块数,口径同 up.sh)。"""
+    shards = []
+    for i in range(n_tars):
+        f = tar_dir / f"shard-{i:06d}.tar"
+        size = f.stat().st_size
+        count = (size + E2E_CHUNK_BYTES - 1) // E2E_CHUNK_BYTES
+        last = size % E2E_CHUNK_BYTES or E2E_CHUNK_BYTES
+        shards.append({"name": f.name, "count": count, "lastChunkSize": last})
+    obj = {
+        "apiVersion": "traincache.io/v1alpha1",
+        "kind": "DataSet",
+        "metadata": {"name": name, "namespace": E2E_NS},
+        "spec": {
+            # agentd 在集群内访问 MinIO,用服务 DNS(去掉 http:// 前缀,同 up.sh)
+            "endpoint": bench_config.MINIO_ENDPOINT.split("://", 1)[-1].rstrip("/"),
+            "bucket": bench_config.MINIO_BUCKET,
+            "datasetName": name,
+            "secretRef": {"name": E2E_OBJSTORE_SECRET},
+            "chunkSize": E2E_CHUNK_BYTES,
+            "shards": shards,
+            "shuffle": False,
+        },
+    }
+    rc, _, err = _kubectl(["apply", "-f", "-"], ns=E2E_NS,
+                          input_text=yaml.safe_dump(obj, default_flow_style=False))
+    if rc != 0:
+        return False, f"DataSet/{name} apply 失败: {err.strip()[:300]}"
+    # 用 datasets.traincache.io 避免与 Fluid 的 datasets.data.fluid.io 冲突
+    deadline = time.monotonic() + E2E_DATASET_READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        rc, out, _ = _kubectl(
+            ["get", "datasets.traincache.io", name, "-o",
+             'jsonpath={.status.conditions[?(@.type=="Ready")].status}'],
+            ns=E2E_NS, timeout=30)
+        if rc == 0 and out.strip() == "True":
+            return True, f"DataSet/{name} Ready({n_tars} shards)"
+        time.sleep(2)
+    return False, f"DataSet/{name} {E2E_DATASET_READY_TIMEOUT_S}s 内未 Ready"
+
+
+def _e2e_warmup_k(cond: dict, tar_dir: Path, n_tars: int) -> int:
+    """预热块数 = 缓存容量 ÷ 块大小,上限是数据集块数(口径同 run_bench.warmup_k_for)。"""
+    total_blocks = 0
+    for i in range(n_tars):
+        size = (tar_dir / f"shard-{i:06d}.tar").stat().st_size
+        total_blocks += (size + E2E_CHUNK_BYTES - 1) // E2E_CHUNK_BYTES
+    cache = cond.get("cache") or {}
+    cap = cond_mod.cache_bytes(cond) if cache.get("enabled") else (1 << 30)
+    return min(max(1, cap // E2E_CHUNK_BYTES), max(1, total_blocks))
+
+
+def _e2e_warm_node(wt: dict) -> str:
+    """预热节点:优先 status.podNodeReadiness[].nodeName,回退 status.assignment
+    (口径同 up.sh 的 [WARM_NODE] 提取)。"""
+    status = wt.get("status") or {}
+    nodes = [e.get("nodeName") for e in status.get("podNodeReadiness") or []
+             if e.get("nodeName")]
+    if not nodes:
+        assignment = status.get("assignment")
+        if isinstance(assignment, str) and assignment.strip():
+            nodes = [assignment.strip()]
+        elif isinstance(assignment, list):
+            nodes = [str(a) for a in assignment if a]
+    return nodes[0] if nodes else ""
+
+
+def _e2e_apply_warmup(dataset: str, k: int, tmax: str) -> tuple[bool, str, dict]:
+    """apply compare-task 式样的 WarmupTask,等 Released,回传预热节点与事实。
+
+    gate threshold 0.9 / tMax 缺省 10m / fanout 1 / podCount 1,字段与 up.sh 一致。
+    """
+    _kubectl(["delete", "warmuptask", E2E_WARMUP_NAME,
+              "--ignore-not-found", "--wait=true"], ns=E2E_NS, timeout=120)
+    obj = {
+        "apiVersion": "traincache.io/v1alpha1",
+        "kind": "WarmupTask",
+        "metadata": {"name": E2E_WARMUP_NAME, "namespace": E2E_NS},
+        "spec": {
+            "dataSetRef": {"name": dataset},
+            "targetRef": {"apiVersion": "v1", "kind": "Pod", "name": E2E_POD_NAME},
+            "podCount": 1,
+            "preheatFanoutMin": 1,
+            "preheatFanout": 1,
+            "affinity": "Any",
+            "trainingType": "static",
+            "podDetails": [{"index": 0, "k": k,
+                            "resources": {"requests": {"cpu": "500m",
+                                                       "memory": "256Mi"}}}],
+            "gate": {"threshold": 0.9, "gapMin": 0.1, "slopeMin": 0.001,
+                     "tMax": tmax, "minInterval": "1s"},
+            "score": {"halfLife": 4, "cutoff": 8},
+            "candidate": {"requireReady": True, "ignoreNoSchedule": False},
+        },
+    }
+    rc, _, err = _kubectl(["apply", "-f", "-"], ns=E2E_NS,
+                          input_text=yaml.safe_dump(obj, default_flow_style=False))
+    if rc != 0:
+        return False, f"WarmupTask apply 失败: {err.strip()[:300]}", {}
+    print(f"[e2e] WarmupTask/{E2E_WARMUP_NAME} 已创建(k={k}, tMax={tmax}),等 Released")
+    deadline = time.monotonic() + E2E_WARMUP_TIMEOUT_S
+    wt: dict = {}
+    while time.monotonic() < deadline:
+        rc, out, _ = _kubectl(["get", "warmuptask", E2E_WARMUP_NAME, "-o", "json"],
+                              ns=E2E_NS, timeout=30)
+        if rc == 0:
+            try:
+                wt = json.loads(out)
+            except ValueError:
+                wt = {}
+        status = wt.get("status") or {}
+        phase = status.get("phase") or ""
+        gate_state = (status.get("gateDecision") or {}).get("state") or ""
+        if phase == "Released" or gate_state == "Released":
+            node = _e2e_warm_node(wt)
+            if not node:
+                return False, "WarmupTask 已 Released 但读不到预热节点", {}
+            facts = {
+                "warm_node": node,
+                "k": k,
+                "tmax": tmax,
+                "phase": phase,
+                "gate_state": gate_state,
+                "started_at": status.get("startedAt"),
+                "decided_at": (status.get("gateDecision") or {}).get("decidedAt"),
+            }
+            return True, f"Released,预热节点={node}", facts
+        if phase in ("Failed", "Degraded"):
+            return False, f"WarmupTask 异常(phase={phase} gate={gate_state})", {}
+        time.sleep(2)
+    return False, f"WarmupTask {E2E_WARMUP_TIMEOUT_S}s 内未 Released", {}
+
+
+def _e2e_train_pod(run_id: str, cond: dict, dataset: str, warm_node: str,
+                   train_args: list[str], job_created_at: str) -> dict:
+    """阶段训练 Pod(形态照 create_measure_pod,镜像换 trainer、命令换 load_train)。
+
+    与 create_measure_pod 的关键差异:
+      * /dev/shm 挂 Memory emptyDir(torch DataLoader worker 走 /dev/shm,
+        容器缺省 64MB 会挂);
+      * out/ckpt 挂 WARM_NODE hostPath,两阶段同节点同目录共享 checkpoint;
+      * 命令包一层 sh:训练结束后把 out 目录 tar+base64 打进日志(完成态 Pod
+        不能 exec,kubectl cp 取不回产物),checkpoint 存在性与内容一并回传。
+    gate 说明:不显式写 schedulingGates——webhook 只对「未 Released 的 Ready
+    任务」注入 traincache.io/warmup gate;本流程先等 Released 再造 Pod(与
+    compare 相同),此时注入与控制器 removeGates 都已终态,显式挂 gate 会让
+    Pod 永久 Pending。label + schedulerName 照 create_measure_pod 保留。
+    """
+    host_out = f"{E2E_HOST_ROOT}/{run_id}/out"
+    host_ckpt = f"{E2E_HOST_ROOT}/{run_id}/ckpt"
+    wrapper = (
+        f"python3 /app/load_train.py {shlex.join(train_args)}\n"
+        "rc=$?\n"
+        'if [ "$rc" -ne 0 ]; then exit "$rc"; fi\n'
+        'if [ -f /ckpt/checkpoint.json ]; then\n'
+        '  echo "[e2e-ckpt] present bytes=$(wc -c < /ckpt/checkpoint.json)"\n'
+        "else\n"
+        '  echo "[e2e-ckpt] missing"\n'
+        "fi\n"
+        f'echo "{E2E_ART_BEGIN}"\n'
+        "tar czf - -C /out . | base64 -w 76\n"
+        f'echo "{E2E_ART_END}"\n'
+        'if [ -f /ckpt/checkpoint.json ]; then\n'
+        f'  echo "{E2E_CKPT_BEGIN}"\n'
+        "  base64 -w 76 /ckpt/checkpoint.json\n"
+        f'  echo "{E2E_CKPT_END}"\n'
+        "fi\n"
+    )
+    env = [
+        {"name": "PYTHONUNBUFFERED", "value": "1"},
+        {"name": "TRAINCACHE_DATASET", "value": dataset},
+        {"name": "TRAINCACHE_ENDPOINT", "value": bench_config.MINIO_ENDPOINT},
+        {"name": "TRAINCACHE_BUCKET", "value": bench_config.MINIO_BUCKET},
+        {"name": "TRAINCACHE_CHUNK_SIZE", "value": str(E2E_CHUNK_BYTES)},
+        {"name": "TRAINCACHE_PREFETCH_K",
+         "value": str((cond.get("prefetch") or {}).get("lookahead", 16))},
+        {"name": "CACHE_ROOT", "value": "/var/cache/traincache/blocks"},
+        {"name": "ORDERS_DIR", "value": "/run/traincache/orders"},
+        {"name": "TRAINCACHE_HOOK_SOCK", "value": "/run/tc-hook/agent.sock"},
+        {"name": "POD_UID",
+         "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
+        {"name": "TRAINCACHE_JOB_CREATED_AT", "value": job_created_at},
+        {"name": "TRAINCACHE_RUN_ID", "value": run_id},
+        {"name": "TRAINCACHE_COND", "value": cond.get("name", "")},
+        {"name": "TRAINCACHE_GROUP", "value": cond.get("group", "")},
+    ]
+    container = {
+        "name": "train",
+        "image": E2E_TRAIN_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["sh", "-c"],
+        "args": [wrapper],
+        "env": env,
+        "volumeMounts": [
+            {"name": "cache-root", "mountPath": "/var/cache/traincache",
+             "readOnly": True},
+            {"name": "orders-dir", "mountPath": "/run/traincache/orders"},
+            {"name": "hook-dir", "mountPath": "/run/tc-hook"},
+            {"name": "out-dir", "mountPath": "/out"},
+            {"name": "ckpt-dir", "mountPath": "/ckpt"},
+            {"name": "dshm", "mountPath": "/dev/shm"},
+        ],
+        "resources": {"requests": {"cpu": "500m", "memory": "1Gi"},
+                      "limits": {"cpu": "2", "memory": "4Gi"}},
+    }
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": E2E_POD_NAME,
+            "namespace": E2E_NS,
+            "labels": {"app": "train-job", "traincache.io/warmup": "enabled"},
+        },
+        "spec": {
+            "restartPolicy": "Never",
+            "schedulerName": "traincache-scheduler",
+            "nodeSelector": {"kubernetes.io/hostname": warm_node},
+            "containers": [container],
+            "volumes": [
+                {"name": "cache-root",
+                 "hostPath": {"path": "/var/cache/traincache", "type": "Directory"}},
+                {"name": "orders-dir",
+                 "hostPath": {"path": "/run/traincache/orders",
+                              "type": "DirectoryOrCreate"}},
+                # agentd 的 hook socket 在节点 /run/traincache/agent.sock,
+                # 挂到 /run/tc-hook 后 Pod 内即 /run/tc-hook/agent.sock(同 compare)
+                {"name": "hook-dir",
+                 "hostPath": {"path": "/run/traincache",
+                              "type": "DirectoryOrCreate"}},
+                {"name": "out-dir",
+                 "hostPath": {"path": host_out, "type": "DirectoryOrCreate"}},
+                {"name": "ckpt-dir",
+                 "hostPath": {"path": host_ckpt, "type": "DirectoryOrCreate"}},
+                # torch DataLoader worker 经 /dev/shm 传张量,缺省 64MB 会挂
+                {"name": "dshm",
+                 "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}},
+            ],
+        },
+    }
+
+
+def _e2e_wait_pod(timeout_s: int) -> tuple[str, str]:
+    """等训练 Pod 到终态,返回 (phase, logs);超时返回 ("Timeout", 尾部日志)。"""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        rc, out, err = _kubectl(
+            ["get", "pod", E2E_POD_NAME, "-o", "jsonpath={.status.phase}"],
+            ns=E2E_NS, timeout=30)
+        if rc != 0 and "NotFound" in err:
+            return "Deleted", ""
+        phase = out.strip()
+        if phase in ("Succeeded", "Failed"):
+            _, logs, _ = _kubectl(["logs", E2E_POD_NAME], ns=E2E_NS, timeout=120)
+            return phase, logs
+        time.sleep(5)
+    _, logs, _ = _kubectl(["logs", E2E_POD_NAME, "--tail=200"],
+                          ns=E2E_NS, timeout=60)
+    return "Timeout", logs
+
+
+def _e2e_extract_artifacts(logs: str, run_dir: Path) -> tuple[bool, str]:
+    """从 Pod 日志取回 out 目录(tar.gz base64)与 checkpoint,落 run_dir。
+
+    完成态 Pod 不能 exec(kubectl cp 依赖运行中容器),日志回传是唯一不依赖
+    容器存活的取回通道。只解普通文件成员,拒绝绝对路径与 .. 越界。
+    """
+    lines = logs.splitlines()
+
+    def section(begin: str, end: str) -> str | None:
+        try:
+            i = lines.index(begin)
+            j = lines.index(end, i + 1)
+        except ValueError:
+            return None
+        return "".join(lines[i + 1:j])
+
+    art = section(E2E_ART_BEGIN, E2E_ART_END)
+    if art is None:
+        return False, "Pod 日志缺产物回传段(训练可能未正常收尾)"
+    try:
+        blob = base64.b64decode(art)
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                name = os.path.normpath(member.name)
+                if os.path.isabs(name) or name.startswith(".."):
+                    continue
+                dest = run_dir / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                src = tf.extractfile(member)
+                if src is None:
+                    continue
+                with dest.open("wb") as fout:
+                    shutil.copyfileobj(src, fout)
+    except (ValueError, tarfile.TarError, OSError) as exc:
+        return False, f"产物解包失败: {exc}"
+    ckpt = section(E2E_CKPT_BEGIN, E2E_CKPT_END)
+    if ckpt is not None:
+        try:
+            (run_dir / "ckpt").mkdir(parents=True, exist_ok=True)
+            (run_dir / "ckpt" / "checkpoint.json").write_bytes(base64.b64decode(ckpt))
+        except (ValueError, OSError) as exc:
+            return False, f"checkpoint 解包失败: {exc}"
+    return True, ""
+
+
+def _e2e_run_phase(cond: dict, run_id: str, run_dir: Path, phase: int,
+                   dataset: str, warm_node: str,
+                   extra_args: list[str]) -> tuple[bool, str]:
+    """造一个阶段训练 Pod,等完成,日志与产物落 run_dir。返回 (ok, reason)。"""
+    n_tars = int(cond["dataset"]["shards"])
+    train_args = (cond_mod.cond_to_train_args(cond)
+                  + ["--n-tars", str(n_tars),
+                     "--out-dir", "/out", "--checkpoint-dir", "/ckpt"]
+                  + extra_args)
+    job_created_at = _rfc3339_now()
+    pod = _e2e_train_pod(run_id, cond, dataset, warm_node, train_args, job_created_at)
+    _kubectl(["delete", "pod", E2E_POD_NAME, "--ignore-not-found",
+              "--grace-period=0", "--force", "--wait=true"], ns=E2E_NS, timeout=120)
+    rc, _, err = _kubectl(["apply", "-f", "-"], ns=E2E_NS,
+                          input_text=yaml.safe_dump(pod, default_flow_style=False))
+    if rc != 0:
+        return False, f"阶段{phase} Pod 创建失败: {err.strip()[:300]}"
+    print(f"[{run_id}] 阶段{phase} Pod 已提交(dataset={dataset}, node={warm_node}, "
+          f"t_submit={job_created_at})")
+    phase_state, logs = _e2e_wait_pod(E2E_POD_TIMEOUT_S)
+    (run_dir / f"phase{phase}.log").write_text(logs, encoding="utf-8")
+    if phase_state != "Succeeded":
+        _, state, _ = _kubectl(
+            ["get", "pod", E2E_POD_NAME, "-o",
+             "jsonpath={range .status.containerStatuses[*]}{.name} "
+             "restarts={.restartCount} exit={.state.terminated.exitCode} "
+             "reason={.state.terminated.reason}{end}"], ns=E2E_NS, timeout=30)
+        (run_dir / f"phase{phase}_state.txt").write_text(
+            f"phase={phase_state}\ncontainer_state: {state.strip()}\n",
+            encoding="utf-8")
+        return False, (f"阶段{phase} Pod {phase_state}"
+                       f"(现场见 phase{phase}.log / phase{phase}_state.txt)")
+    ok, reason = _e2e_extract_artifacts(logs, run_dir)
+    if not ok:
+        return False, f"阶段{phase} {reason}"
+    if not (run_dir / "run.json").is_file():
+        return False, f"阶段{phase} 产物缺 run.json"
+    return True, ""
+
+
+def _e2e_agentd_set_active(active: bool) -> None:
+    """挂起/恢复 agentd DaemonSet(nodeSelector 挂起,口径同 run_bench)。"""
+    value = None if active else "true"
+    patch = json.dumps({"spec": {"template": {"spec": {
+        "nodeSelector": {E2E_AGENTD_PAUSE_KEY: value}}}}})
+    rc, _, err = _kubectl(["patch", "ds/traincache-agentd", "--type=merge",
+                           "-p", patch], ns=E2E_AGENTD_NS, timeout=60)
+    if rc != 0:
+        raise RuntimeError(f"无法{'恢复' if active else '挂起'} agentd: "
+                           f"{err.strip()[:300]}")
+
+
+def _e2e_agentd_counts() -> tuple[int, int]:
+    """agentd (Pod 总数, Ready 数);kubectl 失败返回 (0, 0)。"""
+    rc, out, _ = _kubectl(["get", "pods", "-l", E2E_AGENTD_LABEL, "-o", "json"],
+                          ns=E2E_AGENTD_NS, timeout=30)
+    if rc != 0:
+        return 0, 0
+    try:
+        items = json.loads(out).get("items", [])
+    except ValueError:
+        return 0, 0
+    ready = sum(1 for p in items
+                if any(c.get("type") == "Ready" and c.get("status") == "True"
+                       for c in p.get("status", {}).get("conditions", []) or []))
+    return len(items), ready
+
+
+def _e2e_reset_node_state() -> tuple[bool, str]:
+    """冷态第一层:停 agentd(无写入者)→ 清各节点订单 ring 与块/隔离缓存 →
+    判空(5s 落定复查)→ 恢复并等 Ready。口径同 run_bench.reset_traincache_agent
+    的停写→清→判空→恢复骨架;复位必须在清缓存前,否则在途预取会污染判空。
+    """
+    expected = len(KIND_WORKER_NODES)
+    try:
+        _e2e_agentd_set_active(False)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            total, _ = _e2e_agentd_counts()
+            if total == 0:
+                break
+            time.sleep(2)
+        else:
+            return False, "agentd 挂起后 120s 内 Pod 未全部消失"
+        dirs = " ".join(E2E_NODE_STATE_DIRS)
+        reset_cmd = (f"for d in {dirs}; do "
+                     '[ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 '
+                     "-exec rm -rf {} +; done; true")
+        check_cmd = f"for d in {dirs}; do [ -d \"$d\" ] && ls -A \"$d\"; done; true"
+        for node in KIND_WORKER_NODES:
+            for attempt in range(3):
+                rc, _, err = _run_cmd(["docker", "exec", node, "sh", "-c", reset_cmd],
+                                      timeout=60)
+                if rc != 0:
+                    print(f"[e2e] WARNING: 节点 {node} 清状态失败: {err.strip()[:200]}",
+                          file=sys.stderr)
+                rc, out, _ = _run_cmd(["docker", "exec", node, "sh", "-c", check_cmd],
+                                      timeout=60)
+                if rc == 0 and not out.strip():
+                    # 判空可能落在写入间隙:等 5s 复查,真有活写入者必须看得见
+                    time.sleep(5)
+                    rc2, out2, _ = _run_cmd(
+                        ["docker", "exec", node, "sh", "-c", check_cmd], timeout=60)
+                    if rc2 == 0 and not out2.strip():
+                        break
+                if attempt < 2:
+                    time.sleep(5)
+            else:
+                return False, f"节点 {node} 的订单/块缓存未能清空,冷态不成立"
+    except RuntimeError as exc:
+        return False, str(exc)
+    finally:
+        try:
+            _e2e_agentd_set_active(True)
+        except RuntimeError as exc:
+            print(f"[e2e] WARNING: 恢复 agentd 失败: {exc}", file=sys.stderr)
+    deadline = time.monotonic() + E2E_AGENTD_READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        total, ready = _e2e_agentd_counts()
+        if total >= expected and ready >= expected:
+            return True, ""
+        time.sleep(2)
+    return False, f"agentd 恢复后 {E2E_AGENTD_READY_TIMEOUT_S}s 内未全部 Ready"
+
+
 def _run_e2e_once(cond: dict, run_id: str, reps_dir: Path,
                   scenario: str) -> Path:
-    """e2e 一轮:阶段一(跑 N 个 epoch 后中断)→ 场景动作 → 阶段二(续跑)→ 采集。
+    """e2e 一轮:冷态 → tc → 发块/DataSet/WarmupTask → 阶段一(中断)→ 场景动作
+    → 阶段二(续跑)→ 采集。
 
-    两阶段共用同一个产物目录:阶段二的 run.json 记的是全程口径(提交时刻取
-    阶段一),逐步记录追加在同一份 per_step_*.jsonl 上,阶段一的 run.json
-    另存为 run_phase1.json 留档。
+    两阶段共用同一个产物目录与 WARM_NODE 上同一份 out/ckpt hostPath:阶段二的
+    run.json 记全程口径(t_submit 取阶段一),per_step 追加在同一份 jsonl 上,
+    阶段一的 run.json 另存 run_phase1.json 留档。
     """
     spec = E2E_SCENARIOS.get(scenario)
     if spec is None:
@@ -641,30 +1264,37 @@ def _run_e2e_once(cond: dict, run_id: str, reps_dir: Path,
     reps_dir = Path(reps_dir)
     run_dir = reps_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_dir = run_dir / "ckpt"
+    n_tars = int(cond["dataset"]["shards"])
+    dataset = E2E_DATASET
+    dataset_alt = f"{E2E_DATASET}-alt"
 
-    # 数据版本 2 的前置:分片不在就整轮作废,不进半截流程
-    if spec["data_version"] == 2:
-        shards = int(cond["dataset"]["shards"])
-        missing = [i for i in range(shards)
-                   if not (bench_config.TRAIN_DIR_V2 / f"shard-{i:06d}.tar").is_file()]
-        if missing:
-            reason = (f"数据版本 2 未就绪:{bench_config.TRAIN_DIR_V2} 缺 "
-                      f"{len(missing)}/{shards} 个分片;先跑 make -C bench bench-data-v2")
-            _write_void(run_dir, reason)
-            print(f"[{run_id}] {reason}", file=sys.stderr)
-            return run_dir
-
-    # ---- 冷态 ----
-    rc, out, err = _run_cmd(["bash", str(COLD_RESET_SH)])
-    if rc != 0:
-        reason = f"cold_reset 失败(rc={rc}): {err.strip()[:500]}"
+    def void(reason: str) -> Path:
         _write_void(run_dir, reason)
         print(f"[{run_id}] {reason}", file=sys.stderr)
+        _kubectl(["delete", "pod", E2E_POD_NAME, "--ignore-not-found",
+                  "--grace-period=0", "--force"], ns=E2E_NS, timeout=60)
         return run_dir
-    print(f"[{run_id}] 冷态完成")
 
-    # ---- 挂 tc ----
+    # 数据前置:基础与(切换场景的)alt 分片不在就整轮作废,不进半截流程
+    for tar_dir, hint in [(bench_config.TRAIN_DIR, "make -C bench bench-data")] + (
+            [(bench_config.TRAIN_DIR_ALT, "make -C bench bench-data-alt")]
+            if spec["switch_dataset"] else []):
+        missing = [i for i in range(n_tars)
+                   if not (tar_dir / f"shard-{i:06d}.tar").is_file()]
+        if missing:
+            return void(f"训练数据未就绪:{tar_dir} 缺 {len(missing)}/{n_tars} "
+                        f"个分片;先跑 {hint}")
+
+    # ---- 冷态:先停 agentd 清订单/块缓存,再 cold_reset.sh(页缓存+MinIO+tc)----
+    ok, reason = _e2e_reset_node_state()
+    if not ok:
+        return void(f"冷态复位失败: {reason}")
+    rc, out, err = _run_cmd(["bash", str(COLD_RESET_SH)])
+    if rc != 0:
+        return void(f"cold_reset 失败(rc={rc}): {err.strip()[:500]}")
+    print(f"[{run_id}] 冷态完成(agentd 已复位,节点订单/块缓存已清)")
+
+    # ---- 挂 tc:e2e 走 MinIO egress(_tc_target 对 train 也返回 None)----
     tc_args = cond_mod.cond_to_tc_args(cond)
     target = _tc_target(cond)
     tc_cmd = ["bash", str(TC_APPLY_SH)] + tc_args
@@ -672,38 +1302,54 @@ def _run_e2e_once(cond: dict, run_id: str, reps_dir: Path,
         tc_cmd += ["--target", target]
     rc, out, err = _run_cmd(tc_cmd)
     if rc != 0:
-        reason = f"tc_apply 失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-    print(f"[{run_id}] tc 已挂载: {' '.join(tc_args)}")
+        return void(f"tc_apply 失败(rc={rc}): {err.strip()[:500]}")
+    print(f"[{run_id}] tc 已挂载: {' '.join(tc_args)}(MinIO egress)")
+
+    # ---- 发块 + DataSet CR(基础;切换场景另发 alt)----
+    publish_facts: dict = {}
+    ok, detail = _e2e_publish(dataset, bench_config.TRAIN_DIR, n_tars)
+    if not ok:
+        return void(f"基础数据发布失败: {detail}")
+    publish_facts[dataset] = detail
+    ok, detail = _e2e_apply_dataset(dataset, bench_config.TRAIN_DIR, n_tars)
+    if not ok:
+        return void(detail)
+    print(f"[{run_id}] {detail}")
+    if spec["switch_dataset"]:
+        ok, detail = _e2e_publish(dataset_alt, bench_config.TRAIN_DIR_ALT, n_tars)
+        if not ok:
+            return void(f"切换数据发布失败: {detail}")
+        publish_facts[dataset_alt] = detail
+        ok, detail = _e2e_apply_dataset(dataset_alt, bench_config.TRAIN_DIR_ALT, n_tars)
+        if not ok:
+            return void(detail)
+        print(f"[{run_id}] {detail}")
+
+    # ---- WarmupTask:预热 + gate 放行,提取 WARM_NODE ----
+    cond_env = cond_mod.cond_to_env(cond)
+    tmax = cond_env.get("TRAINCACHE_GATE_TMAX") or E2E_GATE_TMAX_DEFAULT
+    k = _e2e_warmup_k(cond, bench_config.TRAIN_DIR, n_tars)
+    ok, detail, warm_facts = _e2e_apply_warmup(dataset, k, tmax)
+    if not ok:
+        return void(f"预热失败: {detail}")
+    warm_node = warm_facts["warm_node"]
+    print(f"[{run_id}] 预热 {detail}(k={k})")
 
     base_env = os.environ.copy()
-    base_env.update(cond_mod.cond_to_env(cond))
+    base_env.update(cond_env)
     base_env["TRAINCACHE_RUN_ID"] = run_id
-    td_args = cond_mod.cond_to_train_args(cond)
-    td_common = (td_args + ["--n-tars", str(cond["dataset"]["shards"]),
-                            "--out-dir", str(run_dir),
-                            "--checkpoint-dir", str(ckpt_dir)])
 
-    # ---- 阶段一:跑够 N 个 epoch 就写 checkpoint 中断 ----
-    env1 = dict(base_env)
-    env1["TRAINCACHE_JOB_CREATED_AT"] = _rfc3339_now()
-    phase1_cmd = ([PY, str(LOAD_TRAIN)] + td_common
-                  + ["--interrupt-after-epoch", str(spec["interrupt_after_epoch"])])
-    rc, out, err = _run_cmd(phase1_cmd, env=env1)
-    if rc != 0:
-        reason = f"阶段一失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
-    if not (ckpt_dir / "checkpoint.json").is_file():
-        reason = "阶段一跑完了但没有 checkpoint,续跑无从接起"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
+    # ---- 阶段一:跑够 N 个 epoch 写 checkpoint 中断 ----
+    ok, reason = _e2e_run_phase(
+        cond, run_id, run_dir, 1, dataset, warm_node,
+        ["--interrupt-after-epoch", str(spec["interrupt_after_epoch"])])
+    if not ok:
+        return void(reason)
+    if not (run_dir / "ckpt" / "checkpoint.json").is_file():
+        return void("阶段一跑完了但没有 checkpoint,续跑无从接起")
     shutil.copyfile(run_dir / "run.json", run_dir / "run_phase1.json")
-    print(f"[{run_id}] 阶段一完成({spec['interrupt_after_epoch']} 个 epoch 后中断)")
+    print(f"[{run_id}] 阶段一完成({spec['interrupt_after_epoch']} 个 epoch 后中断,"
+          f"checkpoint 已留档)")
 
     # ---- 场景动作(两阶段之间)----
     action_facts: dict = {}
@@ -713,55 +1359,51 @@ def _run_e2e_once(cond: dict, run_id: str, reps_dir: Path,
             json.dumps(action_facts, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8")
         if not action_facts.get("ok"):
-            reason = f"agentd 重启失败: {action_facts.get('reason', '')}"
-            _write_void(run_dir, reason)
-            print(f"[{run_id}] {reason}", file=sys.stderr)
-            return run_dir
+            return void(f"agentd 重启失败: {action_facts.get('reason', '')}")
         print(f"[{run_id}] agentd 已重建并 Ready")
 
-    # ---- 阶段二:从 checkpoint 续跑 ----
-    env2 = dict(base_env)
-    env2["TRAINCACHE_JOB_CREATED_AT"] = _rfc3339_now()
-    phase2_cmd = [PY, str(LOAD_TRAIN)] + td_common + ["--resume"]
-    if spec["data_version"] == 2:
-        phase2_cmd += ["--url", bench_config.TRAIN_URL_V2]
-    rc, out, err = _run_cmd(phase2_cmd, env=env2)
-    if rc != 0:
-        reason = f"阶段二失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
+    # ---- 阶段二:同节点同 checkpoint 续跑;切换场景读 alt DataSet ----
+    phase2_dataset = dataset_alt if spec["switch_dataset"] else dataset
+    ok, reason = _e2e_run_phase(cond, run_id, run_dir, 2, phase2_dataset,
+                                warm_node, ["--resume"])
+    if not ok:
+        return void(reason)
     print(f"[{run_id}] 阶段二完成(续跑到第 {cond['workload']['epochs']} 个 epoch)")
 
-    # ---- 采集 ----
-    collect_cmd = [PY, str(COLLECT_PY), "--run-dir", str(run_dir)]
+    # ---- 采集(Prometheus 按真实 DataSet 名;Pod 仍在,collect 取 Pod 事实)----
+    collect_cmd = [PY, str(COLLECT_PY), "--run-dir", str(run_dir),
+                   "--warmup-task", E2E_WARMUP_NAME, "--pod", E2E_POD_NAME,
+                   "--chunk-bytes", str(E2E_CHUNK_BYTES)]
     if os.environ.get("PROMETHEUS_URL", "").strip():
         collect_cmd += ["--prometheus-url", os.environ["PROMETHEUS_URL"].strip(),
                         "--dump-series"]
-    rc, out, err = _run_cmd(collect_cmd, env=env2)
+    rc, out, err = _run_cmd(collect_cmd, env=base_env)
+    _kubectl(["delete", "pod", E2E_POD_NAME, "--ignore-not-found",
+              "--grace-period=0", "--force"], ns=E2E_NS, timeout=60)
     if rc != 0:
-        reason = f"collect 失败(rc={rc}): {err.strip()[:500]}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
+        return void(f"collect 失败(rc={rc}): {err.strip()[:500]}")
     print(f"[{run_id}] 采集完成 → {run_dir / 'metrics.csv'}")
 
     # ---- 场景记录 + lock ----
     (run_dir / "e2e.json").write_text(json.dumps({
         "scenario": scenario,
         "interrupt_after_epoch": spec["interrupt_after_epoch"],
-        "data_version": spec["data_version"],
+        "switch_dataset": spec["switch_dataset"],
         "action": spec["action"],
         "action_facts": action_facts,
+        "dataset": dataset,
+        "dataset_phase2": phase2_dataset,
+        "warm_node": warm_node,
+        "warmup": warm_facts,
+        "publish": publish_facts,
+        "image": E2E_TRAIN_IMAGE,
+        "pod_name": E2E_POD_NAME,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
         lock_mod.write_lock(run_dir / "lock.json")
         print(f"[{run_id}] lock.json 已写")
     except Exception as exc:  # noqa: BLE001
-        reason = f"lock 写入失败: {exc}"
-        _write_void(run_dir, reason)
-        print(f"[{run_id}] {reason}", file=sys.stderr)
-        return run_dir
+        return void(f"lock 写入失败: {exc}")
 
     return run_dir
 

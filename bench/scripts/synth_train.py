@@ -2,9 +2,8 @@
 """训练负载数据生成器:合成 JPEG → webdataset tar 分片 ×16(≈2GiB,端到端族专用)。
 
 数据集按 config 的 TRAIN_N_TARS × TRAIN_IMAGES_PER_TAR 张 512px JPEG(q85,σ 校准到
-~160KB/张)≈2GiB,落宿主机本地目录(config.TRAIN_DIR,不上传 MinIO),由独立 nginx
-容器 traincache-source-d(端口 9100,挂 /usr/share/nginx/html/track-d)供训练进程
-读取。容器内挂载点沿用磁盘现状,不随命名调整。
+~160KB/张)≈2GiB,落宿主机本地目录(config.TRAIN_DIR,即 train/tars/)。e2e 编排用
+trainpublish 把这些 tar 切块发布到 MinIO,训练 Pod 经 agentd 本地块缓存读块。
 
 与主数据集生成器(synth_dataset.py)同构(权威参考):
 - 同一合成管线:种子派生 RandomState + random.Random(渐变色底 + 随机几何

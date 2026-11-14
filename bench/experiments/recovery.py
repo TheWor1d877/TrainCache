@@ -12,7 +12,7 @@
     (删失率 = 删失数 / (回落数 + 删失数),基线不足事件不进分母);
   * 切换前不足 20 步实测 → status=insufficient_baseline,不进 fig3。
 
-输入契约(D 轨 run 目录,由 bench/scripts/bench_track_d.py 写入):
+输入契约(训练负载 run 目录,由 bench/scripts/load_train.py 写入):
   <run_dir>/per_step_*.jsonl  每步一行:epoch / step_in_epoch / global_step /
       warmup / wait_s / step_s / shard / shards / phase(steady|switch)/ stage
       (stall = wait_s/step_s;startup 相位只存在于 run.json,没有步记录)
@@ -149,7 +149,7 @@ def load_records(run_dir):
     if not any("phase" in r for r in recs):
         raise RecoveryInputError(
             f"{run_dir}: per_step 打点缺 phase 标签(startup/steady/switch)。"
-            "这是旧格式产物,请用含 M1 打点的 bench_track_d.py 重跑 D 轨后再执行 recovery。")
+            "这是旧格式产物,请用含 M1 打点的 load_train.py 重跑训练负载后再执行 recovery。")
     return recs
 
 
@@ -184,7 +184,7 @@ def load_switch_events(run_dir):
         if "at_step" not in e or "to_epoch" not in e:
             raise RecoveryInputError(
                 f"{run_dir}: switch 事件缺 at_step/to_epoch(旧格式打点),"
-                "请用含 M1 打点的 bench_track_d.py 重跑后执行 recovery")
+                "请用含 M1 打点的 load_train.py 重跑后执行 recovery")
     return events, meta
 
 

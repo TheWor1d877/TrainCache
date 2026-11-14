@@ -624,7 +624,7 @@ def _node_cache_check_cmd(node):
 
 
 def _drop_host_page_caches(tag):
-    """冷态第二层：丢宿主机页缓存（口径同 D 轨 `track_d_up.sh` 的 ④）。
+    """冷态第二层：丢宿主机页缓存（口径同 `cold_reset.sh`）。
 
     清缓存目录只清了**磁盘**那一层：kind 节点上 Fluid/JuiceFS 的挂载进程跨 rep
     存活，内核里那批 FUSE 文件的干净页不会因为 `rm -rf` 缓存目录而失效，下一 rep
@@ -1107,7 +1107,7 @@ if (_trace["n_tars"] != n_tars or _trace["epochs"] != epochs
     raise SystemExit("trace.json 与本次运行参数不一致: " + TRACE_PATH)
 # 每个 epoch 的分片消费序列：shard_perm 按 repeats 循环展开。
 # 一步消费 batch 个样本；分片(含 images_per_tar 样本)读一遍横跨
-# images_per_tar/batch 步 —— 与 bench_track_d.py 的 epoch 语义对齐：
+# images_per_tar/batch 步 —— 与 load_train.py 的 epoch 语义对齐：
 # 一个 epoch 恰好把该 stage 的数据按轨迹顺序过一遍。
 epoch_occ = []
 for _ep in _trace["per_epoch"]:
@@ -4460,7 +4460,7 @@ def selftest():
     saved = {k: os.environ.get(k) for k in ("POD_TIMEOUT",)}
     saved_tilt, saved_rate = TILT, TC_RATE_EFF
     saved_n_tars = N_TARS
-    globals()["N_TARS"] = 32          # 倾斜 COND 的 track-b 分片数，与 policy-* 一致
+    globals()["N_TARS"] = 32          # 倾斜 COND 的 tilt 负载分片数，与 policy-* 一致
     floor_s = (EPOCHS * N_TARS * SHARD_SIZE_MB * 1024 * 1024) / (100 * 1e6 / 8)
     try:
         globals()["TC_RATE_EFF"] = "100mbit"

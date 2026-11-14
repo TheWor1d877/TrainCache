@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""性能报告生成器：results-v081 + e2e 序列 → 自包含 ECharts 报告页 + README 静态 PNG。
+"""性能报告生成器：results + e2e 序列 → 自包含 ECharts 报告页 + README 静态 PNG。
 
 输出落 docs/perf-report/（index.html + fig/*.png），不直接放 docs 根。
 --mock 用假数据生成同构报告，供风格验收；真实模式读数据层，不访问集群。
 
 用法:
   python3 bench/experiments/report_perf.py --mock
-  python3 bench/experiments/report_perf.py --results-root <数据层>/bench/results-v081
+  python3 bench/experiments/report_perf.py --results-root <数据层>/bench/results
 """
 from __future__ import annotations
 
@@ -1372,7 +1372,7 @@ def render_html(data, secs):
 <body>
 <nav><span class="brand">TrainCache 性能报告</span>{nav}<div id="progress"></div></nav>
 <header><h1>TrainCache 缓存层性能实测报告{badge}</h1>
-<div class="sub">results-v081 · compare 25 格 + e2e 3 场景 · 口径见各图注</div></header>
+<div class="sub">compare 25 格 + e2e 3 场景 · 口径见各图注</div></header>
 <div class="kpis">{kpi_html}</div>
 {setup_card}
 {''.join(body)}
@@ -1429,7 +1429,7 @@ def export_png(data, out_dir):
 def main():
     ap = argparse.ArgumentParser(description="性能报告生成器")
     ap.add_argument("--results-root", type=Path,
-                    default=config.RESULTS_DIR.parent / "results-v081")
+                    default=config.RESULTS_DIR)
     ap.add_argument("--out", type=Path, default=OUT_DEFAULT)
     ap.add_argument("--mock", action="store_true", help="假数据演示模式")
     ap.add_argument("--png", action="store_true", help="同时导出 README 静态 PNG")

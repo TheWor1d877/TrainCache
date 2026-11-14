@@ -298,7 +298,11 @@ def collect(args):
     post_pod = secs(t_pod_ready, t_last)
     gate_hold = secs(t_pod_ready, t_gate_release)
 
-    dataset = args.dataset or run.get("dataset") or "track-d"
+    dataset = args.dataset or run.get("dataset")
+    if not dataset:
+        raise SystemExit(
+            "collect: 缺 dataset 标签(--dataset 或 run.json 的 dataset 字段必须给一个);"
+            "Prometheus 按真实 DataSet 名观测,不再有旧缺省兜底")
     chunk_bytes = args.chunk_bytes
     fetch = {"startup": None, "sustained": None, "switch": None, "total": None}
     fetch_err = None
@@ -410,7 +414,6 @@ def collect(args):
         "cond": run.get("cond"),
         "group": run.get("group") or args.group,
         "dataset": dataset,
-        "track": run.get("track"),
         "void": "true" if args.void else "false",
         "t_submit": fmt_ts(t_submit),
         "t_submit_source": run.get("t_submit_source"),
@@ -458,7 +461,7 @@ def collect(args):
 
 
 CSV_FIELDS = [
-    "run_id", "cond", "group", "dataset", "track", "void",
+    "run_id", "cond", "group", "dataset", "void",
     "t_submit", "t_submit_source", "t_pod_ready", "t_first_step", "t_last_step",
     "t_startup_ready", "t_gate_release", "gate_state", "gate_reason",
     "startup_makespan_s", "full_makespan_s", "post_pod_s", "gate_hold_s",

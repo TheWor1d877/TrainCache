@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M5 实验 runner:淘汰与预取协同实验(C 轨倾斜场景)。
+"""M5 实验 runner:淘汰与预取协同实验(tilt 负载倾斜场景)。
 
 流程(run_once):
   1. 创建产物目录 results/policy/<cond_name>/<run_id>/
@@ -89,8 +89,8 @@ def _run_cmd(cmd: list, env: dict | None = None,
 # ---------------------------------------------------------------------------
 # Mock 实验(selftest 专用,完全复用 load_tilt 的组件)
 # ---------------------------------------------------------------------------
-def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]:
-    """用 mock 模式跑一轮 C 轨双 Job 实验,产物写入 run_dir。
+def _run_mock_tilt(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]:
+    """用 mock 模式跑一轮 tilt 负载双 Job 实验,产物写入 run_dir。
 
     复用 load_tilt.Downloader / run_job_a / run_job_b /
     compute_eviction_stats,保证逻辑与真实一致。
@@ -144,7 +144,6 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
         "run_id": env.get("TRAINCACHE_RUN_ID"),
         "cond": env.get("TRAINCACHE_COND"),
         "group": env.get("TRAINCACHE_GROUP"),
-        "track": "C",
         "started_at": btc.utc_now(),
         "finished_at": btc.utc_now(),
         "t_submit": env.get("TRAINCACHE_JOB_CREATED_AT", btc.utc_now()),
@@ -161,7 +160,7 @@ def _run_mock_track_c(cond: dict, run_dir: Path, env: dict) -> tuple[dict, dict]
         "full_shard_count": len(full_shards),
         "n_steps_a": sa["n_steps"],
         "n_steps_b": sb["n_steps"],
-        # 正式 C 轨的 A 步预算是常量(4.2 的 COND 契约一节)；mock 这里按合成热集规模给等价的量
+        # 正式 tilt 负载的 A 步预算是常量(4.2 的 COND 契约一节)；mock 这里按合成热集规模给等价的量
         "tilt_a_budget": a_epochs * len(hot_shards),
         "selftest": True,
         "evict_policy": cond["cache"]["evict_policy"],
@@ -247,7 +246,7 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
         # ---- selftest:mock 实验 ----
         print(f"[{run_id}] selftest:mock 模式,跳过 cold_reset/tc_apply")
         try:
-            run_obj, ev = _run_mock_track_c(cond, run_dir, base_env)
+            run_obj, ev = _run_mock_tilt(cond, run_dir, base_env)
         except Exception as exc:  # noqa: BLE001
             reason = f"mock 实验失败: {exc}"
             _write_void(run_dir, reason)
@@ -393,7 +392,6 @@ def selftest(cond_name: str = "evict-heat-rho8") -> int:
 
         # 5. 校验产物内容格式
         run_obj = json.loads((run_dir / "run.json").read_text())
-        assert run_obj["track"] == "C"
         assert run_obj["cond"] == cond_name
         assert run_obj["selftest"] is True
         assert run_obj["evict_policy"] == cond["cache"]["evict_policy"]
@@ -447,7 +445,7 @@ def selftest(cond_name: str = "evict-heat-rho8") -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="M5 实验 runner:淘汰与预取协同实验(C 轨倾斜场景)")
+        description="M5 实验 runner:淘汰与预取协同实验(tilt 负载倾斜场景)")
     ap.add_argument("--cond", default="evict-heat-rho8",
                     help="COND 名(conds/<name>.json,默认 evict-heat-rho8)")
     ap.add_argument("--reps", type=int, default=None,
