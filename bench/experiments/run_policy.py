@@ -15,6 +15,7 @@
 selftest 完全 mock,不访问网络、不启动真实训练。
 """
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -234,7 +235,7 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
                   "--rate", f"{cond['network']['rate_mbit']}mbit",
                   "--groups", cond["group"],
                   "--reps", "1",
-                  "--out", str(run_dir / "summary.csv")]
+                  "--out-root", str(run_dir)]
         rc, out, err = _run_cmd(rb_cmd, env=env)
         if rc != 0:
             reason = f"run_bench 失败(rc={rc}): {err.strip()[:500]}"
@@ -313,7 +314,36 @@ def run_reps(cond_name: str, reps: int | None = None,
         void_marker = run_dir / "VOID"
         if void_marker.exists():
             print(f"[{run_id}] 本轮作废(VOID),继续下一轮", file=sys.stderr)
+    if not selftest:
+        _aggregate_cell_summary(reps_dir, results)
     return results
+
+
+def _aggregate_cell_summary(reps_dir: Path, run_dirs: list[Path]) -> None:
+    """把各 rep 的 summary 行汇总到格根 summary.csv。
+
+    run_bench 按 --out-root 把每 rep 落在 <run_dir>/<compare-格名>/summary.csv，
+    格根没有 summary 时 report 与 grid_done 都读不到，整格完成度也判不出。
+    """
+    rows: list[dict] = []
+    fields = None
+    for rd in run_dirs:
+        if (rd / "VOID").exists():
+            continue
+        for csv_path in sorted(rd.glob("*/summary.csv")):
+            with csv_path.open(newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                if fields is None:
+                    fields = reader.fieldnames
+                rows.extend(reader)
+    if not rows or fields is None:
+        return
+    out = reps_dir / "summary.csv"
+    with out.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[aggregate] 格根 summary.csv 写入 {len(rows)} 行: {out}", flush=True)
 
 
 # ---------------------------------------------------------------------------

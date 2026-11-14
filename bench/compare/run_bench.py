@@ -3427,8 +3427,9 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                                     "warmup_seconds": group_warmup,
                                     "trace_sha256": trace_sha})
                     break
-            if rep:
-                rep_cold_reset(group)
+            # rep0 也要清：进组前的 cold_reset 之后 group_up 才发布快照，新写对象
+            # 会把宿主机页缓存焐热；rep0 跳过清缓存就成了非冷态读（首 rep 离群）。
+            rep_cold_reset(group)
             warmup_seconds = group_warmup
             warmup_basis = group_warmup_basis
         else:
