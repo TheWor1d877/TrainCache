@@ -1304,6 +1304,8 @@ PREFETCH_K = int(os.environ.get("TRAINCACHE_PREFETCH_K", "16"))
 # agentd hook：Unix datagram，行分隔 JSON；测量 Pod 经 hostPath 挂载节点
 # /run/traincache 到 /run/tc-hook。发送失败静默忽略，不影响读数与字节账。
 HOOK_SOCK = os.environ.get("TRAINCACHE_HOOK_SOCK", "/run/tc-hook/agent.sock")
+# 等块期间重发 read_miss 的间隔(秒):钩子帧丢失后重发,语义同生产的 hooklib。
+MISS_REREQUEST_S = 5.0
 _chunk_map = None
 _order_written = False
 
@@ -1465,8 +1467,18 @@ def read_shard(shard, phase):
             # 块落盘是临时文件 + rename(core/cas/store.go 的 CreateTemp/os.Rename),
             # exists 即完整可读,所以轮询可以直接加密:0.5 s 每块平均多等 0.25 s,
             # 3000 块就是 12 分钟;改成 25 ms 纯 stat,等待量级降到秒。
+            # 等待期间每 MISS_REREQUEST_S 秒重发一次 read_miss:钩子帧是单向
+            # datagram,发送失败静默忽略(agent/hooklib 设计),帧撞上 agentd 重建
+            # socket 的空窗就丢了,丢了没人再要这个块,只能等满 180 s 判失败。
+            # 生产的 hooklib 每次 open 失败都重发 read_miss(traincache_hook/torch.py
+            # 的 miss()),这里同语义:重发由 agentd 的 pending 去重表合并,同一块
+            # 不会重复下载。
             deadline = time.perf_counter() + 180
+            next_rerequest = time.perf_counter() + MISS_REREQUEST_S
             while not os.path.exists(blk) and time.perf_counter() < deadline:
+                if time.perf_counter() >= next_rerequest:
+                    _hook_read_miss(name, chunk_idx)
+                    next_rerequest = time.perf_counter() + MISS_REREQUEST_S
                 time.sleep(0.025)
             got2 = None
             if os.path.exists(blk):

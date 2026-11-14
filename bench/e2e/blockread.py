@@ -10,7 +10,8 @@
     (core/cas/header.go),concat payload 成 tar 字节流(io.BytesIO,整片
     ~132MiB 进内存可接受);
   * 缺块:发 read_miss hook 帧 → 25ms stat 轮询等 agentd 补块(上限
-    TRAINCACHE_MISS_WAIT_S,默认 180s)→ 超时即本次读失败(生产上同样是
+    TRAINCACHE_MISS_WAIT_S,默认 180s;等待期间每 TRAINCACHE_MISS_REREQUEST_S
+    秒重发一次 read_miss)→ 超时即本次读失败(生产上同样是
     训练读报错);
   * 每读一块发 advance hook 帧;orders 经 ordersrc.py 写 ring,每 epoch 一次
     (stage_id=epoch),心跳线程每 10s 同代际续写(D57)。
@@ -49,6 +50,8 @@ POD_UID = os.environ.get("POD_UID", "unknown-pod")
 CACHE_ROOT = os.environ.get("CACHE_ROOT", "/var/cache/traincache/blocks")
 ORDERS_DIR = os.environ.get("ORDERS_DIR", "/run/traincache/orders")
 MISS_WAIT_S = float(os.environ.get("TRAINCACHE_MISS_WAIT_S", "180"))
+# 等块期间重发 read_miss 的间隔(秒):钩子帧丢失后重发,语义同生产的 hooklib。
+MISS_REREQUEST_S = float(os.environ.get("TRAINCACHE_MISS_REREQUEST_S", "5"))
 
 SCHEME = "tcblk"
 HEADER_SIZE = 128          # CAS 块头(core/cas/header.go,v1 即最终格式)
@@ -152,7 +155,11 @@ def read_shard_bytes(name):
             # 块落盘是 rename 原子可见,等待量级降到秒(同 run_bench.py 的口径)。
             _hook_read_miss(name, chunk_idx)
             deadline = time.perf_counter() + MISS_WAIT_S
+            next_rerequest = time.perf_counter() + MISS_REREQUEST_S
             while payload is None and time.perf_counter() < deadline:
+                if time.perf_counter() >= next_rerequest:
+                    _hook_read_miss(name, chunk_idx)
+                    next_rerequest = time.perf_counter() + MISS_REREQUEST_S
                 time.sleep(0.025)
                 payload = _read_local_block(blk, size)
             if payload is not None:
