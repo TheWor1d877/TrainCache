@@ -4,7 +4,7 @@
 #
 # 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller、./gateway、
 # ./checkpoint，五个模块目录都需入上下文):
-#   docker build -f agent/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-agentd:v0.9.1 .
+#   docker build -f agent/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-agentd:v0.9.2 .
 # 本机构建用 hack/build-images.sh:构建前先把基础镜像补成官方短名。
 #
 # 镜像内容:agentd 服务二进制(ENTRYPOINT)+ traincache CLI(探针与运维共用;本机无 grpcurl,
@@ -17,7 +17,7 @@ FROM golang:1.26-alpine AS build
 
 # GOPROXY 默认 goproxy.cn,受限网络可用 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖。
 ARG GOPROXY=https://goproxy.cn,direct
-ARG VERSION=v0.9.1
+ARG VERSION=v0.9.2
 ENV CGO_ENABLED=0 \
     GOPROXY=${GOPROXY}
 

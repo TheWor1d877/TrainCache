@@ -64,7 +64,7 @@ EOF
 kubectl kustomize "$tmp" >"$OUT"
 
 bad=0
-if grep -qE ':(dev|v0\.9\.1)' "$OUT"; then
+if grep -qE ':(dev|v0\.9\.2)' "$OUT"; then
   echo "渲染结果仍含浮动标签" >&2
   bad=1
 fi

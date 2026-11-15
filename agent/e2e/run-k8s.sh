@@ -2,8 +2,8 @@
 # run-k8s.sh — TrainCache Agent 服务化「kind 集群端到端」演练。
 #
 # 前置:复用已部署的 kind 集群(traincache),镜像
-#       ghcr.io/thewor1d877/traincache/traincache-agentd:v0.9.1 /
-#       traincache-ordersrc:v0.9.1 / busybox:latest 已用
+#       ghcr.io/thewor1d877/traincache/traincache-agentd:v0.9.2 /
+#       traincache-ordersrc:v0.9.2 / busybox:latest 已用
 #       ./hack/kind-load.sh <集群> <镜像> 送进集群(节点里的镜像名与本机 tag 一致)。
 #       守护集的镜像引用不改:清单里的 ghcr 全名就是 kind load 后的名字,
 #       改成裸名会让后续滚动更新拉不到镜像,且控制面脚本按清单哈希判断是否

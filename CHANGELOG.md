@@ -25,6 +25,10 @@
 
 - Agent 淘汰循环的检查周期可配：环境变量 `TRAINCACHE_EVICT_INTERVAL`（ConfigMap `traincache-config` 键 `evictInterval`），默认 `30s`，非法值或非正数拒绝启动。
 
+### Changed
+
+- 镜像版本统一到 v0.9.2：仓库清单、kustomization 的 `newTag`、组态的 `image_set`、构建脚本默认 tag 与 Dockerfile 的 `VERSION` 默认值全部指向 `v0.9.2`，文档里的镜像引用同步。发布清单仍用 `@sha256` 固定。
+
 ## [v0.9.1] - 2026-11-15
 
 ### Added
