@@ -1,8 +1,8 @@
 # train-pod.yaml — 最小训练 Pod(验收 3)+ OrderSource sidecar(验收 8 前置;design 设计《部署与配置》)。
 #
 # 用法(kind 本机演练;命名空间由 controller/deploy/namespace.yaml 创建,先 apply 它与 agent 清单):
-#   docker build -f agent/deploy/ordersrc.Dockerfile -t traincache-ordersrc:v0.9.2 .
-#   kind load docker-image traincache-ordersrc:v0.9.2 --name traincache
+#   docker build -f agent/deploy/ordersrc.Dockerfile -t traincache-ordersrc:v0.9.3 .
+#   kind load docker-image traincache-ordersrc:v0.9.3 --name traincache
 #   kind load docker-image busybox:latest --name traincache
 #   kubectl apply -f agent/deploy/train-pod.yaml
 #
@@ -56,7 +56,7 @@ spec:
           mountPath: /run/traincache
     # ---- OrderSource sidecar:ConsumeOrder 最小写端(agent/ordersrc/ordersrc.py)----
     - name: ordersrc
-      image: traincache-ordersrc:v0.9.2
+      image: traincache-ordersrc:v0.9.3
       imagePullPolicy: IfNotPresent
       command:
         - /bin/sh

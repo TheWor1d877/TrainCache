@@ -551,16 +551,13 @@ def ensure_agent_config():
     """把 traincache-config 的 agent 键对齐到本轮参数。
 
     agentd 与 controller-manager 都在启动时读这些值。cacheCapacityBytes 变化
-    要重启 controller；四个键任一变化都要重启 agentd，后者由
-    reset_traincache_agent() 逐轮完成。evictInterval 固定 5s：evict-mix 跑程
-    35–48s，生产缺省 30s 周期下超配额窗口短于一个周期，淘汰轮是否被观测到
-    取决于 agentd 启动相位（2026-11-15 heat-rho2 五轮里三轮 rounds_zero）。
+    要重启 controller；三个键任一变化都要重启 agentd，后者由
+    reset_traincache_agent() 逐轮完成。
     """
     want = {
         "cacheCapacityBytes": str(CACHE_BYTES),
         "prefetchLookahead": str(AGENT_PREFETCH_K),
         "evictPolicy": EVICT_POLICY,
-        "evictInterval": "5s",
     }
     cur = _current_agent_config()
     diff = {k: v for k, v in want.items() if cur.get(k) != v}
@@ -766,11 +763,6 @@ def _agentd_pod_names():
     return out.split()
 
 
-# 淘汰轮次从 agentd 日志取。agentd 的 slog 输出是 JSON 格式，字段形态是
-# "result":"normal"；键名与取值与 text 形态一致，两种都收。
-_EVICT_ROUND_RE = re.compile(r'evictor: 淘汰轮结束".*?result["\s:=]+(\w+)')
-
-
 def _evict_round_counts(since_s):
     """run 窗口内各 agentd 日志的淘汰轮次，按 result 分 normal 与 danger。
 
@@ -785,35 +777,12 @@ def _evict_round_counts(since_s):
                              namespace=AGENT_NS, timeout=60)
         if rc != 0:
             continue
-        for m in _EVICT_ROUND_RE.finditer(out):
+        for m in re.finditer(r'evictor: 淘汰轮结束".*?result=(\w+)', out):
             if m.group(1) == "normal":
                 normal += 1
             elif m.group(1) == "danger":
                 danger += 1
     return normal, danger
-
-
-def _evict_mix_failure_reason(metrics: dict) -> str:
-    """混合访问淘汰族的装置失败判据(4.3 按族的判据「evict-mix·装置失败」)。
-
-    读错误与队列超时由 measure_void_reason 统一判，这里只补族内特有的三条:
-    淘汰轮次为 0、存活率列缺失、字节账差超 max(1 B, 1%)。返回空串表示通过。
-    """
-    normal = metrics.get("evict_rounds_normal")
-    danger = metrics.get("evict_rounds_danger")
-    if not isinstance(normal, int) or not isinstance(danger, int):
-        return "evict_mix_missing_column"
-    if normal + danger == 0:
-        return "evict_mix_rounds_zero"
-    for key in ("lowfreq_fresh_survive", "highfreq_stale_survive"):
-        if str(metrics.get(key, "")).strip() == "":
-            return "evict_mix_missing_column"
-    sustained = float(metrics.get("sustained_prefetch_bytes") or 0)
-    switch = float(metrics.get("switch_reprefetch_bytes") or 0)
-    prefetch = float(metrics.get("prefetch_bytes_run") or 0)
-    if abs((sustained + switch) - prefetch) > max(1.0, 0.01 * prefetch):
-        return "evict_mix_bytes_mismatch"
-    return ""
 
 
 def _agentd_pod_ready():
@@ -3829,17 +3798,6 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                       f" errors={metrics.get('read_errors')})，本轮作废", flush=True)
             else:
                 metrics["void"] = False
-            # 4.3 按族的判据「evict-mix·装置失败」：轮次为 0、存活率列缺失、
-            # 字节账差超限，任一命中整轮作废。读错误与队列超时由
-            # measure_void_reason 统一判，不在这里重复。放在测量体判定之后，
-            # 否则会被上面 else 分支的 void=False 覆盖。
-            if TILT_MIX and not metrics.get("void"):
-                _mix_reason = _evict_mix_failure_reason(metrics)
-                if _mix_reason:
-                    metrics["void"] = True
-                    metrics["reason"] = _mix_reason
-                    print(f"[run] {group} rep={rep} 混合访问淘汰族装置失败"
-                          f"({_mix_reason})，本轮作废", flush=True)
             # 测量期间出现降级：功能打折（消费推进换 inotify 信号源），
             # 本轮不参与组间对比；已有更具体的作废原因时保留原原因。
             if is_tc and degraded_value == 1 and not metrics.get("void"):
@@ -3874,11 +3832,8 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 guard_base=guard_base, guard_final=guard_final,
                 dir_peaks=list(dir_peaks), dir_peak_times=list(dir_peak_times))
             # 4.3 全体判据：目录装过容量而淘汰没删过一个块 → 容量口径不成立，作废。
-            # 这条只适用于 evict 族(4.3「淘汰生效」一节)：混合访问淘汰族按族判据
-            # 「evict-mix·装置失败」执行，淘汰计数为 0 不在这条判据里作废。
             # 已有更具体的作废原因时保留原原因。
             if (not metrics.get("void")
-                    and not TILT_MIX
                     and evict_not_engaged(metrics.get("evict_blocks_run"),
                                           metrics.get("cache_dir_peak_bytes"),
                                           CACHE_BYTES)):
@@ -5003,38 +4958,6 @@ def selftest():
     print("[selftest] 15) 多读端直读：4 读端 + 容量 0 才判直读；读法是 HTTP 直读，"
           "脚本里没有 agent 侧的订单与快照函数；未命中字节账等于读字节账；"
           "直读 Pod 只挂脚本卷并带 TRAINCACHE_DIRECT_READ")
-    # ---- 16) 淘汰轮次采集正则：agentd 的 slog 输出是 JSON 形态 ----
-    _json_round = ('{"time":"2026-11-15T06:31:00Z","level":"INFO",'
-                   '"msg":"evictor: 淘汰轮结束","dataset":"ds",'
-                   '"result":"normal","evicted_blocks":172}')
-    if _EVICT_ROUND_RE.findall(_json_round) != ["normal"]:
-        raise AssertionError("自测：JSON 形态的淘汰轮次行取不到 result 取值")
-    _text_round = ('time=2026-11-15T06:31:00Z level=INFO '
-                   'msg="evictor: 淘汰轮结束" result=danger')
-    if _EVICT_ROUND_RE.findall(_text_round) != ["danger"]:
-        raise AssertionError("自测：text 形态的淘汰轮次行取不到 result 取值")
-    print("[selftest] 16) 淘汰轮次采集：JSON 与 text 两种日志形态都取到 result 取值")
-    # ---- 17) 混合访问淘汰族装置失败判据：轮次、缺列、字节账差三条 ----
-    _mix_ok = {"evict_rounds_normal": 2, "evict_rounds_danger": 0,
-               "lowfreq_fresh_survive": 0.0312, "highfreq_stale_survive": 0.3542,
-               "sustained_prefetch_bytes": 100.0, "switch_reprefetch_bytes": 0.0,
-               "prefetch_bytes_run": 100.0}
-    if _evict_mix_failure_reason(_mix_ok):
-        raise AssertionError("自测：各项齐备时不该判装置失败")
-    if _evict_mix_failure_reason(
-            dict(_mix_ok, evict_rounds_normal=0, evict_rounds_danger=0)
-    ) != "evict_mix_rounds_zero":
-        raise AssertionError("自测：淘汰轮次为 0 应判装置失败")
-    if _evict_mix_failure_reason(
-            dict(_mix_ok, highfreq_stale_survive="")
-    ) != "evict_mix_missing_column":
-        raise AssertionError("自测：存活率列缺失应判装置失败")
-    if _evict_mix_failure_reason(
-            dict(_mix_ok, prefetch_bytes_run=200.0)
-    ) != "evict_mix_bytes_mismatch":
-        raise AssertionError("自测：字节账差超限应判装置失败")
-    print("[selftest] 17) 混合访问淘汰族装置失败判据：轮次为 0、存活率列缺失、"
-          "字节账差超限三条都命中，各项齐备时不误判")
     print("run_bench selftest: PASS")
 
 

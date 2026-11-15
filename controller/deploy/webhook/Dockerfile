@@ -4,12 +4,12 @@
 # and traincache/core through go.work, so build from the repo root (or a staged
 # copy of it):
 #   docker build -f controller/deploy/webhook/Dockerfile \
-#     -t ghcr.io/thewor1d877/traincache/webhook:v0.9.2 .
+#     -t ghcr.io/thewor1d877/traincache/webhook:v0.9.3 .
 # hack/build-images.sh runs this build and first retags locally present base
 # images to their official short names.
 FROM golang:1.26-bookworm AS build
 ARG GOPROXY=https://goproxy.cn,direct
-ARG VERSION=v0.9.2
+ARG VERSION=v0.9.3
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.work go.work.sum ./

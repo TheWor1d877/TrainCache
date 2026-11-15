@@ -169,7 +169,7 @@ Fluid 1.1.0-alpha.9 and JuiceFS CE 1.3.0 were deployed and benchmarked on a kind
 ```bash
 make verify           # build, vet, go test -race and gofmt for three modules
 make verify-metadata  # version fields, image names, relative doc links
-hack/build-images.sh  # development images (:v0.9.2)
+hack/build-images.sh  # development images (:v0.9.3)
 make e2e              # six assertions in a kind cluster
 ```
 

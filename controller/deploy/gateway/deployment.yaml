@@ -39,7 +39,7 @@ spec:
       terminationGracePeriodSeconds: 40
       containers:
         - name: gateway
-          image: ghcr.io/thewor1d877/traincache/traincache-gateway:v0.9.2
+          image: ghcr.io/thewor1d877/traincache/traincache-gateway:dev
           imagePullPolicy: IfNotPresent
           env:
             - name: TRAINCACHE_OBJSTORE_ENDPOINT

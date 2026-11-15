@@ -312,8 +312,8 @@ type PrefetchManager struct {
 	cancel  context.CancelFunc
 
 	// cacheCapacityBytes 是节点缓存容量字节维度上限(TRAINCACHE_CACHE_CAPACITY_BYTES;
-	// 装配期经 SetCacheCapacityBytes 注入,m.mu 保护)。ForOrder 用它与订单数据集总字节
-	// 比较,决定是否把该订单预取降级为按需;0 = 字节维度未启用,不降级。
+	// 装配期经 SetCacheCapacityBytes 注入,m.mu 保护)。ForOrder 用它的一半与邻域预取窗口
+	// 字节比较,决定是否把该订单预取降级为按需;0 = 字节维度未启用,不降级。
 	cacheCapacityBytes int64
 
 	mu      sync.Mutex
@@ -965,7 +965,7 @@ func (b *datasetBundle) protectedFPs() []cas.Fingerprint {
 // ForOrder 是订单入口(发现转发 goroutine 内串行调用;ctx = 发现循环 ctx):取/建 bundle
 // (订单前缀 hint 随构造装入,先于 Follow 首轮检查,D60)→ 只加载订单 chunks 涉及的前缀
 // 分片(LoadPrefixes,不整包下载;经 measureLoadPrefixes 打索引线指标)→ 缓存压力判据
-// (容量 > 0 且数据集总字节超容量时降级为按需预取)→ 首个订单启动调度(Start;之后订单只走
+// (容量 > 0 且邻域窗口字节超容量一半时降级为按需预取)→ 首个订单启动调度(Start;之后订单只走
 // OnStageSwitch)→ OnStageSwitch 安装新阶段(旧阶段降级/在途/ETA 均在预取器内部处理,svc 只记
 // 日志)→ 新订单 t_touch 刷新(设计《回收与磁盘淘汰》任务 4;仅订单成功安装后)。返回索引加载或
 // 阶段切换错误(调用方记日志、不中断发现循环)。
@@ -985,21 +985,24 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 		return err
 	}
 
-	// 缓存压力判据:容量 > 0 且订单数据集总字节超过容量时,该订单预取降级为按需——
-	// 首批 K 置 0,预取器同时关闭邻域窗口;read_miss 钩子触发的按需回源不受影响。
-	// 容量为 0 表示字节维度未启用,维持现状。
+	// 缓存压力判据:容量 > 0 且邻域预取窗口(lookahead 块)的字节超过容量的一半时,该订单
+	// 预取降级为按需——首批 K 置 0,预取器同时关闭邻域窗口;read_miss 钩子触发的按需回源
+	// 不受影响。容量为 0 表示字节维度未启用,维持现状。比的是窗口而非数据集总字节:窗口 ≤
+	// 半缓存时预取块与在用块各占一半,预取块不会在消费前被自己挤出;数据集大于缓存而窗口
+	// 远小于缓存的中间档因此照常预取,不再被整单否决。
 	m.mu.Lock()
 	capacity := m.cacheCapacityBytes
 	m.mu.Unlock()
 	demandOnly := false
 	if capacity > 0 {
-		if total := orderTotalBytes(ctx, b.catalog, o.Chunks); total > capacity {
+		k := b.prefetcher.Lookahead()
+		if window := orderWindowBytes(ctx, b.catalog, o.Chunks, k); window > capacity/2 {
 			demandOnly = true
 			o.PrefetchChunks = 0
-			slog.Info("orders: 缓存容量小于数据集总字节,预取降级为按需回源",
+			slog.Info("orders: 邻域预取窗口超过缓存容量一半,预取降级为按需回源",
 				"dataset", o.Dataset,
 				"stage_id", o.StageID,
-				"dataset_bytes", total,
+				"window_bytes", window,
 				"capacity_bytes", capacity,
 			)
 		}
@@ -1056,11 +1059,14 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	return nil
 }
 
-// orderTotalBytes 累加订单 chunks 的数据集总字节:ref 去重后逐个索引 Lookup 取
-// Entry.Size 求和。Lookup 未命中/出错的块跳过——低估只会漏判降级,不会把容量
-// 足够的订单误降级。
-func orderTotalBytes(ctx context.Context, cat *index.Catalog, chunks []ordersource.ChunkRef) int64 {
-	seen := make(map[ordersource.ChunkRef]bool, len(chunks))
+// orderWindowBytes 累加订单前 k 个去重块的字节量,作为邻域预取窗口的字节足迹。k ≤ 0 返回
+// 0;订单去重块不足 k 时按实有块计。块大小取索引真实值,缺项(查不到/出错)跳过,与
+// 旧的整单累加同口径,只是求和范围收窄到窗口头 k 块。
+func orderWindowBytes(ctx context.Context, cat *index.Catalog, chunks []ordersource.ChunkRef, k int) int64 {
+	if k <= 0 {
+		return 0
+	}
+	seen := make(map[ordersource.ChunkRef]bool, k)
 	var total int64
 	for _, ref := range chunks {
 		if seen[ref] {
@@ -1072,6 +1078,9 @@ func orderTotalBytes(ctx context.Context, cat *index.Catalog, chunks []ordersour
 			continue
 		}
 		total += e.Size
+		if len(seen) >= k {
+			break
+		}
 	}
 	return total
 }

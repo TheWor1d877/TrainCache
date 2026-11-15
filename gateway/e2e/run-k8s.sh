@@ -8,7 +8,7 @@
 #      mc 发现/读取对象；MinIO 镜像不带 mc 时相关步骤 SKIP）。
 #   3. traincache namespace 已存在 ConfigMap traincache-config 与 Secret
 #      traincache-objstore（accessKey / secretKey 两个键）。
-#   4. 镜像 traincache-gateway:v0.9.2 已 kind load；清单里的 ghcr 引用会被
+#   4. 镜像 traincache-gateway:v0.9.3 已 kind load；清单里的 ghcr 引用会被
 #      `kubectl set image` 替换。
 #   5. 探针镜像已在集群内（默认 busybox:latest，TC_PROBE_IMAGE 可换）。
 #   6. 对象键：优先 E2E_KEY='<bucket 内完整 key>'；未设置时用 mc 递归列桶取
@@ -47,7 +47,7 @@ NS="${TC_NAMESPACE:-traincache}"
 MINIO_NS="${TC_MINIO_NAMESPACE:-minio}"
 GW_DEPLOY=traincache-gateway
 GW_SVC=traincache-gateway
-GW_IMAGE="${TC_GATEWAY_IMAGE:-traincache-gateway:v0.9.2}"
+GW_IMAGE="${TC_GATEWAY_IMAGE:-traincache-gateway:v0.9.3}"
 GW_PORT=9413
 AGENT_DS=traincache-agentd
 AGENT_LABEL="app.kubernetes.io/name=traincache-agentd"

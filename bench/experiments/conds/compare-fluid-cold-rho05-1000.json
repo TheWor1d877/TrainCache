@@ -32,7 +32,7 @@
     "gateway": false,
     "gateway_image": null,
     "gateway_cache": false,
-    "image_set": "sha256:615bb913850c1c014c7ed659882c6fbd1a3522ab897b920876d79a2b3de2b74f"
+    "image_set": "sha256:d21aa6de42a594678f22aaae622bee77632b385464bbc6064ee06bb7ffc162fd"
   },
   "tags": [
     "compare",

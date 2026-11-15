@@ -17,16 +17,14 @@ DATA_DIR = DATA_ROOT / "bench" / "data"
 DATASET_DIR = DATA_DIR / "dataset" / "tars"
 TILT_DIR = DATA_DIR / "tilt"
 TRAIN_DIR = DATA_DIR / "train" / "tars"
-# 产物根。正式轮落默认目录；冒烟用 TRAINCACHE_RESULTS_ROOT 指向自己的目录，
-# 冒烟产物与正式产物不混在一个根下,正式轮的行不会被冒烟行顶掉。
-RESULTS_DIR = Path(os.environ.get("TRAINCACHE_RESULTS_ROOT") or (DATA_ROOT / "bench" / "results")).resolve()
+RESULTS_DIR = DATA_ROOT / "bench" / "results"
 # 产物根下按族 ID 分片:results/<族>/<格子>/。族名与 COND 的 family 字段同源,
 # 一个族一个目录,汇总与出图按族各自读自己的目录。
 BENCH_FAMILIES = ("compare", "gateway", "evict", "evict-mix", "prefetch",
                   "warmup", "switch", "chaos", "multiconsumer", "e2e",
                   "rangepar")
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
-COMPARE_LOGS_DIR = LOGS_DIR / "compare"
+COMPARE_LOGS_DIR = DATA_ROOT / "bench" / "compare" / "logs"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"
 
 

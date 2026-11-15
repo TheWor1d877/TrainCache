@@ -57,6 +57,10 @@ IMG_MANAGER="ghcr.io/thewor1d877/traincache/controller-manager:$TAG"
 IMG_WEBHOOK="ghcr.io/thewor1d877/traincache/webhook:$TAG"
 IMG_SCHEDULER="ghcr.io/thewor1d877/traincache/kube-scheduler:$TAG"
 IMG_AGENT="ghcr.io/thewor1d877/traincache/traincache-agentd:$TAG"
+# checkpointd 由准入注入到训练 Pod 当 sidecar，训练 Job 用的是 busybox 镜像，
+# 所以 checkpointd 必须随控制面一起构建并加载，否则注入的 init container
+# 会去 registry 拉一个本地没有的镜像。
+IMG_CHECKPOINT="ghcr.io/thewor1d877/traincache/traincache-checkpointd:$TAG"
 # Third-party fixtures are preloaded too: kind's containerd does not read the
 # host docker daemon mirror, so they are pulled on the host and loaded.
 IMG_MINIO="pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
@@ -249,16 +253,23 @@ build_images() {
     "$REPO_ROOT/agent" "$REPO_ROOT/core" "$REPO_ROOT/gateway"
     "$REPO_ROOT/checkpoint"
   )
+  local checkpoint_src=(
+    "$REPO_ROOT/go.work" "$REPO_ROOT/go.work.sum"
+    "$REPO_ROOT/checkpoint" "$REPO_ROOT/core" "$REPO_ROOT/agent"
+    "$REPO_ROOT/controller" "$REPO_ROOT/gateway"
+  )
   build_image manager "$IMG_MANAGER" "$REPO_ROOT/controller/deploy/manager/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
   build_image webhook "$IMG_WEBHOOK" "$REPO_ROOT/controller/deploy/webhook/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
   build_image scheduler "$IMG_SCHEDULER" "$REPO_ROOT/controller/deploy/scheduler/Dockerfile" "$stage" "${controller_src[@]}" || { rm -rf "$stage"; return 1; }
   build_image agent "$IMG_AGENT" "$REPO_ROOT/agent/Dockerfile" "$stage" "${agent_src[@]}" || { rm -rf "$stage"; return 1; }
+  build_image checkpointd "$IMG_CHECKPOINT" "$REPO_ROOT/checkpoint/Dockerfile" "$stage" "${checkpoint_src[@]}" || { rm -rf "$stage"; return 1; }
   rm -rf "$stage"
 
   load_image "$IMG_MANAGER" || return 1
   load_image "$IMG_WEBHOOK" || return 1
   load_image "$IMG_SCHEDULER" || return 1
   load_image "$IMG_AGENT" || return 1
+  load_image "$IMG_CHECKPOINT" || return 1
 
   local img
   for img in "$IMG_MINIO" "$IMG_BUSYBOX"; do
