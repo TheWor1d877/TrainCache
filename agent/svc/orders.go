@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,11 @@ type sourceEntry struct {
 
 	missingSince time.Time // 首次观察到文件消失的时间(零值 = 文件在)
 	state        string    // 上一拍状态(仅用于转移日志)
+
+	// dataset 是该源最近一次投递订单的数据集(空 = 尚未收到有效订单);
+	// datasetAt 是那一单的本地时间,供活跃快照判"是否比聚合拍新"。
+	dataset   string
+	datasetAt time.Time
 }
 
 // OrderDiscovery 是 ordersource 读端的装配层(D22):轮询 dir 发现 <pod-uid>.ring,
@@ -77,11 +83,88 @@ type OrderDiscovery struct {
 	// mode 是上一拍聚合模式(Run goroutine 专属,仅用于转移日志)。
 	mode string
 
-	mu      sync.Mutex
-	readers map[string]*sourceEntry // pod-uid → 订单源(发现即入表;回收后移除)
-	stale   map[string]time.Time    // pod-uid → 已计过 stale_file 的 mtime
-	ctx     context.Context         // Run 注入的内部 ctx:转发 goroutine 与 Reader 订阅共用
-	wg      sync.WaitGroup          // 转发 goroutine 计数(Run 退出前等待)
+	mu       sync.Mutex
+	readers  map[string]*sourceEntry // pod-uid → 订单源(发现即入表;回收后移除)
+	stale    map[string]time.Time    // pod-uid → 已计过 stale_file 的 mtime
+	active   []string                // 活跃数据集快照(discovered/healthy 源的 dataset,排序去重)
+	onActive func([]string)          // 活跃快照变化回调(装配期注入;锁外调用)
+	ctx      context.Context         // Run 注入的内部 ctx:转发 goroutine 与 Reader 订阅共用
+	wg       sync.WaitGroup          // 转发 goroutine 计数(Run 退出前等待)
+}
+
+// SetActiveCallback 注入活跃数据集快照回调(装配期调用一次;传 nil 解除)。
+// 回调在锁外调用,实现方不得在回调内再回调本发现器。
+func (d *OrderDiscovery) SetActiveCallback(fn func([]string)) {
+	d.mu.Lock()
+	d.onActive = fn
+	d.mu.Unlock()
+}
+
+// ActiveDatasets 返回活跃数据集集合的拷贝(纯读,不推进 missingSince)。
+func (d *OrderDiscovery) ActiveDatasets() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.active))
+	copy(out, d.active)
+	return out
+}
+
+// activeStateLocked 是不写状态的活跃判定:discovered/healthy 为活跃,stalled 不活跃。
+// 与 stateOfEntryLocked 的区别是不推进 missingSince——查询活跃集合不能改变源的状态机。
+func (d *OrderDiscovery) activeStateLocked(e *sourceEntry, now time.Time) bool {
+	grace := now.Sub(d.startedAt) < orderStartupGrace || now.Sub(e.createdAt) < orderStartupGrace
+	if e.r.Missing() {
+		return grace
+	}
+	if e.r.Generation() == 0 || e.r.LastAdvance().IsZero() {
+		return grace
+	}
+	return now.Sub(e.r.LastAdvance()) <= orderStallThreshold
+}
+
+// publishActiveLocked 重算活跃数据集快照(调用方持 d.mu;结果已排序去重)。
+func (d *OrderDiscovery) publishActiveLocked(now time.Time) []string {
+	seen := make(map[string]struct{}, len(d.readers))
+	for _, e := range d.readers {
+		if e.dataset == "" || !d.activeStateLocked(e, now) {
+			continue
+		}
+		seen[e.dataset] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	d.active = names
+	return names
+}
+
+// publishActive 重算活跃快照并在锁外回调(调用方不得持 d.mu)。
+func (d *OrderDiscovery) publishActive() {
+	now := d.now()
+	d.mu.Lock()
+	names := d.publishActiveLocked(now)
+	cb := d.onActive
+	d.mu.Unlock()
+	if cb != nil {
+		cb(names)
+	}
+}
+
+// recordDataset 记下该源最近一次订单的数据集,并刷新活跃快照。
+// 订单投递路径调用:订单可能先于下一拍聚合并入,这里让归属解析立即看到新数据集。
+func (d *OrderDiscovery) recordDataset(podUID, dataset string) {
+	if dataset == "" {
+		return
+	}
+	d.mu.Lock()
+	if e, ok := d.readers[podUID]; ok {
+		e.dataset = dataset
+		e.datasetAt = d.now()
+	}
+	d.mu.Unlock()
+	d.publishActive()
 }
 
 // readerCount 返回当前订单源数(观测用)。
@@ -211,6 +294,7 @@ func (d *OrderDiscovery) aggregate() {
 		}
 		d.mode = mode
 	}
+	d.publishActive()
 }
 
 // stateOfEntryLocked 计算单个订单源的状态(调用方持 d.mu):
@@ -358,6 +442,7 @@ func (d *OrderDiscovery) forward(ctx context.Context, podUID string, r *ordersou
 		if err != nil {
 			// 读端解析出的订单理论上必可序列化;防御性直投,不因去重失败丢单。
 			slog.Warn("orders: ConsumeOrder 序列化失败,跳过去重直投", "pod_uid", podUID, "err", err)
+			d.recordDataset(podUID, o.Dataset)
 			d.onOrder(ctx, podUID, o)
 			return
 		}
@@ -366,6 +451,7 @@ func (d *OrderDiscovery) forward(ctx context.Context, podUID string, r *ordersou
 		}
 		lastGen, delivered = gen, true
 		lastRaw = append(lastRaw[:0], raw...)
+		d.recordDataset(podUID, o.Dataset)
 		d.onOrder(ctx, podUID, o)
 	}
 

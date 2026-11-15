@@ -97,6 +97,7 @@ FAMILY_OPTIONS = {
     "compare": ("group",),
     "gateway": ("gateway",),
     "evict": ("evict_policy",),
+    "evict-mix": ("evict_policy",),
     "prefetch": ("lookahead", "fanout"),
     "warmup": ("gate", "window"),
     "switch": ("scenario",),
@@ -345,6 +346,8 @@ def cmd_family(family: str, args) -> None:
         print(f"[skip] 共跳过 {skipped} 个已完成格（--force 可强制重跑）", flush=True)
     if failed:
         raise SystemExit(f"失败 {len(failed)} 格: {' '.join(failed)}")
+    # 收尾标记与 rerun_compare 同形,哨兵 void_watch 靠它判正常跑完(exit 2)
+    print(f"[done] 跳过 {skipped}，失败 0", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +377,7 @@ def _add_family_options(parser: argparse.ArgumentParser, family: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="run.py", description="bench 唯一实验入口：十个族 + status")
+        prog="run.py", description="bench 唯一实验入口：十一个族 + status")
     sub = ap.add_subparsers(dest="command", required=True)
     for family in FAMILIES:
         parser = sub.add_parser(family, help=f"{family} 族")

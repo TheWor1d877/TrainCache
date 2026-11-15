@@ -28,10 +28,6 @@
     "evict_policy": "heat",
     "warmup_seconds": 0
   },
-  "prefetch": {
-    "lookahead": 32,
-    "fanout": 1
-  },
   "sampling": {
     "reps": 3
   },
@@ -47,5 +43,9 @@
     "tier=l2",
     "arm=par-on"
   ],
-  "notes": "并行下载族格子；链路条件档 l2：单流上限 16 mbit、时延 20 ms、丢包 0%；Range 并行打开。档内两臂只差这一个开关。"
+  "notes": "并行下载族格子；链路条件档 l2：单流上限 16 mbit、时延 20 ms、丢包 0%；Range 并行打开。档内两臂只差这一个开关。",
+  "prefetch": {
+    "lookahead": 32,
+    "fanout": 1
+  }
 }

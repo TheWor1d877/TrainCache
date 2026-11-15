@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成十个实验族的 COND（schema v4）。
+"""生成十一个实验族的 COND（schema v4）。
 
 族、轴与取值取自 docs/4.2-bench-families.md 的族总表与各族一节。一个族只动该族的轴，其余参数取默认值：
 
@@ -12,10 +12,10 @@
 用法：
   python3 bench/experiments/gen_conds.py --family compare          # 只打印计划
   python3 bench/experiments/gen_conds.py --family compare --write  # 校验并落盘
-  python3 bench/experiments/gen_conds.py --family all --write      # 九族一次生成
+  python3 bench/experiments/gen_conds.py --family all --write      # 十一族一次生成
 
 --write 会先校验全部 COND，任一条不过就整体不落盘；同时清掉 conds/ 里遗留的
-v3 文件与本族的过期文件，最终目录只留九族生成的 v4 COND。
+v3 文件与本族的过期文件，最终目录只留十一族生成的 v4 COND。
 """
 import argparse
 import hashlib
@@ -41,6 +41,14 @@ DATASET = {
     "shards": config.DATASET_SHARDS,
     "shard_size_bytes": config.DATASET_SHARD_BYTES,
     "seed": config.SEED,
+}
+# train 负载读训练数据(16×128 MiB=2 GiB),与主数据集是两份;快照名同
+# run.py 的 E2E_DATASET 缺省值。
+TRAIN_DATASET = {
+    "name": "train-e2e",
+    "shards": config.TRAIN_N_TARS,
+    "shard_size_bytes": config.TRAIN_SHARD_BYTES,
+    "seed": config.TRAIN_SEED,
 }
 
 # 网关镜像取现有 gw COND 里记录的真实 digest；镜像换了用 --gateway-digest 覆盖。
@@ -88,6 +96,15 @@ FAMILIES = {
             "rho": [1.0, 8.0],
         },
         "cells": 6,
+    },
+    "evict-mix": {
+        "prefix": "evict-mix",
+        "axis": "evict_policy × rho",
+        "values": {
+            "evict_policy": list(config.EVICT_MIX_POLICIES),
+            "rho": list(config.EVICT_MIX_RHO),
+        },
+        "cells": 9,
     },
     "prefetch": {
         "prefix": "prefetch",
@@ -146,6 +163,15 @@ FAMILIES = {
         },
         "cells": 3,
     },
+    "rangepar": {
+        "prefix": "rangepar",
+        "axis": "tier × arm",
+        "values": {
+            "tier": ["l0", "l1", "l2", "l3"],
+            "arm": ["par-on", "par-off"],
+        },
+        "cells": 8,
+    },
 }
 
 
@@ -184,6 +210,10 @@ def make_cond(
     load: str = "dataset",
     rho: float = 4.0,
     rate: int = 1000,
+    per_conn_mbit: int | None = None,
+    delay_ms: int | None = None,
+    loss_percent: float | None = None,
+    fetch_range_parallel: bool | None = None,
     reps: int | None = None,
     shuffle: str = "per-epoch",
     fractions: tuple[float, ...] | None = None,
@@ -209,30 +239,40 @@ def make_cond(
             "evict_policy": evict,
             "warmup_seconds": int(warmup),
         })
+    network: dict = {"rate_mbit": rate}
+    if per_conn_mbit is not None:
+        network["per_conn_mbit"] = int(per_conn_mbit)
+    if delay_ms is not None:
+        network["delay_ms"] = int(delay_ms)
+    if loss_percent is not None:
+        network["loss_percent"] = loss_percent
+    environment: dict = {
+        "gateway": bool(gateway),
+        "gateway_image": (gateway_digest or GATEWAY_IMAGE_DIGEST)
+        if gateway else None,
+        "gateway_cache": bool(gateway_cache),
+        "image_set": image_set_ref(),
+    }
+    if fetch_range_parallel is not None:
+        environment["fetch_range_parallel"] = bool(fetch_range_parallel)
     cond = {
         "schema_version": cond_mod.SCHEMA_VERSION,
         "name": name,
         "family": family,
         "group": group,
         "load": load,
-        "dataset": dict(DATASET),
+        "dataset": dict(TRAIN_DATASET if load == "train" else DATASET),
         "workload": {
             "epochs": config.EPOCHS,
             "shuffle": shuffle,
             "readers": readers,
             "access_pattern": pattern,
         },
-        "network": {"rate_mbit": rate},
+        "network": network,
         "cache": cache,
         "sampling": {"reps": reps if reps is not None else
                      (config.E2E_REPS if family == "e2e" else config.REPS)},
-        "environment": {
-            "gateway": bool(gateway),
-            "gateway_image": (gateway_digest or GATEWAY_IMAGE_DIGEST)
-            if gateway else None,
-            "gateway_cache": bool(gateway_cache),
-            "image_set": image_set_ref(),
-        },
+        "environment": environment,
         "tags": list(tags),
         "notes": notes,
     }
@@ -246,17 +286,19 @@ def make_cond(
         cond["prefetch"] = {"lookahead": lookahead, "fanout": fanout}
         if gate:
             cond["prefetch"]["gate"] = {"mode": gate}
-    if load == "tilt":
+    if load in ("tilt", "tilt-mix"):
         if trace_ref is None:
-            raise SystemExit("load=tilt 的格子必须给 trace_ref")
+            raise SystemExit("load=tilt 与 load=tilt-mix 的格子必须给 trace_ref")
         file, sha = trace_ref
         cond["trace"] = {"file": file, "sha256": sha, "seed": config.SEED}
     return cond
 
 
-def _note(family: str, **params) -> str:
+def _note(family: str, *, train: bool = False, **params) -> str:
     body = "，".join(f"{k}={v}" for k, v in params.items())
-    return (f"{family} 族格子；{body}；数据集 16×256 MiB（4 GiB），"
+    dataset = ("训练数据 16×128 MiB（2 GiB）" if train
+               else "数据集 16×256 MiB（4 GiB）")
+    return (f"{family} 族格子；{body}；{dataset}，"
             f"{config.EPOCHS} epoch，rho 只改缓存配额。")
 
 
@@ -337,6 +379,23 @@ def build_evict(trace_ref) -> list[dict]:
                       "load=tilt"),
                 notes=_note("evict", evict_policy=policy, rho=rho, rate=1000,
                             load="tilt 热 10%")))
+    return out
+
+
+def build_evict_mix(trace_ref) -> list[dict]:
+    out = []
+    for policy in config.EVICT_MIX_POLICIES:
+        for rho in config.EVICT_MIX_RHO:
+            name = f"evict-mix-{policy}-rho{rho_label(rho)}"
+            out.append(make_cond(
+                name=name, family="evict-mix", group=DEFAULT_GROUP,
+                load="tilt-mix", rho=rho, rate=1000, evict=policy,
+                lookahead=16, fanout=1, reps=config.EVICT_MIX_REPS,
+                trace_ref=trace_ref,
+                tags=("evict-mix", f"evict_policy={policy}", f"rho={rho}",
+                      "load=tilt-mix"),
+                notes=_note("evict-mix", evict_policy=policy, rho=rho,
+                            rate=1000, load="tilt-mix 热 2/中频 4/低频 2/冷 8")))
     return out
 
 
@@ -447,8 +506,34 @@ def build_e2e() -> list[dict]:
             load="train", rho=4.0, rate=1000, reps=config.E2E_REPS,
             lookahead=16, fanout=1,
             tags=("e2e", f"scenario={scenario}"),
-            notes=_note("e2e", scenario=scenario, rho=4, rate=1000,
-                        reps=config.E2E_REPS, run_min=70)))
+            notes=_note("e2e", train=True, scenario=scenario, rho=4, rate=1000,
+                        reps=config.E2E_REPS)))
+    return out
+
+
+def build_rangepar() -> list[dict]:
+    # 链路条件档：(单流上限 mbit, 时延 ms, 丢包 %)。0 表示单流不限。
+    # 档内两臂只差 Range 并行开关，其余参数逐字相同。
+    tiers = {
+        "l0": (0, 20, 0),
+        "l1": (32, 20, 0),
+        "l2": (16, 20, 0),
+        "l3": (0, 200, 1),
+    }
+    out = []
+    for tier, (per_conn, delay, loss) in tiers.items():
+        for arm in ("par-on", "par-off"):
+            parallel = arm == "par-on"
+            out.append(make_cond(
+                name=f"rangepar-{tier}-{arm}", family="rangepar",
+                group="traincache", rho=4.0, rate=1000, lookahead=32,
+                fanout=1, per_conn_mbit=per_conn, delay_ms=delay,
+                loss_percent=loss, fetch_range_parallel=parallel,
+                tags=("rangepar", f"tier={tier}", f"arm={arm}"),
+                notes=(f"并行下载族格子；链路条件档 {tier}：单流上限 "
+                       f"{per_conn} mbit、时延 {delay} ms、丢包 {loss}%；"
+                       f"Range 并行{'打开' if parallel else '关闭'}。"
+                       f"档内两臂只差这一个开关。")))
     return out
 
 
@@ -459,6 +544,8 @@ def build_family(family: str, trace_ref) -> list[dict]:
         return build_gateway()
     if family == "evict":
         return build_evict(trace_ref)
+    if family == "evict-mix":
+        return build_evict_mix(trace_ref)
     if family == "prefetch":
         return build_prefetch()
     if family == "warmup":
@@ -471,6 +558,8 @@ def build_family(family: str, trace_ref) -> list[dict]:
         return build_multiconsumer(trace_ref)
     if family == "e2e":
         return build_e2e()
+    if family == "rangepar":
+        return build_rangepar()
     raise SystemExit(f"未知族：{family}")
 
 
@@ -566,10 +655,10 @@ def write_all(families: list[str], conds_by_family: dict[str, list[dict]],
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="生成九族 COND（schema v4）")
+    ap = argparse.ArgumentParser(description="生成十一族 COND（schema v4）")
     ap.add_argument("--family", required=True,
                     choices=sorted(FAMILIES) + ["all"],
-                    help="族 ID；all 表示九族一次生成")
+                    help="族 ID；all 表示十一族一次生成")
     ap.add_argument("--write", action="store_true",
                     help="校验并写入 experiments/conds/；缺省只打印计划")
     ap.add_argument("--gateway-digest", default=None,
@@ -585,7 +674,7 @@ def main() -> int:
         GATEWAY_IMAGE_DIGEST = args.gateway_digest
 
     families = list(FAMILIES) if args.family == "all" else [args.family]
-    need_trace = any(load_family in ("evict", "multiconsumer")
+    need_trace = any(load_family in ("evict", "evict-mix", "multiconsumer")
                      for load_family in families)
     trace_path, trace_sha, trace_obj = tilt_trace() if need_trace else (None, None, None)
     trace_ref = (trace_path, trace_sha) if need_trace else None

@@ -5,8 +5,7 @@
 traincache-cold 与 traincache-warm 各跑一组。同档内按 rho 升序,
 先跑高带宽,便于在长时间重跑里尽早看到快档的结论。
 
-产物默认落 <数据层>/bench/results-v081/compare,与 results/compare 的
-v0.8.0 记录分开。完成判据同 bench/run.py:summary.csv 有效行数
+产物默认落 <数据层>/bench/results/compare。完成判据同 bench/run.py:summary.csv 有效行数
 (void 列非真)≥ reps,中断后重启自动跳过已完成格。
 """
 import argparse
@@ -22,7 +21,7 @@ import config as bench_config  # noqa: E402
 
 CONDS = BENCH_ROOT / "experiments" / "conds"
 RUN_BENCH = BENCH_ROOT / "compare" / "run_bench.py"
-DEFAULT_OUT = bench_config.RESULTS_DIR.parent / "results-v081" / "compare"
+DEFAULT_OUT = bench_config.RESULTS_DIR / "compare"
 
 
 def done_rows(path: Path) -> int:

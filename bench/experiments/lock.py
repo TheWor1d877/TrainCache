@@ -143,9 +143,9 @@ def _chunk_size_bytes(cond: dict | None) -> int | None:
 
 
 def _dataset_name() -> str:
-    """TrainCache 快照/数据集名:环境变量 DATASET_NAME,默认 compare-data-8m,
+    """TrainCache 快照/数据集名:环境变量 DATASET_NAME,默认 dataset-4gib,
     与 run_bench.py 同源;块大小脱离所属快照无意义,两者一起进清单。"""
-    return os.environ.get("DATASET_NAME") or "compare-data-8m"
+    return os.environ.get("DATASET_NAME") or "dataset-4gib"
 
 
 def _git_commit() -> str | None:

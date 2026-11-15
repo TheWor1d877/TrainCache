@@ -5,10 +5,10 @@
   "group": "traincache-cold",
   "load": "train",
   "dataset": {
-    "name": "dataset-4gib",
+    "name": "train-e2e",
     "shards": 16,
-    "shard_size_bytes": 268435456,
-    "seed": 20261006
+    "shard_size_bytes": 134217728,
+    "seed": 20261015
   },
   "workload": {
     "epochs": 3,
@@ -38,7 +38,7 @@
     "e2e",
     "scenario=checkpoint-version"
   ],
-  "notes": "e2e 族格子；scenario=checkpoint-version，rho=4，rate=1000，reps=2，run_min=70；数据集 16×256 MiB（4 GiB），3 epoch，rho 只改缓存配额。",
+  "notes": "e2e 族格子；scenario=checkpoint-version，rho=4，rate=1000，reps=2；训练数据 16×128 MiB（2 GiB），3 epoch，rho 只改缓存配额。",
   "prefetch": {
     "lookahead": 16,
     "fanout": 1

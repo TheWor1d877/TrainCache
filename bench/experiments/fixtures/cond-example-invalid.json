@@ -5,13 +5,13 @@
   "group": "traincache-cold",
   "track": "D",
   "dataset": {
-    "name": "track-d",
+    "name": "train-e2e",
     "shards": 16,
     "shard_size_bytes": 134217728,
     "seed": 20261015
   },
   "trace": {
-    "file": "traces/track-d-16shard-per-epoch.json",
+    "file": "traces/train-16shard-per-epoch.json",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "seed": 20261015
   },

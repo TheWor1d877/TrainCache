@@ -9,7 +9,7 @@
   * 两 Job 并发运行,Job B 可交错启动(--stagger-s);
   * 统计:A 命中率、A 等待占比、B 把热数据挤出去的次数。
 
-数据复用 主数据集(32×256MiB≈8GB),源站 MinIO 或本地 nginx;热/全量分片清单
+数据复用主数据集(16×256MiB=4GiB),源站 MinIO;热/全量分片清单
 由 synth_tilt.py 生成(hot-shards.txt / full-shards.txt)。
 
 输出(--out-dir,缺省 bench/results/tilt):
@@ -61,7 +61,7 @@ import config
 TILT_RESULTS_DIR = config.RESULTS_DIR / "tilt"
 # 主数据集分片字节(用于 selftest 的容量换算);真实容量由环境变量控制
 SHARD_BYTES_DEFAULT = config.DATASET_SHARD_BYTES  # 256MiB
-N_TARS_DEFAULT = config.DATASET_SHARDS           # 32
+N_TARS_DEFAULT = config.DATASET_SHARDS           # 16
 
 # 每步 compute 替身开销(秒):tilt 以 IO 为主,compute 可忽略,但 step_s 需
 # 略大于 wait_s 以保持口径一致;取 1ms 量级。
@@ -346,7 +346,7 @@ def selftest() -> int:
     """合成数据跑一轮 mock,验证输出格式与挤占逻辑。返回 0=通过。"""
     import tempfile
 
-    tmp = Path(tempfile.mkdtemp(prefix="track-c-selftest-"))
+    tmp = Path(tempfile.mkdtemp(prefix="tilt-selftest-"))
     cache_dir = tmp / "cache"
     cache_dir.mkdir()
     out_dir = tmp / "results"
@@ -456,7 +456,7 @@ def selftest() -> int:
     first_steps = [t for t in (sa.get("first_step_at"), sb.get("first_step_at")) if t]
     last_steps = [t for t in (sa.get("last_step_at"), sb.get("last_step_at")) if t]
     run_obj = {
-        "schema_version": "1", "track": "C",
+        "schema_version": "1",
         "t_submit": utc_now(), "t_first_step": min(first_steps) if first_steps else None,
         "t_last_step": max(last_steps) if last_steps else None,
         "switch_events": sa.get("switch_events", []) + sb.get("switch_events", []),
@@ -469,7 +469,6 @@ def selftest() -> int:
     for k in ("t_submit", "t_first_step", "t_last_step", "switch_events",
               "phase_policy"):
         assert k in run_on_disk, f"run.json 缺字段 {k}"
-    assert run_on_disk["track"] == "C"
     assert isinstance(run_on_disk["switch_events"], list)
     assert run_on_disk["phase_policy"]["phases"]
 
@@ -617,7 +616,7 @@ def main() -> int:
 
     cond = os.environ.get("TRAINCACHE_COND", "").strip() or None
     run_id = os.environ.get("TRAINCACHE_RUN_ID", "").strip() or (
-        f"{cond or 'track-c'}-s{args.seed}-"
+        f"{cond or 'tilt'}-s{args.seed}-"
         f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}")
 
     downloader = Downloader(
@@ -628,7 +627,6 @@ def main() -> int:
         "schema_version": "1",
         "run_id": run_id,
         "cond": cond,
-        "track": "C",
         "started_at": started_at,
         "finished_at": None,
         "t_submit": t_submit,

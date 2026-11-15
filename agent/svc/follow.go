@@ -4,6 +4,9 @@ package svc
 // 冻结语义:每个 dataset 一个 Catalog.Follow(周期 = Config.IndexRefreshInterval),
 // prefixes 取该 dataset 最近订单的路径;快照切换经 OnSnapshotChange 立即声明,
 // 单轮失败经 OnSnapshotError 计错误并保持旧映射(由 core 保证)。
+//
+// 退役只让 dataset 退出归属解析,不停止 Follow 与读者心跳:旧快照仍被保守 claim
+// 保护、GC 延后删除,这是"宁可不删"的有意取舍(设计《订单通道降级》)。
 
 import (
 	"context"

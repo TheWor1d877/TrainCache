@@ -22,7 +22,7 @@ SCHEMA_VERSION = "4"
 
 # 族 ID 与产物目录同名；multiconsumer 族的 COND 名前缀用 multi-，与族 ID 不同。
 VALID_FAMILIES = {
-    "compare", "gateway", "evict", "prefetch", "warmup",
+    "compare", "gateway", "evict", "evict-mix", "prefetch", "warmup",
     "switch", "chaos", "multiconsumer", "e2e", "rangepar",
 }
 VALID_GROUPS = {
@@ -30,8 +30,9 @@ VALID_GROUPS = {
     "traincache", "traincache-cold", "traincache-warm",
 }
 TRAINCACHE_GROUPS = {"traincache", "traincache-cold", "traincache-warm"}
-# 负载形态取代 v3 的 track：dataset 主数据集、tilt 倾斜访问、train 真实训练循环。
-VALID_LOADS = {"dataset", "tilt", "train"}
+# 负载形态取代 v3 的 track：dataset 主数据集、tilt 倾斜访问、
+# tilt-mix 混合访问、train 真实训练循环。
+VALID_LOADS = {"dataset", "tilt", "tilt-mix", "train"}
 VALID_SHUFFLES = {"fixed", "per-epoch", "curriculum"}
 VALID_EVICT_POLICIES = {"heat", "lru", "lfu", "external"}
 VALID_LOOKAHEAD = {8, 16, 32}
@@ -51,7 +52,7 @@ V3_FIELDS = {
 }
 
 # 不再写进 COND 的固定量。改这里之前先想清楚：所有历史点会一起变。
-CHUNK_SIZE_BYTES = 8388608
+CHUNK_SIZE_BYTES = 8388608             # bench 实验块粒度 8MiB(生产缺省 64MiB)
 DEFAULTS = {
     "batch": 32,
     "workers": 4,
@@ -202,14 +203,20 @@ def validate_cond(cond: dict) -> list[str]:
         if all(isinstance(ds.get(k), int) and ds.get(k) > 0
                for k in ("shards", "shard_size_bytes")):
             total = ds["shards"] * ds["shard_size_bytes"]
-            if total != config.DATASET_BYTES:
-                errors.append(f"shards×shard_size_bytes={total} 必须等于 "
-                              f"{config.DATASET_BYTES}(4 GiB)")
+            # train 负载读训练数据(16×128 MiB=2 GiB),其余读主数据集(4 GiB)。
+            if load == "train":
+                want = config.TRAIN_N_TARS * config.TRAIN_SHARD_BYTES
+                label = f"{want}(2 GiB,训练数据 16×128 MiB)"
+            else:
+                want = config.DATASET_BYTES
+                label = f"{want}(4 GiB)"
+            if total != want:
+                errors.append(f"shards×shard_size_bytes={total} 必须等于 {label}")
 
     # ---- trace ----
-    # 倾斜负载按清单文件消费,清单本身要可复现,所以只有 load=tilt 需要记录。
+    # 倾斜负载按清单文件消费,清单本身要可复现,所以倾斜两类都要记录。
     trace = cond.get("trace")
-    if load == "tilt":
+    if load in ("tilt", "tilt-mix"):
         trace = _require(cond, "trace", "$", errors)
     if isinstance(trace, dict):
         _check_unknown(trace, ALLOWED_TRACE, "$.trace", errors)
@@ -322,7 +329,9 @@ def validate_cond(cond: dict) -> list[str]:
     if isinstance(samp, dict):
         _check_unknown(samp, ALLOWED_SAMPLING, "$.sampling", errors)
         reps = _require(samp, "reps", "$.sampling", errors)
-        want = config.E2E_REPS if family == "e2e" else config.REPS
+        want = (config.E2E_REPS if family == "e2e"
+                else config.EVICT_MIX_REPS if family == "evict-mix"
+                else config.REPS)
         if reps is not None and reps != want:
             errors.append(f"$.sampling.reps={reps} 必须为 {want}"
                           f"（family={family}）")
@@ -490,6 +499,15 @@ def selftest() -> None:
     c = json.loads(json.dumps(good))
     c["dataset"]["shards"] = 15
     assert any("4 GiB" in e for e in validate_cond(c)), validate_cond(c)
+
+    # train 负载读训练数据(16×128 MiB=2 GiB),不是主数据集的 4 GiB
+    c = json.loads(json.dumps(good))
+    c["load"] = "train"
+    c["dataset"] = {"name": "train-e2e", "shards": 16,
+                    "shard_size_bytes": 134217728, "seed": 20261015}
+    assert not validate_cond(c), validate_cond(c)
+    c["dataset"]["shard_size_bytes"] = 268435456  # 误用 4 GiB 主数据集口径
+    assert any("2 GiB" in e for e in validate_cond(c)), validate_cond(c)
 
     # rho 只能取五个值
     c = json.loads(json.dumps(good))

@@ -2,7 +2,7 @@
 # 过关标准验证:两次冷读结果对得上。
 # 冷读 = 集群内 busybox Pod 经 MinIO Service 全量下载 主数据集 tar(受 tc 限速),
 # 每轮前执行冷态规程;两次冷读相对差 ≤10% 判"对上"。
-# 用法:verify_cold.sh [--quick](quick 只读 1 个 tar,秒级;默认全量 8GB,约 11 分钟/轮)
+# 用法:verify_cold.sh [--quick](quick 只读 1 个 tar,秒级;默认全量主数据集 4GiB)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CFG() { python3 "$ROOT/config.py" --sh "$1"; }
@@ -19,9 +19,9 @@ cold_read() {
     shards="$(seq -f 'shard-%05g.tar' 0 $(( $(CFG DATASET_SHARDS) - 1 )) | tr '\n' ' ')"
   fi
   pod="cold-reader-$(date +%s)"
-  # 冷读 8GB 需 ~11 分钟,远超 kubectl run --rm 的默认 60s 超时,
+  # 全量冷读耗时以分钟计,远超 kubectl run --rm 的默认 60s 超时,
   # 改为:创建 → 轮询 Succeeded → 取日志 → 删除
-  # busybox 的 date 不支持 %N(毫秒),计时用秒级;冷读 8GB≈640s,秒级精度 0.2% 足够
+  # busybox 的 date 不支持 %N(毫秒),计时用秒级;冷读耗时以分钟计,秒级精度足够
   kubectl run "$pod" --image="$(CFG COLD_READ_IMAGE)" --restart=Never \
     --image-pull-policy=IfNotPresent \
     --command -- sh -c \

@@ -1,6 +1,6 @@
 # Changelog说明
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。版本号与 git tag 逐字一致，带 `v`；最新版本在最上面。
-每完成一项用户可见的改动就补一条，写在 `## 未发布` 下，先不写版本号；发版时把该节标题改成 `## [vX.Y.Z] - 日期`。
+每完成一项用户可见的改动就补一条，写在 `## 未发布` 下，先不写版本号；发版时把该节标题改成 `## [vX.Y.Z] - 日期`。bench 装置改动不写入：它不改变交付镜像与用户动作，只改实验跑法。
 
 ## 写法示例
 下面的代码块只演示格式，不是发布记录。分组按改动性质从 Added / Changed / Deprecated / Removed / Fixed / Security 中选，没有就不写该组。
@@ -9,8 +9,6 @@
 
 ### Added
 - `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
-
-- bench 装置重排为九族实验：97 个 COND，入口 `python3 bench/run.py <族>`
 
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
@@ -21,11 +19,22 @@
 
 # Changelog正文
 
+## 未发布
+
+### Added
+
+- bench 新增进度哨兵 `bench/scripts/watch_progress.sh`：每 60 秒记一次跑分进度与事件，驱动退出后自动结束。进度行给各族的有效行数与总行数、本轮有变化的族、测量 Pod 与 Agent Pod 的状态计数；出现新作废行或失败现场文件时另记一行 `EVENT`。只读监控，不碰驱动进程。用法见 `docs/4.4-bench-runbook.md` 的盯跑分进度一节。
+
+### Fixed
+
+- Agent 在训练数据换版本后把读缺块归到旧数据集：归属解析改为按订单源判定的活跃数据集集合取候选，退出解析的旧数据集不再参与，切换数据后按需回补的块落到新数据集。两份同形状数据同时活跃、分片名与块号完全相同时仍无法区分。
+
 ## [v0.9.0] - 2026-11-13
 
 ### Added
 
 - bench 性能报告生成器 `bench/experiments/report_perf.py`：读结果目录生成自包含报告页与静态图，`--mock` 用假数据出同构图。
+- 网关对带 Range 的块 GET 按键做区间合并再回源，合并结果落盘复用，同一键的重复区间只回源一次。网关族组态由多臂减到三臂。
 
 ### Changed
 

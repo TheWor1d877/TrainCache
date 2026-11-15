@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""读侧收数的两道过滤(4.3 全体判据、4.2 的机时账一节、4.2 的 COND 契约一节)。
+"""读侧收数的两道过滤(4.3 全体判据、4.1 的实测有效带宽一节、4.2 的 COND 契约一节)。
 
 汇总与出表脚本从数据层取 `summary.csv` 时都过这两道,按顺序取
 第一条命中的拒因:
 
-  1. `void` 为假;倾斜两族的行还要三列淘汰证据(`evict_blocks_run`、
+  1. `void` 为假;倾斜三族的行还要三列淘汰证据(`evict_blocks_run`、
      `b_evictions_of_hot`、`cache_dir_peak_bytes`)齐且非空(4.3 全体判据);
-  2. 倾斜两族的行满足字节地板 `total_makespan ≥ fetch_bytes_run ÷ 该档
-     实测有效带宽`(带宽表在 `bench/config.py`,与 4.2 的机时账一节 同源)。
+  2. 倾斜三族的行满足字节地板 `total_makespan ≥ fetch_bytes_run ÷ 该档
+     实测有效带宽`(带宽表在 `bench/config.py`,与 4.1 的实测有效带宽一节 同源)。
 
 只筛 TrainCache 自己的行:`baselines/` 里的 Fluid/JuiceFS/direct 行不产淘汰
 证据,属既有对照数据。地板同理只对倾斜两族成立——其余族的预热与计算重叠,
-`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速(4.2 的机时账一节 的
+`fetch_bytes_run ÷ total_makespan` 普遍高于整形线速(4.1 的实测有效带宽一节 的
 12.5/37.5/125 MiB/s 就是这种口径),拿它当上界会误杀。
 
 被排除的行既打印也给一份 `results/summary/rejected.csv`,让「谁被排除」入账。
@@ -38,7 +38,7 @@ REJECT_FIELDS = ("source", "cond", "group", "rate", "total_makespan",
 
 def _is_tilt(row: dict) -> bool:
     """按 load 字段判倾斜负载；没有该列的行不按倾斜处理。"""
-    return str(row.get("load", "")).strip() == "tilt"
+    return str(row.get("load", "")).strip() in ("tilt", "tilt-mix")
 
 
 def _first_bad(values) -> str:

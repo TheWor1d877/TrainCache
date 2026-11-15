@@ -493,6 +493,55 @@ def plot_evict(rows):
                 series_order=rhos, colors=colors, series_fmt=_rho_mark)
 
 
+def plot_evict_mix(rows):
+    """混合访问淘汰族：横轴 ρ、分组算法；两张柱图与两张分组图。"""
+    policies = ["heat", "lru", "lfu"]
+    present = {_policy(r) for r in rows}
+    policies = [p for p in policies if p in present]
+    rhos = _rho_sorted({_rho_key(r) for r in rows})
+    colors = {p: c for p, c in zip(policies, SERIES_COLORS)}
+    for metric, fname, ylabel, zh, en in (
+        ("total_makespan", "evict-mix-makespan",
+         t("全程 makespan (s)", "total makespan (s)"),
+         "混合访问淘汰族：三种算法随 ρ 的全程耗时",
+         "evict-mix: makespan by policy and rho"),
+        ("b_evictions_of_hot", "evict-mix-hot-evictions",
+         t("热块被挤出次数", "hot-block evictions"),
+         "混合访问淘汰族：三种算法随 ρ 的热块挤出",
+         "evict-mix: hot-block evictions by policy and rho"),
+    ):
+        data = _collect(rows, metric, lambda r: "", _rho_key, _policy)
+        _render(data, fname, t(zh, en), ylabel, t("ρ", "rho"),
+                x_order=rhos, series_order=policies, colors=colors)
+
+    low = _collect(rows, "lowfreq_fresh_survive", _policy, _rho_key,
+                   lambda r: "lowfreq-fresh")
+    high = _collect(rows, "highfreq_stale_survive", _policy, _rho_key,
+                    lambda r: "highfreq-stale")
+    _render({**low, **high}, "evict-mix-survive",
+            t("混合访问淘汰族：两类块型的存活率",
+              "evict-mix: survival by block type"),
+            t("存活率", "survival ratio"), t("ρ", "rho"), kind="line",
+            facet_order=policies, x_order=rhos,
+            series_order=["lowfreq-fresh", "highfreq-stale"],
+            colors={"lowfreq-fresh": "#2f8f6b",
+                    "highfreq-stale": "#c0392b"},
+            facet_fmt=lambda v: v)
+
+    normal = _collect(rows, "evict_rounds_normal", _policy, _rho_key,
+                      lambda r: "normal")
+    danger = _collect(rows, "evict_rounds_danger", _policy, _rho_key,
+                      lambda r: "danger")
+    _render({**normal, **danger}, "evict-mix-rounds",
+            t("混合访问淘汰族：normal 与 danger 淘汰轮次",
+              "evict-mix: normal and danger eviction rounds"),
+            t("淘汰轮次数", "eviction rounds"), t("ρ", "rho"), kind="bar",
+            facet_order=policies, x_order=rhos,
+            series_order=["normal", "danger"],
+            colors={"normal": "#2f8f6b", "danger": "#c0392b"}, stack=True,
+            facet_fmt=lambda v: v)
+
+
 def plot_prefetch(rows):
     xs = sorted({int(_num(r.get("prefetch_lookahead")) or 0) for r in rows})
     rhos = _rho_sorted({_rho_key(r) for r in rows})
@@ -722,6 +771,7 @@ FAMILY_PLOTS = {
     "compare": plot_compare,
     "gateway": plot_gateway,
     "evict": plot_evict,
+    "evict-mix": plot_evict_mix,
     "prefetch": plot_prefetch,
     "warmup": plot_warmup,
     "switch": plot_switch,

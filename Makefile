@@ -64,13 +64,11 @@ BENCH_VARS = $(foreach v,TIER RATE REPS TAG COND QUICK DELAY GROUP FORCE,$(if $(
 
 .PHONY: bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-list \
 	bench-cold bench-verify bench bench-selftest tc-up tc-down \
-	track-d-up track-d-verify track-d-down \
-	kind-up k8s-up data-up upload bench-data bench-tc track-d-data
+	kind-up k8s-up data-up upload bench-data bench-tc
 
 bench-up bench-down bench-down-full ctrl-up ctrl-down bench-status bench-doctor bench-quick bench-list \
 bench-cold bench-verify bench tc-up tc-down \
-track-d-up track-d-verify track-d-down \
-kind-up k8s-up data-up upload bench-data bench-tc track-d-data:
+kind-up k8s-up data-up upload bench-data bench-tc:
 	+@$(BENCH_MAKE) $@ $(BENCH_VARS)
 
 # bench/Makefile 里的目标名是 selftest;根入口统一叫 bench-selftest。
