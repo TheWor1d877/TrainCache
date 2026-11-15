@@ -28,6 +28,7 @@ SOURCE_RATIO_TARGET = 12.0
 SOURCE_RATIO_BAND = 0.05
 FAMILY_CN = {
     "compare": "对照族", "gateway": "网关族", "evict": "淘汰策略族",
+    "evict-mix": "混合访问淘汰族",
     "prefetch": "预取参数族", "warmup": "预热族", "switch": "阶段切换族",
     "chaos": "混沌族", "multiconsumer": "多消费者族", "e2e": "端到端族",
     "rangepar": "并行下载族",
@@ -36,6 +37,7 @@ FAMILY_Q = {
     "compare": "缓存摘掉源站字节后，启动与全程各快多少；ρ 从 0.5 到 8 在哪一段收益消失",
     "gateway": "网关合并与两级缓存各贡献多少",
     "evict": "heat、lru、lfu 三种算法在 ρ 两端能否分辨",
+    "evict-mix": "混合访问下三种算法对「高频陈旧」与「低频新鲜」块的存活差异",
     "prefetch": "lookahead 增到多少转平；fanout 增加带来多少重复字节",
     "warmup": "门控等待预热值不值；窗口多长合适",
     "switch": "阶段切换后 stall 多久回落；哪些事件到 epoch 末仍未回落",
@@ -48,6 +50,7 @@ FAMILY_CRITERION = {
     "compare": "4.3 按族的判据「compare·组间胜负」",
     "gateway": "4.3 按族的判据「gateway·网关缓存」「gateway·臂间比较」",
     "evict": "4.3 按族的判据「evict·策略可分辨」「evict·策略不可分辨」",
+    "evict-mix": "4.3 按族的判据「evict-mix·装置失败」「evict-mix·读数照常出结论」",
     "prefetch": "4.3 按族的判据「prefetch·转平」「prefetch·重复字节」",
     "warmup": "4.3 按族的判据「warmup·门控有效」「warmup·门控无价值」「warmup·门控负收益」",
     "switch": "4.3 按族的判据「switch·回落」「switch·差异」「switch·右删失」",
@@ -60,6 +63,8 @@ FAMILY_FIGURES = {
     "compare": ["compare-groups-rho4", "compare-rho"],
     "gateway": ["gateway-makespan", "gateway-source-bytes"],
     "evict": ["evict-makespan", "evict-hot-evictions"],
+    "evict-mix": ["evict-mix-makespan", "evict-mix-hot-evictions",
+                  "evict-mix-survive", "evict-mix-rounds"],
     "prefetch": ["prefetch-lookahead"],
     "warmup": ["warmup-startup"],
     "switch": ["switch-recovery"],
@@ -72,6 +77,8 @@ FAMILY_METRICS = {
     "compare": ["startup_makespan", "total_makespan", "hit_rate", "fetch_bytes_run"],
     "gateway": ["total_makespan", "fetch_bytes_run", "gateway_merged"],
     "evict": ["total_makespan", "hit_rate", "b_evictions_of_hot"],
+    "evict-mix": ["total_makespan", "hit_rate", "b_evictions_of_hot",
+                  "lowfreq_fresh_survive", "highfreq_stale_survive"],
     "prefetch": ["total_makespan", "fetch_bytes_run", "hit_rate"],
     "warmup": ["startup_makespan", "total_makespan", "hit_rate"],
     "switch": ["recovery_time_s", "recovery_censored", "total_makespan"],
@@ -214,6 +221,35 @@ def verdict_evict(rows):
                     worst = max(worst, _rel_diff(a, b))
         facts.append(f"ρ={rho}：三项最大相对差 {worst:.1f}%，"
                      + ("可分辨" if worst >= 5 else "不可分辨"))
+    return "；".join(facts) or "样本不足"
+
+
+def verdict_evict_mix(rows):
+    """只判装置失败，不判算法胜负：三档读数重合也照常报。"""
+    if not rows:
+        return "未跑"
+    facts = []
+    void_n = sum(1 for r in rows
+                 if str(r.get("void", "")).strip().lower() == "true")
+    if void_n:
+        facts.append(f"装置失败 {void_n} 轮")
+    for rho in pf._rho_sorted({pf._rho_key(r) for r in rows}):
+        sub = [r for r in rows if pf._rho_key(r) == rho
+               and str(r.get("void", "")).strip().lower() != "true"]
+        if not sub:
+            continue
+        low = _mean(_vals(sub, "lowfreq_fresh_survive"))
+        high = _mean(_vals(sub, "highfreq_stale_survive"))
+        ms = _mean(_vals(sub, "total_makespan"))
+        parts = []
+        if low is not None:
+            parts.append(f"低频新鲜存活 {low:.2f}")
+        if high is not None:
+            parts.append(f"高频陈旧存活 {high:.2f}")
+        if ms is not None:
+            parts.append(f"makespan {ms:.0f}s")
+        if parts:
+            facts.append(f"ρ={rho}：" + "，".join(parts))
     return "；".join(facts) or "样本不足"
 
 
@@ -389,6 +425,7 @@ VERDICTS = {
     "compare": verdict_compare,
     "gateway": verdict_gateway,
     "evict": verdict_evict,
+    "evict-mix": verdict_evict_mix,
     "prefetch": verdict_prefetch,
     "warmup": verdict_warmup,
     "switch": verdict_switch,

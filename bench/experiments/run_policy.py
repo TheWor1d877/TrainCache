@@ -227,6 +227,9 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
             "TC_RATE": f"{cond['network']['rate_mbit']}mbit",
             "TC_DELAY": f"{cond_mod.DEFAULTS['delay_ms']}ms",
         })
+        # 混合访问淘汰族在 tilt 双 Job 上再切四类分片与中频窗口。
+        if cond.get("load") == "tilt-mix":
+            env["TRAINCACHE_TILT_MIX"] = "1"
         rb_cmd = [PY, str(RUN_BENCH)]
         if (cond.get("cache") or {}).get("enabled"):
             rb_cmd += ["--rho", str(cond["cache"]["rho"])]

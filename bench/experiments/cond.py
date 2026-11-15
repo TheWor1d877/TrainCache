@@ -22,7 +22,7 @@ SCHEMA_VERSION = "4"
 
 # 族 ID 与产物目录同名；multiconsumer 族的 COND 名前缀用 multi-，与族 ID 不同。
 VALID_FAMILIES = {
-    "compare", "gateway", "evict", "prefetch", "warmup",
+    "compare", "gateway", "evict", "evict-mix", "prefetch", "warmup",
     "switch", "chaos", "multiconsumer", "e2e", "rangepar",
 }
 VALID_GROUPS = {
@@ -30,8 +30,9 @@ VALID_GROUPS = {
     "traincache", "traincache-cold", "traincache-warm",
 }
 TRAINCACHE_GROUPS = {"traincache", "traincache-cold", "traincache-warm"}
-# 负载形态取代 v3 的 track：dataset 主数据集、tilt 倾斜访问、train 真实训练循环。
-VALID_LOADS = {"dataset", "tilt", "train"}
+# 负载形态取代 v3 的 track：dataset 主数据集、tilt 倾斜访问、
+# tilt-mix 混合访问、train 真实训练循环。
+VALID_LOADS = {"dataset", "tilt", "tilt-mix", "train"}
 VALID_SHUFFLES = {"fixed", "per-epoch", "curriculum"}
 VALID_EVICT_POLICIES = {"heat", "lru", "lfu", "external"}
 VALID_LOOKAHEAD = {8, 16, 32}
@@ -213,9 +214,9 @@ def validate_cond(cond: dict) -> list[str]:
                 errors.append(f"shards×shard_size_bytes={total} 必须等于 {label}")
 
     # ---- trace ----
-    # 倾斜负载按清单文件消费,清单本身要可复现,所以只有 load=tilt 需要记录。
+    # 倾斜负载按清单文件消费,清单本身要可复现,所以倾斜两类都要记录。
     trace = cond.get("trace")
-    if load == "tilt":
+    if load in ("tilt", "tilt-mix"):
         trace = _require(cond, "trace", "$", errors)
     if isinstance(trace, dict):
         _check_unknown(trace, ALLOWED_TRACE, "$.trace", errors)
@@ -328,7 +329,9 @@ def validate_cond(cond: dict) -> list[str]:
     if isinstance(samp, dict):
         _check_unknown(samp, ALLOWED_SAMPLING, "$.sampling", errors)
         reps = _require(samp, "reps", "$.sampling", errors)
-        want = config.E2E_REPS if family == "e2e" else config.REPS
+        want = (config.E2E_REPS if family == "e2e"
+                else config.EVICT_MIX_REPS if family == "evict-mix"
+                else config.REPS)
         if reps is not None and reps != want:
             errors.append(f"$.sampling.reps={reps} 必须为 {want}"
                           f"（family={family}）")

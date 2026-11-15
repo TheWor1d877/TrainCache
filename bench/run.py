@@ -97,6 +97,7 @@ FAMILY_OPTIONS = {
     "compare": ("group",),
     "gateway": ("gateway",),
     "evict": ("evict_policy",),
+    "evict-mix": ("evict_policy",),
     "prefetch": ("lookahead", "fanout"),
     "warmup": ("gate", "window"),
     "switch": ("scenario",),
@@ -376,7 +377,7 @@ def _add_family_options(parser: argparse.ArgumentParser, family: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="run.py", description="bench 唯一实验入口：十个族 + status")
+        prog="run.py", description="bench 唯一实验入口：十一个族 + status")
     sub = ap.add_subparsers(dest="command", required=True)
     for family in FAMILIES:
         parser = sub.add_parser(family, help=f"{family} 族")

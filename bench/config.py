@@ -20,8 +20,9 @@ TRAIN_DIR = DATA_DIR / "train" / "tars"
 RESULTS_DIR = DATA_ROOT / "bench" / "results"
 # 产物根下按族 ID 分片:results/<族>/<格子>/。族名与 COND 的 family 字段同源,
 # 一个族一个目录,汇总与出图按族各自读自己的目录。
-BENCH_FAMILIES = ("compare", "gateway", "evict", "prefetch", "warmup",
-                  "switch", "chaos", "multiconsumer", "e2e", "rangepar")
+BENCH_FAMILIES = ("compare", "gateway", "evict", "evict-mix", "prefetch",
+                  "warmup", "switch", "chaos", "multiconsumer", "e2e",
+                  "rangepar")
 LOGS_DIR = DATA_ROOT / "bench" / "logs"
 COMPARE_LOGS_DIR = DATA_ROOT / "bench" / "compare" / "logs"
 SUDO_PASS_FILE = ROOT / ".sudo-pass"
@@ -73,6 +74,16 @@ DATASET_TARGET_IMG_KB = 160        # σ 自动校准到该体积
 
 # ---- 倾斜负载:热分片比例;数据复用主数据集,只生成清单 ----
 TILT_HOT_RATIO = 0.10
+
+# ---- 混合访问淘汰族:四类分片、采样次数与中频窗口 ----
+# 16 片按访问形态分四类,片号按顺序切:热 0-1、中频 2-5、低频 6-7、冷 8-15。
+EVICT_MIX_REPS = 5
+EVICT_MIX_POLICIES = ("heat", "lru", "lfu")
+EVICT_MIX_RHO = (2.0, 4.0, 8.0)
+EVICT_MIX_SHARDS = {"hot": 2, "mid": 4, "low": 2, "cold": 8}
+EVICT_MIX_MID_READS = (20, 50)      # 中频片每 epoch 的读块次区间
+EVICT_MIX_MID_WINDOW_SHARDS = 2     # 冷扫完成这么多片后关闭中频窗口
+EVICT_MIX_LOW_READS = 1             # 低频片每 epoch 末尾的读块次
 
 # ---- 训练负载:单 Job 连续多 epoch,MinIO 块缓存源 ----
 # 16×800 张 512px JPEG q85(~160KB/张)≈2GiB,落 train/tars/,经 trainpublish
@@ -138,7 +149,7 @@ def burst_for_rate(rate_mbit: int) -> str:
 # 倾斜负载走 @100 mbit 时回源是串行阻塞,所以「跑完 time ÷ 有效带宽」才是这一族
 # 成立的物理下界;其余族的预热与计算重叠,同一比值普遍高于线速,不套这道地板。
 # 每档实测有效带宽(MB/s)。@100 = 2026-11-02 集群内只读探针,同一对象四种
-# 取法同值;@300 = 4.2 的机时账一节的 35.6(95% 线速)。表里没有的档位给不出地板,
+# 取法同值;@300 = 4.1 的实测有效带宽一节 的 35.6(95% 线速)。表里没有的档位给不出地板,
 # 读侧跳过第三条而不是猜一个值。
 TILT_EFF_BW_MB_S = {100: 11.95, 300: 35.6}
 
@@ -163,9 +174,10 @@ def rate_mbit(value) -> int | None:
 def tilt_floor_seconds(row: dict) -> float | None:
     """该行回源字节走完整整形链路所需的最短秒数;取不到给 None。
 
-    按 load 字段判定是不是倾斜负载,不看 COND 名前缀:改名与新增族都不会漏判。
+    按 load 字段判定倾斜两类负载(tilt 与 tilt-mix),不看 COND 名前缀:
+    改名与新增族都不会漏判。
     """
-    if row.get("load") != "tilt":
+    if row.get("load") not in ("tilt", "tilt-mix"):
         return None
     bw = TILT_EFF_BW_MB_S.get(rate_mbit(row.get("rate")))
     try:

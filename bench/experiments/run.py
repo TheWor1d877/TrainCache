@@ -458,8 +458,8 @@ def run_reps(cond_name: str, reps: int | None = None,
              conds_dir: Path | None = None) -> list[Path]:
     """跑一个 COND;reps=None 取 COND 的 sampling.reps。
 
-    按 load 选执行体:dataset 交给 run_bench.py,tilt 交给 run_policy.py,
-    train 走 e2e 族两阶段流程(集群内训练 Pod 读 agentd 块缓存)。
+    按 load 选执行体:dataset 交给 run_bench.py,倾斜两类(tilt 与 tilt-mix)
+    交给 run_policy.py,train 走 e2e 族两阶段流程(集群内训练 Pod 读 agentd 块缓存)。
     """
     cond = cond_mod.load_cond(cond_name, conds_dir)
     errors = cond_mod.validate_cond(cond)
@@ -470,7 +470,7 @@ def run_reps(cond_name: str, reps: int | None = None,
 
     if cond.get("load") == "dataset":
         return _run_bench_cond(cond, reps)
-    if cond.get("load") == "tilt":
+    if cond.get("load") in ("tilt", "tilt-mix"):
         import run_policy  # noqa: PLC0415
         return run_policy.run_reps(cond_name, reps, conds_dir)
     if _e2e_scenario(cond):

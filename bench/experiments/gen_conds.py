@@ -97,6 +97,15 @@ FAMILIES = {
         },
         "cells": 6,
     },
+    "evict-mix": {
+        "prefix": "evict-mix",
+        "axis": "evict_policy × rho",
+        "values": {
+            "evict_policy": list(config.EVICT_MIX_POLICIES),
+            "rho": list(config.EVICT_MIX_RHO),
+        },
+        "cells": 9,
+    },
     "prefetch": {
         "prefix": "prefetch",
         "axis": "lookahead × fanout × rho",
@@ -254,9 +263,9 @@ def make_cond(
         cond["prefetch"] = {"lookahead": lookahead, "fanout": fanout}
         if gate:
             cond["prefetch"]["gate"] = {"mode": gate}
-    if load == "tilt":
+    if load in ("tilt", "tilt-mix"):
         if trace_ref is None:
-            raise SystemExit("load=tilt 的格子必须给 trace_ref")
+            raise SystemExit("load=tilt 与 load=tilt-mix 的格子必须给 trace_ref")
         file, sha = trace_ref
         cond["trace"] = {"file": file, "sha256": sha, "seed": config.SEED}
     return cond
@@ -347,6 +356,23 @@ def build_evict(trace_ref) -> list[dict]:
                       "load=tilt"),
                 notes=_note("evict", evict_policy=policy, rho=rho, rate=1000,
                             load="tilt 热 10%")))
+    return out
+
+
+def build_evict_mix(trace_ref) -> list[dict]:
+    out = []
+    for policy in config.EVICT_MIX_POLICIES:
+        for rho in config.EVICT_MIX_RHO:
+            name = f"evict-mix-{policy}-rho{rho_label(rho)}"
+            out.append(make_cond(
+                name=name, family="evict-mix", group=DEFAULT_GROUP,
+                load="tilt-mix", rho=rho, rate=1000, evict=policy,
+                lookahead=16, fanout=1, reps=config.EVICT_MIX_REPS,
+                trace_ref=trace_ref,
+                tags=("evict-mix", f"evict_policy={policy}", f"rho={rho}",
+                      "load=tilt-mix"),
+                notes=_note("evict-mix", evict_policy=policy, rho=rho,
+                            rate=1000, load="tilt-mix 热 2/中频 4/低频 2/冷 8")))
     return out
 
 
@@ -469,6 +495,8 @@ def build_family(family: str, trace_ref) -> list[dict]:
         return build_gateway()
     if family == "evict":
         return build_evict(trace_ref)
+    if family == "evict-mix":
+        return build_evict_mix(trace_ref)
     if family == "prefetch":
         return build_prefetch()
     if family == "warmup":
@@ -595,7 +623,7 @@ def main() -> int:
         GATEWAY_IMAGE_DIGEST = args.gateway_digest
 
     families = list(FAMILIES) if args.family == "all" else [args.family]
-    need_trace = any(load_family in ("evict", "multiconsumer")
+    need_trace = any(load_family in ("evict", "evict-mix", "multiconsumer")
                      for load_family in families)
     trace_path, trace_sha, trace_obj = tilt_trace() if need_trace else (None, None, None)
     trace_ref = (trace_path, trace_sha) if need_trace else None
