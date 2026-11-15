@@ -257,6 +257,9 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// 发现循环由 agentd 在 signal ctx 下起 goroutine 运行(M2);handler = M2 日志行 + 预取
 	// 接线(M3);订单通道状态由发现循环单写者聚合(D63)。
 	ag.Orders = NewOrderDiscovery(cfg.OrdersDir, ag.Metrics, HandleOrder(ag.Prefetch))
+	// 活跃数据集集合是归属解析的候选范围:发现循环每拍与每次订单投递后发布,
+	// 预取管理器据此让旧数据集退出解析(设计《订单通道降级》)。
+	ag.Orders.SetActiveCallback(ag.Prefetch.SetActiveDatasets)
 	return ag, nil
 }
 
@@ -314,6 +317,9 @@ type PrefetchManager struct {
 
 	mu      sync.Mutex
 	bundles map[string]*datasetBundle
+	// active 是订单源判定的活跃数据集集合(m.mu 保护)。空集 = 未判定或全部停滞,
+	// 归属解析退化为遍历全部 bundle;非空时只在不含退役 dataset 的子集里解析。
+	active map[string]struct{}
 
 	// p0Done 是 P0 块完成分发(装配期经 SetP0Done 注册;回调在预取器调度协程内同步
 	// 调用,故用 atomic 指针免锁读,回调路径不阻塞调度)。
@@ -522,6 +528,9 @@ type datasetBundle struct {
 	// lookahead 块;protectedFPs 在 bundle 锁下读)。
 	lastOrder ordersource.ConsumeOrder
 	hasOrder  bool
+	// lastOrderAt 是最近一次成功安装订单的本地时间(b.mu 保护):归属解析在多个
+	// 候选、多个活跃 dataset 同时命中同一 path+chunk 时取它最新者。
+	lastOrderAt time.Time
 	// followPrefixes 是当前订单的块路径前缀 hint(ForOrder 在首次索引加载前写入)。
 	// Follow 首轮 tick 可能早于 lastOrder 安装,没有 hint 时会以空前缀走
 	// RefreshManifest 并清空随后加载的映射;空订单写入非 nil 空切片显式清除。
@@ -612,7 +621,8 @@ func (m *PrefetchManager) existingBundle(dataset string) (*datasetBundle, bool) 
 	return b, ok
 }
 
-// bundleNames 返回已有 bundle 的 dataset 名(升序稳定输出;状态 RPC/GC 枚举用)。
+// bundleNames 返回已有 bundle 的 dataset 名(升序稳定输出;状态 RPC/GC/心跳枚举用,
+// 含已退出归属解析的 dataset)。归属解析用 resolutionNames():两者的分工不能混。
 func (m *PrefetchManager) bundleNames() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -621,6 +631,84 @@ func (m *PrefetchManager) bundleNames() []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// orderAt 返回该 dataset 最近一次成功安装订单的时间(零值 = 从未安装)。
+func (b *datasetBundle) orderAt() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastOrderAt
+}
+
+// SetActiveDatasets 用订单源判定的活跃数据集集合替换快照(装配期经
+// OrderDiscovery.SetActiveCallback 注入;每拍与每次订单投递后调用)。
+//   - 集合非空:归属解析只在该集合内进行,不在集合里的 bundle 退出解析(不删 map、
+//     不停 Follow/预取器,在途块与保护集合照常);
+//   - 集合为空:退化为遍历全部 bundle,保护"同一数据集重启、订单源短暂断流"的路径。
+//
+// 订单先于聚合拍到达的窗口由 ForOrder 入口的 MarkActiveDataset 覆盖。
+func (m *PrefetchManager) SetActiveDatasets(names []string) {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	m.mu.Lock()
+	m.active = set
+	m.mu.Unlock()
+}
+
+// MarkActiveDataset 把订单入口自己的 dataset 并入活跃集合:订单先到、聚合拍后到
+// 的窗口里,归属解析必须立即指向这个 dataset,不能等下一拍。
+func (m *PrefetchManager) MarkActiveDataset(name string) {
+	if name == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.active == nil {
+		m.active = make(map[string]struct{})
+	}
+	m.active[name] = struct{}{}
+	m.mu.Unlock()
+}
+
+// datasetActive 报告该 dataset 是否仍在归属解析候选里(活跃集合为空时恒为 true,
+// 退化为全量解析)。
+func (m *PrefetchManager) datasetActive(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.active) == 0 {
+		return true
+	}
+	_, ok := m.active[name]
+	return ok
+}
+
+// resolutionNames 返回归属解析的候选 dataset:活跃集合非空时取活跃 ∩ 已有 bundle,
+// 空集时取全部;顺序按最近安装订单时间降序,同时间按名字升序稳定。
+// 只在解析路径调用;状态 RPC/GC/心跳仍用 bundleNames() 的全集。
+func (m *PrefetchManager) resolutionNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, 0, len(m.bundles))
+	for name := range m.bundles {
+		if len(m.active) > 0 {
+			if _, ok := m.active[name]; !ok {
+				continue
+			}
+		}
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		ai := m.bundles[names[i]].orderAt()
+		aj := m.bundles[names[j]].orderAt()
+		if !ai.Equal(aj) {
+			return ai.After(aj)
+		}
+		return names[i] < names[j]
+	})
 	return names
 }
 
@@ -643,7 +731,16 @@ func (b *datasetBundle) orderSnapshot() (ordersource.ConsumeOrder, bool) {
 // 完全无归属时 dataset 为空。只走 existingBundle,不触发 bundle 构造(避免采集侧副作用)。
 func (m *PrefetchManager) orderContext(ref ordersource.ChunkRef, fp cas.Fingerprint) (dataset, stage string, order ordersource.ConsumeOrder, ok bool) {
 	if ref.Path != "" {
-		for _, ds := range m.bundleNames() {
+		// 同一 path+chunk 可能同时命中多个 dataset(两份同形状数据),这里在
+		// 解析候选里收集命中者,取最近安装订单的那个;候选已由活跃集合过滤,
+		// 旧数据集在切换后不再参与。
+		var (
+			pickDS    string
+			pickAt    time.Time
+			pickOrder ordersource.ConsumeOrder
+			pickHas   bool
+		)
+		for _, ds := range m.resolutionNames() {
 			b, exists := m.existingBundle(ds)
 			if !exists {
 				continue
@@ -651,12 +748,22 @@ func (m *PrefetchManager) orderContext(ref ordersource.ChunkRef, fp cas.Fingerpr
 			if _, found, err := b.catalog.Lookup(context.Background(), ref.Path, ref.Chunk); err != nil || !found {
 				continue
 			}
+			at := b.orderAt()
 			if o, has := b.orderSnapshot(); has {
-				return ds, o.StageID, o, true
+				if !pickHas || at.After(pickAt) {
+					pickDS, pickAt, pickOrder, pickHas = ds, at, o, true
+				}
+			} else if pickDS == "" {
+				pickDS, pickAt = ds, at
 			}
-			return ds, "", ordersource.ConsumeOrder{}, false
 		}
-		for _, ds := range m.bundleNames() {
+		if pickDS != "" {
+			if pickHas {
+				return pickDS, pickOrder.StageID, pickOrder, true
+			}
+			return pickDS, "", ordersource.ConsumeOrder{}, false
+		}
+		for _, ds := range m.resolutionNames() {
 			b, exists := m.existingBundle(ds)
 			if !exists {
 				continue
@@ -674,7 +781,7 @@ func (m *PrefetchManager) orderContext(ref ordersource.ChunkRef, fp cas.Fingerpr
 	if fp == (cas.Fingerprint{}) {
 		return "", "", ordersource.ConsumeOrder{}, false
 	}
-	for _, ds := range m.bundleNames() {
+	for _, ds := range m.resolutionNames() {
 		b, exists := m.existingBundle(ds)
 		if !exists {
 			continue
@@ -870,6 +977,9 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	// 空订单写非 nil 空切片,显式清除上一单前缀且不回退。
 	prefixes := orderPaths(o.Chunks)
 	b := m.bundleFor(o.Dataset, prefixes)
+	// 订单入口先把自己并入活跃集合:否则聚合拍还没到前,本 dataset 可能被
+	// 上一拍的活跃快照判成"不在集合里"而退出解析。
+	m.MarkActiveDataset(o.Dataset)
 	if err := m.measureLoadPrefixes(ctx, o.Dataset, b.catalog, prefixes); err != nil {
 		return err
 	}
@@ -918,6 +1028,7 @@ func (m *PrefetchManager) ForOrder(ctx context.Context, podUID string, o orderso
 	if err == nil {
 		b.stageSeen = true
 		b.lastOrder, b.hasOrder = o, len(o.Chunks) > 0
+		b.lastOrderAt = time.Now()
 	}
 	b.mu.Unlock()
 	if err != nil {

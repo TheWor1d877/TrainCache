@@ -92,7 +92,7 @@ func (a *Agent) onInotifyOpen(fp cas.Fingerprint) {
 		return
 	}
 	ctx := context.Background()
-	for _, ds := range a.Prefetch.bundleNames() {
+	for _, ds := range a.Prefetch.resolutionNames() {
 		b, ok := a.Prefetch.existingBundle(ds)
 		if !ok {
 			continue
@@ -108,12 +108,12 @@ func (a *Agent) onInotifyOpen(fp cas.Fingerprint) {
 
 // —— 钩子三型 handler(设计《钩子 socket 协议》)——
 
-// resolveRef 解析一个块引用所属的 dataset 与指纹(设计《钩子 socket 协议》接线口径):按已知 dataset
-// (bundle 集合)逐个查索引;都未命中 → ok=false(调用方丢弃或跳过)。
+// resolveRef 解析一个块引用所属的 dataset 与指纹(设计《钩子 socket 协议》接线口径):按归属解析
+// 候选(活跃数据集集合,见 resolutionNames)逐个查索引;都未命中 → ok=false(调用方丢弃或跳过)。
 // 指纹只能来自索引条目,要求命中的调用方(open/advance、本地探测)适用本口径;
 // demand 补块只需 dataset 归属,走 resolveDataset,不受索引未命中影响(D60)。
 func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fingerprint, ok bool) {
-	for _, ds := range a.Prefetch.bundleNames() {
+	for _, ds := range a.Prefetch.resolutionNames() {
 		if e, found, err := a.Prefetch.lookupRef(ds, ref); err == nil && found {
 			return ds, e.Fingerprint, true
 		}
@@ -122,13 +122,14 @@ func (a *Agent) resolveRef(ref ordersource.ChunkRef) (dataset string, fp cas.Fin
 }
 
 // resolveDataset 解析块引用的 dataset 归属,不要求路径索引命中(设计《钩子 socket 协议》/D60):
-// 先按引用/指纹找订单上下文,再回退已知 bundle 集合的第一个;都没有 → ok=false
-// (调用方丢弃帧)。D25 键由 (dataset, path, chunk) 直接构造,demand 补块不依赖索引。
+// 先按引用/指纹找订单上下文,再回退归属解析候选的第一个(活跃集合非空时不会落到
+// 已退出解析的旧数据集);都没有 → ok=false(调用方丢弃帧)。D25 键由
+// (dataset, path, chunk) 直接构造,demand 补块不依赖索引。
 func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok bool) {
 	if ds, _, _, _ := a.orderContext(ref, cas.Fingerprint{}); ds != "" {
 		return ds, true
 	}
-	if names := a.Prefetch.bundleNames(); len(names) > 0 {
+	if names := a.Prefetch.resolutionNames(); len(names) > 0 {
 		return names[0], true
 	}
 	return "", false
@@ -143,8 +144,9 @@ func (a *Agent) resolveDataset(ref ordersource.ChunkRef) (dataset string, ok boo
 //   - read_miss(D44):async demand 补块入口 handleReadMiss;
 //   - read_stall(D47):stallAttributor.Attribute + ObserveReadStall(见 stallattr.go)。
 //
-// 钩子帧不带 dataset:stage_switch 的基底取最近安装的订单,多条 dataset 并发时以
-// 最后安装者为准(已知限制,见设计《订单通道降级》)。handler 只做内存/非阻塞操作;ctx 用后台 ctx
+// 钩子帧不带 dataset:归属由 agentd 按订单源判定的活跃数据集集合解析,切换后旧数据集
+// 退出解析;两份同形状数据同时活跃且同名同块号时仍无法区分(协议约束,见设计
+// 《订单通道降级》)。handler 只做内存/非阻塞操作;ctx 用后台 ctx
 // (集帧自身无 ctx,预取器生命周期仍受其调度 ctx 约束)。
 func (a *Agent) hookHandlers() HookHandlers {
 	// 帧身份暂存(Meta 先于类型回调、同一读循环 goroutine 顺序执行):read_miss 的补块
@@ -200,6 +202,13 @@ func (a *Agent) onHookStageSwitch(stageID string, seed int64) {
 		return
 	}
 	if o.StageID == stageID && o.ShuffleSeed == seed {
+		return
+	}
+	// 基底 dataset 已退出归属解析时丢弃该帧:旧订单基底不能把已退役数据集重新激活;
+	// 活跃集合为空(未判定)时保持现行为。
+	if !a.Prefetch.datasetActive(o.Dataset) {
+		slog.Warn("hooksock: stage_switch 基底 dataset 不在活跃集合,丢弃",
+			"dataset", o.Dataset, "stage_id", stageID)
 		return
 	}
 	next := o
