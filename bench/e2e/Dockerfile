@@ -1,4 +1,4 @@
-# traincache-trainer:dev — e2e 块读训练镜像(数据面)。
+# traincache-trainer:v0.9.1 — e2e 块读训练镜像(数据面)。
 # 构建上下文由 build-trainer.sh 组装(不在仓库内落大产物):
 #   app/           load_train.py blockread.py ordersrc.py config.py
 #   site-packages/ 宿主机 .venv site-packages + ~/.local 的 torch 及依赖

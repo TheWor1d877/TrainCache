@@ -44,14 +44,14 @@ spec:
           emptyDir: {}
       initContainers:
         - name: checkpoint-plugins
-          image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+          image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:v0.9.1
           imagePullPolicy: IfNotPresent
           command: ["cp", "-a", "/opt/traincache/plugins/.", "/mnt/plugins/"]
           volumeMounts:
             - name: checkpoint-plugins
               mountPath: /mnt/plugins
         - name: checkpointd
-          image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:dev
+          image: ghcr.io/thewor1d877/traincache/traincache-checkpointd:v0.9.1
           imagePullPolicy: IfNotPresent
           command: ["checkpointd"]
           restartPolicy: Always

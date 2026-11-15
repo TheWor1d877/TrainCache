@@ -22,6 +22,12 @@
 #                              eviction trigger. Read by Agent and Controller.
 #   prefetchLookahead        — neighbour blocks prefetched ahead of the cursor.
 #   evictPolicy              — eviction order: heat / lru / lfu.
+#   evictInterval            — Agent eviction loop check interval. The code
+#                              default is 30s. Written here because the
+#                              DaemonSet references it: patching the key is
+#                              the supported way to change it per run (the
+#                              bench short-window families set 5s), and a
+#                              missing key blocks Pod startup.
 #   datasetMetricsWhitelist  — comma-separated DataSet names that keep their own
 #                              metrics label; "" merges every DataSet into the
 #                              "other" label (bounded cardinality, D35).
@@ -102,6 +108,7 @@ data:
   cacheCapacityBytes: "0"
   prefetchLookahead: "16"
   evictPolicy: "heat"
+  evictInterval: "30s"
   datasetMetricsWhitelist: ""
   startupWindowBytes: "536870912"
   maxFillFraction: "0.125"

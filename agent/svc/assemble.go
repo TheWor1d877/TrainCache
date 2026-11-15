@@ -243,6 +243,7 @@ func assembleWith(obj objectstore.Store, cfg Config) (*Agent, error) {
 	// M4:注入 Policy(heat/lru/lfu,由 TRAINCACHE_EVICT_POLICY 选择;撤 W-TinyLFU 档)。
 	ag.Evictor = evictor.New(cs, evictHeatSource{ag}, ag.Prefetch, ag.Metrics, policy, evictor.Config{
 		BlockDir:           cfg.CacheRoot,
+		Interval:           cfg.EvictInterval,
 		TriggerPercent:     cfg.Heat.DiskTriggerPercent,
 		DeltaPercent:       cfg.Heat.DiskDeltaPercent,
 		CriticalPercent:    cfg.Heat.DiskCriticalPercent,

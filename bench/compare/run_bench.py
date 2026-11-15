@@ -551,13 +551,16 @@ def ensure_agent_config():
     """把 traincache-config 的 agent 键对齐到本轮参数。
 
     agentd 与 controller-manager 都在启动时读这些值。cacheCapacityBytes 变化
-    要重启 controller；三个键任一变化都要重启 agentd，后者由
-    reset_traincache_agent() 逐轮完成。
+    要重启 controller；四个键任一变化都要重启 agentd，后者由
+    reset_traincache_agent() 逐轮完成。evictInterval 固定 5s：evict-mix 跑程
+    35–48s，生产缺省 30s 周期下超配额窗口短于一个周期，淘汰轮是否被观测到
+    取决于 agentd 启动相位（2026-11-15 heat-rho2 五轮里三轮 rounds_zero）。
     """
     want = {
         "cacheCapacityBytes": str(CACHE_BYTES),
         "prefetchLookahead": str(AGENT_PREFETCH_K),
         "evictPolicy": EVICT_POLICY,
+        "evictInterval": "5s",
     }
     cur = _current_agent_config()
     diff = {k: v for k, v in want.items() if cur.get(k) != v}

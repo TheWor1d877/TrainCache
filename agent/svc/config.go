@@ -70,6 +70,11 @@ const (
 	// envCacheCapacityBytes 是字节维度缓存上限(M-debug-1/设计《回收与磁盘淘汰》;默认 0=关闭字节淘汰,
 	// 只走磁盘水位)。
 	envCacheCapacityBytes = "TRAINCACHE_CACHE_CAPACITY_BYTES"
+	// defaultEvictInterval 是淘汰循环检查周期默认值(D24;与 evictor 包默认一致)。
+	defaultEvictInterval = 30 * time.Second
+	// envEvictInterval 覆盖淘汰循环检查周期(time.ParseDuration)。bench 短窗口
+	// 测量(跑程 35–48s)用 5s,否则超配额窗口短于周期,淘汰轮是否被观测到看相位。
+	envEvictInterval = "TRAINCACHE_EVICT_INTERVAL"
 )
 
 // HeatConfig 是热度与磁盘触发线参数(N=24h、M=30min、T=24h(因子 0.5)、k=80%、Δ=5%、M=90%;
@@ -152,6 +157,9 @@ type Config struct {
 	// CacheCapacityBytes 是字节维度缓存上限(设计《回收与磁盘淘汰》;默认 0=关闭,只走磁盘水位)。
 	// TRAINCACHE_CACHE_CAPACITY_BYTES 覆盖;>0 时 evictor 启用双维度淘汰判定。
 	CacheCapacityBytes int64
+	// EvictInterval 是淘汰循环检查周期(设计《回收与磁盘淘汰》;默认 30s,
+	// TRAINCACHE_EVICT_INTERVAL 覆盖,非法取值拒绝启动)。
+	EvictInterval time.Duration
 }
 
 // indexRefreshInterval 返回生效的快照跟随刷新周期(未配置/非正 → 默认 5s;
@@ -212,6 +220,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	evictInterval, err := envDuration(envEvictInterval, defaultEvictInterval)
+	if err != nil {
+		return nil, err
+	}
 	fetchRangeParallel, err := envBoolStrict(envFetchRangeParallel, defaultFetchRangeParallel)
 	if err != nil {
 		return nil, err
@@ -246,6 +258,7 @@ func Load() (*Config, error) {
 		GatewaySecure:                 envBool("TRAINCACHE_GATEWAY_SECURE"),
 		DebugAddr:                     debugAddr,
 		CacheCapacityBytes:            cacheCapacityBytes,
+		EvictInterval:                 evictInterval,
 	}, nil
 }
 

@@ -26,7 +26,7 @@ checkpointd 没有自己的 Deployment：它由准入注入到训练 Pod 当 sid
 
 ### 构建
 
-从仓库根构建。`VERSION` 默认 `dev`，候选构建时传目标版本号，也就是随后要打的 tag：
+从仓库根构建。`VERSION` 默认 `v0.9.1`（当前版本），候选构建时传目标版本号，也就是随后要打的 tag：
 
 ```bash
 docker build -f agent/Dockerfile \
@@ -40,7 +40,7 @@ docker build -f agent/Dockerfile \
 
 ### 清单
 
-- 仓库内清单写 `:dev`，用 `kustomize build controller/deploy` 渲染。
+- 仓库内清单写 `:v0.9.1`（当前版本，发版时与 git tag 逐字一致），用 `kustomize build controller/deploy` 渲染。
 - 发布清单由 kustomize `images:` 把五个 Deployment 的镜像改成 `@sha256:<digest>`，checkpointd 的 digest 由 overlay 的 patch 写进 `traincache-checkpoint-image` ConfigMap，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。
@@ -192,7 +192,7 @@ main 上打 tag `vX.Y.Z` 并推送会触发 `release.yml`。它找同一 sha 的
 
 指标口径：`dataset` 标签只对白名单内的 DataSet 取原名，其余一律合并成 `other`，目的是限制该标签的基数。白名单为空时所有带 `dataset` 标签的指标都合并到 `other`，按 dataset 拆分的看板看不出数据集差异，排查单数据集时再把名字加回白名单。
 
-ConfigMap 的配置项用 camelCase。Agent 的 11 项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_OBJSTORE_COMPRESSION`、`TRAINCACHE_FETCH_RANGE_PARALLEL`、`TRAINCACHE_GATEWAY_ENDPOINT`、`TRAINCACHE_GATEWAY_SECURE`。Controller 的 6 项由 `controller/deploy/manager/deployment.yaml` 注入：`CONTROLLER_POLL_INTERVAL`、`CONTROLLER_SCORE_TTL`、`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_STARTUP_WINDOW_BYTES`、`TRAINCACHE_MAX_FILL_FRACTION`、`TRAINCACHE_GATE_NETWORK_BANDWIDTH`。scheduler 的 2 项由 `controller/deploy/scheduler/deployment.yaml` 注入：`SCHEDULER_SCORE_TTL`、`CONTROLLER_LOG_LEVEL`。网关的 9 项由 `controller/deploy/gateway/deployment.yaml` 注入：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_OBJSTORE_COMPRESSION`、`TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY`、`TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES`、`TRAINCACHE_GATEWAY_CACHE`、`TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES`、`TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES`；AK/SK 另走 Secret `traincache-objstore`。webhook 另有一条 `CHECKPOINT_IMAGE`，值取自 `traincache-checkpoint-image` ConfigMap，是注入训练 Pod 的镜像引用。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。
+ConfigMap 的配置项用 camelCase。Agent 的 12 项由 DaemonSet 用 `configMapKeyRef` 注入，环境变量名不变：`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_PREFETCH_LOOKAHEAD`、`TRAINCACHE_EVICT_POLICY`、`TRAINCACHE_EVICT_INTERVAL`、`TRAINCACHE_DATASET_WHITELIST`、`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_OBJSTORE_COMPRESSION`、`TRAINCACHE_FETCH_RANGE_PARALLEL`、`TRAINCACHE_GATEWAY_ENDPOINT`、`TRAINCACHE_GATEWAY_SECURE`。Controller 的 6 项由 `controller/deploy/manager/deployment.yaml` 注入：`CONTROLLER_POLL_INTERVAL`、`CONTROLLER_SCORE_TTL`、`TRAINCACHE_CACHE_CAPACITY_BYTES`、`TRAINCACHE_STARTUP_WINDOW_BYTES`、`TRAINCACHE_MAX_FILL_FRACTION`、`TRAINCACHE_GATE_NETWORK_BANDWIDTH`。scheduler 的 2 项由 `controller/deploy/scheduler/deployment.yaml` 注入：`SCHEDULER_SCORE_TTL`、`CONTROLLER_LOG_LEVEL`。网关的 9 项由 `controller/deploy/gateway/deployment.yaml` 注入：`TRAINCACHE_OBJSTORE_ENDPOINT`、`TRAINCACHE_OBJSTORE_BUCKET`、`TRAINCACHE_OBJSTORE_SECURE`、`TRAINCACHE_OBJSTORE_COMPRESSION`、`TRAINCACHE_GATEWAY_BUCKET_CONCURRENCY`、`TRAINCACHE_GATEWAY_BLOCK_BUFFER_BYTES`、`TRAINCACHE_GATEWAY_CACHE`、`TRAINCACHE_GATEWAY_CACHE_DATASET_BYTES`、`TRAINCACHE_GATEWAY_CACHE_TOTAL_BYTES`；AK/SK 另走 Secret `traincache-objstore`。webhook 另有一条 `CHECKPOINT_IMAGE`，值取自 `traincache-checkpoint-image` ConfigMap，是注入训练 Pod 的镜像引用。ConfigMap 或任一被引用的配置项缺失时读取方 Pod 停在 `CreateContainerConfigError`，不静默回退到内置默认值。
 
 ## CLI 下发
 

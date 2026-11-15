@@ -64,8 +64,8 @@ EOF
 kubectl kustomize "$tmp" >"$OUT"
 
 bad=0
-if grep -q ':dev' "$OUT"; then
-  echo "渲染结果仍含 :dev 标签" >&2
+if grep -qE ':(dev|v0\.9\.1)' "$OUT"; then
+  echo "渲染结果仍含浮动标签" >&2
   bad=1
 fi
 for pair in "controller-manager:$D_MANAGER" "webhook:$D_WEBHOOK" "kube-scheduler:$D_SCHEDULER" "traincache-agentd:$D_AGENT" "traincache-gateway:$D_GATEWAY" "traincache-checkpointd:$D_CHECKPOINT"; do

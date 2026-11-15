@@ -6,6 +6,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
 
+# 仓库内清单与组态统一用的镜像 tag。发版时与 git tag 逐字一致。
+VERSION_TAG="${VERSION_TAG:-v0.9.1}"
+
 bad=0
 fail() { printf '  [FAIL] %s\n' "$*"; bad=1; }
 
@@ -17,30 +20,30 @@ while IFS= read -r img; do
   [[ -n "$img" ]] || continue
   case "$img" in
     *@sha256:*) ;;
-    *:dev) ;;
-    *) fail "镜像未使用 dev 标签或 digest: $img" ;;
+    *:${VERSION_TAG}) ;;
+    *) fail "镜像未使用 ${VERSION_TAG} 标签或 digest: $img" ;;
   esac
 done <<<"$images"
 
-# 2. kustomization 的 images 必须覆盖全部部署组件，且发布前都指向 dev。
+# 2. kustomization 的 images 必须覆盖全部部署组件，且发布前都指向当前版本 tag。
 #    checkpointd 由准入按 Pod 注入，不进 kustomization，因此这五个组件的
 #    循环保持五行；它的取值放在 traincache-checkpoint-image ConfigMap 里，
 #    单独在下面校验，它的 Dockerfile/main 在第 3、4 节校验。
 for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
   if ! grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
-      | grep -q 'newTag: dev'; then
-    fail "kustomization images 缺少 $comp 或未指向 dev"
+      | grep -q "newTag: ${VERSION_TAG}"; then
+    fail "kustomization images 缺少 $comp 或未指向 ${VERSION_TAG}"
   fi
 done
 
-# 2b. checkpointd 的镜像取值必须由 ConfigMap 承载，且只能是 dev 标签或 digest。
+# 2b. checkpointd 的镜像取值必须由 ConfigMap 承载，且只能是当前版本 tag 或 digest。
 ckpt_image="$(awk '/^[[:space:]]*checkpointImage:/ {print $2; exit}' \
   controller/deploy/webhook/checkpoint-image.yaml)"
 [[ -n "$ckpt_image" ]] || fail "checkpoint-image.yaml 缺少 checkpointImage 键"
 case "$ckpt_image" in
   *@sha256:*) ;;
-  *:dev) ;;
-  *) fail "checkpointd 镜像未使用 dev 标签或 digest: $ckpt_image" ;;
+  *:${VERSION_TAG}) ;;
+  *) fail "checkpointd 镜像未使用 ${VERSION_TAG} 标签或 digest: $ckpt_image" ;;
 esac
 grep -q 'name: CHECKPOINT_IMAGE' controller/deploy/webhook/deployment.yaml \
   || fail "webhook Deployment 没有读 CHECKPOINT_IMAGE"
@@ -72,7 +75,7 @@ mains=(
 
 for df in "${dockerfiles[@]}"; do
   ! grep -q 'ARG REGISTRY' "$df" || fail "$df: 不应有镜像站参数,基础镜像写官方短名"
-  grep -qx 'ARG VERSION=dev' "$df" || fail "$df: ARG VERSION 默认值不是 dev"
+  grep -qx "ARG VERSION=${VERSION_TAG}" "$df" || fail "$df: ARG VERSION 默认值不是 ${VERSION_TAG}"
   grep -q -- '-X main.version=\${VERSION}' "$df" || fail "$df: 未用 ldflags 注入 main.version"
 done
 

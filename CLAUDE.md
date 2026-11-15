@@ -1,6 +1,6 @@
 ## 项目整体约束
 全程简体中文作答。
-讲解以「让用户听懂」为第一目标，在此基础上再追求专业、准确、严谨。直白讲清逻辑。写作规则以 ai-output-rules skill 为准，本文件的写法条目与它冲突时按 skill 执行：不用比喻、类比、排比代替定义，不给无生命主语加拟人动词，结尾不做提议与反问。
+讲解以「让用户听懂」为第一目标，在此基础上再追求专业、准确、严谨。直白讲清逻辑。写作规则以 ai-output-and-action-rules skill 为准，本文件的写法条目与它冲突时按 skill 执行：不用比喻、类比、排比代替定义，不给无生命主语加拟人动词，结尾不做提议与反问。
 文档(README，CHANGELOG,接口规范型,一般的说明文档)要与代码高度统一，增删改代码是应该遵循文档现行原则，在文档中修改出最终内容，然后维护代码与文档的一致。
 没有用户的明确允许，不得创建新分支。
 
@@ -50,7 +50,7 @@ k8s/containerd 不读 daemon.json。镜像拉不到时先在宿主机 `docker pu
 
 ## 版本、镜像与发布物
 - 版本号唯一来源是 git tag `vX.Y.Z`；镜像 tag、二进制注入版本、CHANGELOG 标题逐字一致，统一带 `v`。
-- 镜像名固定 `ghcr.io/thewor1d877/traincache/<组件>`：开发打 `:dev`，候选打 `sha-<7 位短 sha>`，发布清单用 `@sha256`。仓库内任何文件不得出现私有镜像站域名。
+- 镜像名固定 `ghcr.io/thewor1d877/traincache/<组件>`：开发打 `:v0.9.1`（当前版本，发版时与 git tag 逐字一致），候选打 `sha-<7 位短 sha>`，发布清单用 `@sha256`。仓库内任何文件不得出现私有镜像站域名。
 - Dockerfile 不写私人镜像站前缀，基础镜像写官方短名，拉取加速交给 docker daemon 的 `registry-mirrors`；Go module 走 `ARG GOPROXY`，默认值用公共代理。
 - 仓库内清单的镜像 tag 写 `dev`；发布清单由 kustomize `images:` 渲染，全部 Traincache 镜像用 `@sha256` 固定，不手改 YAML。
 - `controller/deploy/observability/` 是 dev-only 装置，不进发布包，也不得引用到发布清单。

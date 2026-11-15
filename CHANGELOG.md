@@ -8,7 +8,7 @@
 ## [v9.9.9] - 2026-12-01
 
 ### Added
-- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
+- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。
 
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
@@ -28,6 +28,10 @@
 ### Fixed
 
 - Agent 在训练数据换版本后把读缺块归到旧数据集：归属解析改为按订单源判定的活跃数据集集合取候选，退出解析的旧数据集不再参与，切换数据后按需回补的块落到新数据集。两份同形状数据同时活跃、分片名与块号完全相同时仍无法区分。
+
+### Changed
+
+- 镜像版本统一到 v0.9.1：仓库清单、kustomization 的 `newTag`、组态的 `image_set`、构建脚本默认 tag 与 Dockerfile 的 `VERSION` 默认值全部指向 `v0.9.1`，文档里的镜像引用同步。发布清单仍用 `@sha256` 固定。
 
 ## [v0.9.0] - 2026-11-13
 

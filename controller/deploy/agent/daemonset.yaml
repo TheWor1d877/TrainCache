@@ -32,7 +32,7 @@ spec:
       # The control-plane taint keeps the Agent off kind's control-plane node.
       containers:
         - name: agentd
-          image: ghcr.io/thewor1d877/traincache/traincache-agentd:dev
+          image: ghcr.io/thewor1d877/traincache/traincache-agentd:v0.9.1
           imagePullPolicy: IfNotPresent
           env:
             # No literal values here. Settings that vary by cluster or by run
@@ -65,6 +65,11 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: evictPolicy
+            - name: TRAINCACHE_EVICT_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: evictInterval
             - name: TRAINCACHE_OBJSTORE_ENDPOINT
               valueFrom:
                 configMapKeyRef:

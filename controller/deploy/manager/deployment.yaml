@@ -25,7 +25,7 @@ spec:
       priorityClassName: system-cluster-critical
       containers:
         - name: manager
-          image: ghcr.io/thewor1d877/traincache/controller-manager:dev
+          image: ghcr.io/thewor1d877/traincache/controller-manager:v0.9.1
           imagePullPolicy: IfNotPresent
           env:
             # No literal values here. Values equal to the defaults in

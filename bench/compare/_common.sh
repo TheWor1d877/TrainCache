@@ -45,7 +45,7 @@ cfg() {
 
 # 日志落运行时数据层(路径口径由 bench/config.py 定义,repo 内不建日志目录)
 LOG_DIR="$(cfg COMPARE_LOGS_DIR)"
-LOG_DIR="${LOG_DIR:-$BENCH_ROOT/../../traincachedata/bench/compare/logs}"
+LOG_DIR="${LOG_DIR:-$BENCH_ROOT/../../traincachedata/bench/logs/compare}"
 mkdir -p "$LOG_DIR"
 
 # ---- 共享基础设施参数(只读 config.py,不硬编码)----

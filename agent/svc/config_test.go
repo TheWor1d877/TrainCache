@@ -142,6 +142,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LocalGCInterval != defaultLocalGCInterval {
 		t.Errorf("LocalGCInterval = %v, want %v(§11.5 默认)", cfg.LocalGCInterval, defaultLocalGCInterval)
 	}
+	if cfg.EvictInterval != defaultEvictInterval {
+		t.Errorf("EvictInterval = %v, want %v(《回收与磁盘淘汰》默认)", cfg.EvictInterval, defaultEvictInterval)
+	}
 	if cfg.ObjstoreProbeConditionalWrite {
 		t.Error("ObjstoreProbeConditionalWrite 默认值 = true, want false(6.1《快照与回收》)")
 	}
@@ -255,6 +258,46 @@ func TestLoadLocalGCInterval(t *testing.T) {
 			}
 			if cfg.LocalGCInterval != tc.want {
 				t.Fatalf("LocalGCInterval = %v, want %v", cfg.LocalGCInterval, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadEvictInterval:TRAINCACHE_EVICT_INTERVAL 解析(设计《回收与磁盘淘汰》)——未设置取默认
+// 30s;合法值覆盖(bench 短窗口测量用 5s);非法取值与其余 duration 参数同口径判启动错误。
+func TestLoadEvictInterval(t *testing.T) {
+	cases := []struct {
+		name    string
+		set     bool
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "缺省", want: defaultEvictInterval},
+		{name: "显式配置", set: true, value: "5s", want: 5 * time.Second},
+		{name: "非法非duration", set: true, value: "abc", wantErr: true},
+		{name: "非法零", set: true, value: "0s", wantErr: true},
+		{name: "非法负值", set: true, value: "-1m", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("NODE_NAME", "worker-01")
+			if tc.set {
+				t.Setenv("TRAINCACHE_EVICT_INTERVAL", tc.value)
+			}
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load 未报错，期望拒绝非法淘汰周期 %q", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.EvictInterval != tc.want {
+				t.Fatalf("EvictInterval = %v, want %v", cfg.EvictInterval, tc.want)
 			}
 		})
 	}
