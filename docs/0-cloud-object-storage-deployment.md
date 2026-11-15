@@ -265,3 +265,4 @@ mc --etag="00000000000000000000000000000000" put mycos/my-train-data/test-key.tx
 ```
 
 阿里云 OSS、AWS S3 同样写法：动作换成对应的 `oss:*` 或 `s3:*`，Resource 限定到目标桶和桶内对象。
+

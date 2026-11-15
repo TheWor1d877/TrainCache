@@ -237,6 +237,7 @@ def run_once(cond: dict, run_id: str, reps_dir: Path,
                   "--rate", f"{cond['network']['rate_mbit']}mbit",
                   "--groups", cond["group"],
                   "--reps", "1",
+                  "--family", cond["family"],
                   "--out-root", str(run_dir)]
         rc, out, err = _run_cmd(rb_cmd, env=env)
         if rc != 0:

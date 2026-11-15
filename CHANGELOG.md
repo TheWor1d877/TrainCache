@@ -34,6 +34,7 @@
 ### Added
 
 - bench 性能报告生成器 `bench/experiments/report_perf.py`：读结果目录生成自包含报告页与静态图，`--mock` 用假数据出同构图。
+- 网关对带 Range 的块 GET 按键做区间合并再回源，合并结果落盘复用，同一键的重复区间只回源一次。网关族组态由多臂减到三臂。
 
 ### Changed
 
