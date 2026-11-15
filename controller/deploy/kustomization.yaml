@@ -20,12 +20,12 @@ resources:
 # so no tag or digest is ever hand-edited in the per-component manifests.
 images:
   - name: ghcr.io/thewor1d877/traincache/controller-manager
-    newTag: dev
+    newTag: v0.9.1
   - name: ghcr.io/thewor1d877/traincache/webhook
-    newTag: dev
+    newTag: v0.9.1
   - name: ghcr.io/thewor1d877/traincache/kube-scheduler
-    newTag: dev
+    newTag: v0.9.1
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
-    newTag: dev
+    newTag: v0.9.1
   - name: ghcr.io/thewor1d877/traincache/traincache-gateway
-    newTag: dev
+    newTag: v0.9.1

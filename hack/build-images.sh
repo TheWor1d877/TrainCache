@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-images.sh — 构建全部开发镜像（tag 默认 dev）。
+# build-images.sh — 构建全部开发镜像（tag 默认 v0.9.1）。
 #
 # 用法:
 #   ./hack/build-images.sh                  # manager webhook scheduler agent gateway checkpoint
@@ -10,7 +10,7 @@
 #   ./hack/build-images.sh --print-fp       # 只打印当前源码指纹（不构建，供镜像新鲜度门禁）
 #
 # 每个镜像都打上 io.traincache.src-fp 标签，值是构建时源码指纹。热集群里
-# :dev 标签会被反复复用，容器只比"镜像在不在"就会拿旧二进制参与测量——
+# 同一版本标签会被反复复用，容器只比"镜像在不在"就会拿旧二进制参与测量——
 # bench/scripts/ctrl_up.sh 用这个标签判定新鲜度。
 #
 # 构建器按 Dockerfile 里的官方短名解析基础镜像。本机镜像只有带镜像站前缀的
@@ -21,7 +21,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REG="ghcr.io/thewor1d877/traincache"
-TAG="${TAG:-dev}"
+TAG="${TAG:-v0.9.1}"
 
 declare -A DF=(
   [manager]="$ROOT/controller/deploy/manager/Dockerfile"

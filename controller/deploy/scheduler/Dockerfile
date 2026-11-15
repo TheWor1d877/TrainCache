@@ -5,13 +5,13 @@
 # go.work, so build from the repo root (or a staged copy of it):
 #
 #   docker build -f controller/deploy/scheduler/Dockerfile \
-#     -t ghcr.io/thewor1d877/traincache/kube-scheduler:dev .
+#     -t ghcr.io/thewor1d877/traincache/kube-scheduler:v0.9.1 .
 # hack/build-images.sh runs this build and first retags locally present base
 # images to their official short names.
 FROM golang:1.26-bookworm AS build
 
 ARG GOPROXY=https://goproxy.cn,direct
-ARG VERSION=dev
+ARG VERSION=v0.9.1
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local \
