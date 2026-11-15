@@ -8,7 +8,7 @@
 ## [v9.9.9] - 2026-12-01
 
 ### Added
-- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。字段契约见 `docs/4.4-experiment-protocol.md` §C。
+- `WarmupTask` 新增按块预热开关 `spec.blockWarmup`，只预热训练首个窗口。
 
 ### Changed
 - Agent 默认缓存上限从固定 1GiB 改为节点内存的 10%。
