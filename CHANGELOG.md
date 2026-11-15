@@ -25,10 +25,6 @@
 
 - Agent 订单预取降级判据从「订单数据集总字节 > 缓存容量」改成「邻域预取窗口（`TRAINCACHE_PREFETCH_LOOKAHEAD` 个去重块）字节 > 缓存容量的一半」：数据集大于缓存、但窗口在半缓存以内的订单恢复首批与邻域预取；窗口超过容量一半仍降级为按需回源。
 
-### Changed
-
-- 镜像版本统一到 v0.9.3：仓库清单、kustomization 的 `newTag`、构建脚本默认 tag 与 Dockerfile 的 `VERSION` 默认值全部指向 `v0.9.3`，文档里的镜像引用同步。发布清单仍用 `@sha256` 固定。组态 `image_set` 与 145 个 COND 留在 v0.9.2，等本次候选构建产出 v0.9.3 digest 后由后续 chore 提交换版。
-
 ## [v0.9.2] - 2026-11-15
 
 ### Added
