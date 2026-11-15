@@ -3,7 +3,7 @@
 # 只读，不改任何状态：查 Pod、训练步进度、已出 RESULT 的 Pod、MinIO 限速档位、
 # 各格 summary.csv 的有效轮数、跑分日志尾部。
 set -uo pipefail
-RESULTS_DIR="${TRAINCACHE_RESULTS_DIR:-$HOME/tcd/bench/results}"
+RESULTS_DIR="${TRAINCACHE_RESULTS_ROOT:-$HOME/tcd/bench/results}"
 
 echo "===== $(date '+%F %T') ====="
 
@@ -47,4 +47,4 @@ PY
 done
 
 echo "-- 跑分日志尾部 --"
-tail -5 "$HOME/tcd/bench/compare/logs/traincache.log" 2>/dev/null
+tail -5 "$HOME/tcd/bench/logs/compare/traincache.log" 2>/dev/null

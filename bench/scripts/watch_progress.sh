@@ -16,9 +16,12 @@ RUN_LOG="${3:-}"
 FOCUS="${4:-}"
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-WATCH_LOG=${WATCH_LOG:-$HOME/tcd/bench/watch-progress-$STAMP.log}
-VOID_MARK=${VOID_MARK:-$HOME/tcd/bench/watch-progress-void.seen}
-STATE_MARK=${STATE_MARK:-$HOME/tcd/bench/watch-progress-cells.seen}
+# 日志与状态标记落 ~/tcd/bench/logs/，不散在 bench 根目录。
+LOG_DIR="${LOG_DIR:-$HOME/tcd/bench/logs}"
+mkdir -p "$LOG_DIR"
+WATCH_LOG=${WATCH_LOG:-$LOG_DIR/watch-progress-$STAMP.log}
+VOID_MARK=${VOID_MARK:-$LOG_DIR/watch-progress-void.seen}
+STATE_MARK=${STATE_MARK:-$LOG_DIR/watch-progress-cells.seen}
 START=$(date +%s)
 : > "$VOID_MARK"
 : > "$STATE_MARK"

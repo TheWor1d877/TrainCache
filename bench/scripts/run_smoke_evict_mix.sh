@@ -8,8 +8,9 @@
 # 验收对象是数据，不是流程：每格跑完立即执行硬断言，不符当场终止，不带病跑完。
 # 断言写在脚本里（不是清单里），冒烟与正式轮共用同一份判定口径。
 #
-# 产物落正式产物根 ~/tcd/bench/results/evict-mix/，冒烟行是同格 rep0，
-# 正式轮重跑该格时被同 key 新行顶替，不进最终口径。
+# 产物落冒烟目录 ~/tcd/bench/smoke/<时间戳>/，与正式产物根 ~/tcd/bench/results/ 分开：
+# 冒烟用 TRAINCACHE_RESULTS_ROOT 把产物根指到自己的目录，不进正式产物根，
+# 正式轮的行也不会被冒烟行顶掉。日志与失败现场落 ~/tcd/bench/logs/。
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,14 +19,15 @@ cd "$REPO"
 
 DATA_ROOT="${TRAINCACHE_DATA_ROOT:-$(cd "$REPO/.." && pwd)/traincachedata}"
 BENCH_DIR="$DATA_ROOT/bench"
-RESULTS_DIR="$BENCH_DIR/results"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-LOG="$BENCH_DIR/run-smoke-evictmix-$STAMP.log"
-LOGDIR="$BENCH_DIR/smoke-evictmix-$STAMP"
-PIDFILE="$BENCH_DIR/smoke-evictmix.pid"
-FAILFILE="$BENCH_DIR/smoke-evictmix-failures-$STAMP.txt"
+SMOKE_DIR="$BENCH_DIR/smoke/$STAMP"
+RESULTS_DIR="$SMOKE_DIR/results"
+LOGDIR="$SMOKE_DIR/agentd-logs"
+LOG="$BENCH_DIR/logs/smoke-evictmix-$STAMP.log"
+PIDFILE="$BENCH_DIR/logs/smoke-evictmix.pid"
+FAILFILE="$BENCH_DIR/logs/smoke-evictmix-failures-$STAMP.txt"
 
-mkdir -p "$LOGDIR"
+mkdir -p "$BENCH_DIR/logs"
 echo $$ > "$PIDFILE"
 
 : > "$FAILFILE"
@@ -161,8 +163,15 @@ precheck() {
     return $rc
 }
 
-# ---- 只跑断言，不占机时：对既有产物验一遍判定逻辑（已知答案探针）----
+# ---- 只跑断言，不占机时：对最近一次冒烟产物验一遍判定逻辑（已知答案探针）----
 if [ "${1:-}" = "--assert-only" ]; then
+    LATEST=$(ls -1dt "$BENCH_DIR"/smoke/*/results 2>/dev/null | head -1 || true)
+    if [ -z "$LATEST" ]; then
+        echo "[assert] 没有冒烟产物可验：$BENCH_DIR/smoke/ 下找不到 results 目录" >&2
+        exit 2
+    fi
+    RESULTS_DIR="$LATEST"
+    echo "[assert] 验最近一次冒烟产物 $RESULTS_DIR"
     rc_all=0
     for pol in heat lru lfu; do
         for rho in 2 4 8; do
@@ -173,6 +182,11 @@ if [ "${1:-}" = "--assert-only" ]; then
     echo "[assert] 既有产物断言结束 rc=$rc_all"
     exit "$rc_all"
 fi
+
+# 产物根指到冒烟自己的目录：bench/config.py 的 RESULTS_DIR 读这个变量，
+# 正式轮不受影响，冒烟行不进正式产物根。
+export TRAINCACHE_RESULTS_ROOT="$RESULTS_DIR"
+mkdir -p "$LOGDIR"
 
 exec >> "$LOG" 2>&1
 echo "[smoke] evict-mix 冒烟开始 $(date '+%F %T') pid=$$ log=$LOG 留档目录=$LOGDIR"

@@ -8,8 +8,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CFG() { python3 "$ROOT/config.py" --sh "$1"; }
 QUICK="${1:-}"
 BUCKET="$(CFG MINIO_BUCKET)"
-OUT="$(CFG RESULTS_DIR)/cold-verify.txt"
-mkdir -p "$(CFG RESULTS_DIR)"
+OUT="$(CFG LOGS_DIR)/cold-verify.txt"
+mkdir -p "$(CFG LOGS_DIR)"
 
 cold_read() {
   local shards pod
