@@ -21,6 +21,10 @@
 
 ## [v0.9.3] - 2026-11-15
 
+### Changed
+
+- 仓库内清单的镜像 tag 从版本号改成浮动标签 `dev`：kustomization 的 `newTag`、五个 Deployment 的 `image` 与 `checkpointImage` 都指向 `dev`，e2e 用本地构建的镜像跑，不再依赖已发布镜像在 registry 上可拉。发布清单仍由 kustomize 渲染成 `@sha256`，装机用的镜像引用不变。
+
 ### Fixed
 
 - Agent 订单预取降级判据从「订单数据集总字节 > 缓存容量」改成「邻域预取窗口（`TRAINCACHE_PREFETCH_LOOKAHEAD` 个去重块）字节 > 缓存容量的一半」：数据集大于缓存、但窗口在半缓存以内的订单恢复首批与邻域预取；窗口超过容量一半仍降级为按需回源。
