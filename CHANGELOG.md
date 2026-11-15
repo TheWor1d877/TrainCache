@@ -19,6 +19,12 @@
 
 # Changelog正文
 
+## 未发布
+
+### Added
+
+- Agent 淘汰循环的检查周期可配：环境变量 `TRAINCACHE_EVICT_INTERVAL`（ConfigMap `traincache-config` 键 `evictInterval`），默认 `30s`，非法值或非正数拒绝启动。
+
 ## [v0.9.1] - 2026-11-15
 
 ### Added
