@@ -184,7 +184,6 @@ make e2e              # kind 集群中的六项断言
 | [1 TrainCache 介绍与背景](docs/1-introduction-and-background.md) | 问题定义、外部事实、与 Fluid/JuiceFS 的定位差异 |
 | [2 TrainCache 三层架构](docs/2-three-layer-architecture.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3-field-survey.md) | Fluid/JuiceFS 的机制现勘与缺口证据 |
-| [4.0 bench 文档索引](docs/4.0-bench-guide.md) | 4.1–4.4 的分工与常驻命令 |
 | [4.1 装置与变量空间](docs/4.1-bench-apparatus.md) | 装置构成、ρ 阶梯、参数、数据生成与落点 |
 | [4.2 实验族与格子](docs/4.2-bench-families.md) | 十个族的轴与格子、COND 契约、机时账 |
 | [4.3 指标与决策](docs/4.3-bench-metrics-and-decisions.md) | 指标算式、判据阈值、D 号决策 |

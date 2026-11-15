@@ -184,7 +184,6 @@ Documents under `docs/` are written in Chinese.
 | [1 Introduction and background](docs/1-introduction-and-background.md) | Problem statement, external facts, positioning against Fluid and JuiceFS |
 | [2 Three-layer architecture](docs/2-three-layer-architecture.md) | Control plane, node plane, data sources and data-plane conventions |
 | [3 Field survey](docs/3-field-survey.md) | How Fluid and JuiceFS work, and the gaps found |
-| [4.0 Bench guide](docs/4.0-bench-guide.md) | Division of work across 4.1–4.4 and standing commands |
 | [4.1 Apparatus and variable space](docs/4.1-bench-apparatus.md) | Rig, ρ ladder, parameters, data generation and locations |
 | [4.2 Families and grids](docs/4.2-bench-families.md) | Ten experiment families, cell matrices, COND contract, machine-hour account |
 | [4.3 Metrics and decisions](docs/4.3-bench-metrics-and-decisions.md) | Metric formulas, pass criteria, numbered decisions |
