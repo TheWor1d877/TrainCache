@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
 
 # 仓库内清单与组态统一用的镜像 tag。发版时与 git tag 逐字一致。
-VERSION_TAG="${VERSION_TAG:-v0.9.2}"
+VERSION_TAG="${VERSION_TAG:-v0.9.3}"
 
 bad=0
 fail() { printf '  [FAIL] %s\n' "$*"; bad=1; }

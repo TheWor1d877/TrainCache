@@ -26,7 +26,7 @@ checkpointd 没有自己的 Deployment：它由准入注入到训练 Pod 当 sid
 
 ### 构建
 
-从仓库根构建。`VERSION` 默认 `v0.9.2`（当前版本），候选构建时传目标版本号，也就是随后要打的 tag：
+从仓库根构建。`VERSION` 默认 `v0.9.3`（当前版本），候选构建时传目标版本号，也就是随后要打的 tag：
 
 ```bash
 docker build -f agent/Dockerfile \
@@ -40,7 +40,7 @@ docker build -f agent/Dockerfile \
 
 ### 清单
 
-- 仓库内清单写 `:v0.9.2`（当前版本，发版时与 git tag 逐字一致），用 `kustomize build controller/deploy` 渲染。
+- 仓库内清单写 `:v0.9.3`（当前版本，发版时与 git tag 逐字一致），用 `kustomize build controller/deploy` 渲染。
 - 发布清单由 kustomize `images:` 把五个 Deployment 的镜像改成 `@sha256:<digest>`，checkpointd 的 digest 由 overlay 的 patch 写进 `traincache-checkpoint-image` ConfigMap，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。

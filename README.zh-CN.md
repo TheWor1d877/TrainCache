@@ -169,7 +169,7 @@ Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里部署并测得基准
 ```bash
 make verify           # 三个模块的 build、vet、go test -race 与 gofmt
 make verify-metadata  # 版本口径、镜像名、文档相对链接
-hack/build-images.sh  # 开发镜像（:v0.9.2）
+hack/build-images.sh  # 开发镜像（:v0.9.3）
 make e2e              # kind 集群中的六项断言
 ```
 
