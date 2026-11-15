@@ -248,7 +248,7 @@ type PersistentPrefetcher struct {
 	stage   *stageState   // 当前阶段(nil = 尚无订单)
 	dataset string        // 最近一次 OnStageSwitch 的 dataset(P0 入队快照用;mu 保护)
 	// demandOnly 置位时阶段首批(P1)与邻域窗口(P2)都不入队,只保留 P0 按需/预热
-	// 入口(svc 在缓存容量小于订单数据集总字节时置位;mu 保护)。
+	// 入口(svc 在邻域预取窗口字节超过缓存容量一半时置位;mu 保护)。
 	demandOnly bool
 	queues     [numPriorities][]*task // P0..P3 FIFO 分片数组
 	pending    map[pendingKey]*task   // D45 去重表:覆盖 P0–P3 队列与运行中 task(mu 保护)
@@ -367,11 +367,17 @@ func (p *PersistentPrefetcher) OnConsumeSideAdvance(ctx context.Context, ref Chu
 
 // SetDemandOnly 置位/解除按需模式:置位后 OnStageSwitch 不装阶段首批(P1),
 // ensureWindowLocked 不开放邻域窗口(P2),P0 入口(EnqueueP0Demand/EnqueueP0 系列)
-// 不受影响。svc 按订单比较缓存容量与数据集总字节后调用;并发安全。
+// 不受影响。svc 按订单比较缓存容量一半与邻域窗口字节后调用;并发安全。
 func (p *PersistentPrefetcher) SetDemandOnly(on bool) {
 	p.mu.Lock()
 	p.demandOnly = on
 	p.mu.Unlock()
+}
+
+// Lookahead 返回本预取器的邻域预取提前量(块数)。cfg 在 New 时定型、此后不改,
+// 故无需持锁。svc 的缓存压力降级判据用它把窗口字节换算到容量比例上比较。
+func (p *PersistentPrefetcher) Lookahead() int {
+	return p.cfg.Lookahead
 }
 
 // OnStageSwitch 阶段切换:旧阶段 cursor 之后未消费块降级 P3(在途请求不取消);
