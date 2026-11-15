@@ -47,7 +47,7 @@
 
 ### ConfigMap traincache-config
 
-位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，21 个配置项。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`。
+位置 `controller/deploy/agent/configmap.yaml`，namespace `traincache`，22 个配置项。scheduler 的两个配置项在 kube-system 的 `traincache-scheduler-config`。
 
 - `cacheCapacityBytes`，环境变量 `TRAINCACHE_CACHE_CAPACITY_BYTES`，默认 `"0"`，Agent 与 manager 读取，改完重启 Agent 与 manager。
   本地缓存字节上限，必须 `>=0`。`0` 关闭字节维度，只按磁盘水位（80% 触发、90% 紧急）淘汰；填字节数（1GiB = `"1073741824"`）后，字节占用先到阈值就先淘汰。manager 只用它算 `K_cache`，算式是 `floor(cacheCapacityBytes × maxFillFraction / (podCount × chunkSize))`。Agent 还用它做订单预取降级判据：容量大于 0 且订单数据集总字节超过容量时，该订单的首批与邻域预取都不入队，只保留按需回源。
@@ -55,6 +55,8 @@
   节点侧游标之后持续预取的块数。调大提前量，预热流量和缓存占用随之增加。启动窗口块数落在 WarmupTask 的 `podDetails[].k`，算式是 `clamp(min(W_i, K_window, K_cache), 1, W_i)`。
 - `evictPolicy`，环境变量 `TRAINCACHE_EVICT_POLICY`，默认 `"heat"`，Agent 读取，改完重启 Agent。
   缓存淘汰顺序，取 `heat`、`lru`、`lfu`。非法值使 Agent 拒绝启动。
+- `evictInterval`，环境变量 `TRAINCACHE_EVICT_INTERVAL`，默认 `"30s"`，Agent 读取，改完重启 Agent。
+  淘汰循环检查周期，`time.ParseDuration` 格式，非法值或非正数使 Agent 拒绝启动。周期决定超配额后多久开始淘汰：bench 的 evict-mix 族跑程只有 35–48s，缺省 30s 周期下超配额窗口短于一个周期，淘汰轮是否落在跑程内看启动相位，bench 固定下发 `5s`。
 - `datasetMetricsWhitelist`，环境变量 `TRAINCACHE_DATASET_WHITELIST`，默认 `""`，Agent 读取，改完重启 Agent。
   逗号分隔的 DataSet 名，只决定指标 `dataset` 标签是否保留原名；为空时全部合并成 `other`。取数与缓存不受它影响。
 - `startupWindowBytes`，环境变量 `TRAINCACHE_STARTUP_WINDOW_BYTES`，默认 `"536870912"`，manager 读取，改完重启 manager。
@@ -186,6 +188,7 @@ Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内�
 这些参数的运行值取自 `agent/svc/config.go` 的默认值。覆盖办法走「落位判据」；改完重启 Agent DaemonSet 生效。
 
 - `TRAINCACHE_EVICT_POLICY`，默认 `heat`。淘汰策略，取值与非法值的处理跟 `traincache-config` 的 `evictPolicy` 同一个键，DaemonSet 从该键注入。
+- `TRAINCACHE_EVICT_INTERVAL`，默认 `30s`。淘汰循环检查周期，取值与非法值的处理跟 `traincache-config` 的 `evictInterval` 同一个键，DaemonSet 从该键注入。
 - `TRAINCACHE_VERIFY`，默认 `xxh3`。校验级别：`xxh3` 或 `xxh3+sha256`。
 - `TRAINCACHE_CACHE_ROOT`，默认 `/var/cache/traincache`。缓存根目录，必须与 DaemonSet 的 hostPath 挂载一致。
 - `TRAINCACHE_GRPC_ADDR`，默认 `:9410`。Agent gRPC 监听地址，DaemonSet 的 `hostPort` 同值。

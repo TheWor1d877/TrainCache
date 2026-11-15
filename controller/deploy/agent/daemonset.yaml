@@ -65,6 +65,11 @@ spec:
                 configMapKeyRef:
                   name: traincache-config
                   key: evictPolicy
+            - name: TRAINCACHE_EVICT_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: evictInterval
             - name: TRAINCACHE_OBJSTORE_ENDPOINT
               valueFrom:
                 configMapKeyRef:
