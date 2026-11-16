@@ -26,21 +26,21 @@ checkpointd 没有自己的 Deployment：它由准入注入到训练 Pod 当 sid
 
 ### 构建
 
-从仓库根构建。`VERSION` 默认 `v0.9.3`（当前版本），候选构建时传目标版本号，也就是随后要打的 tag：
+从仓库根构建。Dockerfile 的 `VERSION` 默认值是当前版本，与最新 git tag 逐字一致（`hack/verify-release-metadata.sh` 核对）；候选与发布构建时传目标版本号，也就是随后要打的 tag：
 
 ```bash
 docker build -f agent/Dockerfile \
-  --build-arg VERSION=v0.1.0 \
-  -t ghcr.io/thewor1d877/traincache/traincache-agentd:v0.1.0 .
+  --build-arg VERSION=vX.Y.Z \
+  -t ghcr.io/thewor1d877/traincache/traincache-agentd:vX.Y.Z .
 ```
 
 基础镜像从 docker.io 拉取，走宿主 docker daemon 的 `registry-mirrors`，构建命令不带 registry 参数。
 
-本机构建用 `hack/build-images.sh`：`TAG` 默认 `dev`，参数给组件名只构建子集。脚本先把基础镜像准备成官方短名，本机只有带镜像站前缀的同名副本时执行 `docker tag` 复用，不产生网络访问；两种名字都不在本机时立即报错，并给出 `docker pull` 与 `docker tag` 两条处理命令。
+本机构建用 `hack/build-images.sh`：`TAG` 默认与仓库清单的镜像标签一致，参数给组件名只构建子集。脚本先把基础镜像准备成官方短名，本机只有带镜像站前缀的同名副本时执行 `docker tag` 复用，不产生网络访问；两种名字都不在本机时立即报错，并给出 `docker pull` 与 `docker tag` 两条处理命令。
 
 ### 清单
 
-- 仓库内清单写 `:v0.9.3`（当前版本，发版时与 git tag 逐字一致），用 `kustomize build controller/deploy` 渲染。
+- 仓库内清单统一用浮动标签，集群内所有组件镜像同一版本，用 `kustomize build controller/deploy` 渲染。
 - 发布清单由 kustomize `images:` 把五个 Deployment 的镜像改成 `@sha256:<digest>`，checkpointd 的 digest 由 overlay 的 patch 写进 `traincache-checkpoint-image` ConfigMap，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。

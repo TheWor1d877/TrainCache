@@ -4,7 +4,7 @@
 #
 # 构建(仓库根为构建上下文:go.work 同时 use ./agent、./core、./controller、./gateway、
 # ./checkpoint，五个模块目录都需入上下文):
-#   docker build -f gateway/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-gateway:v0.9.3 .
+#   docker build -f gateway/Dockerfile -t ghcr.io/thewor1d877/traincache/traincache-gateway:vX.Y.Z .
 # 本机构建用 hack/build-images.sh:构建前先把基础镜像补成官方短名。
 #
 # 镜像内容只有网关二进制;配置全部来自 env(design 10.1 §5.3),

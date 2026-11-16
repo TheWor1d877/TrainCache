@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# build-images.sh — 构建全部开发镜像（tag 默认 v0.9.3）。
+# build-images.sh — 构建全部开发镜像（tag 默认 dev）。
 #
 # 用法:
 #   ./hack/build-images.sh                  # manager webhook scheduler agent gateway checkpoint
 #   ./hack/build-images.sh manager agent    # 只构建指定组件
-#   TAG=v0.1.0 ./hack/build-images.sh
+#   TAG=vX.Y.Z ./hack/build-images.sh
 #   ./hack/build-images.sh --prepare-only   # 只准备基础镜像，不构建（供 e2e 预检）
 #   ./hack/build-images.sh --list-bases webhook  # 打印该组件需要的基础镜像
 #   ./hack/build-images.sh --print-fp       # 只打印当前源码指纹（不构建，供镜像新鲜度门禁）
@@ -21,7 +21,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REG="ghcr.io/thewor1d877/traincache"
-TAG="${TAG:-v0.9.3}"
+TAG="${TAG:-dev}"
 
 declare -A DF=(
   [manager]="$ROOT/controller/deploy/manager/Dockerfile"

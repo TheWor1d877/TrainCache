@@ -9,7 +9,7 @@ cd "$ROOT" || exit 2
 # 仓库内清单与组态统一用的版本 tag。仓库内清单写浮动标签 dev，
 # 发布清单由 kustomize 渲染成 digest；这个值只用于校验 Dockerfile 的
 # VERSION 默认值与 git tag 逐字一致。
-VERSION_TAG="${VERSION_TAG:-v0.9.3}"
+VERSION_TAG="${VERSION_TAG:-$(git tag --list 'v[0-9]*' | sort -V | tail -1)}"
 
 bad=0
 fail() { printf '  [FAIL] %s\n' "$*"; bad=1; }
@@ -55,7 +55,7 @@ grep -q 'name: traincache-checkpoint-image' controller/deploy/webhook/deployment
   || fail "webhook Deployment 的 CHECKPOINT_IMAGE 没引用 traincache-checkpoint-image"
 
 # 3. 组件清单从五变六：五个部署组件加 checkpointd（由准入注入的 sidecar）。
-#    Dockerfile 不设镜像站参数,VERSION 默认 dev 并由 ldflags 注入。
+#    Dockerfile 不设镜像站参数,VERSION 默认当前版本 tag 并由 ldflags 注入。
 dockerfiles=(
   agent/Dockerfile
   checkpoint/Dockerfile
