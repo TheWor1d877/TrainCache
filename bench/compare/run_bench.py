@@ -194,6 +194,7 @@ GROUP_NS = {
     "juicefs-warm": "juicefs",
     "fluid-cold": "fluid",
     "fluid-warm": "fluid",
+    "traincache": "traincache",
     "traincache-cold": "traincache",
     "traincache-warm": "traincache",
 }
@@ -203,6 +204,7 @@ GROUP_UP = {
     "juicefs-warm": COMPARE_ROOT / "juicefs" / "up.sh",
     "fluid-cold": COMPARE_ROOT / "fluid" / "up.sh",
     "fluid-warm": COMPARE_ROOT / "fluid" / "up.sh",
+    "traincache": COMPARE_ROOT / "traincache" / "up.sh",
     "traincache-cold": COMPARE_ROOT / "traincache" / "up.sh",
     "traincache-warm": COMPARE_ROOT / "traincache" / "up.sh",
 }
@@ -212,6 +214,7 @@ GROUP_DOWN = {
     "juicefs-warm": COMPARE_ROOT / "juicefs" / "down.sh",
     "fluid-cold": COMPARE_ROOT / "fluid" / "down.sh",
     "fluid-warm": COMPARE_ROOT / "fluid" / "down.sh",
+    "traincache": COMPARE_ROOT / "traincache" / "down.sh",
     "traincache-cold": COMPARE_ROOT / "traincache" / "down.sh",
     "traincache-warm": COMPARE_ROOT / "traincache" / "down.sh",
 }

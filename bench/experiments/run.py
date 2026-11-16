@@ -511,7 +511,7 @@ def _run_bench_cond(cond: dict, reps: int) -> list[Path]:
     print(f"[run] {cond['name']} reps={reps}")
     rc, _out, err = _run_cmd(cmd, env=env)
     if rc != 0:
-        raise SystemExit(f"run_bench 失败(rc={rc}): {err.strip()[:500]}")
+        raise SystemExit(f"run_bench 失败(rc={rc}): {err.strip()}")
     return [root]
 
 

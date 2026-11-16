@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建 traincache-trainer:v0.9.3 并载入 kind(traincache)。可重跑:上下文每次
+# 构建 traincache-trainer:dev 并载入 kind(traincache)。可重跑:上下文每次
 # 重新组装到 /tmp 临时目录,退出即清理;镜像与 kind 载入都是覆盖式。
 # 离线优先:直接拷宿主机已装好的 site-packages(torch 在 ~/.local,依赖散在
 # 用户 site 与系统 dist-packages),不走 pip 网络。
@@ -10,7 +10,7 @@ ROOT=$(cd "$HERE/../.." && pwd)
 VENV_SP="$ROOT/.venv/lib/python3.14/site-packages"
 USER_SP="$HOME/.local/lib/python3.14/site-packages"
 SYS_SP="/usr/lib/python3/dist-packages"
-IMAGE=traincache-trainer:v0.9.3
+IMAGE=traincache-trainer:dev
 
 [ -d "$VENV_SP" ] || { echo "缺 $VENV_SP(先在宿主机建 .venv)" >&2; exit 1; }
 [ -d "$USER_SP/torch" ] || { echo "缺 $USER_SP/torch" >&2; exit 1; }
@@ -45,5 +45,5 @@ done
 docker build -t "$IMAGE" -f "$HERE/Dockerfile" "$CTX"
 docker run --rm "$IMAGE" python3 -c \
     "import torch, webdataset, numpy, PIL; print('torch', torch.__version__, '| webdataset', webdataset.__version__, '| numpy', numpy.__version__, '| Pillow', PIL.__version__)"
-kind load docker-image "$IMAGE" --name traincache
+"$ROOT/hack/kind-load.sh" traincache "$IMAGE"
 echo "OK: $IMAGE 已构建并载入 kind(traincache)"
