@@ -18,10 +18,10 @@
   },
   "network": {
     "rate_mbit": 1000,
-    "per_conn_mbit": 0,
-    "delay_ms": 200,
-    "loss_percent": 1,
-    "read_timeout_s": 1200
+    "per_conn_mbit": 8,
+    "delay_ms": 80,
+    "loss_percent": 0,
+    "read_timeout_s": 900
   },
   "cache": {
     "enabled": true,
@@ -44,7 +44,7 @@
     "tier=l3",
     "arm=par-off"
   ],
-  "notes": "并行下载族格子；链路条件档 l3：单流上限 0 mbit、时延 200 ms、丢包 1%；Range 并行关闭。只看冷读段，2 片 1 epoch。",
+  "notes": "并行下载族格子；链路条件档 l3：单流上限 8 mbit、时延 80 ms、丢包 0%；Range 并行关闭。只看冷读段，2 片 1 epoch。",
   "prefetch": {
     "lookahead": 32,
     "fanout": 1

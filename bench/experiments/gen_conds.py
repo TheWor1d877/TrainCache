@@ -527,16 +527,16 @@ def build_e2e() -> list[dict]:
 def build_rangepar() -> list[dict]:
     # 链路条件档：(单流上限 mbit, 时延 ms, 丢包 %, 队头等待上限 s)。
     # 0 表示单流不限；队头上限 None 表示用装置缺省 300s。
-    # l3 的 200ms 时延加 1% 丢包把单流地板压到 0.7~0.9 Mbps，首片 256 MiB
-    # 开臂约 230s、关臂约 540s，缺省 300s 会把两臂都作废，按关臂 2 倍放 1200s。
-    # 整族按冷读段减量:RANGEPAR_SHARDS 片、RANGEPAR_EPOCHS 个 epoch，
-    # 让最慢的 l3 关臂落回 1800s Pod 闸门内(见 runbook rangepar 段)。
+    # l3 与 l1/l2 同用单流上限机制，取 32→16→8 阶梯底端 8 mbit，严格难于 l2，
+    # 保留 80ms 时延作 l3 标识、丢包归零。512 MiB 冷读：关臂单流约 537s、
+    # 开臂 4 路并行聚合 32 mbit 约 134s，比值约 4.0；队头等待按关臂 1.7 倍放 900s。
+    # 整族按冷读段减量:RANGEPAR_SHARDS 片、RANGEPAR_EPOCHS 个 epoch。
     # 档内两臂只差 Range 并行开关，其余参数逐字相同。
     tiers = {
         "l0": (0, 20, 0, None),
         "l1": (32, 20, 0, None),
         "l2": (16, 20, 0, None),
-        "l3": (0, 200, 1, 1200),
+        "l3": (8, 80, 0, 900),
     }
     out = []
     for tier, (per_conn, delay, loss, rto) in tiers.items():
