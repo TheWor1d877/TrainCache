@@ -3,7 +3,7 @@
 
 族、轴与取值取自 docs/4.2-bench-families.md 的族总表与各族一节。一个族只动该族的轴，其余参数取默认值：
 
-  · 数据集固定 16 × 256 MiB = 4 GiB，epoch 全部 3；
+  · 数据集默认 16 × 256 MiB = 4 GiB，epoch 全部 3（并行下载族只测冷读段，减量到 2 片 1 epoch）；
   · 基线五组（direct、juicefs-cold/warm、fluid-cold/warm）只在 rho=4 生成一次；
   · 被测组 traincache-cold/warm 跑满五个 rho（对照族按带宽铺格子）；
   · 采样默认 3 次，端到端族按场景 2 次；
@@ -55,6 +55,10 @@ TRAIN_DATASET = {
 GATEWAY_IMAGE_DIGEST = (
     "docker.io/library/import-2026-11-02@sha256:"
     "0d5521a0c18d09fb98a8e4cce90eba4239ff829385f26a19c32bc3f24747c2b5")
+# 并行下载族只测冷读那一段:整片取主数据集前 2 片(512 MiB)、跑 1 个 epoch。
+# 满量 4 GiB×3 在 l3 慢链路下要数小时,减量后最慢格(l3 关臂)落回 Pod 闸门内。
+RANGEPAR_SHARDS = 2
+RANGEPAR_EPOCHS = 1
 
 TILT_TRACE_NAME = "track-16-per-epoch-ep3.json"
 
@@ -213,8 +217,11 @@ def make_cond(
     per_conn_mbit: int | None = None,
     delay_ms: int | None = None,
     loss_percent: float | None = None,
+    read_timeout_s: int | None = None,
     fetch_range_parallel: bool | None = None,
     reps: int | None = None,
+    shards: int | None = None,
+    epochs: int | None = None,
     shuffle: str = "per-epoch",
     fractions: tuple[float, ...] | None = None,
     readers: int = 1,
@@ -246,6 +253,8 @@ def make_cond(
         network["delay_ms"] = int(delay_ms)
     if loss_percent is not None:
         network["loss_percent"] = loss_percent
+    if read_timeout_s is not None:
+        network["read_timeout_s"] = int(read_timeout_s)
     environment: dict = {
         "gateway": bool(gateway),
         "gateway_image": (gateway_digest or GATEWAY_IMAGE_DIGEST)
@@ -282,6 +291,10 @@ def make_cond(
             "shard_fractions": [float(x) for x in fractions],
             "boundary_rule": "equal-thirds",
         }
+    if shards is not None:
+        cond["dataset"]["shards"] = int(shards)
+    if epochs is not None:
+        cond["workload"]["epochs"] = int(epochs)
     if group in cond_mod.TRAINCACHE_GROUPS:
         cond["prefetch"] = {"lookahead": lookahead, "fanout": fanout}
         if gate:
@@ -512,28 +525,35 @@ def build_e2e() -> list[dict]:
 
 
 def build_rangepar() -> list[dict]:
-    # 链路条件档：(单流上限 mbit, 时延 ms, 丢包 %)。0 表示单流不限。
+    # 链路条件档：(单流上限 mbit, 时延 ms, 丢包 %, 队头等待上限 s)。
+    # 0 表示单流不限；队头上限 None 表示用装置缺省 300s。
+    # l3 的 200ms 时延加 1% 丢包把单流地板压到 0.7~0.9 Mbps，首片 256 MiB
+    # 开臂约 230s、关臂约 540s，缺省 300s 会把两臂都作废，按关臂 2 倍放 1200s。
+    # 整族按冷读段减量:RANGEPAR_SHARDS 片、RANGEPAR_EPOCHS 个 epoch，
+    # 让最慢的 l3 关臂落回 1800s Pod 闸门内(见 runbook rangepar 段)。
     # 档内两臂只差 Range 并行开关，其余参数逐字相同。
     tiers = {
-        "l0": (0, 20, 0),
-        "l1": (32, 20, 0),
-        "l2": (16, 20, 0),
-        "l3": (0, 200, 1),
+        "l0": (0, 20, 0, None),
+        "l1": (32, 20, 0, None),
+        "l2": (16, 20, 0, None),
+        "l3": (0, 200, 1, 1200),
     }
     out = []
-    for tier, (per_conn, delay, loss) in tiers.items():
+    for tier, (per_conn, delay, loss, rto) in tiers.items():
         for arm in ("par-on", "par-off"):
             parallel = arm == "par-on"
             out.append(make_cond(
                 name=f"rangepar-{tier}-{arm}", family="rangepar",
                 group="traincache", rho=4.0, rate=1000, lookahead=32,
                 fanout=1, per_conn_mbit=per_conn, delay_ms=delay,
-                loss_percent=loss, fetch_range_parallel=parallel,
+                loss_percent=loss, read_timeout_s=rto,
+                fetch_range_parallel=parallel,
+                shards=RANGEPAR_SHARDS, epochs=RANGEPAR_EPOCHS,
                 tags=("rangepar", f"tier={tier}", f"arm={arm}"),
                 notes=(f"并行下载族格子；链路条件档 {tier}：单流上限 "
                        f"{per_conn} mbit、时延 {delay} ms、丢包 {loss}%；"
                        f"Range 并行{'打开' if parallel else '关闭'}。"
-                       f"档内两臂只差这一个开关。")))
+                       f"只看冷读段，{RANGEPAR_SHARDS} 片 {RANGEPAR_EPOCHS} epoch。")))
     return out
 
 

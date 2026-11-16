@@ -77,7 +77,7 @@ ALLOWED_DATASET = {"name", "shards", "shard_size_bytes", "seed"}
 ALLOWED_TRACE = {"file", "sha256", "seed"}
 ALLOWED_WORKLOAD = {"epochs", "shuffle", "curriculum", "readers", "access_pattern"}
 ALLOWED_CURRICULUM = {"stages", "shard_fractions", "boundary_rule"}
-ALLOWED_NETWORK = {"rate_mbit", "per_conn_mbit", "delay_ms", "loss_percent"}
+ALLOWED_NETWORK = {"rate_mbit", "per_conn_mbit", "delay_ms", "loss_percent", "read_timeout_s"}
 ALLOWED_CACHE = {"enabled", "rho", "evict_policy", "warmup_seconds"}
 ALLOWED_PREFETCH = {"lookahead", "fanout", "gate"}
 ALLOWED_GATE = {"mode"}
@@ -207,11 +207,21 @@ def validate_cond(cond: dict) -> list[str]:
             if load == "train":
                 want = config.TRAIN_N_TARS * config.TRAIN_SHARD_BYTES
                 label = f"{want}(2 GiB,训练数据 16×128 MiB)"
+                if total != want:
+                    errors.append(f"shards×shard_size_bytes={total} 必须等于 {label}")
+            elif family == "rangepar":
+                # 并行下载族只看冷读那一段,按整片取主数据集的一个前缀子集;
+                # 每片仍须是发布的 256 MiB 整片,片数落在已发布的 16 片之内。
+                if ds["shard_size_bytes"] != config.DATASET_SHARD_BYTES:
+                    errors.append("$.dataset.shard_size_bytes 必须是 256 MiB 整片")
+                if not 1 <= ds["shards"] <= config.DATASET_SHARDS:
+                    errors.append(
+                        f"$.dataset.shards 必须在 1 到 {config.DATASET_SHARDS} 之间")
             else:
                 want = config.DATASET_BYTES
                 label = f"{want}(4 GiB)"
-            if total != want:
-                errors.append(f"shards×shard_size_bytes={total} 必须等于 {label}")
+                if total != want:
+                    errors.append(f"shards×shard_size_bytes={total} 必须等于 {label}")
 
     # ---- trace ----
     # 倾斜负载按清单文件消费,清单本身要可复现,所以倾斜两类都要记录。
@@ -233,8 +243,13 @@ def validate_cond(cond: dict) -> list[str]:
     if isinstance(wl, dict):
         _check_unknown(wl, ALLOWED_WORKLOAD, "$.workload", errors)
         ep = _require(wl, "epochs", "$.workload", errors)
-        if ep is not None and ep != config.EPOCHS:
-            errors.append(f"$.workload.epochs={ep} 必须为 {config.EPOCHS}")
+        if ep is not None:
+            if family == "rangepar":
+                if not 1 <= ep <= config.EPOCHS:
+                    errors.append(
+                        f"$.workload.epochs={ep} 必须在 1 到 {config.EPOCHS} 之间")
+            elif ep != config.EPOCHS:
+                errors.append(f"$.workload.epochs={ep} 必须为 {config.EPOCHS}")
         shuffle = _require(wl, "shuffle", "$.workload", errors)
         if shuffle is not None and shuffle not in VALID_SHUFFLES:
             errors.append(f"$.workload.shuffle 非法: {shuffle!r}")
@@ -280,9 +295,11 @@ def validate_cond(cond: dict) -> list[str]:
         if not isinstance(delay_ms, int) or isinstance(delay_ms, bool) or delay_ms < 0:
             errors.append("$.network.delay_ms 必须是 ≥0 的整数")
         loss = net.get("loss_percent", 0)
-        if (not isinstance(loss, (int, float)) or isinstance(loss, bool)
-                or not 0 <= loss <= 100):
+        if not isinstance(loss, (int, float)) or isinstance(loss, bool) or not 0 <= loss <= 100:
             errors.append("$.network.loss_percent 必须在 0 到 100 之间")
+        rto = net.get("read_timeout_s")
+        if rto is not None and (not isinstance(rto, int) or isinstance(rto, bool) or rto <= 0):
+            errors.append("$.network.read_timeout_s 必须是 >0 的整数(秒)")
 
     # ---- cache ----
     cache = _require(cond, "cache", "$", errors)
@@ -400,6 +417,12 @@ def cond_to_env(cond: dict) -> dict[str, str]:
             "1" if cond["environment"].get("gateway_cache") else "0",
     }
     cache = cond["cache"]
+    if cond.get("load") == "dataset":
+        # 工作集与 epoch 由 COND 决定:分片数进 N_TARS、epoch 进 EPOCHS,
+        # run_bench 据此消费主数据集的一个整片前缀子集(并行下载族只用冷读段)。
+        # 其余 dataset 族 shards=16/epochs=3,等于 run_bench 缺省,行为不变。
+        env["N_TARS"] = str(cond["dataset"]["shards"])
+        env["EPOCHS"] = str(cond["workload"]["epochs"])
     if cache.get("enabled"):
         env["TRAINCACHE_EVICT_POLICY"] = str(cache["evict_policy"])
         # 缓存容量的唯一注入点：ρ 只在这里变成字节数，被测侧不认识 ρ。
@@ -430,6 +453,10 @@ def cond_to_env(cond: dict) -> dict[str, str]:
         env["TC_DELAY"] = f"{int(net.get('delay_ms', 20))}ms"
         env["TC_PER_CONN_MBIT"] = str(int(net.get("per_conn_mbit", 0)))
         env["TC_LOSS_PERCENT"] = str(net.get("loss_percent", 0))
+        # 队头等待上限:高时延高丢包档的单流地板撑不起缺省 300s,按格下发。
+        rto = net.get("read_timeout_s")
+        if rto:
+            env["READ_TIMEOUT_S"] = str(int(rto))
     return env
 
 
@@ -499,6 +526,15 @@ def selftest() -> None:
     c = json.loads(json.dumps(good))
     c["dataset"]["shards"] = 15
     assert any("4 GiB" in e for e in validate_cond(c)), validate_cond(c)
+
+    # 并行下载族按冷读段减量:整片前缀子集 + 1..EPOCHS 个 epoch 放行,越界才拒
+    c = json.loads(json.dumps(good))
+    c["family"], c["name"] = "rangepar", "rangepar-l3-par-on"
+    c["group"] = "traincache"
+    c["dataset"]["shards"], c["workload"]["epochs"] = 2, 1
+    assert not validate_cond(c), validate_cond(c)
+    c["dataset"]["shards"] = config.DATASET_SHARDS + 1
+    assert any("shards" in e for e in validate_cond(c)), validate_cond(c)
 
     # train 负载读训练数据(16×128 MiB=2 GiB),不是主数据集的 4 GiB
     c = json.loads(json.dumps(good))
