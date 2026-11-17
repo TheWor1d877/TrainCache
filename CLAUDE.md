@@ -50,9 +50,9 @@ k8s/containerd 不读 daemon.json。镜像拉不到时先在宿主机 `docker pu
 
 ## 版本、镜像与发布物
 - 版本号唯一来源是 git tag `vX.Y.Z`；镜像 tag、二进制注入版本、CHANGELOG 标题逐字一致，统一带 `v`。
-- 镜像名固定 `ghcr.io/thewor1d877/traincache/<组件>`：开发镜像用与清单一致的浮动标签，候选打 `sha-<7 位短 sha>`，发布清单用 `@sha256`；发版时镜像 tag 与 git tag 逐字一致。仓库内任何文件不得出现私有镜像站域名。
+- 镜像名固定 `ghcr.io/thewor1d877/traincache/<组件>`：开发镜像用与清单一致的版本标签（取最新 git tag），候选打 `sha-<7 位短 sha>`，发布清单用 `@sha256`；发版时镜像 tag 与 git tag 逐字一致。仓库内任何文件不得出现私有镜像站域名。
 - Dockerfile 不写私人镜像站前缀，基础镜像写官方短名，拉取加速交给 docker daemon 的 `registry-mirrors`；Go module 走 `ARG GOPROXY`，默认值用公共代理。
-- 仓库内清单的镜像统一写浮动标签，集群内所有组件镜像同一版本；发布清单由 kustomize `images:` 渲染，全部 Traincache 镜像用 `@sha256` 固定，不手改 YAML。
+- 仓库内清单与 kustomization `images:` 的镜像统一写同一个版本标签（取最新 git tag），集群内所有组件镜像同一版本；发布清单由 kustomize `images:` 渲染，全部 Traincache 镜像用 `@sha256` 固定，不手改 YAML。
 - `controller/deploy/observability/` 是 dev-only 装置，不进发布包，也不得引用到发布清单。
 - 文档正文只写当前状态，不标“v几新增”；版本历史只记 `CHANGELOG.md`；只有对外契约表（CRD 字段、env、CLI flag）标“起始版本”。
 - `CHANGELOG.md` 只在发版时更新：`dev` 日常提交不写；`dev` 合并 `main`、打 tag 前补该版本条目。

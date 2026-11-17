@@ -157,7 +157,7 @@ kubectl -n kube-system rollout status deploy/traincache-scheduler
 位置 `controller/deploy/webhook/checkpoint-image.yaml`，namespace `traincache`，一项。
 
 - `checkpointImage`，默认值在 `controller/deploy/webhook/checkpoint-image.yaml`，webhook 读取，改完重启 webhook。
-  注入到训练 Pod 的 checkpointd 镜像。开发清单用浮动标签，与其余组件镜像同一版本；发布清单由渲染脚本把它改成本次发布的 digest。接入方可用 Pod 注解 `traincache.io/checkpoint-image` 或自己的 ConfigMap 键覆盖它。
+  注入到训练 Pod 的 checkpointd 镜像。开发清单用版本标签，与其余组件镜像同一版本；发布清单由渲染脚本把它改成本次发布的 digest。接入方可用 Pod 注解 `traincache.io/checkpoint-image` 或自己的 ConfigMap 键覆盖它。
 
 改这个值后重启 webhook：
 

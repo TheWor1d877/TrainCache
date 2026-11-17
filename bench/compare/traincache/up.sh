@@ -32,7 +32,9 @@ TRACE_FILE="${TRACE_FILE:-$BENCH_ROOT/experiments/traces/track-16-per-epoch-ep3.
 DATASET="${DATASET:-dataset-4gib}"
 
 # TrainCache 控制面镜像(允许环境变量覆盖)
-TAG="${TAG:-dev}"
+# 默认对齐发布版本 v0.9.3：集群上只跑显式发布 tag，不再用 :dev 浮动标签，
+# 以免 group_up 把已删的 :dev 重新 apply 回来、重建 Pod 拉不到镜像。
+TAG="${TAG:-v0.9.3}"
 IMG_MANAGER="${IMG_MANAGER:-ghcr.io/thewor1d877/traincache/controller-manager:$TAG}"
 IMG_WEBHOOK="${IMG_WEBHOOK:-ghcr.io/thewor1d877/traincache/webhook:$TAG}"
 IMG_SCHEDULER="${IMG_SCHEDULER:-ghcr.io/thewor1d877/traincache/kube-scheduler:$TAG}"

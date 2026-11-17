@@ -40,7 +40,7 @@ docker build -f agent/Dockerfile \
 
 ### 清单
 
-- 仓库内清单统一用浮动标签，集群内所有组件镜像同一版本，用 `kustomize build controller/deploy` 渲染。
+- 仓库内清单与 kustomization 的 `images:` 统一写同一个版本标签（取最新 git tag），集群内所有组件镜像同一版本，用 `kustomize build controller/deploy` 渲染。两处标签必须一致，`apply -k` 会用 kustomization 的标签覆盖 per-component 清单里的镜像引用。
 - 发布清单由 kustomize `images:` 把五个 Deployment 的镜像改成 `@sha256:<digest>`，checkpointd 的 digest 由 overlay 的 patch 写进 `traincache-checkpoint-image` ConfigMap，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。

@@ -49,9 +49,10 @@ DATA="$RESULTS/data"
 TLS="$RESULTS/tls"
 
 CLUSTER="${CLUSTER:-traincache-e2e}"
-# Image tag is always dev: controller/deploy kustomization pins the same tag,
-# so building with a different one would deploy a reference nothing built.
-TAG="dev"
+# 镜像标签与 controller/deploy 的 kustomization 渲染结果一致：per-component
+# 清单钉在 v0.9.3，kustomization 的 images: 覆盖成同一个标签，本地构建就打
+# 这个标签，否则集群里引用的是一个没构建过的镜像。
+TAG="v0.9.3"
 NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.37.0}"
 IMG_MANAGER="ghcr.io/thewor1d877/traincache/controller-manager:$TAG"
 IMG_WEBHOOK="ghcr.io/thewor1d877/traincache/webhook:$TAG"

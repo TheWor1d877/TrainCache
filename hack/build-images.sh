@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-images.sh — 构建全部开发镜像（tag 默认 dev）。
+# build-images.sh — 构建全部开发镜像（tag 默认 v0.9.3）。
 #
 # 用法:
 #   ./hack/build-images.sh                  # manager webhook scheduler agent gateway checkpoint
@@ -21,7 +21,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REG="ghcr.io/thewor1d877/traincache"
-TAG="${TAG:-dev}"
+TAG="${TAG:-v0.9.3}"
 
 declare -A DF=(
   [manager]="$ROOT/controller/deploy/manager/Dockerfile"

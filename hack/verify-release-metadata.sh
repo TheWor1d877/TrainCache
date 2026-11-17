@@ -28,15 +28,19 @@ while IFS= read -r img; do
   esac
 done <<<"$images"
 
-# 2. kustomization 的 images 必须覆盖全部部署组件，且仓库内都指向浮动标签 dev。
+# 2. kustomization 的 images 必须覆盖全部部署组件，标签取 dev 或当前版本 tag。
+#    kustomization 的 images: 会覆盖 per-component 清单里的镜像引用，
+#    所以这里的标签必须落在允许的取值集合里。
 #    checkpointd 由准入按 Pod 注入，不进 kustomization，因此这五个组件的
 #    循环保持五行；它的取值放在 traincache-checkpoint-image ConfigMap 里，
 #    单独在下面校验，它的 Dockerfile/main 在第 3、4 节校验。
 for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
-  if ! grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
-      | grep -q "newTag: dev"; then
-    fail "kustomization images 缺少 $comp 或未指向 dev"
-  fi
+  newtag="$(grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
+      | sed -nE 's/^[[:space:]]*newTag:[[:space:]]*//p' | head -1)"
+  case "$newtag" in
+    dev | "${VERSION_TAG}") ;;
+    *) fail "kustomization images 缺少 $comp 或未指向 dev 或 ${VERSION_TAG}" ;;
+  esac
 done
 
 # 2b. checkpointd 的镜像取值必须由 ConfigMap 承载，且只能是当前版本 tag 或 digest。

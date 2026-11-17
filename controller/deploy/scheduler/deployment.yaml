@@ -3,7 +3,7 @@
 #
 # Build/load the image first (see Dockerfile):
 #   docker build -f deploy/scheduler/Dockerfile \
-#     -t <registry>/traincache/kube-scheduler:dev .
+#     -t <registry>/traincache/kube-scheduler:v0.9.3 .
 #   kind load docker-image ...:v0.9.3 --name <cluster>
 apiVersion: v1
 kind: ServiceAccount
