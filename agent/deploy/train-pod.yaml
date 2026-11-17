@@ -55,7 +55,7 @@ spec:
           mountPath: /run/traincache
     # ---- OrderSource sidecar:ConsumeOrder 最小写端(agent/ordersrc/ordersrc.py)----
     - name: ordersrc
-      image: traincache-ordersrc:dev
+      image: traincache-ordersrc:v0.9.3
       imagePullPolicy: IfNotPresent
       command:
         - /bin/sh
