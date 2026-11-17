@@ -349,14 +349,14 @@ EOF
   echo "$WARMUP_YAML" | kubectl apply -f -
   log_group "$GROUP" "warmuptask/compare-task 已创建(targetRef=Pod/train-job-0,k=$WARMUP_K)"
 
-  # 等待 WarmupTask 进入 Released(预热完成,gate 放行)
+  # 等待 WarmupTask 门控终态:Released(达标/边际收益放行)或 Degraded(tMax 超时放行)
   log_group "$GROUP" "等待 warmuptask/compare-task 完成(预热,超时 ${TRAINCACHE_WARMUP_TIMEOUT}s)"
   WARM_T0=$(date +%s)
   WARM_PHASE=""
   while true; do
     WARM_PHASE=$(kubectl -n "$NS" get warmuptask compare-task -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
     GATE_STATE=$(kubectl -n "$NS" get warmuptask compare-task -o jsonpath='{.status.gateDecision.state}' 2>/dev/null || echo "")
-    if [ "$WARM_PHASE" = "Released" ] || [ "$GATE_STATE" = "Released" ]; then
+    if [ "$WARM_PHASE" = "Released" ] || [ "$GATE_STATE" = "Released" ] || [ "$WARM_PHASE" = "Degraded" ] || [ "$GATE_STATE" = "Degraded" ]; then
       WARM_T1=$(date +%s)
       WALL_SECONDS=$(( WARM_T1 - WARM_T0 ))
       # 预热时长优先取控制器事件时间：startedAt → gateDecision.decidedAt，
@@ -373,12 +373,12 @@ EOF
           WARM_BASIS=event
         fi
       fi
-      log_group "$GROUP" "warmuptask/compare-task 已 Released,预热时长=${WARM_SECONDS}s(basis=$WARM_BASIS,wall=${WALL_SECONDS}s,phase=$WARM_PHASE gate=$GATE_STATE)"
+      log_group "$GROUP" "warmuptask/compare-task 门控终态(phase=$WARM_PHASE gate=$GATE_STATE),预热时长=${WARM_SECONDS}s(basis=$WARM_BASIS,wall=${WALL_SECONDS}s)"
       echo "[WARMUP_SECONDS] $WARM_SECONDS"  # run_bench.py 解析此行
       echo "[WARMUP_BASIS] $WARM_BASIS"
       break
     fi
-    if [ "$WARM_PHASE" = "Failed" ] || [ "$WARM_PHASE" = "Degraded" ]; then
+    if [ "$WARM_PHASE" = "Failed" ]; then
       log_group "$GROUP" "warmuptask/compare-task 异常(phase=$WARM_PHASE gate=$GATE_STATE),整轮作废" >&2
       exit 1
     fi
