@@ -154,15 +154,7 @@ def burst_for_rate(rate_mbit: int) -> str:
 TILT_EFF_BW_MB_S = {100: 11.95, 300: 35.6}
 
 
-# ---- 并行下载族的比值合格区间(4.3 的 rangepar·并行收益)----
-# 键是链路条件档,值是「关臂 makespan ÷ 开臂 makespan」的 (下限, 上限)。
-# 上限为 None 表示只管下限。l0 单流不限,两臂同速,比值应落在 1 附近。
-RANGEPAR_RATIO = {
-    "l0": (0.9, 1.1),
-    "l1": (1.8, None),
-    "l2": (1.8, None),
-    "l3": (1.5, None),
-}
+# ---- 并行下载族(4.3 的 rangepar)不设比值合格区间,只报两臂实测比值 ----
 
 
 def rate_mbit(value) -> int | None:

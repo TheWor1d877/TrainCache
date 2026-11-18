@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import re
 import sys
@@ -575,7 +576,38 @@ def plot_warmup(rows):
             x_fmt=lambda v: str(v))
 
 
+def switch_recovery_rows() -> list[dict]:
+    """切换族的回落时长：summary.csv 不含这一列，只能从每轮 recovery.json 取。
+
+    每轮把成功回落的事件时长取平均，算该轮一个采样；删失与基线不足的事件
+    没有 recovery_time_s，天然不进统计。
+    """
+    root = config.family_results_dir("switch")
+    rows: list[dict] = []
+    if not root.is_dir():
+        return rows
+    for path in sorted(root.glob("*/runs/*/recovery.json")):
+        cell = path.relative_to(root).parts[0]
+        try:
+            events = json.loads(path.read_text(encoding="utf-8")).get("events") or []
+        except (OSError, json.JSONDecodeError):
+            continue
+        times = [_num(event.get("recovery_time_s")) for event in events]
+        times = [value for value in times if value is not None]
+        if not times:
+            continue
+        match = re.search(r"-rho(\d+(?:\.\d+)?)$", cell)
+        rows.append({"cond": cell, "_cell": cell,
+                     "rho": match.group(1) if match else "",
+                     "recovery_time_s": sum(times) / len(times)})
+    return rows
+
+
 def plot_switch(rows):
+    rows = switch_recovery_rows()
+    if not rows:
+        print("[skip] switch-recovery: 无 recovery.json", file=sys.stderr)
+        return
     xs = ["fixed", "per-epoch", "curriculum", "curriculum-narrow"]
     present = {_scenario(r) for r in rows}
     xs = [x for x in xs if x in present]
@@ -646,10 +678,8 @@ def plot_rangepar(rows):
             x_fmt=lambda v: (RANGEPAR_TIER_CN if LANG == "zh" else RANGEPAR_TIER_EN).get(v, v),
             value_labels=True)
 
-    # 比值图：每个档一格，柱高是关臂耗时除以开臂耗时，虚线是该档的合格区间。
+    # 比值图：每个档一格，柱高是关臂耗时除以开臂耗时。
     ratio = {}
-    bounds = {}
-    notes = {}
     for tier in tiers:
         on, off = buckets.get((tier, "par-on")), buckets.get((tier, "par-off"))
         if not on or not off:
@@ -659,16 +689,6 @@ def plot_rangepar(rows):
             continue
         value = off_median / on_median
         ratio[(tier, "比值", "all")] = (value, value, value, min(len(on), len(off)))
-        low, high = config.RANGEPAR_RATIO.get(tier, (None, None))
-        marks = []
-        if low is not None and high is not None:
-            marks.append((low, None, high))
-            marks.append((high, None, None))
-            notes[tier] = t(f"合格区间 {low}–{high}", f"qualified {low}–{high}")
-        elif low is not None:
-            marks.append((low, None, None))
-            notes[tier] = t(f"合格下限 {low}", f"lower bound {low}")
-        bounds[tier] = marks
     if ratio:
         _render(ratio, "rangepar-speedup",
                 t("并行下载族：关臂耗时除以开臂耗时",
@@ -678,8 +698,7 @@ def plot_rangepar(rows):
                 x_order=["比值"], series_order=["all"],
                 colors={"all": "#2f6db5"}, facet_fmt=lambda v: (
                     RANGEPAR_TIER_CN if LANG == "zh" else RANGEPAR_TIER_EN).get(v, v),
-                x_fmt=lambda v: "", hlines=bounds, notes=notes, xpad=0.9,
-                value_labels=True)
+                x_fmt=lambda v: "", xpad=0.9, value_labels=True)
 
 
 def plot_e2e(rows):
