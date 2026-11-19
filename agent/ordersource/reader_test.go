@@ -278,6 +278,31 @@ func TestReaderGenerationChangeRereads(t *testing.T) {
 	}
 }
 
+// TestReaderGenerationChangeWithoutNewOrderDoesNotReplay 代际先变、新订单后到:
+// 中间窗口里最新槽仍属旧代际,读端不得把它当作新订单重放(否则收到上一阶段的顺序)。
+func TestReaderGenerationChangeWithoutNewOrderDoesNotReplay(t *testing.T) {
+	fastPoll(t)
+	path := newRingPath(t)
+	w := newRingWriter(t, path, 1, 512, 8)
+	r := newTestReader(t, path)
+
+	a := testOrder("epoch-1", 1)
+	w.WriteOrder(a)
+	mustEventually(t, "初始代际订单就绪", func() bool {
+		cur, ok := r.CurrentOrder()
+		return ok && orderEqual(cur, a)
+	})
+	ch := subscribeTest(t, r)
+
+	w.SetGeneration(2)
+	mustEventually(t, "Generation 跟进新代际", func() bool { return r.Generation() == 2 })
+	expectNoEvent(t, ch) // 旧代际的最新槽不能被当成新代际订单推送
+
+	b := testOrder("epoch-2", 2)
+	w.WriteOrder(b)
+	assertOrderEqual(t, recvOrder(t, ch), b)
+}
+
 // TestReaderGenerationChangeSamePayloadRedelivered gen 变化但 payload 字节相同 → 重放一次
 // (设计《订单通道降级》:sidecar 重启后会话要追到当前阶段,不能按字节吞掉)。
 func TestReaderGenerationChangeSamePayloadRedelivered(t *testing.T) {
