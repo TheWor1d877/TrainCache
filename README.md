@@ -4,6 +4,8 @@ English | [简体中文](README.zh-CN.md)
 
 TrainCache runs on Kubernetes. It fetches dataset blocks into node-local disk before a Pod is scheduled, uses warmup progress to decide which node the Pod is placed on, and keeps prefetching the blocks training reads next.
 
+Benchmark charts: [GitHub Pages](https://thewor1d877.github.io/TrainCache/).
+
 [![verify](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml) ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white) ![Kubernetes 1.28+](https://img.shields.io/badge/Kubernetes-1.28%2B-326CE5?logo=kubernetes&logoColor=white) ![S3 compatible](https://img.shields.io/badge/S3-compatible-569A31?logo=amazons3&logoColor=white) ![License Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-4C8EDA)
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/traincache-lockup-dark.svg"><img src="docs/assets/logo/traincache-lockup.svg" alt="TrainCache" width="420"></picture>
@@ -125,7 +127,7 @@ kubectl delete -f install.yaml
 
 ## Results
 
-Eleven families ran on a kind cluster against v0.9.3: 145 cells and 432 valid samples, three runs per cell (two for e2e). The comparison family covers direct reads, JuiceFS and Fluid (cold and prewarmed) and TrainCache (cold and prewarmed) at 100, 300 and 1000 Mbit/s over ρ=0.5–8, where ρ is dataset bytes divided by per-node cache size. Values are cell means; per-cell summary files are in `docs/assets/data/bench-v0.9.3/`. The charts and the interactive pages come from `python3 bench/experiments/plot_echarts.py`; all twenty charts and their notes are on the [benchmark charts](https://thewor1d877.github.io/TrainCache/) page, which opens in English and switches to Chinese.
+Benchmarks of TrainCache v0.9.3 on a kind cluster span eleven experiment families: 145 cells and 432 valid samples, three runs per cell (two for e2e). The comparison family covers direct reads, JuiceFS and Fluid (cold and prewarmed) and TrainCache (cold and prewarmed) at 100, 300 and 1000 Mbit/s over ρ=0.5–8, where ρ is dataset bytes divided by per-node cache size. Values are cell means; per-cell summary files are in `docs/assets/data/bench-v0.9.3/`. The charts and the interactive pages come from `python3 bench/experiments/plot_echarts.py`; all twenty charts and their notes are on the [benchmark charts](https://thewor1d877.github.io/TrainCache/) page, which opens in English and switches to Chinese.
 
 The result splits at ρ=1. At or below 1 the node cache holds the working set and reuse carries the gain. Above 1 the hit rate falls under 0.32 and the run is bounded by the origin read path.
 

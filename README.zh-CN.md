@@ -4,6 +4,8 @@
 
 TrainCache 运行在 Kubernetes 上。Pod 调度前，它把数据集的块拉到节点本地盘，用预热进度决定 Pod 调度到哪个节点，训练中按数据消费顺序持续预取后续块。
 
+基准图表：[GitHub Pages](https://thewor1d877.github.io/TrainCache/index-zh.html)。
+
 [![verify](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml) ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white) ![Kubernetes 1.28+](https://img.shields.io/badge/Kubernetes-1.28%2B-326CE5?logo=kubernetes&logoColor=white) ![S3 compatible](https://img.shields.io/badge/S3-compatible-569A31?logo=amazons3&logoColor=white) ![License Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-4C8EDA)
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/traincache-lockup-dark.svg"><img src="docs/assets/logo/traincache-lockup.svg" alt="TrainCache" width="420"></picture>
@@ -125,7 +127,7 @@ kubectl delete -f install.yaml
 
 ## 实验结果
 
-11 个族在 kind 集群上跑 TrainCache v0.9.3：145 格、432 条有效采样，每格 3 轮（e2e 为 2 轮）。对照族覆盖直读源站、JuiceFS 与 Fluid 的冷/热组态、TrainCache 的冷/热组态，链路带宽取 100、300、1000 Mbit/s，ρ 从 0.5 到 8，ρ 为数据集字节数除以单节点缓存容量。数值为格均值；每格汇总文件在 `docs/assets/data/bench-v0.9.3/`。图与交互页由 `python3 bench/experiments/plot_echarts.py` 生成，全部 20 张图与图下说明在[图表页](https://thewor1d877.github.io/TrainCache/)，默认英文，可切换中文。
+TrainCache v0.9.3 的基准测试在 kind 集群上覆盖 11 个实验族：145 个格子、432 条有效采样，每格 3 轮（e2e 每场景 2 轮）。对照族覆盖直读源站、JuiceFS 与 Fluid 的冷/热组态、TrainCache 的冷/热组态，链路带宽取 100、300、1000 Mbit/s，ρ 从 0.5 到 8，ρ 为数据集字节数除以单节点缓存容量。数值为格均值；每格汇总文件在 `docs/assets/data/bench-v0.9.3/`。图与交互页由 `python3 bench/experiments/plot_echarts.py` 生成，全部 20 张图与图下说明在[图表页](https://thewor1d877.github.io/TrainCache/index-zh.html)。
 
 结果在 ρ=1 处分开。ρ≤1 时节点缓存装得下工作集，收益来自复用；ρ>1 后命中率降到 0.32 以下，耗时由回源路径决定。
 
