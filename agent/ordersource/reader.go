@@ -287,17 +287,24 @@ func (r *Reader) pollOnceLocked(suppress bool) {
 // 只读最新槽,按字节去重决定是否推送;suppress 仅用于 NewReader 初始快照。
 // 已接入的跳读按跳过序号数计入包级 resync 丢单计数;首次接入的历史尚无消费者,不计数。
 func (r *Reader) resyncLocked(h ringHeader, suppress bool) {
+	genChanged := r.attached && h.generation != r.lastGen
 	if r.attached {
 		if skipped := h.writeSeq - r.lastReadSeq; skipped > 0 {
 			countDroppedResync(skipped)
 		}
 	}
+	prevSeq := r.lastReadSeq
 	r.attached = true
 	r.lastGen = h.generation
 	r.lastReadSeq = h.writeSeq // 跳过历史:阶段切换只关心最新顺序
 	// :首次快照 / 新代际 / 写端回退后重同步均视为"观察到推进"(写端在此刻可读)。
 	r.lastAdvance = time.Now()
 	if h.writeSeq <= 0 {
+		return
+	}
+	if genChanged && h.writeSeq == prevSeq {
+		// 新会话刚改头、下一份订单还没落盘:最新槽仍属旧代际,重放它就是重放历史。
+		// 保持已接入新代际的读位,等 write_seq 推进后由 followLocked 投递新订单。
 		return
 	}
 	order, raw, out := r.readSlotLocked(h, h.writeSeq)
