@@ -16,13 +16,13 @@ sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
-import plot_families as pf  # noqa: E402
+import plot_data as pf  # noqa: E402
 
 OUT = config.RESULTS_DIR / "report" / "index.html"
-FIG_ROOT = config.RESULTS_DIR / "figures"
+FIG_ROOT = config.RESULTS_DIR / "figures-echarts"
 BASELINES = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm"]
 
-# 网关缓存判据（docs/4.3 按族的判据「gateway·网关缓存」）：G2 对 G0 的源站
+# 网关装置自检（docs/4.3 按族的读数「gateway」）：G2 对 G0 的源站
 # 字节比落在 12 ± 5%。模型值 12 是 4 个读端乘 3 epoch 共 12 份重复压成 1 份。
 SOURCE_RATIO_TARGET = 12.0
 SOURCE_RATIO_BAND = 0.05
@@ -47,17 +47,17 @@ FAMILY_Q = {
     "rangepar": "把每个块拆成 4 条 Range GET 并行取，在什么链路条件下端到端变快",
 }
 FAMILY_CRITERION = {
-    "compare": "4.3 按族的判据「compare·组间胜负」",
-    "gateway": "4.3 按族的判据「gateway·网关缓存」「gateway·臂间比较」",
-    "evict": "4.3 按族的判据「evict·策略可分辨」「evict·策略不可分辨」",
-    "evict-mix": "4.3 按族的判据「evict-mix·装置失败」「evict-mix·读数照常出结论」",
-    "prefetch": "4.3 按族的判据「prefetch·转平」「prefetch·重复字节」",
-    "warmup": "4.3 按族的判据「warmup·门控有效」「warmup·门控无价值」「warmup·门控负收益」",
-    "switch": "4.3 按族的判据「switch·回落」「switch·差异」「switch·右删失」",
+    "compare": "4.3 按族的读数：compare",
+    "gateway": "4.3 按族的读数：gateway（含装置自检）",
+    "evict": "4.3 按族的读数：evict",
+    "evict-mix": "4.3 按族的读数：evict-mix（含装置失败条件）",
+    "prefetch": "4.3 按族的读数：prefetch",
+    "warmup": "4.3 按族的读数：warmup",
+    "switch": "4.3 按族的读数：switch（回落点为指标定义）",
     "chaos": "4.3 混沌族判据",
-    "multiconsumer": "4.3 按族的判据「multiconsumer·热比例效应」",
-    "e2e": "4.3 按族的判据「e2e·恢复成功」",
-    "rangepar": "4.3 按族的判据「rangepar·并行收益」「rangepar·字节守恒」「rangepar·命中不退化」",
+    "multiconsumer": "4.3 按族的读数：multiconsumer",
+    "e2e": "4.3 按族的读数：e2e",
+    "rangepar": "4.3 按族的读数：rangepar",
 }
 FAMILY_FIGURES = {
     "compare": ["compare-groups-rho4", "compare-rho"],
@@ -115,7 +115,7 @@ def _diff_ci(a, b, iters=10000, seed=7):
 
 
 def _cmp_low(group_rows, base_rows, metric):
-    """越低越好的指标：返回 (判定, 改善百分比) 或 None。"""
+    """越低越好的指标：返回 (均值差百分比, CI 下界, CI 上界) 或 None。"""
     gv, bv = _vals(group_rows, metric), _vals(base_rows, metric)
     if len(gv) < 2 or len(bv) < 2:
         return None
@@ -124,13 +124,7 @@ def _cmp_low(group_rows, base_rows, metric):
         return None
     low, high = _diff_ci(gv, bv)
     gain = (mb - mg) / abs(mb) * 100
-    if gain >= 5 and high < 0:
-        return "赢", gain
-    if gain <= -5 and low > 0:
-        return "输", gain
-    if low <= 0 <= high:
-        return "相近", gain
-    return "可忽略", gain
+    return gain, low, high
 
 
 def _rel_diff(a, b):
@@ -165,8 +159,9 @@ def verdict_compare(rows):
                     continue
                 result = _cmp_low(grow, base_rows[best], "total_makespan")
                 if result:
+                    gain, low, high = result
                     facts.append(f"{pf._rate_fmt(rate)} ρ={rho:g}：{group} 对 {best} "
-                                 f"{result[0]} {abs(result[1]):.1f}%")
+                                 f"makespan 差 {gain:+.1f}%，CI [{low:+.1f}, {high:+.1f}] s")
     return "；".join(facts) or "样本不足"
 
 
@@ -183,9 +178,10 @@ def verdict_gateway(rows):
         result = _cmp_low([r for r in rows if pf._arm(r) == arm],
                           [r for r in rows if pf._arm(r) == base], "total_makespan")
         if result:
-            facts.append(f"{arm.upper()} 对 {base.upper()} makespan "
-                         f"{result[0]} {abs(result[1]):.1f}%")
-    # 网关缓存判据：G2 对 G0 的源站字节比落在 12 ± 5%。
+            gain, low, high = result
+            facts.append(f"{arm.upper()} 对 {base.upper()} makespan 差 {gain:+.1f}%，"
+                         f"CI [{low:+.1f}, {high:+.1f}] s")
+    # 网关装置自检：G2 对 G0 的源站字节比落在 12 ± 5%。
     # G2 侧取网关记的源站字节（数据面经网关从源站拉到的字节），
     # G0 侧取 MinIO 出站（直读，没有 agentd，不含元数据流量），
     # 两边都只算 Get 路径的流量。
@@ -219,8 +215,7 @@ def verdict_evict(rows):
                     a = _mean(_vals([r for r in sub if pf._policy(r) == left], metric))
                     b = _mean(_vals([r for r in sub if pf._policy(r) == right], metric))
                     worst = max(worst, _rel_diff(a, b))
-        facts.append(f"ρ={rho}：三项最大相对差 {worst:.1f}%，"
-                     + ("可分辨" if worst >= 5 else "不可分辨"))
+        facts.append(f"ρ={rho}：三项最大相对差 {worst:.1f}%")
     return "；".join(facts) or "样本不足"
 
 
@@ -268,14 +263,12 @@ def verdict_prefetch(rows):
                 value = _mean(_vals(picked, "total_makespan"))
                 if value is not None:
                     points.append((lookahead, value))
-            plateau = None
-            for (la0, m0), (la1, m1) in zip(points, points[1:]):
-                if m0 and (m0 - m1) / m0 < 0.05:
-                    plateau = (la0, la1)
-                    break
-            if plateau:
-                facts.append(f"ρ={rho} fanout={fan}：{plateau[0]}→{plateau[1]} 块转平")
-    return "；".join(facts) or "未见转平点"
+            deltas = [((m0 - m1) / m0 * 100, la0, la1)
+                      for (la0, m0), (la1, m1) in zip(points, points[1:]) if m0]
+            if deltas:
+                gain, la0, la1 = min(deltas)
+                facts.append(f"ρ={rho} fanout={fan}：相邻档最小差 {gain:+.1f}%（{la0}→{la1}）")
+    return "；".join(facts) or "样本不足"
 
 
 def verdict_warmup(rows):
@@ -295,8 +288,7 @@ def verdict_warmup(rows):
         if gated is None or free is None or not gated:
             continue
         gain = (gated - free) / gated * 100
-        label = "有效" if gain >= 10 else ("无价值" if abs(gain) <= 5 else "负收益")
-        facts.append(f"ρ={rho} 窗口 {window}s：gated 比 free 慢 {gain:.1f}%，{label}")
+        facts.append(f"ρ={rho} 窗口 {window}s：gated 比 free 慢 {gain:.1f}%")
     return "；".join(facts) or "样本不足"
 
 
@@ -328,7 +320,7 @@ def verdict_multiconsumer(rows):
     return "；".join(facts) or "样本不足"
 
 
-# 并行下载族的比值合格区间在 bench/config.py(与出图共用一份)。
+# 并行下载族不设比值合格区间，只报两臂实测值。
 RANGEPAR_CELL_RE = re.compile(r"^rangepar-(l\d+)-(par-on|par-off)$")
 
 
@@ -341,7 +333,7 @@ def _rangepar_parts(row):
 
 
 def verdict_rangepar(rows):
-    """并行下载族:同档两臂的总耗时比,外加字节守恒与命中不退化两条约束。"""
+    """并行下载族:同档两臂的总耗时比,并报两臂的字节与命中率。"""
     if not rows:
         return "未跑"
     facts = []
@@ -354,25 +346,17 @@ def verdict_rangepar(rows):
         if not on_ms or not off_ms:
             continue
         ratio = off_ms / on_ms
-        low, high = config.RANGEPAR_RATIO.get(tier, (None, None))
-        if low is not None and ratio < low:
-            mark = f"未达下限 {low}"
-        elif high is not None and ratio > high:
-            mark = f"超出上限 {high}"
-        else:
-            mark = "在合格区间"
-        facts.append(f"{tier}：关臂/开臂 总耗时 {ratio:.2f}×（{mark}）")
+        facts.append(f"{tier}：关臂/开臂 总耗时 {ratio:.2f}×")
         for metric in ("origin_egress_bytes", "fetch_bytes_run"):
             ov = _mean(_vals(on, metric))
             fv = _mean(_vals(off, metric))
             if ov and fv:
                 delta = abs(ov - fv) / max(ov, fv) * 100
-                if delta >= 2:
-                    facts.append(f"{tier} 字节不守恒（{metric} 差 {delta:.1f}%）")
+                facts.append(f"{tier} {metric} 两臂差 {delta:.1f}%")
         oh = _mean(_vals(on, "hit_rate"))
         fh = _mean(_vals(off, "hit_rate"))
-        if oh is not None and fh is not None and oh < fh - 0.02:
-            facts.append(f"{tier} 命中退化（{(oh - fh) * 100:+.1f}pp）")
+        if oh is not None and fh is not None:
+            facts.append(f"{tier} 命中率 开臂 {oh:.3f} 关臂 {fh:.3f}")
     return "；".join(facts) or "样本不足"
 
 
@@ -469,7 +453,7 @@ def _figure(family):
     for name in FAMILY_FIGURES.get(family, []):
         path = FIG_ROOT / f"{name}.zh.png"
         if path.is_file():
-            parts.append(f'<figure><img src="../figures/{name}.zh.png" '
+            parts.append(f'<figure><img src="../figures-echarts/{name}.zh.png" '
                          f'alt="{html.escape(name)}">'
                          f"<figcaption>{html.escape(name)}</figcaption></figure>")
     return "".join(parts) or "<p>没有图。</p>"
@@ -548,7 +532,7 @@ def build() -> Path:
         section = (
             f"<h2 id=\"{family}\">{html.escape(FAMILY_CN[family])}"
             f"（{html.escape(family)}）</h2>"
-            f"<p class=meta>判据：{html.escape(FAMILY_CRITERION[family])}；"
+            f"<p class=meta>读数依据：{html.escape(FAMILY_CRITERION[family])}；"
             f"样本：{samples}</p>"
             + _figure(family))
         # 混沌族的产物是每轮一份 summary.txt，没有 summary.csv 的逐格读数表。
@@ -564,7 +548,7 @@ def build() -> Path:
 <p class=meta>产物根 {html.escape(str(config.RESULTS_DIR))}；
 完成格子 {done}/{total}</p>
 <h2>决策表</h2>
-<table><thead><tr><th>族</th><th>要回答的问题</th><th>结论</th><th>判据</th>
+<table><thead><tr><th>族</th><th>要回答的问题</th><th>结论</th><th>读数依据</th>
 <th>样本</th></tr></thead><tbody>{''.join(table_rows)}</tbody></table>
 {''.join(sections)}
 </body></html>

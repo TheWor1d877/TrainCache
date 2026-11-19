@@ -15,17 +15,18 @@ resources:
   - agent
   - scheduler
   - gateway
-# Dev builds tag every image `dev`. Release builds rewrite these five entries
-# with `kustomize edit set image <name>=ghcr.io/thewor1d877/traincache/<comp>@sha256:<digest>`,
-# so no tag or digest is ever hand-edited in the per-component manifests.
+# 控制面五个镜像统一钉在发布标签 v0.9.3，集群内不跑 :dev 浮动标签
+# （已删的 :dev 会被 `apply -k` 重新渲染回来，重建 Pod 随即 ImagePullBackOff）。
+# 发版时用 `kustomize edit set image <name>=ghcr.io/thewor1d877/traincache/<comp>@sha256:<digest>`
+# 覆盖这五条，per-component 清单里不手改标签或摘要。
 images:
   - name: ghcr.io/thewor1d877/traincache/controller-manager
-    newTag: dev
+    newTag: v0.9.3
   - name: ghcr.io/thewor1d877/traincache/webhook
-    newTag: dev
+    newTag: v0.9.3
   - name: ghcr.io/thewor1d877/traincache/kube-scheduler
-    newTag: dev
+    newTag: v0.9.3
   - name: ghcr.io/thewor1d877/traincache/traincache-agentd
-    newTag: dev
+    newTag: v0.9.3
   - name: ghcr.io/thewor1d877/traincache/traincache-gateway
-    newTag: dev
+    newTag: v0.9.3

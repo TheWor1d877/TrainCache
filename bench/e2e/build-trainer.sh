@@ -45,5 +45,5 @@ done
 docker build -t "$IMAGE" -f "$HERE/Dockerfile" "$CTX"
 docker run --rm "$IMAGE" python3 -c \
     "import torch, webdataset, numpy, PIL; print('torch', torch.__version__, '| webdataset', webdataset.__version__, '| numpy', numpy.__version__, '| Pillow', PIL.__version__)"
-kind load docker-image "$IMAGE" --name traincache
+"$ROOT/hack/kind-load.sh" traincache "$IMAGE"
 echo "OK: $IMAGE 已构建并载入 kind(traincache)"

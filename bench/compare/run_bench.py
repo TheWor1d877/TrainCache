@@ -194,6 +194,7 @@ GROUP_NS = {
     "juicefs-warm": "juicefs",
     "fluid-cold": "fluid",
     "fluid-warm": "fluid",
+    "traincache": "traincache",
     "traincache-cold": "traincache",
     "traincache-warm": "traincache",
 }
@@ -203,6 +204,7 @@ GROUP_UP = {
     "juicefs-warm": COMPARE_ROOT / "juicefs" / "up.sh",
     "fluid-cold": COMPARE_ROOT / "fluid" / "up.sh",
     "fluid-warm": COMPARE_ROOT / "fluid" / "up.sh",
+    "traincache": COMPARE_ROOT / "traincache" / "up.sh",
     "traincache-cold": COMPARE_ROOT / "traincache" / "up.sh",
     "traincache-warm": COMPARE_ROOT / "traincache" / "up.sh",
 }
@@ -212,6 +214,7 @@ GROUP_DOWN = {
     "juicefs-warm": COMPARE_ROOT / "juicefs" / "down.sh",
     "fluid-cold": COMPARE_ROOT / "fluid" / "down.sh",
     "fluid-warm": COMPARE_ROOT / "fluid" / "down.sh",
+    "traincache": COMPARE_ROOT / "traincache" / "down.sh",
     "traincache-cold": COMPARE_ROOT / "traincache" / "down.sh",
     "traincache-warm": COMPARE_ROOT / "traincache" / "down.sh",
 }
@@ -3570,6 +3573,12 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 [{"group": group, "rep": r, "void": True, "reason": "up_failed",
                   "warmup_seconds": 0.0, "trace_sha256": trace_sha}
                  for r in range(reps)], group, substitute_for)
+    # 每跑完一轮就把已积累的样本落盘一次：write_csv 按 (group, rep) 幂等合并，
+    # 中途被停时已完成的 rep 不会留在内存里丢掉（最小有效单位 = 1 rep 落盘）。
+    def _flush():
+        if out_csv:
+            write_csv(out_csv,
+                      stamp_rows([dict(r) for r in results], group, substitute_for))
     for rep in range(reps):
         run_id = f"{rep:02d}"
         print(f"\n{'='*60}")
@@ -3622,6 +3631,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                 results.append({"group": group, "rep": rep, "void": True,
                                 "reason": "up_failed", "warmup_seconds": warmup_seconds,
                                 "trace_sha256": trace_sha})
+                _flush()
                 continue
 
         # 6.16:traincache 组在创建 train-job 前抓 fetch 计数器基线
@@ -3642,6 +3652,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                             "trace_sha256": trace_sha})
             if not reuse:
                 group_down(group)
+            _flush()
             continue
 
         ns = GROUP_NS[group]
@@ -3746,6 +3757,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
                             "agent_degraded_max": degraded_value})
             if not reuse:
                 group_down(group)
+            _flush()
             continue
 
         metrics = parse_result(logs)
@@ -3846,6 +3858,7 @@ def run_group(group, reps, out_csv, trace_json, trace_sha, substitute_for=""):
             results.append(metrics)
             print(f"[run] {group} rep={rep} 结果: {metrics}", flush=True)
 
+        _flush()
         if not reuse:
             group_down(group)
             time.sleep(10)

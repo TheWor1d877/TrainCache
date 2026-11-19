@@ -4,7 +4,7 @@
 # 用法:
 #   ./hack/build-images.sh                  # manager webhook scheduler agent gateway checkpoint
 #   ./hack/build-images.sh manager agent    # 只构建指定组件
-#   TAG=v0.1.0 ./hack/build-images.sh
+#   TAG=vX.Y.Z ./hack/build-images.sh
 #   ./hack/build-images.sh --prepare-only   # 只准备基础镜像，不构建（供 e2e 预检）
 #   ./hack/build-images.sh --list-bases webhook  # 打印该组件需要的基础镜像
 #   ./hack/build-images.sh --print-fp       # 只打印当前源码指纹（不构建，供镜像新鲜度门禁）

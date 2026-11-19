@@ -85,7 +85,7 @@ E2E_NS = "traincache"
 # MinIO 快照前缀(发布会互相覆盖)。alt 数据独立发一份,阶段二切它。
 E2E_DATASET = os.environ.get("E2E_DATASET", "train-e2e")
 E2E_CHUNK_BYTES = 8388608               # 本实验块粒度 8MiB(生产缺省 64MiB),与 up.sh/COND 同口径
-E2E_TRAIN_IMAGE = os.environ.get("E2E_TRAIN_IMAGE", "traincache-trainer:dev")
+E2E_TRAIN_IMAGE = os.environ.get("E2E_TRAIN_IMAGE", "traincache-trainer:v0.9.3")
 # Pod 名固定:WarmupTask targetRef 按名匹配,ResolvePodIndex 从 -0 后缀解析 index=0
 E2E_POD_NAME = "e2e-train-0"
 E2E_WARMUP_NAME = "e2e-task"
@@ -511,7 +511,7 @@ def _run_bench_cond(cond: dict, reps: int) -> list[Path]:
     print(f"[run] {cond['name']} reps={reps}")
     rc, _out, err = _run_cmd(cmd, env=env)
     if rc != 0:
-        raise SystemExit(f"run_bench 失败(rc={rc}): {err.strip()[:500]}")
+        raise SystemExit(f"run_bench 失败(rc={rc}): {err.strip()}")
     return [root]
 
 
@@ -1313,6 +1313,10 @@ def _run_e2e_cond(cond: dict, reps: int) -> list[Path]:
         run_dir = _run_e2e_once(cond, run_id, reps_dir, scenario)
         results.append(run_dir)
         rows.append(summarize_run(run_dir, cond, i + 1))
+        # 每轮跑完即落盘格根 summary.csv，中途被停时已完成的 rep 不丢
+        # （最小有效单位 = 1 rep 落盘）。_attach_ci 与 write_summary 全量重写，幂等。
+        _attach_ci(rows)
+        write_summary(reps_dir / "summary.csv", rows)
         if (run_dir / "VOID").exists():
             print(f"[{run_id}] 本轮作废(VOID),继续下一轮", file=sys.stderr)
 

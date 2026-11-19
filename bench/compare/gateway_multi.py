@@ -335,6 +335,10 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
               "warmup_seconds": 0.0, "trace_sha256": trace_sha}
              for r in range(reps)], group, substitute_for)
 
+    def _flush():
+        if out_csv:
+            rb.write_csv(out_csv,
+                         rb.stamp_rows([dict(r) for r in results], group, substitute_for))
     for rep in range(reps):
         print(f"\n{'='*60}\n[multi] group={group} rep={rep+1}/{reps} "
               f"readers={rb.READERS} pattern={rb.ACCESS_PATTERN} "
@@ -385,6 +389,7 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
                             "reason": "pod_create_failed",
                             "warmup_seconds": 0.0, "trace_sha256": trace_sha})
             print(exc, flush=True)
+            _flush()
             continue
 
         ready = {}
@@ -411,6 +416,7 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
             results.append({"group": group, "rep": rep, "void": True,
                             "reason": "pod_failed", "warmup_seconds": 0.0,
                             "trace_sha256": trace_sha})
+            _flush()
             continue
 
         metrics = aggregate(logs_by_pod)
@@ -418,6 +424,7 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
             results.append({"group": group, "rep": rep, "void": True,
                             "reason": "parse_failed", "warmup_seconds": 0.0,
                             "trace_sha256": trace_sha})
+            _flush()
             continue
 
         metrics.update({
@@ -483,6 +490,7 @@ def run_group_multi(rb, group, reps, out_csv, trace_json, trace_sha,
               f"bytes={metrics.get('total_read_bytes')} "
               f"gw_merged={metrics['gateway_merged']}", flush=True)
         results.append(metrics)
+        _flush()
 
     rb.group_down(group)
     return rb.stamp_rows(results, group, substitute_for)

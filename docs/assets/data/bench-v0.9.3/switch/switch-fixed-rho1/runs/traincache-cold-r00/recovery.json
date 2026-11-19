@@ -1,0 +1,59 @@
+{
+ "schema": "q9-recovery-1",
+ "generated_at": "2026-11-18T02:16:50+00:00",
+ "run_dir": "/home/howardhe/Project/TrainCache/traincachedata/bench/results/switch/switch-fixed-rho1/runs/traincache-cold-r00",
+ "meta": {
+  "run_id": "traincache-cold-r00",
+  "shuffle": "per-epoch",
+  "epochs": 3,
+  "seed": 20261015
+ },
+ "params": {
+  "baseline_steps": 20,
+  "roll_window": 10,
+  "hold_steps": 10,
+  "rel_factor": 1.1,
+  "abs_margin_pp": 5.0,
+  "threshold_rule": "max(1.1×基线, 基线+5pp)",
+  "recovery_time_s": "切换时刻→回落点,按切换后实测步 step_s 累加"
+ },
+ "events": [
+  {
+   "baseline_n": 20,
+   "baseline_stall": 0.0,
+   "threshold": 0.05,
+   "status": "recovered",
+   "censored": false,
+   "recovery_step": 9,
+   "recovery_global_step": 409,
+   "recovery_time_s": 2.317396,
+   "n_post_steps": 399,
+   "kind": "epoch",
+   "from_epoch": null,
+   "to_epoch": 1,
+   "at": 1794968034.9043112
+  },
+  {
+   "baseline_n": 20,
+   "baseline_stall": 0.0,
+   "threshold": 0.05,
+   "status": "recovered",
+   "censored": false,
+   "recovery_step": 10,
+   "recovery_global_step": 810,
+   "recovery_time_s": 2.507671,
+   "n_post_steps": 400,
+   "kind": "epoch",
+   "from_epoch": null,
+   "to_epoch": 2,
+   "at": 1794968120.6835632
+  }
+ ],
+ "summary": {
+  "n_events": 2,
+  "recovered": 2,
+  "censored": 0,
+  "insufficient_baseline": 0,
+  "censoring_rate": 0.0
+ }
+}

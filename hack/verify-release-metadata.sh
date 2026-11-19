@@ -9,7 +9,7 @@ cd "$ROOT" || exit 2
 # 仓库内清单与组态统一用的版本 tag。仓库内清单写浮动标签 dev，
 # 发布清单由 kustomize 渲染成 digest；这个值只用于校验 Dockerfile 的
 # VERSION 默认值与 git tag 逐字一致。
-VERSION_TAG="${VERSION_TAG:-v0.9.3}"
+VERSION_TAG="${VERSION_TAG:-$(git tag --list 'v[0-9]*' | sort -V | tail -1)}"
 
 bad=0
 fail() { printf '  [FAIL] %s\n' "$*"; bad=1; }
@@ -28,15 +28,19 @@ while IFS= read -r img; do
   esac
 done <<<"$images"
 
-# 2. kustomization 的 images 必须覆盖全部部署组件，且仓库内都指向浮动标签 dev。
+# 2. kustomization 的 images 必须覆盖全部部署组件，标签取 dev 或当前版本 tag。
+#    kustomization 的 images: 会覆盖 per-component 清单里的镜像引用，
+#    所以这里的标签必须落在允许的取值集合里。
 #    checkpointd 由准入按 Pod 注入，不进 kustomization，因此这五个组件的
 #    循环保持五行；它的取值放在 traincache-checkpoint-image ConfigMap 里，
 #    单独在下面校验，它的 Dockerfile/main 在第 3、4 节校验。
 for comp in controller-manager webhook kube-scheduler traincache-agentd traincache-gateway; do
-  if ! grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
-      | grep -q "newTag: dev"; then
-    fail "kustomization images 缺少 $comp 或未指向 dev"
-  fi
+  newtag="$(grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
+      | sed -nE 's/^[[:space:]]*newTag:[[:space:]]*//p' | head -1)"
+  case "$newtag" in
+    dev | "${VERSION_TAG}") ;;
+    *) fail "kustomization images 缺少 $comp 或未指向 dev 或 ${VERSION_TAG}" ;;
+  esac
 done
 
 # 2b. checkpointd 的镜像取值必须由 ConfigMap 承载，且只能是当前版本 tag 或 digest。
@@ -55,7 +59,7 @@ grep -q 'name: traincache-checkpoint-image' controller/deploy/webhook/deployment
   || fail "webhook Deployment 的 CHECKPOINT_IMAGE 没引用 traincache-checkpoint-image"
 
 # 3. 组件清单从五变六：五个部署组件加 checkpointd（由准入注入的 sidecar）。
-#    Dockerfile 不设镜像站参数,VERSION 默认 dev 并由 ldflags 注入。
+#    Dockerfile 不设镜像站参数,VERSION 默认当前版本 tag 并由 ldflags 注入。
 dockerfiles=(
   agent/Dockerfile
   checkpoint/Dockerfile

@@ -6,15 +6,19 @@ TrainCache 运行在 Kubernetes 上。Pod 调度前，它把数据集的块拉�
 
 [![verify](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/TheWor1d877/TrainCache/actions/workflows/verify.yml) ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white) ![Kubernetes 1.28+](https://img.shields.io/badge/Kubernetes-1.28%2B-326CE5?logo=kubernetes&logoColor=white) ![S3 compatible](https://img.shields.io/badge/S3-compatible-569A31?logo=amazons3&logoColor=white) ![License Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-4C8EDA)
 
-<img src="docs/assets/logo/traincache-lockup.svg" alt="TrainCache" width="420">
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/traincache-lockup-dark.svg"><img src="docs/assets/logo/traincache-lockup.svg" alt="TrainCache" width="420"></picture>
+
+![图 1：控制面、节点面、数据面与可观测](docs/assets/figures/architecture.zh.svg)
+
+*图 1：控制面、节点面、数据面与可观测。网关合并在途请求并缓存块；traintrace 用 eBPF 观测块 I/O；checkpointd 以 Pod 级 sidecar 运行。*
 
 ```bash
 make e2e    # 建 kind 集群、加载镜像、跑六项断言
 ```
 
-![图 1：e2e 跑完后的资源状态](docs/assets/screenshots/e2e-demo_v0.4.1.gif)
+![图 2：e2e 跑完后的资源状态](docs/assets/screenshots/e2e-demo.gif)
 
-*图 1：`make e2e` 跑完后查询资源。WarmupTask 已 Released，两个训练 Pod 落在带 `traincache.io/s3-access=true` 的节点，Pod 注释里的 `node-scores` 为 100。*
+*图 2：`make e2e` 跑完后查询资源。WarmupTask 已 Released，两个训练 Pod 落在带 `traincache.io/s3-access=true` 的节点，Pod 注释里的 `node-scores` 为 100。*
 
 ## 背景
 
@@ -63,6 +67,9 @@ TrainCache 面向「数据要从远端拉、消费顺序能提前算出来、拉
 - scheduler 插件读 Pod 注释 `traincache.io/node-scores`，按全局位置衰减后的就绪度给候选节点打分，选分数最高的节点。
 - Pod 调度到节点后，agentd 按训练实际消费顺序预取后续块；epoch、shuffle、curriculum 切换事件到达时，按新顺序继续预取（`agent/ordersrc/`）。
 - 每次预热到候选节点的字节记入 `startup_warmup_bytes`，持续预取的字节记入 `sustained_prefetch_bytes`，同一格的所有组态共用这套口径（[指标与决策](docs/4.3-bench-metrics-and-decisions.md) §2）。
+- 配置 `gatewayEndpoint` 后，agentd 把块 GET 交给单副本网关。网关合并在途的重复请求；开启磁盘缓存后，错峰重复的块直接从网关盘返回。网关用自己的凭证重签 SigV4，并在到源站这一段终止 TLS（[9.x 网关](docs/9.1-design.md)）。
+- 带 `traincache.io/checkpoint` 标签的 Pod 在准入时注入异步 checkpoint sidecar。它在 Pod 卷与后端之间搬运 checkpoint 目录，流量不经过网关（[10.x checkpoint](docs/10.1-design.md)）。
+- `traintrace` 是只读 eBPF 二进制，按 cgroup 与进程记录块 I/O 延迟、major fault 与无效预读，每轮写出结构化指标文件（[11.x eBPF](docs/11.0-eBPF-observability-tools.md)）。
 
 ## 快速开始
 
@@ -71,7 +78,7 @@ TrainCache 面向「数据要从远端拉、消费顺序能提前算出来、拉
 **1. 控制面安装。** 镜像按 digest 固定：
 
 ```bash
-curl -LO https://github.com/TheWor1d877/TrainCache/releases/download/v0.4.1/install.yaml
+curl -LO https://github.com/TheWor1d877/TrainCache/releases/download/v0.9.3/install.yaml
 kubectl apply -f install.yaml
 ```
 
@@ -118,42 +125,41 @@ kubectl delete -f install.yaml
 
 ## 实验结果
 
-七种组态包括 direct 直读、JuiceFS 冷/热、Fluid 冷/热与 TrainCache 冷/热，同一负载形态各跑 3 次。表中为均值，bootstrap 95% 置信区间放在 CSV 的 `ci_low` 与 `ci_high` 列。数据版本 `v0.4.0`，图上用到的聚合值见 [`compare_total_v0.4.0.csv`](docs/assets/data/compare_total_v0.4.0.csv)。L-1000 只有 1 次运行。
+11 个族在 kind 集群上跑 TrainCache v0.9.3：145 格、432 条有效采样，每格 3 轮（e2e 为 2 轮）。对照族覆盖直读源站、JuiceFS 与 Fluid 的冷/热组态、TrainCache 的冷/热组态，链路带宽取 100、300、1000 Mbit/s，ρ 从 0.5 到 8，ρ 为数据集字节数除以单节点缓存容量。数值为格均值；每格汇总文件在 `docs/assets/data/bench-v0.9.3/`。图与交互页由 `python3 bench/experiments/plot_echarts.py` 生成，全部 20 张图与图下说明在[图表页](https://thewor1d877.github.io/TrainCache/)，默认英文，可切换中文。
 
-| 格 | direct | Fluid 冷 | TrainCache 冷 | TrainCache 热 | n |
-|---|---:|---:|---:|---:|---:|
-| S-100 | 576.7 | 352.0 | 412.9 | 349.8 | 3 |
-| S-300 | 297.0 | 255.8 | 302.4 | — | 3 |
-| S-1000 | 258.4 | 251.6 | 272.7 | 264.4 | 3 |
-| M-1000 | 83.4 | 122.6 | 106.8 | — | 3 |
-| L-1000 | — | 302.4 | 287.9 | — | 1 |
+结果在 ρ=1 处分开。ρ≤1 时节点缓存装得下工作集，收益来自复用；ρ>1 后命中率降到 0.32 以下，耗时由回源路径决定。
 
-- S-100（100 mbit、2 GiB 数据）：TrainCache 冷比 direct 少 163.7 s（28.4%），Fluid 冷比 TrainCache 冷少 60.9 s；TrainCache 热 349.8 s。
-- 同格 stall 占比从 direct 的 52.9% 降到 TrainCache 冷的 0.1%。冷启动预热花了 124.3 s，总时长仍低于 direct。
-- 1000 mbit 下门控预热是净开销：S-1000 从 258.4 s 涨到 272.7 s（5.6%），M-1000 从 83.4 s 涨到 106.8 s（28.1%）。
-- 六个格子切换后 stall 回落时间在 2.24 至 2.36 s 之间，最大差 0.11 s（4.9%），低于协议规定的 20% 判据。
+![图 3：相对直读源站的耗时比](docs/assets/figures/bench-v0.9.3/compare-ratio.zh.png)
 
-![图 2：makespan 组态对比](docs/assets/figures/compare_total_v0.4.0.zh.png)
+*图 3：每种组态在同一带宽下除以直读源站的耗时，低于虚线 1.0 表示更快。100 Mbit/s、ρ≤1 时 TrainCache 用 547 s，直读为 1083 s；300 Mbit/s 已预热组比 Fluid 已预热少 55 s；300 Mbit/s、ρ=8 的未预热组比直读慢 35%。直读只测 ρ=4，按不随 ρ 变化处理。*
 
-*图 2：五个格子、七种组态的全程 makespan，柱长为该组均值，越短越好。*
+![图 4：缓存足够与缓存不足的对比](docs/assets/figures/bench-v0.9.3/compare-rho1-rho4.zh.png)
 
-![图 3：启动门控盈亏](docs/assets/figures/fig1_startup_surface_v0.4.0.zh.png)
+*图 4：同一带宽下 ρ=1 与 ρ=4 的对比。100 Mbit/s 的未预热组比直读快 49%；300 Mbit/s 已预热组比 Fluid 已预热快 18%。ρ=4 时 300 Mbit/s 未预热比 Fluid 未预热慢 9%，100 Mbit/s 比直读慢 5%。100 Mbit/s 分面没有 Fluid 与 JuiceFS 读数。*
 
-*图 3：启动门控相对自由调度的 makespan 变化，按 fanout 分三面。右向蓝柱表示门控更快，左向橙柱表示门控更慢；−443.9% 的格子截断到轴端并用 `◀` 标出真实值。*
+其余族在同一装置上每次只改一个子系统。
 
-![图 4：makespan 随带宽与 epoch 数](docs/assets/figures/fig2_total_makespan_v0.4.0.zh.png)
+![图 5：按读取路径看的源站出流量](docs/assets/figures/bench-v0.9.3/gateway-source-bytes.zh.png)
 
-*图 4：三档带宽下 1、3、6 个 epoch 的全程 makespan，柱顶标实测值，纵轴为对数刻度。*
+*图 5：源站出流量依次为 50.9 GB（直读源站）、46.1 GB（仅本地缓存）与 4.3 GB（本地缓存加网关）。网关把重复块请求合并成一次回源，出流量减少 92%。*
 
-![图 5：切换后 stall 回落时间](docs/assets/figures/fig3_recovery_v0.4.0.zh.png)
+![图 6：故障中断到恢复训练的时长](docs/assets/figures/bench-v0.9.3/e2e-recovery.zh.png)
 
-*图 5：六个格子的 shuffle × epoch 切换后的 stall 回落时间。小点是单次切换事件，大点是均值，右侧标数值。*
+*图 6：检查点续跑 13.1–13.2 s，换数据集后续跑 14.3–17.6 s，训练与 agentd 同时重启 22.0–24.9 s。恢复窗口内读错误为 0。*
+
+- 淘汰：ρ=1 三者 76–79 s，差异在噪声内；ρ=8 热度优先 132 s、LRU 143 s、LFU 148 s。
+- 预取：前瞻 8 最优（ρ=8 时 273 s），前瞻 32 最差（337–359 s）；副本数从 1 增到 3 没有收益。
+- 预热门控：ρ=1、等待上限 60 s 时把启动从 32.8 s 降到 3.4 s；ρ=8 时门控多花 0.3–2.0 s。
+- 顺序切换：ρ=1 四种方式都在 2.3 s；ρ=8 升到 6.5–11.4 s。
+- 两个任务共享缓存：命中率 0.39–0.42；同节点部署 408–412 s，跨节点 413–418 s。
+- 并行连接：三种受限链路下，4 路并行的耗时比分别为 2.7×、4.3×、3.9×。
+- 混沌：六种故障修复后全部 PASS。
+
+## 已知限制
+
+300 Mbit/s、ρ>1 的格子里 TrainCache 慢于 Fluid 与 JuiceFS：命中率在 ρ=4 降到 0.09–0.13、ρ=8 降到 0.04–0.05，agentd 打开的回源连接少，也不合并不同 Pod 的重复块请求，回源路径填不满链路。合并重复读的网关单独成族测量，对照族未开启。这一区间在当前设计的目标复用区之外；提高 agentd 的回源并发、在对照族里开启网关属于后续工作。
 
 ## 架构
-
-![图 6：控制面、节点与对象存储](docs/assets/figures/architecture_v0.4.1.zh.svg)
-
-*图 6：控制面、节点面与对象存储。*
 
 控制面下发预热任务、门控释放与节点打分，不进入数据路径。agentd 常驻每个节点，把块写到节点本地盘；训练 Pod 以 hostPath 只读挂载该目录，读取不经过 agentd。读侧信号由 DataLoader 钩子与 inotify 旁路采集。
 
@@ -163,13 +169,12 @@ kubectl delete -f install.yaml
 
 Fluid 1.1.0-alpha.9 与 JuiceFS CE 1.3.0 在 kind 集群里部署并测得基准数据，作为七种组态中的对照组（[现勘报告](docs/3-field-survey.md)、[4.1 装置](docs/4.1-bench-apparatus.md)）。`DataSet` 与 `Runtime` 的命名、nodeAffinity 注入方式参考 Fluid。块级就绪度在 `controller/cmd/controller-manager`，SchedulingGate 注入在 `controller/cmd/webhook`，节点打分在 `controller/cmd/scheduler`，预取在 `agent/cmd/agentd`。上游代码未内嵌，两个项目均为 Apache-2.0：[fluid-cloudnative/fluid](https://github.com/fluid-cloudnative/fluid)、[juicedata/juicefs](https://github.com/juicedata/juicefs)。
 
-
 ## 构建与测试
 
 ```bash
 make verify           # 三个模块的 build、vet、go test -race 与 gofmt
 make verify-metadata  # 版本口径、镜像名、文档相对链接
-hack/build-images.sh  # 开发镜像（:v0.9.3）
+hack/build-images.sh  # 开发镜像（tag 与清单一致）
 make e2e              # kind 集群中的六项断言
 ```
 
@@ -181,11 +186,12 @@ make e2e              # kind 集群中的六项断言
 
 | 文档 | 内容 |
 |---|---|
+| [0 云对象存储部署](docs/0-cloud-object-storage-deployment.md) | S3 兼容桶的接入与凭据配置 |
 | [1 TrainCache 介绍与背景](docs/1-introduction-and-background.md) | 问题定义、外部事实、与 Fluid/JuiceFS 的定位差异 |
 | [2 TrainCache 三层架构](docs/2-three-layer-architecture.md) | 控制面、节点面、数据源的分工与数据面约定 |
 | [3 现勘报告](docs/3-field-survey.md) | Fluid/JuiceFS 的机制现勘与缺口证据 |
 | [4.1 装置与变量空间](docs/4.1-bench-apparatus.md) | 装置构成、ρ 阶梯、参数、数据生成与落点 |
-| [4.2 实验族与格子](docs/4.2-bench-families.md) | 十个族的轴与格子、COND 契约、机时账 |
+| [4.2 实验族与格子](docs/4.2-bench-families.md) | 十一个族的轴与格子、COND 契约、机时账 |
 | [4.3 指标与决策](docs/4.3-bench-metrics-and-decisions.md) | 指标算式、判据阈值、D 号决策 |
 | [4.4 操作手册](docs/4.4-bench-runbook.md) | 环境准备、拉起、数据准备、跑族、排障、产物 |
 | [5.x 缓存核心库](docs/5.1-design.md) | 设计要求、计划、决策与测试 |
@@ -193,6 +199,10 @@ make e2e              # kind 集群中的六项断言
 | [7.x Controller 与 Scheduler](docs/7.1-design.md) | 控制面的接口与决策 |
 | [8.x 日志与监控](docs/8.1-design.md) | 指标、日志契约与使用说明 |
 | [9.x 合并回源网关](docs/9.1-design.md) | 网关的接口契约、决策与测试 |
+| [10.x checkpoint sidecar](docs/10.1-design.md) | 注入、保存与恢复流程、后端插件 |
+| [11.x eBPF 观测](docs/11.0-eBPF-observability-tools.md) | traintrace 探针、指标契约与 bench 集成 |
+| [CLI 接口](docs/CLI-INTERFACE.md) | 命令集、参数与退出码 |
+| [参数配置](docs/PARAMETER-CONFIGURATION.md) | DataSet、WarmupTask 与各组件的参数 |
 | [发布约束](docs/RELEASE-CONSTRAINTS.md) | 版本、镜像、发布物与 CI 口径 |
 
 ## License

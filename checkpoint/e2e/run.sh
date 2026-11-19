@@ -47,7 +47,9 @@ E2E="$SCRIPT_DIR"
 
 CLUSTER="${CLUSTER:-kind-traincheckpoint-e2e}"
 NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.37.0}"
-TAG=dev
+# 镜像标签与 checkpoint/e2e/manifests 里写的 tag 一致：脚本构建并加载这个标签，
+# 清单里的 checkpointImage 与各 Pod 的容器镜像必须是同一个标签。
+TAG=v0.9.3
 
 NS=traincache
 POD=traincache-checkpoint-e2e

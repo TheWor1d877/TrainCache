@@ -119,7 +119,7 @@ if [ "$DRY_RUN" = 1 ]; then
     chaos_show_cmd -n "$AGENT_NS" exec "\$AGENTD_POD" -c "$CHAOS_AGENTD_CONTAINER_DEFAULT" -- \
       wget -qO- "http://127.0.0.1:${CHAOS_METRICS_PORT_DEFAULT}/metrics"
     chaos_note "[dry-run]   ↑ 观察窗口 ${OBSERVE}s 内取 traincache_source_mode / traincache_gateway_fallback_total(源站不可用时不应变化)"
-    chaos_show_cmd -n "$AGENT_NS" get warmuptasks.eta.traincache.io -o jsonpath='{.items[*].status.phase}'
+    chaos_show_cmd -n "$AGENT_NS" get warmuptasks.traincache.io -o jsonpath='{.items[*].status.phase}'
     chaos_note "[dry-run]   ↑ 取 WarmupTask status.phase(CRD 直读,门控降级判据)"
     if [ "$RECOVER" = 1 ]; then
       chaos_show_cmd -n "$NS" scale "deploy/$DEPLOY" --replicas="\$ORIGINAL"
@@ -296,7 +296,7 @@ fi
 # 门控与训练终态由 bench/compare 的装置产生(WarmupTask + 带 hook 的训练 Job)。
 # 集群里没有 WarmupTask 时这两项判据不适用,只记录不判定。
 WARMUP_NAMES="$(chaos_cr_jsonpath warmuptask '{range .items[*]}{.metadata.name}{"\n"}{end}' "$AGENT_NS")"
-WARMUP_PHASES="$(chaos_cr_jsonpath warmuptask '{range .items[*].status.phase}{.}{" "}{end}' "$AGENT_NS")"
+WARMUP_PHASES="$(chaos_cr_jsonpath warmuptask '{range .items[*]}{.status.phase}{" "}{end}' "$AGENT_NS")"
 TRAIN_PHASE="$(chaos_kubectl -n "$AGENT_NS" get pod "$TRAIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 JOB_FAILED="$(chaos_cr_jsonpath job '{range .items[*]}{.status.failed}{" "}{end}' "$AGENT_NS")"
 if [ -z "$(printf '%s' "$WARMUP_NAMES" | tr -d '[:space:]')" ]; then

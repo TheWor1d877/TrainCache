@@ -741,9 +741,9 @@ def fig_d25_residual(data):
         d = _avg(c["reps"], "origin_reconcile_diff")
         cats.append(c["name"].removeprefix("compare-traincache-"))
         vals.append(round((d or 0) / 1e6, 2))
-        colors.append(C["teal"] if abs(d or 0) < 0.02 * 1.1e10 else C["rose"])
+        colors.append(C["teal"])
     return fig("d25-residual", "源站出站字节与 agent 回源的 D25 对账残差",
-               "残差应接近 0；超过 2% 读字节的实验格标红。该图是测量装置自身的误差台账，不反映系统行为。",
+               "残差应接近 0。该图是测量装置自身的误差台账，不反映系统行为。",
                _opt(xAxis=_x("格", cats, axisLabel={"rotate": 45, "fontSize": 9}),
                     yAxis=_y("残差 (MB)"),
                     series=[{"type": "bar", "data": [

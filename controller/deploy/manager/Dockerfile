@@ -4,7 +4,7 @@
 # traincache/core through go.work, so the build context must be the repo root
 # (or a staged copy of it) containing all three modules:
 #   docker build -f controller/deploy/manager/Dockerfile \
-#     -t ghcr.io/thewor1d877/traincache/controller-manager:v0.9.3 .
+#     -t ghcr.io/thewor1d877/traincache/controller-manager:vX.Y.Z .
 # hack/build-images.sh runs this build and first retags locally present base
 # images to their official short names.
 FROM golang:1.26-bookworm AS build

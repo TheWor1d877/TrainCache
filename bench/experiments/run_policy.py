@@ -313,11 +313,13 @@ def run_reps(cond_name: str, reps: int | None = None,
         print(f"\n===== 第 {i+1}/{reps} 轮: {run_id} =====")
         run_dir = run_once(cond, run_id, reps_dir, selftest=selftest)
         results.append(run_dir)
+        # 每轮跑完即刷新格根 summary.csv：run_once 已把本轮产物落进独立 run_dir，
+        # 这里让格根也逐 rep 增长，中途被停时已完成 rep 在格根可见（最小单位 = 1 rep）。
+        if not selftest:
+            _aggregate_cell_summary(reps_dir, results)
         void_marker = run_dir / "VOID"
         if void_marker.exists():
             print(f"[{run_id}] 本轮作废(VOID),继续下一轮", file=sys.stderr)
-    if not selftest:
-        _aggregate_cell_summary(reps_dir, results)
     return results
 
 
