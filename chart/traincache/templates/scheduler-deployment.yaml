@@ -1,0 +1,196 @@
+# Custom TrainCache scheduler. Runs beside the stock scheduler under a
+# distinct profile name; training Pods select it via spec.schedulerName.
+#
+# Build/load the image first (see Dockerfile):
+#   docker build -f deploy/scheduler/Dockerfile \
+#     -t <registry>/traincache/kube-scheduler:v0.9.3 .
+#   kind load docker-image ...:v0.9.3 --name <cluster>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traincache-scheduler
+  namespace: {{ .Values.scheduler.namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-scheduler
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: {{ .Values.scheduler.namespace }}
+---
+# The stock scheduler's identity is the User system:kube-scheduler, which
+# already has these two bindings; a dedicated ServiceAccount does not inherit
+# them. Without system:volume-scheduler the StorageClass informer cannot sync,
+# and without the authentication-reader Role the requestheader ConfigMap cannot
+# be read; either failure keeps the scheduler from ever becoming leader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-scheduler-volume
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:volume-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: {{ .Values.scheduler.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-scheduler-auth-reader
+  namespace: {{ .Values.scheduler.namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: {{ .Values.scheduler.namespace }}
+---
+# system:kube-scheduler only grants lease access to the resourceName
+# "kube-scheduler"; this scheduler deliberately uses a distinct lease name so
+# it can coexist with the stock scheduler, so it needs its own grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: traincache-scheduler-leader-election
+  namespace: {{ .Values.scheduler.namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["traincache-scheduler"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-scheduler-leader-election
+  namespace: {{ .Values.scheduler.namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: traincache-scheduler-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: traincache-scheduler
+    namespace: {{ .Values.scheduler.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-scheduler
+  namespace: {{ .Values.scheduler.namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+spec:
+  replicas: {{ .Values.scheduler.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traincache-scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traincache-scheduler
+    spec:
+      serviceAccountName: traincache-scheduler
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: kube-scheduler
+          # Registry mirror domain from /etc/docker/daemon.json; never :latest.
+          image: {{ include "traincache.image" (dict "image" .Values.images.scheduler) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/kubernetes/traincache-scheduler.yaml
+            - --v=2
+          env:
+            # Only the two values that differ from the code defaults are set,
+            # and they come from traincache-scheduler-config, the ConfigMap in
+            # this Pod's own namespace: the score TTL must match the Controller's
+            # controllerScoreTTL, and debug emits one "scheduler score" line per
+            # (pod,node) decision. Score annotation (traincache.io/node-scores),
+            # health (:8081) and metrics (:9412, where the independent
+            # traincache_scheduler_score_total registry is served under
+            # /metrics/traincache) all use their defaults.
+            - name: SCHEDULER_SCORE_TTL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-scheduler-config
+                  key: schedulerScoreTTL
+            - name: CONTROLLER_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-scheduler-config
+                  key: schedulerLogLevel
+          ports:
+            - name: health
+              containerPort: 8081
+            - name: metrics
+              containerPort: 9412
+            - name: https
+              containerPort: 10259
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: {{ .Values.scheduler.resources.requests.cpu }}
+              memory: {{ .Values.scheduler.resources.requests.memory }}
+            limits:
+              memory: {{ .Values.scheduler.resources.limits.memory }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kubernetes/traincache-scheduler.yaml
+              subPath: scheduler.yaml
+              readOnly: true
+            # kube-scheduler generates its own serving certificate here; the
+            # root filesystem is read-only.
+            - name: certs
+              mountPath: /var/run/kubernetes
+      securityContext:
+        fsGroup: 65534
+      volumes:
+        - name: config
+          configMap:
+            name: traincache-scheduler-config
+        - name: certs
+          emptyDir: {}

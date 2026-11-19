@@ -1,7 +1,7 @@
 # TrainCache 验证入口。CI 跑 verify；PR 到 main 另跑 verify-metadata 与 kind e2e；
 # e2e 需要 docker + kind，也可手动触发。
 
-.PHONY: verify verify-controller verify-core verify-agent verify-gateway verify-checkpoint verify-hooklib verify-metadata e2e \
+.PHONY: verify verify-controller verify-core verify-agent verify-gateway verify-checkpoint verify-hooklib verify-metadata verify-chart e2e \
 	release-install release-smoke
 
 verify: verify-controller verify-core verify-agent verify-gateway verify-checkpoint verify-hooklib
@@ -40,6 +40,10 @@ verify-metadata:
 	./hack/verify-release-metadata.sh
 	./hack/verify-doc-refs.sh
 	./hack/verify-config-placement.sh
+
+# Helm chart 与 kustomize 清单同源；需要 helm 与 kubectl。
+verify-chart:
+	./hack/verify-chart.sh
 
 # 端到端：脚本自行创建/清理 kind 集群，源码比镜像新会自动重建。
 e2e:

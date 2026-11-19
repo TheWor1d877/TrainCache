@@ -100,6 +100,16 @@ kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategi
 
 证书有效期为 365 天，SAN 覆盖 Service 名与 namespace 内的 DNS。CA 要写进两条 webhook 条目：checkpoint 条目的 `failurePolicy` 是 `Fail`，`caBundle` 为空时带 `traincache.io/checkpoint` 标签（值为同 namespace 的 ConfigMap 名）的 Pod 会被准入拒绝。
 
+用 Helm chart 时，Secret 用同样命令创建，CA 在安装时通过 `--set webhook.caBundle` 传入。chart 会同时写进两条规则，不需要再 patch：
+
+```bash
+helm install traincache ./chart/traincache -n traincache --create-namespace \
+  --set webhook.caBundle="$(base64 -w0 "$TLS/ca.crt")" \
+  --set config.objstoreEndpoint=<endpoint> --set config.objstoreBucket=<bucket>
+```
+
+chart 的前置动作与全部 values 见 [chart/traincache/README.md](chart/traincache/README.md)。
+
 **3. 桶与凭据。** `DataSet.spec` 写 `endpoint`（不带 scheme）、`bucket`、`secretRef`；Secret 的字段是 `accessKey` 与 `secretKey`，与 DataSet 同 namespace。桶的接入方式见[云对象存储部署指南](docs/0-cloud-object-storage-deployment.md)。
 
 **4. 控制面验证。**
@@ -124,6 +134,8 @@ scheduler 运行在 `kube-system`，用 `kubectl -n kube-system rollout status d
 ```bash
 kubectl delete -f install.yaml
 ```
+
+Helm 安装的卸载命令是 `helm uninstall traincache -n traincache`。
 
 ## 实验结果
 

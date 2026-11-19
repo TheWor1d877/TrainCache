@@ -1,0 +1,166 @@
+# TrainCache node Agent DaemonSet.
+#
+# Prerequisites maintained by the cluster operator (never by TrainCache):
+#   * Nodes that may host training Pods must carry the MANUAL label
+#     traincache.io/s3-access=true (docs/7.2 D30). No component writes it.
+#   * The credential Secret traincache-objstore exists in this namespace
+#     (keys accessKey / secretKey). e2e/run.sh creates it from the MinIO root
+#     credentials.
+#
+# The Agent listens on the Pod IP; hostPort is also published so the
+# controller's Node InternalIP fallback route works. The cache directory is a
+# hostPath so a restarted Agent reuses already-verified blocks.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: traincache-agentd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: traincache-agentd
+    app.kubernetes.io/name: traincache-agentd
+    app.kubernetes.io/part-of: traincache
+spec:
+  selector:
+    matchLabels:
+      app: traincache-agentd
+  template:
+    metadata:
+      labels:
+        app: traincache-agentd
+        app.kubernetes.io/name: traincache-agentd
+    spec:
+      # The control-plane taint keeps the Agent off kind's control-plane node.
+      containers:
+        - name: agentd
+          image: {{ include "traincache.image" (dict "image" .Values.images.agent) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            # No literal values here. Settings that vary by cluster or by run
+            # come from traincache-config; credentials from traincache-objstore;
+            # the node name from the Downward API. Anything not listed uses the
+            # default recorded in agent/svc/config.go (GRPC :9410, metrics
+            # :9411, verify xxh3, cache root /var/cache/traincache, and the
+            # eleven TRAINCACHE_HEAT_* values).
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: TRAINCACHE_DATASET_WHITELIST
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: datasetMetricsWhitelist
+            - name: TRAINCACHE_CACHE_CAPACITY_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: cacheCapacityBytes
+            - name: TRAINCACHE_PREFETCH_LOOKAHEAD
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: prefetchLookahead
+            - name: TRAINCACHE_EVICT_POLICY
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: evictPolicy
+            - name: TRAINCACHE_EVICT_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: evictInterval
+            - name: TRAINCACHE_OBJSTORE_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreEndpoint
+            - name: TRAINCACHE_OBJSTORE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreBucket
+            - name: TRAINCACHE_OBJSTORE_SECURE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreSecure
+            - name: TRAINCACHE_OBJSTORE_COMPRESSION
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: objstoreCompression
+            - name: TRAINCACHE_FETCH_RANGE_PARALLEL
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: fetchRangeParallel
+            - name: TRAINCACHE_OBJSTORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objstore.existingSecret }}
+                  key: accessKey
+            - name: TRAINCACHE_OBJSTORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objstore.existingSecret }}
+                  key: secretKey
+            - name: TRAINCACHE_GATEWAY_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewayEndpoint
+            - name: TRAINCACHE_GATEWAY_SECURE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-config
+                  key: gatewaySecure
+          ports:
+            - name: grpc
+              containerPort: 9410
+              hostPort: 9410
+            - name: metrics
+              containerPort: 9411
+              hostPort: 9411
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - traincache node status --node "$NODE_NAME" --item agent
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - traincache node status --node "$NODE_NAME" --item rescan
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: {{ .Values.agent.resources.requests.cpu }}
+              memory: {{ .Values.agent.resources.requests.memory }}
+            limits:
+              memory: {{ .Values.agent.resources.limits.memory }}
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/traincache
+            - name: run
+              mountPath: /run/traincache
+      volumes:
+        - name: cache
+          hostPath:
+            path: {{ .Values.agent.cacheHostPath }}
+            type: DirectoryOrCreate
+        - name: run
+          hostPath:
+            path: {{ .Values.agent.runHostPath }}
+            type: DirectoryOrCreate

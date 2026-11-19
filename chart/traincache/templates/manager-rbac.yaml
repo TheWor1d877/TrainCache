@@ -1,0 +1,90 @@
+# controller-manager RBAC.
+#
+# Secrets are intentionally NOT granted cluster-wide. The manager
+# only reads the object-store credential Secret referenced by a DataSet, so a
+# namespaced Role is bound per tenant namespace. The shipped Role covers the
+# traincache namespace; every additional DataSet namespace needs its own
+# Role + RoleBinding for this ServiceAccount (the e2e tenant ships its own in
+# controller/e2e/manifests/tenant.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traincache-controller-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+    app.kubernetes.io/part-of: traincache
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traincache-controller-manager
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+rules:
+  - apiGroups: ["traincache.io"]
+    resources: ["datasets", "datasets/status", "warmuptasks", "warmuptasks/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # Node annotations carry the per-task score written at gate release (D49,
+  # docs/7.1-design.md《Pod 分数注解》). Kubernetes RBAC cannot scope update to annotations only.
+  # Other components (webhook, scheduler) keep Nodes read-only.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traincache-controller-manager
+  labels:
+    app.kubernetes.io/name: traincache-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traincache-controller-manager
+subjects:
+  - kind: ServiceAccount
+    name: traincache-controller-manager
+    namespace: {{ .Release.Namespace }}
+---
+# Namespaced Secret read for DataSets hosted in the traincache namespace. Add
+# the same Role/RoleBinding to every other namespace that hosts DataSets. Only
+# "get" is granted: the manager disables client caching for Secrets, so no
+# cluster-wide list/watch is needed; the storage factory caches stores by Secret
+# resourceVersion.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: traincache-dataset-secrets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: traincache
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: traincache-controller-manager-secrets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: traincache
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: traincache-dataset-secrets
+subjects:
+  - kind: ServiceAccount
+    name: traincache-controller-manager
+    namespace: {{ .Release.Namespace }}

@@ -1,0 +1,83 @@
+# Pod mutating webhook. controller-runtime serves TLS on :9443 and reads the
+# serving certificate from /tmp/k8s-webhook-server/serving-certs (the Secret
+# traincache-webhook-tls created by e2e/run.sh or by the cluster operator).
+#
+# failurePolicy=Ignore (see mutatingwebhook.yaml): a webhook outage never
+# blocks Pod creation; the manager records GateInjectionDegraded instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traincache-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-webhook
+    app.kubernetes.io/part-of: traincache
+spec:
+  replicas: {{ .Values.webhook.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traincache-webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traincache-webhook
+    spec:
+      serviceAccountName: traincache-webhook
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: webhook
+          image: {{ include "traincache.image" (dict "image" .Values.images.webhook) }}
+          imagePullPolicy: IfNotPresent
+          # No env entries except CHECKPOINT_IMAGE: every other setting this
+          # process reads uses the default in
+          # controller/internal/config/config.go (webhook :9443, health :8081,
+          # metrics :9412, all namespaces, gate traincache.io/warmup, log level
+          # info).
+          env:
+            - name: CHECKPOINT_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: traincache-checkpoint-image
+                  key: checkpointImage
+          ports:
+            - name: https
+              containerPort: 9443
+            - name: health
+              containerPort: 8081
+            - name: metrics
+              containerPort: 9412
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+              scheme: HTTP
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: {{ .Values.webhook.resources.requests.cpu }}
+              memory: {{ .Values.webhook.resources.requests.memory }}
+            limits:
+              memory: {{ .Values.webhook.resources.limits.memory }}
+          volumeMounts:
+            - name: tls
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.webhook.existingSecret }}

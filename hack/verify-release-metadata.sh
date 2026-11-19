@@ -58,6 +58,47 @@ grep -q 'name: CHECKPOINT_IMAGE' controller/deploy/webhook/deployment.yaml \
 grep -q 'name: traincache-checkpoint-image' controller/deploy/webhook/deployment.yaml \
   || fail "webhook Deployment 的 CHECKPOINT_IMAGE 没引用 traincache-checkpoint-image"
 
+# 2c. Helm chart 的镜像默认值、appVersion 与仓库清单同源。
+#     chart 是第二处镜像引用，默认 tag 必须与 kustomization 的 newTag 逐字相等，
+#     digest 只能由安装时的 --set 提供。
+chart_tag() {
+  awk -v key="$1" '
+    $0 == "  " key ":" { inside = 1; next }
+    inside && $1 == "tag:" { print $2; exit }
+    inside && /^  [^ ]/ { exit }
+  ' chart/traincache/values.yaml
+}
+for pair in "controllerManager:controller-manager" "webhook:webhook" \
+            "scheduler:kube-scheduler" "agent:traincache-agentd" "gateway:traincache-gateway"; do
+  key="${pair%%:*}" comp="${pair#*:}"
+  expected="$(grep -A1 -E "name: .*/traincache/${comp}$" controller/deploy/kustomization.yaml \
+      | sed -nE 's/^[[:space:]]*newTag:[[:space:]]*//p' | head -1)"
+  actual="$(chart_tag "$key")"
+  [[ "$actual" == "$expected" ]] \
+    || fail "chart images.${key}.tag=${actual:-空}，kustomization 是 ${expected:-空}"
+done
+
+# 默认 digest 必须为空，发布安装时由 --set 覆盖。
+[[ "$(grep -c '^    digest: ""$' chart/traincache/values.yaml)" -eq 6 ]] \
+  || fail "chart values 的六个镜像默认 digest 必须为空字符串"
+
+# checkpointImage 与清单同源；清单用 digest 时跳过 tag 比较。
+ckpt_tag="$(awk '
+  /^  checkpointImage:$/ { inside = 1; next }
+  inside && $1 == "tag:" { print $2; exit }
+  inside && /^  [^ ]/ { exit }
+' chart/traincache/values.yaml)"
+ckpt_ref="$(awk '/^[[:space:]]*checkpointImage:/ {print $2; exit}' \
+  controller/deploy/webhook/checkpoint-image.yaml)"
+if [[ "$ckpt_ref" != *@sha256:* ]]; then
+  [[ "$ckpt_tag" == "${ckpt_ref##*:}" ]] \
+    || fail "chart webhook.checkpointImage.tag=${ckpt_tag:-空}，清单是 ${ckpt_ref##*:}"
+fi
+
+app_version="$(awk '/^appVersion:/ {gsub(/"/, "", $2); print $2; exit}' chart/traincache/Chart.yaml)"
+[[ "$app_version" == "$VERSION_TAG" ]] \
+  || fail "chart AppVersion=${app_version:-空}，最新 tag 是 ${VERSION_TAG}"
+
 # 3. 组件清单从五变六：五个部署组件加 checkpointd（由准入注入的 sidecar）。
 #    Dockerfile 不设镜像站参数,VERSION 默认当前版本 tag 并由 ldflags 注入。
 dockerfiles=(

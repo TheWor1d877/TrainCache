@@ -1,0 +1,6 @@
+apiVersion: v2
+name: traincache
+description: TrainCache control plane, node Agent and S3 merge gateway.
+type: application
+version: 0.1.0
+appVersion: "v0.9.3"

@@ -1,0 +1,125 @@
+# TrainCache chart values。
+#
+# 默认值与 controller/deploy 的 kustomize 清单逐项一致，helm template 的
+# 输出与 kubectl kustomize controller/deploy 的渲染结果对齐。改这里的默认
+# 值前先改清单，两处由 hack/verify-chart.sh 与
+# hack/verify-release-metadata.sh 交叉校验。
+#
+# 镜像默认 tag 取仓库清单的版本标签；发布安装用 digest 覆盖 tag。
+
+images:
+  controllerManager:
+    repository: ghcr.io/thewor1d877/traincache/controller-manager
+    tag: v0.9.3
+    digest: ""
+  webhook:
+    repository: ghcr.io/thewor1d877/traincache/webhook
+    tag: v0.9.3
+    digest: ""
+  scheduler:
+    repository: ghcr.io/thewor1d877/traincache/kube-scheduler
+    tag: v0.9.3
+    digest: ""
+  agent:
+    repository: ghcr.io/thewor1d877/traincache/traincache-agentd
+    tag: v0.9.3
+    digest: ""
+  gateway:
+    repository: ghcr.io/thewor1d877/traincache/traincache-gateway
+    tag: v0.9.3
+    digest: ""
+
+manager:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+webhook:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # 服务端证书 Secret。安装前由安装方创建，键为 tls.crt 与 tls.key。
+  existingSecret: traincache-webhook-tls
+  # 签发 CA 的 base64 内容，写进 MutatingWebhookConfiguration 的两条规则。
+  # 为空时准入只做 no-op；带 traincache.io/checkpoint 标签的 Pod 会被拒绝
+  # （该规则 failurePolicy=Fail），所以安装时必须填。
+  caBundle: ""
+  # 注入训练 Pod 的 checkpointd sidecar 镜像。
+  checkpointImage:
+    repository: ghcr.io/thewor1d877/traincache/traincache-checkpointd
+    tag: v0.9.3
+    digest: ""
+
+agent:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 4Gi
+  cacheHostPath: /var/cache/traincache
+  runHostPath: /run/traincache
+
+scheduler:
+  # scheduler 与 kube-system 的 extension-apiserver-authentication 配套，
+  # 不跟随 Release namespace。
+  namespace: kube-system
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+gateway:
+  # 副本数固定 1：在途 GET 合并只在进程内成立，模板里写死、不提供 values。
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1.5Gi
+
+objstore:
+  # 凭据 Secret，键为 accessKey 与 secretKey，与 Release 同 namespace。
+  existingSecret: traincache-objstore
+
+# traincache namespace 的 traincache-config，22 项。
+config:
+  cacheCapacityBytes: "0"
+  prefetchLookahead: "16"
+  evictPolicy: "heat"
+  evictInterval: "30s"
+  datasetMetricsWhitelist: ""
+  startupWindowBytes: "536870912"
+  maxFillFraction: "0.125"
+  objstoreEndpoint: minio.minio.svc.cluster.local:9000
+  objstoreBucket: traincache
+  objstoreSecure: "false"
+  objstoreCompression: "false"
+  fetchRangeParallel: "true"
+  gatewayEndpoint: ""
+  gatewaySecure: "false"
+  gatewayBucketConcurrency: "64"
+  gatewayBlockBufferBytes: "10485760"
+  gatewayCache: "true"
+  gatewayCacheDatasetBytes: "34359738368"
+  gatewayCacheTotalBytes: "68719476736"
+  controllerPollInterval: "1s"
+  controllerScoreTTL: "10m"
+  gateNetworkBandwidthBytes: "0"
+
+# kube-system 的 traincache-scheduler-config，2 项。schedulerScoreTTL 必须
+# 与 config.controllerScoreTTL 同值。
+schedulerConfig:
+  schedulerScoreTTL: "10m"
+  schedulerLogLevel: "debug"

@@ -44,6 +44,15 @@ docker build -f agent/Dockerfile \
 - 发布清单由 kustomize `images:` 把五个 Deployment 的镜像改成 `@sha256:<digest>`，checkpointd 的 digest 由 overlay 的 patch 写进 `traincache-checkpoint-image` ConfigMap，不手改组件 YAML。
 - 候选镜像另打 `sha-<7 位短 sha>` 标签，供人工复现候选；清单与发布物只用 `@sha256` 引用，不出现 `sha-<短 sha>`。
 - kind 环境用 `./hack/kind-load.sh <cluster> <image>` 导入同名镜像（单平台导出，不用 `kind load docker-image`），清单的 `imagePullPolicy` 是 `IfNotPresent`。
+- 同一批对象另有 Helm chart `chart/traincache`：values 默认值与清单逐项一致，`make verify-chart` 比较两边渲染结果，默认 values 下除 Namespace 外必须完全相等。chart 不注入 Helm 自有标签，否则两边无法对齐。
+
+### Helm chart
+
+- chart 用独立版本号（`Chart.yaml` 的 `version`），`appVersion` 指向当前发布版本，与最新 git tag 逐字一致（`hack/verify-release-metadata.sh` 核对）。
+- 只改模板与 values 不改镜像内容，因此不重发镜像、不占用新版本号，也不写 `CHANGELOG.md`。
+- values 的镜像默认 tag 与 kustomization 的 `newTag` 同源，默认 digest 必须为空；发布安装用 `--set images.<组件>.digest=sha256:...` 覆盖。
+- CRD 放在 `crds/`：`helm install` 时创建，`helm upgrade` 不更新，`helm uninstall` 不删除。升级 CRD 用 `kubectl apply -f chart/traincache/crds/`。
+- chart 不带 Namespace 对象，安装用 `--create-namespace`；scheduler 固定在 `kube-system`，不跟随 Release namespace；网关副本固定 1，不提供 values。
 
 ## 发布
 
@@ -61,6 +70,7 @@ docker build -f agent/Dockerfile \
 - 清单用 digest（`@sha256:`）引用。tag 配 `IfNotPresent` 时节点沿用同名旧镜像，换 digest 才会重拉。
 - 发布包不含 `controller/deploy/observability/`，也不含 minio、busybox、kindest/node 和对象存储。
 - `install.yaml` 与两个 CLI 由候选构建产出，tag 晋升后连同单 tar、`SHA256SUMS` 挂到 Release，不入库。
+- 候选 artifact 不含 Helm chart：chart 随仓库分发，模板与 values 改动不产生新镜像，暂不进 Release 资产。
 
 ## CI
 
@@ -88,7 +98,7 @@ main 上打 tag `vX.Y.Z` 并推送会触发 `release.yml`。它找同一 sha 的
 
 | 触发 | 内容 | 是否阻塞 |
 |---|---|---|
-| push `dev` / 任意 PR | 各模块 build + vet + test `-race`，gofmt，禁用符号检查，`kubectl kustomize` 可渲染 | 必须过 |
+| push `dev` / 任意 PR | 各模块 build + vet + test `-race`，gofmt，禁用符号检查，`kubectl kustomize` 可渲染，`make verify-chart` | 必须过 |
 | PR `dev` 到 `main` | 上一行的内容加版本一致性检查（清单不写手填版本、Dockerfile 不写死 tag、CHANGELOG 与 tag 一致）加文档引用完整性 | 必须过 |
 | PR `dev` 到 `main` | kind e2e | 必须过，合并门禁 |
 | 手动 `release-candidate` | 全部镜像推 `:sha-<7 位短 sha>`，渲染 `install.yaml`，编译 CLI，上传候选 artifact | 发版前置 |
@@ -108,6 +118,7 @@ main 上打 tag `vX.Y.Z` 并推送会触发 `release.yml`。它找同一 sha 的
 
 - `make verify-<module>` 依次跑 build、vet、`go test -race`、gofmt；controller 的 job 另查禁用符号（`GetPreheatProgress`、`ScorePolicy.Window`、`consumeOrderRef`）。
 - `make verify-metadata` 跑 `hack/verify-release-metadata.sh`（版本、镜像名、CHANGELOG 与 tag）、`hack/verify-doc-refs.sh`（文档相对链接）与 `hack/verify-config-placement.sh`（配置落位：清单零字面量 env、ConfigMap 与引用对齐）。
+- `make verify-chart` 跑 `hack/verify-chart.sh`：helm lint、默认 values 下与 `kubectl kustomize controller/deploy` 逐字段比较、digest 覆盖与 caBundle 注入断言；`verify.yml` 的 render job 装 helm 后执行。
 - `release-candidate.yml` 推六个 `:sha-<7 位短 sha>` 镜像，产出 `install.yaml`、两个 CLI、`candidate.json` 与 `SHA256SUMS`，作为 artifact `release-candidate-<短 sha>` 保留 14 天。`candidate.json` 记 `sha`、`short_sha`、`version`、`images` 下每个组件的 digest（值带 `sha256:` 前缀）与 `created_at`。
 - `release.yml` 只在 tag 上跑。它按 commit 找成功的候选 run，校验候选 version 与 tag 逐字相等、候选 sha 与 tag 指向的提交相同，再断言同一 sha 有成功的 release-smoke 运行；缺任一条就停在这一步，不晋升、不建 Release。
 - 判定通过后用 `docker buildx imagetools create` 把候选 digest 晋升成 `:vX.Y.Z`，再回查 `:vX.Y.Z` 指向的清单中含候选 digest。晋升会把单平台的 image manifest 包进一层 manifest list，tag 摘要与候选摘要不相等，两者指向同一个镜像内容。
@@ -120,7 +131,7 @@ main 上打 tag `vX.Y.Z` 并推送会触发 `release.yml`。它找同一 sha 的
 
 ## 用户自备
 
-发布包只有控制面、Agent 与 CRD。webhook 的 TLS Secret `traincache-webhook-tls` 与 caBundle 不在清单里，安装方自备；`release-smoke` 用自签证书演示这一步。
+发布包只有控制面、Agent 与 CRD。webhook 的 TLS Secret `traincache-webhook-tls` 与 caBundle 不在清单里，安装方自备；`release-smoke` 用自签证书演示这一步。用 Helm chart 时这两个值分别由 `webhook.existingSecret` 与 `webhook.caBundle` 提供，安装时一次写入两条准入规则。
 
 ### 对象存储
 
