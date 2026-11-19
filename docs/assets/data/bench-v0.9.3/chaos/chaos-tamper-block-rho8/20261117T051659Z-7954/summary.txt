@@ -1,0 +1,37 @@
+== TrainCache 韧性套件 结果 ==
+run-id: 20261117T051659Z-7954
+context: kind-traincache
+开始: 2026-11-17T05:16:59Z
+
+tamper_block PASS
+  含义: 原地改坏 agent 本地缓存里的一个块文件,测数据面校验
+  证据: /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-tamper-block-rho8/20261117T051659Z-7954/tamper_block
+  观测(tampered_block.txt):
+    block=/var/cache/traincache/blocks/01/01021b43b03f4737fa6bab4c3ae89bfe.blk
+    offset=128
+    bytes=1
+    sha256_before=6e5a070b5dbd832f9d9d59df8a6785c8d3fd29ae47c666656ee18a7413bf8b3c
+    sha256_after=3a6f913a73eed3ae5605f422fa1eff90482bd67952f3a167d7e16663cbec9dfe
+    backup_local=/home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-tamper-block-rho8/20261117T051659Z-7954/tamper_block/tamper_backup/01021b43b03f4737fa6bab4c3ae89bfe.blk.orig
+    backup_in_cache=/var/cache/traincache/blocks/01/01021b43b03f4737fa6bab4c3ae89bfe.blk.chaos-orig
+    quarantined_before=0
+    quarantined_peak=0
+    repair_queue_depth_before=0
+    repair_queue_depth_peak=0
+    repair_requests_before=1
+    repair_requests_after=1
+    rescan_phase=DONE
+    observe_s=60
+  断言:
+    PASS 缓存里已有 .chaos-orig(最初的原字节),沿用它不覆盖;本轮证据另存 /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-tamper-block-rho8/20261117T051659Z-7954/tamper_block/tamper_backup/01021b43b03f4737fa6bab4c3ae89bfe.blk.orig
+    PASS 已在 /var/cache/traincache/blocks/01/01021b43b03f4737fa6bab4c3ae89bfe.blk 的 offset=128 处原地改写 1 字节
+    PASS 块内容确实变了(改前 sha256 != 改后 sha256)
+    PASS 替代 Pod 的 rescan 走完全量校验:DONE
+    PASS 替代 Pod 上 repair 回源计数为 1(新进程从 0 起),坏块被检出并重拉
+    PASS repair 回源计数为 1(替代 Pod 新进程从 0 起),坏块走了修复队列
+    PASS 修复队列已回落(峰值 0,终值 0)
+
+== 汇总 ==
+共 1 个故障:PASS 1 / FAIL 0
+结束: 2026-11-17T05:19:17Z
+证据根目录: /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-tamper-block-rho8/20261117T051659Z-7954

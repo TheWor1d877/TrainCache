@@ -1,0 +1,38 @@
+== TrainCache 韧性套件 结果 ==
+run-id: 20261117T050600Z-5e70
+context: kind-traincache
+开始: 2026-11-17T05:06:00Z
+
+kill_agent PASS
+  含义: SIGKILL agentd Pod,等 DaemonSet 拉起替代 Pod,记录重建耗时
+  证据: /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-kill-agent-rho1/20261117T050600Z-5e70/kill_agent
+  观测(metrics.txt):
+    agent_up=1
+    replacement_ready_s=12
+    rescan_phase=DONE
+    node=traincache-worker2
+    fetch_bytes_total=0
+    fetch_bytes_delta=0
+    chunk_bytes=8388608
+    quarantined_blocks=0
+  观测(timings.txt):
+    old_pod=traincache-agentd-bqcz5
+    old_uid=c735dce5-601e-4b1f-8c52-394a7bc24952
+    old_node=traincache-worker2
+    replacement_pod=traincache-agentd-gdxr8
+    replacement_uid=0ae4e211-9347-405d-96f9-cfa33ba34d1e
+    replacement_ready_s=12
+    agent_up=1
+    replacement_ready_s=12
+  断言:
+    PASS 替代 Pod 已 Ready: traincache-agentd-gdxr8(耗时 12s)
+    PASS 替代 Pod 的 UID 与旧 Pod 不同(旧 c735dce5-601e-4b1f-8c52-394a7bc24952 → 新 0ae4e211-9347-405d-96f9-cfa33ba34d1e)
+    PASS 替代 Pod 上 traincache_agent_up=1
+    PASS rescan 阶段已离开 SAMPLING:DONE
+    PASS 替代 Pod 上 traincache_quarantined_blocks=0(已落盘的块没被判为损坏)
+    PASS 观察窗口内回源字节增量 0B 不超过一个块(8388608B)
+
+== 汇总 ==
+共 1 个故障:PASS 1 / FAIL 0
+结束: 2026-11-17T05:06:34Z
+证据根目录: /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-kill-agent-rho1/20261117T050600Z-5e70

@@ -16,10 +16,10 @@ sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(HERE))
 
 import config  # noqa: E402
-import plot_families as pf  # noqa: E402
+import plot_data as pf  # noqa: E402
 
 OUT = config.RESULTS_DIR / "report" / "index.html"
-FIG_ROOT = config.RESULTS_DIR / "figures"
+FIG_ROOT = config.RESULTS_DIR / "figures-echarts"
 BASELINES = ["direct", "juicefs-cold", "juicefs-warm", "fluid-cold", "fluid-warm"]
 
 # 网关装置自检（docs/4.3 按族的读数「gateway」）：G2 对 G0 的源站
@@ -453,7 +453,7 @@ def _figure(family):
     for name in FAMILY_FIGURES.get(family, []):
         path = FIG_ROOT / f"{name}.zh.png"
         if path.is_file():
-            parts.append(f'<figure><img src="../figures/{name}.zh.png" '
+            parts.append(f'<figure><img src="../figures-echarts/{name}.zh.png" '
                          f'alt="{html.escape(name)}">'
                          f"<figcaption>{html.escape(name)}</figcaption></figure>")
     return "".join(parts) or "<p>没有图。</p>"

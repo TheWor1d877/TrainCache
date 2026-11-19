@@ -1,0 +1,257 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 760" width="1800" height="760" role="img" aria-label="TrainCache architecture">
+<defs>
+      <filter id="sh" x="-20%" y="-20%" width="140%" height="160%">
+        <feDropShadow dx="0" dy="2" stdDeviation="2.2" flood-color="#0F172A" flood-opacity="0.07"/>
+      </filter>
+<marker id="m4F46E5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#4F46E5"/></marker>
+<marker id="m2563EB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2563EB"/></marker>
+<marker id="m0D9488" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0D9488"/></marker>
+<marker id="m64748B" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#64748B"/></marker>
+<marker id="m334155" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#334155"/></marker>
+<marker id="m7C3AED" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7C3AED"/></marker>
+<marker id="mEA580C" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#EA580C"/></marker>
+<marker id="m059669" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#059669"/></marker>
+<style>text{font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Inter',sans-serif;} .tg{letter-spacing:.3px} .el{paint-order:stroke;stroke:#FFFFFF;stroke-width:3.4px;stroke-linejoin:round} .cs{letter-spacing:.2px}</style>
+</defs>
+<rect width="1800" height="760" fill="#FFFFFF"/>
+<text x="36" y="44" font-size="24" font-weight="700" fill="#0F172A" text-anchor="start" class="">TrainCache architecture</text>
+<text x="36" y="70" font-size="11.5" font-weight="500" fill="#64748B" text-anchor="start" class="">The control plane decides gate release and placement inside the startup window. Reads land on node-local disk, the gateway merges origin fetches, and observability sits off the data path.</text>
+<rect x="36" y="100" width="580" height="470" rx="13" fill="#EEF0FF" stroke="#C7D2FE" stroke-width="1.3"/>
+<rect x="52" y="116" width="4" height="15" rx="2" fill="#4F46E5"/>
+<text x="66" y="128" font-size="14" font-weight="700" fill="#0F172A" text-anchor="start" class="">1  Control loop</text>
+<text x="66" y="145" font-size="10" font-weight="500" fill="#64748B" text-anchor="start" class="">declare → warm up → gate → score</text>
+<rect x="634" y="100" width="600" height="470" rx="13" fill="#F6F2FE" stroke="#DDD0F5" stroke-width="1.3"/>
+<rect x="650" y="116" width="4" height="15" rx="2" fill="#7C3AED"/>
+<text x="664" y="128" font-size="14" font-weight="700" fill="#0F172A" text-anchor="start" class="">2  Node plane ×N</text>
+<text x="664" y="145" font-size="10" font-weight="500" fill="#64748B" text-anchor="start" class="">one per GPU node</text>
+<rect x="1252" y="100" width="512" height="230" rx="13" fill="#FFF5EC" stroke="#F6D2B3" stroke-width="1.3"/>
+<rect x="1268" y="116" width="4" height="15" rx="2" fill="#EA580C"/>
+<text x="1282" y="128" font-size="14" font-weight="700" fill="#0F172A" text-anchor="start" class="">3  Data plane</text>
+<text x="1282" y="145" font-size="10" font-weight="500" fill="#64748B" text-anchor="start" class="">gateway cache and in-flight merge</text>
+<rect x="1252" y="350" width="512" height="220" rx="13" fill="#EFFBF8" stroke="#A7DDD4" stroke-width="1.3"/>
+<rect x="1268" y="366" width="4" height="15" rx="2" fill="#0D9488"/>
+<text x="1282" y="378" font-size="14" font-weight="700" fill="#0F172A" text-anchor="start" class="">4  Observability</text>
+<text x="1282" y="395" font-size="10" font-weight="500" fill="#64748B" text-anchor="start" class="">off the data path</text>
+<rect x="36" y="600" width="1728" height="110" rx="13" fill="#F0F5FE" stroke="#BFDBFE" stroke-width="1.3"/>
+<rect x="52" y="616" width="4" height="15" rx="2" fill="#2563EB"/>
+<text x="66" y="628" font-size="14" font-weight="700" fill="#0F172A" text-anchor="start" class="">5  Prefetch stages</text>
+<path d="M184 236 L184 248" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M448 236 L448 248" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M184 324 L184 336" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M448 324 L324 352" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M308 374 L324 374" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M184 412 L184 424" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M448 412 L448 424" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M308 462 L324 462" fill="none" stroke="#4F46E5" stroke-width="1.6" marker-end="url(#m4F46E5)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M926 202 L944 202" fill="none" stroke="#059669" stroke-width="1.6" marker-end="url(#m059669)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M926 270 L944 230" fill="none" stroke="#7C3AED" stroke-width="1.6" marker-end="url(#m7C3AED)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M792 244 L792 256" fill="none" stroke="#64748B" stroke-width="1.6" marker-end="url(#m64748B)" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<path d="M944 298 L926 298" fill="none" stroke="#7C3AED" stroke-width="1.6" marker-end="url(#m7C3AED)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M792 344 L792 330" fill="none" stroke="#64748B" stroke-width="1.6" marker-end="url(#m64748B)" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<path d="M1234 207 L1276 207" fill="none" stroke="#EA580C" stroke-width="1.6" marker-end="url(#mEA580C)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1276 223 L1234 223" fill="none" stroke="#059669" stroke-width="1.6" marker-end="url(#m059669)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1234 140 L1234 88 L1640 88 L1640 160" fill="none" stroke="#64748B" stroke-width="1.6" marker-end="url(#m64748B)" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4 4"/>
+<path d="M1234 435 L1276 435" fill="none" stroke="#0D9488" stroke-width="1.6" marker-end="url(#m0D9488)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1496 207 L1520 207" fill="none" stroke="#EA580C" stroke-width="1.6" marker-end="url(#mEA580C)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1520 223 L1496 223" fill="none" stroke="#EA580C" stroke-width="1.6" marker-end="url(#mEA580C)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1346 470 L1346 490" fill="none" stroke="#0D9488" stroke-width="1.6" marker-end="url(#m0D9488)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1510 470 L1510 490" fill="none" stroke="#0D9488" stroke-width="1.6" marker-end="url(#m0D9488)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1604 435 L1580 435" fill="none" stroke="#0D9488" stroke-width="1.6" marker-end="url(#m0D9488)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M750 653 L760 653" fill="none" stroke="#2563EB" stroke-width="1.6" marker-end="url(#m2563EB)" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M1190 653 L1200 653" fill="none" stroke="#2563EB" stroke-width="1.6" marker-end="url(#m2563EB)" stroke-linejoin="round" stroke-linecap="round"/>
+<g filter="url(#sh)"><rect x="60" y="160" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="74" y="174" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(81 181)"><rect x="6" y="4" width="12" height="16" rx="2" fill="none" stroke="#4F46E5" stroke-width="1.7"/><path d="M9 8h6M9 12h6M9 16h4" stroke="#4F46E5" stroke-width="1.4" stroke-linecap="round"/></g>
+<text x="122" y="189" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">DataSet (CRD)</text>
+<text x="122" y="207" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">data contract</text>
+<text x="122" y="220" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">block space fixed once</text>
+<g filter="url(#sh)"><rect x="324" y="160" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="338" y="174" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(345 181)"><rect x="6" y="4" width="12" height="16" rx="2" fill="none" stroke="#4F46E5" stroke-width="1.7"/><path d="M9 8h6M9 12h6M9 16h4" stroke="#4F46E5" stroke-width="1.4" stroke-linecap="round"/></g>
+<text x="386" y="189" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">WarmupTask (CRD)</text>
+<text x="386" y="207" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">runtime object of one warmup</text>
+<g filter="url(#sh)"><rect x="60" y="248" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="74" y="262" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(81 269)"><path d="M5 7h14M5 12h14M5 17h14" stroke="#4F46E5" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="7" r="2" fill="#fff" stroke="#4F46E5" stroke-width="1.6"/><circle cx="15" cy="12" r="2" fill="#fff" stroke="#4F46E5" stroke-width="1.6"/><circle cx="11" cy="17" r="2" fill="#fff" stroke="#4F46E5" stroke-width="1.6"/></g>
+<text x="122" y="277" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">DataSet controller</text>
+<text x="122" y="295" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">reconcile: validates spec</text>
+<text x="122" y="308" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">no data fetch</text>
+<g filter="url(#sh)"><rect x="324" y="248" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="338" y="262" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(345 269)"><path d="M5 7h14M5 12h14M5 17h14" stroke="#4F46E5" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="7" r="2" fill="#fff" stroke="#4F46E5" stroke-width="1.6"/><circle cx="15" cy="12" r="2" fill="#fff" stroke="#4F46E5" stroke-width="1.6"/><circle cx="11" cy="17" r="2" fill="#fff" stroke="#4F46E5" stroke-width="1.6"/></g>
+<text x="386" y="277" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">WarmupTask controller</text>
+<text x="386" y="295" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">reconcile: sharded warmup</text>
+<text x="386" y="308" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">readiness gates release</text>
+<g filter="url(#sh)"><rect x="60" y="336" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="74" y="350" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(81 357)"><path d="M12 4l8 4-8 4-8-4 8-4z" fill="none" stroke="#4F46E5" stroke-width="1.5"/><path d="M4 12l8 4 8-4M4 16l8 4 8-4" fill="none" stroke="#4F46E5" stroke-width="1.5" stroke-linejoin="round"/></g>
+<text x="122" y="365" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">K8s API Server</text>
+<text x="122" y="383" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">state and annotations</text>
+<text x="122" y="396" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">components watch / patch</text>
+<g filter="url(#sh)"><rect x="324" y="336" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="338" y="350" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(345 357)"><path d="M4 17a8 8 0 0 1 16 0" fill="none" stroke="#4F46E5" stroke-width="1.6" stroke-linecap="round"/><path d="M12 17l4-5" stroke="#4F46E5" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="17" r="1.6" fill="#4F46E5"/></g>
+<text x="386" y="365" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Node score snapshot</text>
+<text x="386" y="383" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">node-scores annotation</text>
+<g filter="url(#sh)"><rect x="60" y="424" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="74" y="438" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(81 445)"><path d="M12 4l7 3v5c0 4-3 7-7 8-4-1-7-4-7-8V7l7-3z" fill="none" stroke="#4F46E5" stroke-width="1.6"/><path d="M9 12l2 2 4-4" fill="none" stroke="#4F46E5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="122" y="453" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Admission webhook</text>
+<text x="122" y="471" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">admission: injects</text>
+<text x="122" y="484" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">SchedulingGate</text>
+<g filter="url(#sh)"><rect x="324" y="424" width="248" height="76" rx="10" fill="#FFFFFF" stroke="#4F46E5" stroke-width="1.2"/></g>
+<rect x="338" y="438" width="38" height="38" rx="10" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(345 445)"><circle cx="12" cy="12" r="8" fill="none" stroke="#4F46E5" stroke-width="1.5"/><circle cx="12" cy="12" r="3.2" fill="#4F46E5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#4F46E5" stroke-width="1.5" stroke-linecap="round"/></g>
+<text x="386" y="453" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Scheduler plugin</text>
+<text x="386" y="471" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">scheduler: reads scores</text>
+<text x="386" y="484" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">picks by readiness</text>
+<text x="60" y="514" font-size="10.8" font-weight="700" fill="#475569" text-anchor="start" class="">release conditions</text>
+<rect x="76" y="522" width="150" height="24" rx="7" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".25" stroke-width="1"/>
+<text x="151.0" y="538" font-size="9.5" font-weight="700" fill="#4F46E5" text-anchor="middle" class="cs">readiness ≥ M</text>
+<rect x="240" y="522" width="150" height="24" rx="7" fill="#4F46E5" fill-opacity=".08" stroke="#4F46E5" stroke-opacity=".25" stroke-width="1"/>
+<text x="315.0" y="538" font-size="9.5" font-weight="700" fill="#4F46E5" text-anchor="middle" class="cs">t_max: degrade</text>
+<g filter="url(#sh)"><rect x="658" y="160" width="268" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="672" y="174" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(679 181)"><rect x="4" y="5" width="16" height="14" rx="3" fill="none" stroke="#7C3AED" stroke-width="1.6"/><circle cx="8" cy="9" r="1.1" fill="#7C3AED"/><circle cx="16" cy="9" r="1.1" fill="#7C3AED"/><circle cx="8" cy="15" r="1.1" fill="#7C3AED"/><circle cx="16" cy="15" r="1.1" fill="#7C3AED"/></g>
+<text x="720" y="189" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Training container</text>
+<text x="720" y="207" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">DataLoader + Hook</text>
+<text x="720" y="220" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">checkpointd injected at admission</text>
+<g filter="url(#sh)"><rect x="944" y="160" width="268" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="958" y="174" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(965 181)"><ellipse cx="12" cy="7" rx="7" ry="3" fill="none" stroke="#7C3AED" stroke-width="1.6"/><path d="M5 7v10c0 1.7 3.1 3 7 3s7-1.3 7-3V7" fill="none" stroke="#7C3AED" stroke-width="1.6"/><path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" fill="none" stroke="#7C3AED" stroke-width="1.3"/></g>
+<text x="1006" y="189" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Node-local cache</text>
+<text x="1006" y="207" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">CAS: content-addressed blocks, hostPath</text>
+<text x="1006" y="220" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">read-only; reads hit page cache</text>
+<g filter="url(#sh)"><rect x="658" y="256" width="268" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="672" y="270" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(679 277)"><rect x="6" y="6" width="12" height="12" rx="2.4" fill="none" stroke="#7C3AED" stroke-width="1.6"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" stroke="#7C3AED" stroke-width="1.4" stroke-linecap="round"/><rect x="9.5" y="9.5" width="5" height="5" rx="1" fill="#7C3AED"/></g>
+<text x="720" y="285" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">agentd · DaemonSet</text>
+<text x="720" y="303" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">warmup · prefetch · fetch · evict</text>
+<text x="720" y="316" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">P0–P3 queues + read admission</text>
+<g filter="url(#sh)"><rect x="944" y="256" width="268" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="958" y="270" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(965 277)"><path d="M4 8l8-4 8 4v9l-8 4-8-4V8z" fill="none" stroke="#7C3AED" stroke-width="1.6" stroke-linejoin="round"/><path d="M4 8l8 4 8-4M12 12v9" fill="none" stroke="#7C3AED" stroke-width="1.4"/></g>
+<text x="1006" y="285" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Consumption-order sidecar</text>
+<text x="1006" y="303" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">order ring from the Job</text>
+<text x="1006" y="316" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">sidecar</text>
+<g filter="url(#sh)"><rect x="658" y="352" width="268" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="672" y="366" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(679 373)"><path d="M2.5 12s3.5-5.5 9.5-5.5S21.5 12 21.5 12s-3.5 5.5-9.5 5.5S2.5 12 2.5 12z" fill="none" stroke="#7C3AED" stroke-width="1.5"/><circle cx="12" cy="12" r="3" fill="none" stroke="#7C3AED" stroke-width="1.5"/></g>
+<text x="720" y="381" font-size="12.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">inotify file open (fallback)</text>
+<text x="720" y="399" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">side-channel: open events</text>
+<text x="720" y="412" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">inotify fallback</text>
+<g filter="url(#sh)"><rect x="944" y="352" width="268" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="958" y="366" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(965 373)"><path d="M3 13h4l2.5-6 3.5 12 3-6h5" fill="none" stroke="#7C3AED" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="1006" y="381" font-size="12.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">traintrace · eBPF (read-only)</text>
+<text x="1006" y="399" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">block I/O, major fault, readahead</text>
+<text x="1006" y="412" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">libbpf + CO-RE, single binary</text>
+<g filter="url(#sh)"><rect x="658" y="448" width="554" height="84" rx="10" fill="#FFFFFF" stroke="#7C3AED" stroke-width="1.2"/></g>
+<rect x="672" y="462" width="38" height="38" rx="10" fill="#7C3AED" fill-opacity=".08" stroke="#7C3AED" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(679 469)"><rect x="4" y="4" width="16" height="16" rx="2.5" fill="none" stroke="#7C3AED" stroke-width="1.6"/><path d="M8 4v6h7V4M8 20v-6h8v6" fill="none" stroke="#7C3AED" stroke-width="1.4" stroke-linejoin="round"/></g>
+<text x="720" y="477" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">checkpointd (Pod level)</text>
+<text x="720" y="495" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">async upload / restore</text>
+<text x="720" y="508" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">direct to backend</text>
+<text x="944" y="493" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">injected per Pod, one per rank</text>
+<text x="944" y="510" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">serial per step, queue limit 4</text>
+<g filter="url(#sh)"><rect x="1276" y="160" width="220" height="90" rx="10" fill="#FFFFFF" stroke="#EA580C" stroke-width="1.2"/></g>
+<rect x="1290" y="174" width="38" height="38" rx="10" fill="#EA580C" fill-opacity=".08" stroke="#EA580C" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1297 181)"><path d="M4 6h5l4 6M4 18h5l4-6M13 12h7" fill="none" stroke="#EA580C" stroke-width="1.6" stroke-linecap="round"/><path d="M17 9l3 3-3 3" fill="none" stroke="#EA580C" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="1338" y="189" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Merge gateway</text>
+<text x="1338" y="207" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">Deployment, Service :9413</text>
+<text x="1338" y="220" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">in-flight merge + disk cache</text>
+<g filter="url(#sh)"><rect x="1520" y="160" width="220" height="90" rx="10" fill="#FFFFFF" stroke="#EA580C" stroke-width="1.2"/></g>
+<rect x="1534" y="174" width="38" height="38" rx="10" fill="#EA580C" fill-opacity=".08" stroke="#EA580C" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1541 181)"><path d="M7 18h10a4 4 0 0 0 .6-7.9A6 6 0 0 0 6 9.5 4.2 4.2 0 0 0 7 18z" fill="none" stroke="#EA580C" stroke-width="1.6" stroke-linejoin="round"/></g>
+<text x="1582" y="189" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Object storage</text>
+<text x="1582" y="207" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">MinIO or cloud S3</text>
+<text x="1582" y="220" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">S3 API origin</text>
+<g filter="url(#sh)"><rect x="1276" y="258" width="464" height="64" rx="10" fill="#FFFFFF" stroke="#EA580C" stroke-width="1.2"/></g>
+<rect x="1290" y="272" width="38" height="38" rx="10" fill="#EA580C" fill-opacity=".08" stroke="#EA580C" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1297 279)"><path d="M12 4l7 3v5c0 4-3 7-7 8-4-1-7-4-7-8V7l7-3z" fill="none" stroke="#EA580C" stroke-width="1.6"/><path d="M9 12l2 2 4-4" fill="none" stroke="#EA580C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="1338" y="287" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Credentials and links</text>
+<text x="1338" y="305" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">gateway re-signs SigV4</text>
+<text x="1338" y="318" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">TLS terminates at origin</text>
+<text x="1526" y="287" font-size="9.4" font-weight="500" fill="#64748B" text-anchor="start" class="">Secret: traincache-objstore</text>
+<text x="1526" y="304" font-size="9.4" font-weight="500" fill="#64748B" text-anchor="start" class="">agent-gateway: cluster network</text>
+<g filter="url(#sh)"><rect x="1276" y="400" width="140" height="70" rx="10" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2"/></g>
+<rect x="1290" y="414" width="38" height="38" rx="10" fill="#0D9488" fill-opacity=".08" stroke="#0D9488" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1297 421)"><path d="M4 17a8 8 0 0 1 16 0" fill="none" stroke="#0D9488" stroke-width="1.6" stroke-linecap="round"/><path d="M12 17l4-5" stroke="#0D9488" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="17" r="1.6" fill="#0D9488"/></g>
+<text x="1338" y="429" font-size="12.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Prometheus</text>
+<text x="1338" y="447" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">metrics</text>
+<g filter="url(#sh)"><rect x="1440" y="400" width="140" height="70" rx="10" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2"/></g>
+<rect x="1454" y="414" width="38" height="38" rx="10" fill="#0D9488" fill-opacity=".08" stroke="#0D9488" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1461 421)"><path d="M5 6h14M5 10h14M5 14h9M5 18h11" stroke="#0D9488" stroke-width="1.7" stroke-linecap="round"/></g>
+<text x="1502" y="429" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Loki</text>
+<text x="1502" y="447" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">logs</text>
+<g filter="url(#sh)"><rect x="1604" y="400" width="140" height="70" rx="10" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2"/></g>
+<rect x="1618" y="414" width="38" height="38" rx="10" fill="#0D9488" fill-opacity=".08" stroke="#0D9488" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1625 421)"><path d="M5 6h14M5 10h14M5 14h9M5 18h11" stroke="#0D9488" stroke-width="1.7" stroke-linecap="round"/></g>
+<text x="1666" y="429" font-size="12.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Fluent Bit</text>
+<text x="1666" y="447" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">node logs</text>
+<g filter="url(#sh)"><rect x="1276" y="490" width="468" height="70" rx="10" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2"/></g>
+<rect x="1290" y="504" width="38" height="38" rx="10" fill="#0D9488" fill-opacity=".08" stroke="#0D9488" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1297 511)"><path d="M4 20V10M9 20V6M14 20v-7M19 20V4" stroke="#0D9488" stroke-width="2" stroke-linecap="round"/></g>
+<text x="1338" y="519" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Grafana</text>
+<text x="1338" y="537" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">dashboards and alerts</text>
+<text x="1338" y="550" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">queries Prometheus and Loki</text>
+<text x="1600" y="519" font-size="9.4" font-weight="500" fill="#64748B" text-anchor="start" class="">metrics and logs board</text>
+<text x="1600" y="536" font-size="9.4" font-weight="500" fill="#64748B" text-anchor="start" class="">alerts grouped by job</text>
+<g filter="url(#sh)"><rect x="320" y="618" width="430" height="70" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="1.2"/></g>
+<rect x="334" y="632" width="38" height="38" rx="10" fill="#2563EB" fill-opacity=".08" stroke="#2563EB" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(341 639)"><path d="M3 13h4l2.5-6 3.5 12 3-6h5" fill="none" stroke="#2563EB" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="382" y="647" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Stage 1 · startup warmup</text>
+<text x="382" y="665" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">WarmupTask controller shards blocks;</text>
+<text x="382" y="678" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">readiness decides release</text>
+<g filter="url(#sh)"><rect x="760" y="618" width="430" height="70" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="1.2"/></g>
+<rect x="774" y="632" width="38" height="38" rx="10" fill="#2563EB" fill-opacity=".08" stroke="#2563EB" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(781 639)"><path d="M3 13h4l2.5-6 3.5 12 3-6h5" fill="none" stroke="#2563EB" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="822" y="647" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Stage 2 · sustained prefetch</text>
+<text x="822" y="665" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">agentd follows the order ring</text>
+<text x="822" y="678" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">lookahead 16, P0 demand first</text>
+<g filter="url(#sh)"><rect x="1200" y="618" width="430" height="70" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="1.2"/></g>
+<rect x="1214" y="632" width="38" height="38" rx="10" fill="#2563EB" fill-opacity=".08" stroke="#2563EB" stroke-opacity=".22" stroke-width="1"/>
+<g transform="translate(1221 639)"><path d="M3 13h4l2.5-6 3.5 12 3-6h5" fill="none" stroke="#2563EB" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="1262" y="647" font-size="13.0" font-weight="700" fill="#0F172A" text-anchor="start" class="">Stage 3 · order switch</text>
+<text x="1262" y="665" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">epoch / shuffle events arrive</text>
+<text x="1262" y="678" font-size="9.6" font-weight="500" fill="#64748B" text-anchor="start" class="">then re-prefetch in new order</text>
+<rect x="187" y="408" width="58.6" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="192" y="418" font-size="9.2" font-weight="700" fill="#475569" text-anchor="start" class="">admission</text>
+<rect x="451" y="408" width="91.0" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="456" y="418" font-size="9.2" font-weight="700" fill="#475569" text-anchor="start" class="">read annotation</text>
+<rect x="919.2" y="185" width="31.6" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="935" y="195" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">read</text>
+<rect x="916.5" y="240" width="37.0" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="935" y="250" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">write</text>
+<rect x="795" y="240" width="31.6" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="800" y="250" font-size="9.2" font-weight="700" fill="#475569" text-anchor="start" class="">hook</text>
+<rect x="916.5" y="281" width="37.0" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="935" y="291" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">order</text>
+<rect x="795" y="330" width="31.6" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="800" y="340" font-size="9.2" font-weight="700" fill="#475569" text-anchor="start" class="">side</text>
+<rect x="1241.9" y="190" width="26.200000000000003" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1255" y="200" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">GET</text>
+<rect x="1236.5" y="226" width="37.0" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1255" y="236" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">bytes</text>
+<rect x="1381.0" y="72" width="118.0" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1440" y="82" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">direct (gateway off)</text>
+<rect x="1231.1" y="418" width="47.800000000000004" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1255" y="428" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">metrics</text>
+<rect x="1347" y="474" width="47.800000000000004" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1352" y="484" font-size="9.2" font-weight="700" fill="#475569" text-anchor="start" class="">metrics</text>
+<rect x="1511" y="474" width="31.6" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1516" y="484" font-size="9.2" font-weight="700" fill="#475569" text-anchor="start" class="">logs</text>
+<rect x="1576.2" y="418" width="31.6" height="15" rx="3.5" fill="#FFFFFF" fill-opacity=".9"/>
+<text x="1592" y="428" font-size="9.2" font-weight="700" fill="#475569" text-anchor="middle" class="">ship</text>
+<text x="36" y="740" font-size="10" font-weight="700" fill="#475569" text-anchor="start" class="">Legend</text>
+<path d="M82 736 L108 736" stroke="#4F46E5" stroke-width="1.8" marker-end="url(#m4F46E5)"/>
+<text x="116" y="740" font-size="9.6" font-weight="500" fill="#475569" text-anchor="start" class="">declaration / scheduling</text>
+<path d="M278.0 736 L304.0 736" stroke="#7C3AED" stroke-width="1.8" marker-end="url(#m7C3AED)"/>
+<text x="312.0" y="740" font-size="9.6" font-weight="500" fill="#475569" text-anchor="start" class="">node internals</text>
+<path d="M419.0 736 L445.0 736" stroke="#EA580C" stroke-width="1.8" marker-end="url(#mEA580C)"/>
+<text x="453.0" y="740" font-size="9.6" font-weight="500" fill="#475569" text-anchor="start" class="">origin data</text>
+<path d="M543.5 736 L569.5 736" stroke="#64748B" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#m64748B)"/>
+<text x="577.5" y="740" font-size="9.6" font-weight="500" fill="#475569" text-anchor="start" class="">side channel</text>
+<path d="M673.5 736 L699.5 736" stroke="#0D9488" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#m0D9488)"/>
+<text x="707.5" y="740" font-size="9.6" font-weight="500" fill="#475569" text-anchor="start" class="">observability</text>
+</svg>

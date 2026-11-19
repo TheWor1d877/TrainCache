@@ -1,0 +1,40 @@
+== TrainCache 韧性套件 结果 ==
+run-id: 20261117T070426Z-4858
+context: kind-traincache
+开始: 2026-11-17T07:04:26Z
+
+minio_down PASS
+  含义: MinIO Deployment 缩到 0 副本,测源站整体不可用
+  证据: /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-minio-down-rho1/20261117T070426Z-4858/minio_down
+  观测(replicas.txt):
+    original_replicas=1
+    ready_replicas=
+    replicas=
+    state_file=/home/howardhe/tcd/chaos/minio_replicas.txt
+    source_mode_before=0
+    source_mode_after=0
+    gateway_fallback_before=0
+    gateway_fallback_after=0
+    agentd_pod=traincache-agentd-5tpds
+    observe_s=30
+    warmup_names=
+    warmup_phases=
+    train_pod=traincache-train
+    train_pod_phase=Running
+    job_failed=
+    recover_error_before=0
+    recover_error_after=0
+    recover_observe_s=60
+    train_manifest=/home/howardhe/Project/TrainCache/traincache-dev/agent/deploy/train-pod.yaml
+  断言:
+    PASS MinIO 已下线(replicas=0 readyReplicas=0)
+    PASS traincache_gateway_fallback_total 未增长(0 → 0),没有错误切到备用源
+    PASS traincache_source_mode 未变化(0)
+    PASS 源站已恢复到 1 副本且 Ready
+    PASS 训练 Pod traincache-train 重建后 Running
+    PASS 恢复窗口 60s 内 traincache_fetch_requests_total{result="error"} 增量为 0(0 → 0),回源路径不再报错
+
+== 汇总 ==
+共 1 个故障:PASS 1 / FAIL 0
+结束: 2026-11-17T07:06:13Z
+证据根目录: /home/howardhe/Project/TrainCache/traincachedata/bench/results/chaos/chaos-minio-down-rho1/20261117T070426Z-4858
