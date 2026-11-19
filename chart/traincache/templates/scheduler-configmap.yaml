@@ -1,0 +1,45 @@
+# KubeSchedulerConfiguration (v1) enabling TrainCacheScore on the score
+# extension point (docs/7.0 Scheduler, docs/7.1-design.md《Scheduler 评分插件》).
+#
+# The profile name is traincache-scheduler so this scheduler can run beside the
+# stock kube-scheduler: training Pods opt in with spec.schedulerName. The
+# plugin reads each Node's per-task annotation and never writes anything.
+# NormalizeScore is not a v1 config field: kube-scheduler calls it
+# automatically for every score plugin whose ScoreExtensions implements it, so
+# the single `score` entry below covers both extension points. Adding a
+# `normalizeScore:` key is rejected by strict decoding.
+#
+# leaderElection.resourceName must differ from kube-scheduler's default lease,
+# otherwise the two schedulers fight over the same lock.
+#
+# This ConfigMap also carries the scheduler's two env values. configMapKeyRef is
+# namespace-local, and the scheduler runs in kube-system, so it cannot reference
+# traincache-config in the traincache namespace — that reference leaves the Pod
+# in CreateContainerConfigError. schedulerScoreTTL must keep the same value as
+# controllerScoreTTL in traincache-config; hack/verify-config-placement.sh checks
+# both keys exist and that every workload references a ConfigMap in its own
+# namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-scheduler-config
+  namespace: {{ .Values.scheduler.namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-scheduler
+data:
+  schedulerScoreTTL: {{ .Values.schedulerConfig.schedulerScoreTTL | quote }}
+  schedulerLogLevel: {{ .Values.schedulerConfig.schedulerLogLevel | quote }}
+  scheduler.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: traincache-scheduler
+      resourceNamespace: {{ .Values.scheduler.namespace }}
+    profiles:
+      - schedulerName: traincache-scheduler
+        plugins:
+          score:
+            enabled:
+              - name: TrainCacheScore
+                weight: 10

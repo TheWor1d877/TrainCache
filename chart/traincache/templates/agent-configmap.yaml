@@ -1,0 +1,110 @@
+# Runtime parameters shared by the Agent, gateway, controller-manager and
+# scheduler.
+#
+# Placement rule for every TrainCache setting (docs/PARAMETER-CONFIGURATION.md):
+#
+#   credentials                 -> Secret traincache-objstore, via secretKeyRef
+#   per-node identity           -> Downward API fieldRef (NODE_NAME)
+#   changes with cluster or run -> this ConfigMap, via configMapKeyRef
+#   overrides a code default, rarely changes -> this ConfigMap too, so that no
+#                                  workload manifest carries a private value
+#   equals the code default     -> written nowhere; the default lives only in
+#                                  agent/svc/config.go and
+#                                  controller/internal/config/config.go
+#
+# Workload manifests therefore hold no literal `value:` env entries at all.
+# Every key referenced by a configMapKeyRef must exist here: a missing key
+# blocks Pod startup (CreateContainerConfigError) instead of silently falling
+# back to a default.
+#
+#   cacheCapacityBytes       — Agent cache byte cap; "0" disables the byte
+#                              dimension, leaving the disk watermark as the only
+#                              eviction trigger. Read by Agent and Controller.
+#   prefetchLookahead        — neighbour blocks prefetched ahead of the cursor.
+#   evictPolicy              — eviction order: heat / lru / lfu.
+#   evictInterval            — Agent eviction loop check interval. The code
+#                              default is 30s. Written here because the
+#                              DaemonSet references it: patching the key is
+#                              the supported way to change it per run (the
+#                              bench short-window families set 5s), and a
+#                              missing key blocks Pod startup.
+#   datasetMetricsWhitelist  — comma-separated DataSet names that keep their own
+#                              metrics label; "" merges every DataSet into the
+#                              "other" label (bounded cardinality, D35).
+#   startupWindowBytes       — Controller-only startup window used to derive K:
+#                              K_window = ceil(startupWindowBytes / chunkSize).
+#   maxFillFraction          — Controller-only share of cacheCapacityBytes that
+#                              all Pods' preheat windows may occupy (D43).
+#   objstoreEndpoint         — S3-compatible origin the Agent dials. Cluster
+#                              local MinIO here; COS/OSS/S3 in a real cluster.
+#   objstoreBucket           — the bucket holding the published datasets. Must
+#                              equal DataSet.spec.bucket: SubmitPreheat carries
+#                              no bucket field, so a mismatch fails every block
+#                              read. The bench harness rewrites it per dataset.
+#   objstoreSecure           — "true"/"1"/"yes" enables TLS to the origin;
+#                              anything else, including "", means plain HTTP.
+#   objstoreCompression      — "true"/"1"/"yes" lets the Agent and the gateway
+#                              declare gzip to the origin; anything else reads
+#                              responses as raw bytes. Off by default: training
+#                              data is already compressed. Written here even
+#                              though it equals the code default, so the switch
+#                              is discoverable in the manifest.
+#   fetchRangeParallel      — Agent-only switch for splitting every block into
+#                              four parallel Range GETs; "true"/"1"/"yes" turns
+#                              it on, "false"/"0"/"no" turns it off. On by
+#                              default. Written here because the DaemonSet
+#                              references it: patching the key is the supported
+#                              way to change it per run, and a missing key
+#                              blocks Pod startup.
+#   gatewayEndpoint          — S3 gateway the Agent routes block GETs to. ""
+#                              means every block GET goes straight to the
+#                              origin; "<host>:<port>" routes them through the
+#                              gateway.
+#   gatewaySecure            — "true"/"1"/"yes" enables TLS from the Agent to
+#                              the gateway; independent of objstoreSecure.
+#   gatewayBucketConcurrency — Gateway-only cap on concurrent downloads from
+#                              the origin for the bucket; positive integer.
+#                              Changing it restarts the gateway Deployment.
+#   gatewayBlockBufferBytes  — Gateway-only size in bytes of the ring buffer
+#                              held per in-flight block; positive integer.
+#                              Changing it restarts the gateway Deployment.
+#   gatewayCache             — Gateway-only disk cache switch; "true" enables
+#                              the on-disk cache layer, anything else turns it
+#                              off and leaves the gateway doing in-flight
+#                              merging only. Read by the gateway only.
+#   gatewayCacheDatasetBytes — Gateway-only per-dataset residency cap in bytes
+#                              (32GiB by default); positive integer. Changing it
+#                              restarts the gateway Deployment.
+#   gatewayCacheTotalBytes   — Gateway-only global residency cap in bytes
+#                              (64GiB by default); positive integer and not
+#                              below gatewayCacheDatasetBytes. Changing it
+#                              restarts the gateway Deployment.
+#   controllerPollInterval   — WarmupTask progress poll interval. The code
+#                              default is 2s; 1s keeps gate release latency
+#                              inside the bench measurement window.
+#   controllerScoreTTL       — TTL of a node score entry as written by the
+#                              Controller. The scheduler keeps its own copy,
+#                              schedulerScoreTTL, in traincache-scheduler-config
+#                              (kube-system): a configMapKeyRef cannot cross
+#                              namespaces, so the scheduler cannot read this CM.
+#   gateNetworkBandwidthBytes — Controller-only network ceiling in bytes/sec.
+#                               The warmup gate compares the throughput the
+#                               Agent reports against 0.8 of this value and
+#                               releases the gate early when the link is
+#                               already saturated. "0" turns the check off.
+#                               Written here because the manager Deployment
+#                               references it: patching the key is the
+#                               supported way to change the ceiling per run,
+#                               and a missing key blocks Pod startup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traincache-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traincache-config
+    app.kubernetes.io/part-of: traincache
+data:
+{{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}

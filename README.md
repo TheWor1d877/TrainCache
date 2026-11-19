@@ -100,6 +100,16 @@ kubectl patch mutatingwebhookconfiguration traincache-pod-warmup --type=strategi
 
 The certificate is valid for 365 days. The SAN covers the Service name and the DNS name inside the namespace. The CA goes into both webhook entries: the checkpoint entry has `failurePolicy: Fail`, so a Pod labeled `traincache.io/checkpoint` (the label value names a ConfigMap in the same namespace) is rejected when its `caBundle` is empty.
 
+With the Helm chart, create the same Secret and pass the CA at install time; the chart writes it into both entries, so the patch step is not needed:
+
+```bash
+helm install traincache ./chart/traincache -n traincache --create-namespace \
+  --set webhook.caBundle="$(base64 -w0 "$TLS/ca.crt")" \
+  --set config.objstoreEndpoint=<endpoint> --set config.objstoreBucket=<bucket>
+```
+
+The chart's prerequisites and full values are in [chart/traincache/README.md](chart/traincache/README.md).
+
 **3. Bucket and credentials.** `DataSet.spec` takes `endpoint` (no scheme), `bucket` and `secretRef`. The Secret holds `accessKey` and `secretKey` and lives in the same namespace as the DataSet. For bucket setup see [cloud object storage deployment](docs/0-cloud-object-storage-deployment.md).
 
 **4. Verify the control plane.**
@@ -124,6 +134,8 @@ Uninstall:
 ```bash
 kubectl delete -f install.yaml
 ```
+
+A Helm install is removed with `helm uninstall traincache -n traincache`.
 
 ## Results
 

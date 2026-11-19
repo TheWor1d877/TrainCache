@@ -204,7 +204,7 @@ spec:
 
 ## webhook 服务证书与 caBundle
 
-webhook 的服务证书由安装方提供：`controller/deploy/webhook/deployment.yaml` 把 Secret `traincache-webhook-tls` 挂到 `/tmp/k8s-webhook-server/serving-certs`，webhook 进程从该目录读证书与私钥。仓库清单 `controller/deploy/webhook/mutatingwebhook.yaml` 的两条规则都写 `caBundle: ""`，注释写明安装方建好 Secret 后填入签发 CA；`controller/e2e/run.sh` 与 `hack/release-smoke.sh` 用 openssl 自签证书并回填两条规则的 caBundle，属测试装置。
+webhook 的服务证书由安装方提供：`controller/deploy/webhook/deployment.yaml` 把 Secret `traincache-webhook-tls` 挂到 `/tmp/k8s-webhook-server/serving-certs`，webhook 进程从该目录读证书与私钥。仓库清单 `controller/deploy/webhook/mutatingwebhook.yaml` 的两条规则都写 `caBundle: ""`，注释写明安装方建好 Secret 后填入签发 CA；`controller/e2e/run.sh` 与 `hack/release-smoke.sh` 用 openssl 自签证书并回填两条规则的 caBundle，属测试装置。用 Helm chart 安装时，Secret 名由 `webhook.existingSecret` 指定，签发 CA 由 `webhook.caBundle` 传入，两条规则在安装时一次写齐。
 
 caBundle 为空或与服务证书不匹配，API server 无法验证 webhook 的 HTTPS 调用，两条规则各按自己的 failurePolicy 处置：
 

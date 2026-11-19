@@ -171,13 +171,15 @@ kubectl -n traincache rollout status deploy/traincache-webhook
 
 各组件各改自己的清单，按集群规模调整：
 
-| 组件 | 清单 | requests | limits |
-|---|---|---|---|
-| controller-manager | `controller/deploy/manager/deployment.yaml` | 50m / 128Mi | 512Mi（无 CPU 上限） |
-| webhook | `controller/deploy/webhook/deployment.yaml` | 50m / 64Mi | 256Mi（无 CPU 上限） |
-| kube-scheduler | `controller/deploy/scheduler/deployment.yaml` | 100m / 128Mi | 512Mi（无 CPU 上限） |
-| traincache-agentd | `controller/deploy/agent/daemonset.yaml` | 100m / 256Mi | 4Gi（无 CPU 上限） |
-| traincache-gateway | `controller/deploy/gateway/deployment.yaml` | 100m / 256Mi | 1.5Gi（无 CPU 上限） |
+| 组件 | 清单 | chart values | requests | limits |
+|---|---|---|---|---|
+| controller-manager | `controller/deploy/manager/deployment.yaml` | `manager.resources` | 50m / 128Mi | 512Mi（无 CPU 上限） |
+| webhook | `controller/deploy/webhook/deployment.yaml` | `webhook.resources` | 50m / 64Mi | 256Mi（无 CPU 上限） |
+| kube-scheduler | `controller/deploy/scheduler/deployment.yaml` | `scheduler.resources` | 100m / 128Mi | 512Mi（无 CPU 上限） |
+| traincache-agentd | `controller/deploy/agent/daemonset.yaml` | `agent.resources` | 100m / 256Mi | 4Gi（无 CPU 上限） |
+| traincache-gateway | `controller/deploy/gateway/deployment.yaml` | `gateway.resources` | 100m / 256Mi | 1.5Gi（无 CPU 上限） |
+
+用 Helm 安装时，资源、副本与两张 ConfigMap 都由 chart 托管：改 `chart/traincache` 的 `config`、`schedulerConfig` 或各组 `resources`，再用 `helm upgrade` 应用。装完手工 patch ConfigMap 或 Deployment，会在下一次 upgrade 时被 values 覆盖。
 
 Agent 的缓存落在节点 hostPath `/var/cache/traincache`，不占容器内存；`limits.memory` 限制的是 Agent 进程本身。缓存大小由 `cacheCapacityBytes` 和磁盘水位控制。
 

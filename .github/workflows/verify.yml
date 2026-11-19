@@ -76,8 +76,15 @@ jobs:
       - uses: azure/setup-kubectl@v5
         with:
           version: v1.34.1
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.21.2
       - name: render controller/deploy
         run: kubectl kustomize controller/deploy >/dev/null
+      - name: ensure pyyaml
+        run: python3 -c "import yaml" || sudo apt-get install -y python3-yaml
+      - name: verify helm chart
+        run: make verify-chart
 
   # 只拦 PR dev→main：版本引用与文档链接必须在合并前干净。
   metadata:
